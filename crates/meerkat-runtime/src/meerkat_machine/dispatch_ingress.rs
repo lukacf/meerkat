@@ -597,17 +597,11 @@ impl MeerkatMachine {
                             %error,
                             "durable live-boundary payload is not deliverable in-turn; taking the queued follow-up"
                         );
-                        let held_mutation_gate = self
-                            .normalize_durable_live_boundary_fallback(
-                                session_id,
-                                witness,
-                                held_mutation_gate,
-                                input_id,
-                            )
-                            .await?;
-                        return Ok((
+                        return Ok(Self::durable_live_boundary_fallback(
+                            session_id,
+                            input_id,
                             held_mutation_gate,
-                            LiveBoundaryInputDisposition::QueuedFallback,
+                            &error,
                         ));
                     }
                 }
@@ -907,43 +901,39 @@ impl MeerkatMachine {
         ))
     }
 
-    /// Normalize a durable-class input to its queued follow-up without ever
-    /// abandoning it. On a normalization failure the input stays admitted and
-    /// queued (the fallback wake remains armed), so the runtime loop still
-    /// delivers it as an ordinary follow-up turn with its full projection.
-    async fn normalize_durable_live_boundary_fallback(
-        &self,
+    /// A durable-class input that did not join the running turn takes its
+    /// follow-up exactly as it did before durable in-turn delivery existed: its
+    /// admitted state is left untouched (Queued in the Steer lane, recovery
+    /// lane Steer, delivery class kept), so the runtime loop serves it steer
+    /// lane first as one follow-up turn after the current run, ahead of later
+    /// queue-lane work and of later durable steers of the same run.
+    ///
+    /// No generated transition runs here. In particular the
+    /// `LiveBoundaryUnavailable` normalization (which exists only in the
+    /// Attached and Running phases, and moves the input to the Queue lane) is
+    /// never applied: a durable delivery may wait across a closed window until
+    /// the run ends, and the run may have moved the lifecycle to Idle,
+    /// Retired or Stopped by the time this fallback runs. The armed fallback
+    /// wake stays armed for the caller.
+    fn durable_live_boundary_fallback(
         session_id: &SessionId,
-        witness: &RuntimeLiveBoundaryAttachmentWitness,
-        held_mutation_gate: crate::tokio::sync::OwnedMutexGuard<()>,
         input_id: &InputId,
-    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
-        let queued = witness
-            .driver
-            .lock()
-            .await
-            .as_driver()
-            .stored_input_state(input_id)
-            .is_some_and(|stored| stored.seed.phase == InputLifecycleState::Queued);
-        if !queued {
-            return Ok(held_mutation_gate);
-        }
-        if let Err(error) = witness
-            .driver
-            .lock()
-            .await
-            .machine_normalize_live_boundary_unavailable(input_id)
-            .await
-        {
-            tracing::warn!(
-                session_id = %session_id,
-                input_id = %input_id,
-                %error,
-                "durable live-boundary fallback normalization failed; the input stays queued for its follow-up turn"
-            );
-            return Err(error);
-        }
-        Ok(held_mutation_gate)
+        held_mutation_gate: crate::tokio::sync::OwnedMutexGuard<()>,
+        reason: &dyn std::fmt::Display,
+    ) -> (
+        crate::tokio::sync::OwnedMutexGuard<()>,
+        LiveBoundaryInputDisposition,
+    ) {
+        tracing::debug!(
+            session_id = %session_id,
+            input_id = %input_id,
+            %reason,
+            "durable live-boundary delivery did not join the running turn; the input keeps its steer-lane follow-up"
+        );
+        (
+            held_mutation_gate,
+            LiveBoundaryInputDisposition::QueuedFallback,
+        )
     }
 
     /// Deliver one durable-class Steer input into the running turn.
@@ -1016,17 +1006,11 @@ impl MeerkatMachine {
         match revalidation {
             LiveBoundaryAttachmentRevalidation::RunAdvancedQueued => {
                 drop(prepared);
-                let held_mutation_gate = self
-                    .normalize_durable_live_boundary_fallback(
-                        session_id,
-                        witness,
-                        held_mutation_gate,
-                        input_id,
-                    )
-                    .await?;
-                return Ok((
+                return Ok(Self::durable_live_boundary_fallback(
+                    session_id,
+                    input_id,
                     held_mutation_gate,
-                    LiveBoundaryInputDisposition::QueuedFallback,
+                    &format_args!("run {run_id} ended before a boundary accepted the delivery"),
                 ));
             }
             LiveBoundaryAttachmentRevalidation::RunAdvancedClaimed { wake_needed } => {
@@ -1056,24 +1040,11 @@ impl MeerkatMachine {
                 // extraction/noncommitting boundary refused it), Stale, or a
                 // Fault: the durable input never joined the run, so it takes
                 // its queued follow-up turn unchanged.
-                tracing::debug!(
-                    session_id = %session_id,
-                    run_id = %run_id,
-                    input_id = %input_id,
-                    reason = %error,
-                    "durable live boundary unavailable; normalized durable queued fallback"
-                );
-                let held_mutation_gate = self
-                    .normalize_durable_live_boundary_fallback(
-                        session_id,
-                        witness,
-                        held_mutation_gate,
-                        input_id,
-                    )
-                    .await?;
-                return Ok((
+                return Ok(Self::durable_live_boundary_fallback(
+                    session_id,
+                    input_id,
                     held_mutation_gate,
-                    LiveBoundaryInputDisposition::QueuedFallback,
+                    &error,
                 ));
             }
         };
@@ -1085,17 +1056,11 @@ impl MeerkatMachine {
                 input_id = %input_id,
                 "durable live-boundary preparation carried no delivery witness; taking the queued follow-up"
             );
-            let held_mutation_gate = self
-                .normalize_durable_live_boundary_fallback(
-                    session_id,
-                    witness,
-                    held_mutation_gate,
-                    input_id,
-                )
-                .await?;
-            return Ok((
+            return Ok(Self::durable_live_boundary_fallback(
+                session_id,
+                input_id,
                 held_mutation_gate,
-                LiveBoundaryInputDisposition::QueuedFallback,
+                &"the preparation carried no delivery witness",
             ));
         };
 
@@ -1113,24 +1078,11 @@ impl MeerkatMachine {
             Ok(crate::meerkat_machine::driver::LiveBoundaryJoinOutcome::Joined) => {}
             Ok(crate::meerkat_machine::driver::LiveBoundaryJoinOutcome::Refused { reason }) => {
                 drop(prepared);
-                tracing::debug!(
-                    session_id = %session_id,
-                    run_id = %run_id,
-                    input_id = %input_id,
-                    %reason,
-                    "generated authority refused the durable live-boundary join; normalized durable queued fallback"
-                );
-                let held_mutation_gate = self
-                    .normalize_durable_live_boundary_fallback(
-                        session_id,
-                        witness,
-                        held_mutation_gate,
-                        input_id,
-                    )
-                    .await?;
-                return Ok((
+                return Ok(Self::durable_live_boundary_fallback(
+                    session_id,
+                    input_id,
                     held_mutation_gate,
-                    LiveBoundaryInputDisposition::QueuedFallback,
+                    &format_args!("generated authority refused the join: {reason}"),
                 ));
             }
             Err(error) => {

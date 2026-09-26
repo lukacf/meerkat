@@ -166,11 +166,22 @@ them.
     kernel `LiveBoundaryUnavailableNormalized` effect gains
     `live_boundary_delivery`.
   - Behaviour-only: a Steer prompt carrying typed conversation appends whose
-    roles are all `system_notice`, `user` or `injected_context` is now written
-    into the RUNNING turn's transcript at the next cooperative model boundary
-    and committed with that run, instead of waiting for a follow-up turn; its
-    completion resolves with the run terminal. A Steer prompt carrying a
-    `system` (or any other) typed append is never delivered in-turn.
+    roles are all `system_notice`, `user` or `injected_context`, none of which
+    is a synthetic refresh-projection notice (`background_job`,
+    `auth_reauth_required`, or `mcp_pending` without `persisted` blocks), and
+    whose turn metadata carries only the handling mode, execution kind and
+    transcript identity, is now written into the RUNNING turn's transcript at
+    the next cooperative model boundary and committed with that run, instead
+    of waiting for a follow-up turn; its completion resolves with the run
+    terminal. A Steer prompt carrying a `system` (or any other) typed append, a
+    refresh-projection notice, or turn-start metadata (System prompts, skill
+    references, a tool overlay, model/provider/auth routing and the like) is
+    never delivered in-turn and keeps its follow-up turn. An in-turn append
+    joins an already started run, so run-start hooks do not run for it;
+    incoming comms blocks among its appends publish `peer_content_ingested`
+    exactly as the follow-up path does. A durable steer that finds no boundary
+    before its run ends keeps its admitted `steer` lane (unchanged from
+    before), so it runs first after the run.
   - Behaviour-only: a Steer prompt with non-empty text plus typed appends is no
     longer request-only; it is delivered durably (in-turn or by one follow-up
     turn) with all of its rows. Previously the typed appends were dropped.
@@ -232,8 +243,12 @@ them.
   [Request-only and durable steer](docs/reference/session-contracts.mdx#request-only-and-durable-steer).
 - `meerkat_core::lifecycle::boundary_delivery` (re-exported from `meerkat_core`):
   `TurnBoundaryDelivery`, `DurableTurnBoundaryAppends` (with
-  `DurableTurnBoundaryAppendsError`), `CoreBoundaryDeliveryWitness` and
-  `CoreBoundaryDeliveryOutcome`; `CoreBoundaryStageOutput::delivery_witness`,
+  `DurableTurnBoundaryAppendsError` and `peer_ingested_events`),
+  `CoreBoundaryDeliveryWitness`, `CoreBoundaryDeliveryOutcome` and the typed
+  eligibility predicate `conversation_append_joins_running_turn` (re-exported
+  from `meerkat_core::lifecycle`);
+  `meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata::joins_running_turn`;
+  `CoreBoundaryStageOutput::delivery_witness`,
   `PreparedTransientTurnContextBoundary::delivery_witness`,
   `TransientTurnContextStateHandle::discard_uncommitted_durable_deliveries`
   and `EphemeralSessionService::discard_uncommitted_boundary_deliveries`.
@@ -245,8 +260,11 @@ them.
   `RuntimeInputSemantics::live_boundary_delivery` expose the machine-owned
   delivery class of an admitted live-interrupt input.
 - A hand-written bounded TLC audit of the durable-steer input lifecycle,
-  `specs/machines/meerkat_machine/durable_in_turn_steer_audit.tla` with
-  `audit.cfg`.
+  `specs/machines/meerkat_machine/durable_in_turn_steer_audit.tla`, run by
+  `durable_in_turn_steer_audit.sh <max-steps>`, which derives its TLC config
+  from the generated `ci.cfg` on every run. The canonical TLC lane
+  (`make machine-verify`, the machine-codegen-verify pre-push hook and the
+  nightly machine-verify job) runs it at 16 steps.
 
 ### Changed
 

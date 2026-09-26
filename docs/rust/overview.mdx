@@ -496,6 +496,10 @@ match event {
     AgentEvent::TurnUsageAccountingUnmeasured { session_id, unmeasured } => {}
     AgentEvent::TurnUsageAccountingIdentityDisputed { session_id, dispute } => {}
 
+    // Durable steer: typed appends written into the RUNNING turn at a model
+    // boundary (reconcile with the run terminal; a discarded image redelivers)
+    AgentEvent::BoundaryAppendApplied { run_id, input_id, content, append_count } => {}
+
     _ => {} // non_exhaustive: forward compatibility
 }
 ```

@@ -1505,13 +1505,16 @@ where
     /// Called in the same synchronous segment that took the delivery (no await
     /// in between), so a hard-cancel future drop cannot split the witness from
     /// the Session write. The messages were lowered when the runtime built the
-    /// delivery, so the write itself cannot fail. Returns the event facts when
-    /// the appends were written; `None` when the delivery was withdrawn first
-    /// (the actor was revoked), in which case nothing is written.
+    /// delivery, so the write itself cannot fail. Returns the events to
+    /// publish when the appends were written (`BoundaryAppendApplied`, then
+    /// one `PeerContentIngested` per incoming comms block, exactly as the
+    /// turn-start path publishes them); `None` when the delivery was withdrawn
+    /// first (the actor was revoked), in which case nothing is written.
     pub(crate) fn apply_durable_boundary_appends(
         &mut self,
+        run_id: &crate::lifecycle::RunId,
         accepted: crate::lifecycle::boundary_delivery::AcceptedDurableTurnAppends,
-    ) -> Option<(crate::lifecycle::InputId, crate::types::ContentInput, u32)> {
+    ) -> Option<Vec<AgentEvent>> {
         let crate::lifecycle::boundary_delivery::AcceptedDurableTurnAppends { appends, witness } =
             accepted;
         if !self
@@ -1520,12 +1523,25 @@ where
         {
             return None;
         }
-        let (input_id, messages, model_projection) = appends.into_parts();
+        let crate::lifecycle::boundary_delivery::DurableTurnBoundaryAppendParts {
+            input_id,
+            messages,
+            model_projection,
+            peer_ingested_events,
+        } = appends.into_parts();
         let append_count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
         for message in messages {
             self.session.push(message);
         }
-        Some((input_id, model_projection, append_count))
+        let mut events = Vec::with_capacity(1 + peer_ingested_events.len());
+        events.push(AgentEvent::BoundaryAppendApplied {
+            run_id: run_id.clone(),
+            input_id,
+            content: model_projection,
+            append_count,
+        });
+        events.extend(peer_ingested_events);
+        Some(events)
     }
     /// Whether requests composed for this agent carry the request-only
     /// structured-output instruction projection.

@@ -22,7 +22,7 @@ pub mod run_receipt;
 // Re-exports for convenience
 pub use boundary_delivery::{
     CoreBoundaryDeliveryOutcome, CoreBoundaryDeliveryWitness, DurableTurnBoundaryAppends,
-    DurableTurnBoundaryAppendsError, TurnBoundaryDelivery,
+    DurableTurnBoundaryAppendsError, TurnBoundaryDelivery, conversation_append_joins_running_turn,
 };
 pub use core_executor::{
     CommittedSessionBoundaryAuthority, CoreApplyFailureCause, CoreApplyFailureCauseKind,

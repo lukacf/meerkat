@@ -376,3 +376,195 @@ async fn request_only_boundary_context_stays_request_local() {
         );
     }
 }
+
+/// Run one gated turn and deliver `delivery` at its post-tool boundary.
+/// Returns the agent after the run, the Session before the run, the delivery
+/// witness and every event the run published.
+async fn run_with_durable_delivery_at_post_tool_boundary(
+    delivery: meerkat_core::lifecycle::TurnBoundaryDelivery,
+) -> (
+    meerkat_core::Agent<RecordingClient, GatedTools, NoopStore>,
+    meerkat_core::Session,
+    meerkat_core::lifecycle::CoreBoundaryDeliveryWitness,
+    Vec<AgentEvent>,
+) {
+    let client = Arc::new(RecordingClient::new());
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut agent = gated_agent(client, Arc::clone(&entered), Arc::clone(&release)).await;
+    let pre_run_session = agent.session().clone();
+    let state = agent.transient_turn_context_state();
+    let (tx, mut rx) = mpsc::channel(256);
+    let run = tokio::spawn(async move {
+        let result = agent.run_with_events("start".to_string().into(), tx).await;
+        (agent, result)
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the gated tool starts");
+    let run_id = state.active_run_for_test().expect("the run owns the actor");
+    let prepare_state = state.clone();
+    let prepare = tokio::spawn(async move {
+        prepare_state
+            .prepare_active_turn_boundary(&run_id, delivery)
+            .await
+    });
+    wait_until("durable registration", || {
+        state.has_registered_durable_for_test()
+    })
+    .await;
+    release.notify_one();
+    let stage = tokio::time::timeout(std::time::Duration::from_secs(5), prepare)
+        .await
+        .expect("the runner parks at the post-tool boundary")
+        .expect("prepare task")
+        .expect("durable preparation")
+        .into_stage_output(None);
+    let witness = stage.delivery_witness().cloned().expect("durable witness");
+    stage.commit().expect("publish durable appends");
+    let (agent, result) = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("run finishes")
+        .expect("run task");
+    result.expect("run succeeds");
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    (agent, pre_run_session, witness, events)
+}
+
+fn uncommitted_compaction_rollback(
+    agent: &meerkat_core::Agent<RecordingClient, GatedTools, NoopStore>,
+    rollback_session: meerkat_core::Session,
+    rollback_durable_boundary_apply_ordinal: u64,
+) -> crate::agent::CompactionTransaction {
+    crate::agent::CompactionTransaction {
+        phase: crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(Box::new(
+            crate::agent::CompactionRollbackState {
+                rollback_session,
+                rollback_last_input_tokens: agent.last_input_tokens,
+                rollback_compaction_cadence: agent.compaction_cadence.clone(),
+                rollback_durable_row_floor: agent.durable_row_floor,
+                rollback_durable_boundary_apply_ordinal,
+            },
+        )),
+        projections: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn compaction_rollback_discards_only_the_durable_appends_applied_after_its_capture() {
+    let (mut agent, pre_run_session, witness, _events) =
+        run_with_durable_delivery_at_post_tool_boundary(durable_notice()).await;
+    assert_eq!(
+        witness.outcome(),
+        meerkat_core::lifecycle::CoreBoundaryDeliveryOutcome::Applied
+    );
+    let applied_ordinal = agent.transient_turn_context_state().durable_apply_ordinal();
+    assert_eq!(
+        applied_ordinal, 1,
+        "the runner applied exactly one delivery"
+    );
+
+    // A rollback captured AFTER the apply restores an image that still holds
+    // the notice: the delivery stays Applied and its input is consumed.
+    let post_apply_session = agent.session().clone();
+    agent.compaction_transaction = Some(uncommitted_compaction_rollback(
+        &agent,
+        post_apply_session,
+        applied_ordinal,
+    ));
+    agent
+        .abort_uncommitted_compaction_projections()
+        .await
+        .expect("abort a rollback captured after the apply");
+    assert_eq!(
+        witness.outcome(),
+        meerkat_core::lifecycle::CoreBoundaryDeliveryOutcome::Applied
+    );
+    assert_eq!(
+        agent
+            .session()
+            .messages()
+            .iter()
+            .filter(|message| carries_notice(message))
+            .count(),
+        1
+    );
+
+    // A rollback captured BEFORE the apply restores an image without the
+    // notice: the delivery is Discarded, so the runtime redelivers its input
+    // once instead of consuming it with an image that lost it.
+    agent.compaction_transaction =
+        Some(uncommitted_compaction_rollback(&agent, pre_run_session, 0));
+    agent
+        .abort_uncommitted_compaction_projections()
+        .await
+        .expect("abort a rollback captured before the apply");
+    assert!(
+        !agent.session().messages().iter().any(carries_notice),
+        "the restored image no longer holds the notice"
+    );
+    assert_eq!(
+        witness.outcome(),
+        meerkat_core::lifecycle::CoreBoundaryDeliveryOutcome::Discarded
+    );
+}
+
+#[tokio::test]
+async fn durable_comms_notice_publishes_peer_content_ingested_in_turn() {
+    let comms_notice = meerkat_core::lifecycle::ConversationAppend {
+        role: meerkat_core::lifecycle::ConversationAppendRole::SystemNotice,
+        content: meerkat_core::lifecycle::CoreRenderable::SystemNotice {
+            kind: meerkat_core::types::SystemNoticeKind::Comms,
+            body: None,
+            blocks: vec![meerkat_core::types::SystemNoticeBlock::Comms {
+                kind: meerkat_core::types::CommsNoticeKind::Request,
+                direction: meerkat_core::types::SystemNoticeDirection::Incoming,
+                peer: None,
+                sender_taint: None,
+                request_id: Some("req-1".to_string()),
+                intent: None,
+                status: None,
+                summary: None,
+                payload: None,
+                content: vec![meerkat_core::types::ContentBlock::Text {
+                    text: NOTICE_TOKEN.to_string(),
+                }],
+            }],
+        },
+        identity: None,
+    };
+    let delivery = meerkat_core::lifecycle::TurnBoundaryDelivery::DurableAppends(
+        meerkat_core::lifecycle::DurableTurnBoundaryAppends::try_new(
+            meerkat_core::lifecycle::InputId::new(),
+            vec![comms_notice],
+            None,
+        )
+        .expect("eligible comms notice"),
+    );
+    let (_agent, _pre_run_session, witness, events) =
+        run_with_durable_delivery_at_post_tool_boundary(delivery).await;
+    assert_eq!(
+        witness.outcome(),
+        meerkat_core::lifecycle::CoreBoundaryDeliveryOutcome::Applied
+    );
+    // The same ingestion fact the turn-start path publishes for a queued
+    // peer delivery, right after the append is announced.
+    let applied_at = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::BoundaryAppendApplied { .. }))
+        .expect("the durable append is announced");
+    let ingested = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, AgentEvent::PeerContentIngested { .. }))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(ingested, vec![applied_at + 1], "{events:?}");
+    assert!(matches!(
+        &events[applied_at + 1],
+        AgentEvent::PeerContentIngested { request_id, .. } if request_id.as_deref() == Some("req-1")
+    ));
+}

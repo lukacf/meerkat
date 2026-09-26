@@ -5317,25 +5317,16 @@ where
         // results. They land after this boundary's tool results and
         // refreshed notices, before the next assistant message.
         let applied_durable =
-            durable.and_then(|accepted| self.apply_durable_boundary_appends(accepted));
+            durable.and_then(|accepted| self.apply_durable_boundary_appends(ctx.run_id, accepted));
         let base_context_count = self.active_turn_request_contexts.len();
         self.active_turn_request_contexts.extend(boundary_contexts);
         let request_messages = self.llm_messages_for_boundary(!prepared.in_extraction);
         self.active_turn_request_contexts
             .truncate(base_context_count);
-        if let Some((input_id, content, append_count)) = applied_durable {
+        for event in applied_durable.into_iter().flatten() {
             // Announced only after the witness says Applied; the await below
             // can no longer split the write from its witness.
-            emit_phase_event!(
-                self,
-                ctx,
-                AgentEvent::BoundaryAppendApplied {
-                    run_id: ctx.run_id.clone(),
-                    input_id,
-                    content,
-                    append_count,
-                }
-            );
+            emit_phase_event!(self, ctx, event);
         }
         let request_messages = match request_messages {
             Ok(messages) => messages,

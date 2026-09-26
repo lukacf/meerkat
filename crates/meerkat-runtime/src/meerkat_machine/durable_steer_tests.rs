@@ -7,7 +7,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use super::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use meerkat_core::handles::TurnStateHandle;
@@ -56,6 +56,12 @@ struct RunnerScript {
     steps_done: AtomicUsize,
     primitives: std::sync::Mutex<Vec<Vec<InputId>>>,
     applied_durable: std::sync::Mutex<Vec<InputId>>,
+    /// While armed, the ingress side of a boundary preparation is held after
+    /// the core coordinator resolved it, so the runtime loop can win the
+    /// mutation gate first (the "run advanced during preparation" ordering).
+    prepare_hold_armed: AtomicBool,
+    prepare_hold_released: AtomicBool,
+    prepare_hold_reached: AtomicBool,
 }
 
 impl RunnerScript {
@@ -69,6 +75,9 @@ impl RunnerScript {
             steps_done: AtomicUsize::new(0),
             primitives: std::sync::Mutex::new(Vec::new()),
             applied_durable: std::sync::Mutex::new(Vec::new()),
+            prepare_hold_armed: AtomicBool::new(false),
+            prepare_hold_released: AtomicBool::new(false),
+            prepare_hold_reached: AtomicBool::new(false),
         })
     }
 
@@ -103,6 +112,7 @@ impl RunnerScript {
 
 struct DurableSteerBoundaryHandle {
     state: meerkat_core::TransientTurnContextStateHandle,
+    script: Arc<RunnerScript>,
 }
 
 #[async_trait::async_trait]
@@ -123,10 +133,20 @@ impl CoreExecutorBoundaryHandle for DurableSteerBoundaryHandle {
         meerkat_core::lifecycle::CoreBoundaryStageOutput,
         meerkat_core::lifecycle::CoreBoundaryStageError,
     > {
-        self.state
+        let prepared = self
+            .state
             .prepare_active_turn_boundary(expected_run_id, delivery)
             .await
-            .map(|prepared| prepared.into_stage_output(None))
+            .map(|prepared| prepared.into_stage_output(None));
+        if self.script.prepare_hold_armed.load(Ordering::SeqCst) {
+            self.script
+                .prepare_hold_reached
+                .store(true, Ordering::SeqCst);
+            while !self.script.prepare_hold_released.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+        prepared
     }
 }
 
@@ -141,6 +161,7 @@ impl CoreExecutor for DurableSteerExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(DurableSteerBoundaryHandle {
             state: self.state.clone(),
+            script: Arc::clone(&self.script),
         }))
     }
 
@@ -278,7 +299,10 @@ impl DurableSteerRig {
     }
 
     async fn with_adapter(adapter: Arc<MeerkatMachine>) -> Self {
-        let session_id = SessionId::new();
+        Self::with_adapter_for_session(adapter, SessionId::new()).await
+    }
+
+    async fn with_adapter_for_session(adapter: Arc<MeerkatMachine>, session_id: SessionId) -> Self {
         let bindings = adapter
             .prepare_bindings(session_id.clone())
             .await
@@ -623,7 +647,30 @@ async fn durable_steer_waits_across_a_closed_window_and_lands_at_the_next_bounda
 
 #[tokio::test]
 async fn durable_steer_applied_then_run_cancelled_is_consumed_when_the_image_is_kept() {
-    let rig = DurableSteerRig::ephemeral().await;
+    applied_then_run_cancelled_is_consumed_when_the_image_is_kept(
+        DurableSteerRig::ephemeral().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn persistent_durable_steer_applied_then_run_cancelled_is_consumed_when_the_image_is_kept() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let rig = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
+    let steer_id = applied_then_run_cancelled_is_consumed_when_the_image_is_kept(rig).await;
+    let row = store
+        .load_input_state(&runtime_id, &steer_id)
+        .await
+        .expect("load consumed row")
+        .expect("consumed row persisted");
+    assert_eq!(row.seed.phase, InputLifecycleState::Consumed);
+}
+
+async fn applied_then_run_cancelled_is_consumed_when_the_image_is_kept(
+    rig: DurableSteerRig,
+) -> InputId {
     let batch = rig.start_busy_turn().await;
     let steer = typed_steer("kept", ConversationAppendRole::SystemNotice);
     let steer_id = steer.id().clone();
@@ -644,11 +691,36 @@ async fn durable_steer_applied_then_run_cancelled_is_consumed_when_the_image_is_
         0,
         "a retained append is never delivered again"
     );
+    steer_id
 }
 
 #[tokio::test]
 async fn durable_steer_applied_then_run_failed_with_a_kept_image_is_consumed_not_replayed() {
-    let rig = DurableSteerRig::ephemeral().await;
+    applied_then_run_failed_with_a_kept_image_is_consumed_not_replayed(
+        DurableSteerRig::ephemeral().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn persistent_durable_steer_applied_then_run_failed_with_a_kept_image_is_consumed_not_replayed()
+ {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let rig = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
+    let steer_id = applied_then_run_failed_with_a_kept_image_is_consumed_not_replayed(rig).await;
+    let row = store
+        .load_input_state(&runtime_id, &steer_id)
+        .await
+        .expect("load consumed row")
+        .expect("consumed row persisted");
+    assert_eq!(row.seed.phase, InputLifecycleState::Consumed);
+}
+
+async fn applied_then_run_failed_with_a_kept_image_is_consumed_not_replayed(
+    rig: DurableSteerRig,
+) -> InputId {
     let batch = rig.start_busy_turn().await;
     let steer = typed_steer("kept-on-failure", ConversationAppendRole::SystemNotice);
     let steer_id = steer.id().clone();
@@ -668,11 +740,31 @@ async fn durable_steer_applied_then_run_failed_with_a_kept_image_is_consumed_not
         .await;
     assert_eq!(contributions(&rig.script.primitives(), &batch), 2);
     assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
+    steer_id
 }
 
 #[tokio::test]
 async fn durable_steer_applied_then_image_discarded_is_redelivered_exactly_once() {
-    let rig = DurableSteerRig::ephemeral().await;
+    applied_then_image_discarded_is_redelivered_exactly_once(DurableSteerRig::ephemeral().await)
+        .await;
+}
+
+#[tokio::test]
+async fn persistent_durable_steer_applied_then_image_discarded_is_redelivered_exactly_once() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let rig = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
+    let steer_id = applied_then_image_discarded_is_redelivered_exactly_once(rig).await;
+    let row = store
+        .load_input_state(&runtime_id, &steer_id)
+        .await
+        .expect("load consumed row")
+        .expect("consumed row persisted");
+    assert_eq!(row.seed.phase, InputLifecycleState::Consumed);
+}
+
+async fn applied_then_image_discarded_is_redelivered_exactly_once(rig: DurableSteerRig) -> InputId {
     let batch = rig.start_busy_turn().await;
     let steer = typed_steer("discarded", ConversationAppendRole::SystemNotice);
     let steer_id = steer.id().clone();
@@ -696,6 +788,7 @@ async fn durable_steer_applied_then_image_discarded_is_redelivered_exactly_once(
         1,
         "a discarded append is redelivered by exactly one follow-up turn"
     );
+    steer_id
 }
 
 #[tokio::test]
@@ -788,12 +881,17 @@ async fn durable_steer_refused_at_an_extraction_boundary_takes_one_follow_up() {
     rig.wait_for_waiting_delivery().await;
     rig.script.step(RunnerStep::ExtractionBoundary);
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !rig.queue().await.contains(&steer_id) {
+        while rig.state.has_waiting_delivery_for_test() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("refused durable delivery normalizes to the queued fallback");
+    .expect("the extraction boundary refuses the durable delivery");
+    // The refused input keeps its admitted steer-lane state for its
+    // follow-up; no normalization moves it to the queue lane.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(rig.steer_queue().await.contains(&steer_id));
+    assert!(!rig.queue().await.contains(&steer_id));
     rig.script.step(RunnerStep::Finish);
     rig.wait_for_apply_calls(2).await;
     rig.script.step(RunnerStep::Finish);
@@ -858,4 +956,202 @@ async fn persistent_join_is_durable_before_publication_and_the_receipt_names_the
         .expect("load run receipts");
     let terminal = receipts.last().expect("terminal receipt committed");
     assert_eq!(terminal.contributing_input_ids, vec![batch, steer_id]);
+}
+
+#[tokio::test]
+async fn durable_steer_that_misses_its_boundary_keeps_steer_priority_over_queued_work() {
+    let rig = DurableSteerRig::ephemeral().await;
+    rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenStream)
+        .await;
+    // Ordinary queue-lane work admitted BEFORE the durable steer.
+    let queued = Input::Prompt(crate::input::PromptInput::new("queued work", None));
+    let queued_id = queued.id().clone();
+    rig.admit(queued).await;
+    let steer = typed_steer("misses", ConversationAppendRole::SystemNotice);
+    let steer_id = steer.id().clone();
+    rig.admit(steer).await;
+    rig.wait_for_waiting_delivery().await;
+
+    // The model answers: the run ends without another boundary.
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(2).await;
+    assert!(rig.script.applied_durable().is_empty());
+    let follow_up = rig.script.primitives()[1].clone();
+    assert!(
+        follow_up.contains(&steer_id) && !follow_up.contains(&queued_id),
+        "the steer lane is served first, as before durable delivery: {follow_up:?}"
+    );
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_phase(&steer_id, InputLifecycleState::Consumed)
+        .await;
+    rig.wait_for_apply_calls(3).await;
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_phase(&queued_id, InputLifecycleState::Consumed)
+        .await;
+    assert_eq!(contributions(&rig.script.primitives(), &steer_id), 1);
+    assert_eq!(contributions(&rig.script.primitives(), &queued_id), 1);
+}
+
+#[tokio::test]
+async fn persistent_durable_fallback_after_the_run_retired_keeps_the_runtime_healthy() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let rig = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
+    let batch = rig.start_busy_turn().await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenStream)
+        .await;
+    // Hold the ingress after the coordinator resolves its preparation, so the
+    // runtime loop commits the run (and the lifecycle leaves Running) first.
+    rig.script.prepare_hold_armed.store(true, Ordering::SeqCst);
+    let steer = typed_steer("retiring", ConversationAppendRole::SystemNotice);
+    let steer_id = steer.id().clone();
+    rig.admit(steer).await;
+    rig.wait_for_waiting_delivery().await;
+    crate::traits::RuntimeControlPlane::retire(rig.adapter.as_ref(), &runtime_id)
+        .await
+        .expect("retire while the run is bound");
+    // Pause the loop's next lap before it claims queue authority, so the
+    // held ingress observes "run advanced, input still queued" in Retired.
+    let (loop_paused, loop_release) = rig
+        .adapter
+        .arm_runtime_loop_before_queue_authority_test_hook(rig.session_id.clone());
+
+    // The model answers without another boundary: the delivery is withdrawn
+    // and the run commits into Retired while the ingress is still held.
+    rig.script.step(RunnerStep::Finish);
+    tokio::time::timeout(Duration::from_secs(5), loop_paused)
+        .await
+        .expect("the retired runtime loop reaches its drain lap")
+        .expect("queue-authority hook armed");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !rig.script.prepare_hold_reached.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("the durable preparation resolved");
+    rig.wait_for_phase(&batch, InputLifecycleState::Consumed)
+        .await;
+    assert_eq!(
+        crate::store::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state"),
+        Some(crate::runtime_state::RuntimeState::Retired)
+    );
+    assert_eq!(
+        rig.phase(&steer_id).await,
+        Some(InputLifecycleState::Queued)
+    );
+
+    // The ingress now observes the advanced run with the input still queued.
+    // Its fallback runs no generated transition (`LiveBoundaryUnavailable`
+    // does not exist in Retired), so the persistent runtime stays
+    // durability-ready and the retiring runtime drains the notice as exactly
+    // one follow-up turn.
+    rig.script
+        .prepare_hold_released
+        .store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(rig.steer_queue().await.contains(&steer_id));
+    loop_release
+        .send(())
+        .expect("the runtime loop still waits at the drain lap");
+    rig.wait_for_apply_calls(2).await;
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_phase(&steer_id, InputLifecycleState::Consumed)
+        .await;
+    assert!(rig.script.applied_durable().is_empty());
+    assert_eq!(contributions(&rig.script.primitives(), &steer_id), 1);
+}
+
+#[tokio::test]
+async fn persistent_crash_after_the_join_recovers_the_input_for_exactly_one_follow_up() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let crashed = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let session_id = crashed.session_id.clone();
+    let runtime_id = MeerkatMachine::logical_runtime_id(&session_id);
+    let batch = crashed.start_busy_turn().await;
+    let steer = typed_steer("crash", ConversationAppendRole::SystemNotice);
+    let steer_id = steer.id().clone();
+    crashed.admit(steer).await;
+    crashed.wait_for_waiting_delivery().await;
+    crashed.script.step(RunnerStep::BoundaryThenToolCalls);
+    crashed
+        .wait_for_phase(&steer_id, InputLifecycleState::Staged)
+        .await;
+    // The runner applied the append into the live image of the in-flight run.
+    assert_eq!(crashed.script.applied_durable(), vec![steer_id.clone()]);
+    let joined = store
+        .load_input_state(&runtime_id, &steer_id)
+        .await
+        .expect("load joined row")
+        .expect("joined row persisted");
+    assert_eq!(joined.seed.phase, InputLifecycleState::Staged);
+    let crashed_run = joined
+        .seed
+        .last_run_id
+        .clone()
+        .expect("durable run binding");
+
+    // The process dies with the run in flight: nothing of the run commits and
+    // its live image (which held the append) is lost. The abandoned machine
+    // is never driven again.
+    std::mem::forget(crashed);
+
+    let recovered = DurableSteerRig::with_adapter_for_session(
+        Arc::new(MeerkatMachine::persistent_without_blobs(Arc::clone(&store))),
+        session_id,
+    )
+    .await;
+    // Cold recovery returns both contributors of the interrupted run to their
+    // lanes; the durable steer is delivered by exactly one follow-up turn.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(phase) = recovered.phase(&steer_id).await
+                && phase != InputLifecycleState::Staged
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("recovery settles the joined input");
+    for expected_calls in 1..=2 {
+        if recovered.phase(&steer_id).await == Some(InputLifecycleState::Consumed)
+            && recovered.phase(&batch).await == Some(InputLifecycleState::Consumed)
+        {
+            break;
+        }
+        recovered.wait_for_apply_calls(expected_calls).await;
+        recovered.script.step(RunnerStep::Finish);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    recovered
+        .wait_for_phase(&steer_id, InputLifecycleState::Consumed)
+        .await;
+    recovered
+        .wait_for_phase(&batch, InputLifecycleState::Consumed)
+        .await;
+    assert_eq!(
+        contributions(&recovered.script.primitives(), &steer_id),
+        1,
+        "the recovered durable steer is delivered exactly once"
+    );
+    let consumed = store
+        .load_input_state(&runtime_id, &steer_id)
+        .await
+        .expect("load consumed row")
+        .expect("consumed row persisted");
+    assert_eq!(consumed.seed.phase, InputLifecycleState::Consumed);
+    assert_ne!(
+        consumed.seed.last_run_id,
+        Some(crashed_run),
+        "a follow-up run of the recovered runtime consumed it"
+    );
 }

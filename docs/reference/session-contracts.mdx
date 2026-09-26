@@ -614,15 +614,32 @@ from its content:
 
 | Steer input | Delivery class | What the running turn sees |
 | --- | --- | --- |
-| Peer message or request, text-only prompt | request-only | A temporary injected-context row at the tail of exactly the next model request. Never Session state; the input is consumed at injection. |
-| Prompt whose typed conversation appends are all `system_notice`, `user` or `injected_context` rows (for example a detached job's persisted background-job notice) | durable | The appends are written into the running turn's transcript after that boundary's tool results and before the next assistant message. The same request and every later request of the run see them, and they commit with the run like tool results. The input is consumed with the run terminal. |
-| Prompt carrying any other typed append (a `system` row) | follow-up only | Never joins the running turn. |
+| Peer message or request, text-only prompt | request-only | At an open boundary: a temporary injected-context row at the tail of exactly the next model request. Never Session state; the input is consumed at injection. With no open boundary (the model is streaming, or another request-only steer already holds the boundary) the input is normalised to `queue` and runs as one follow-up turn, which writes it to the transcript. |
+| Prompt whose typed conversation appends are all `system_notice`, `user` or `injected_context` rows (for example a detached job's persisted background-job notice), and whose turn metadata carries only the handling mode, execution kind and transcript identity | durable | The appends are written into the running turn's transcript after that boundary's tool results and before the next assistant message. The same request and every later request of the run see them, and they commit with the run like tool results. The input is consumed with the run terminal. |
+| Prompt carrying any other typed append (a `system` row), a synthetic refresh-projection notice, or turn metadata only a fresh turn can apply | follow-up only | Never joins the running turn. |
+
+A synthetic refresh-projection notice is one the next boundary's notice
+refresh replaces (`background_job` and `auth_reauth_required` notices, and
+`mcp_pending` notices whose blocks are not `persisted`); written into a running
+turn it would vanish from later requests, so it takes the follow-up turn.
+Turn metadata that only a fresh turn applies is everything else a runtime turn
+start honours: System prompts, skill references, a tool overlay, additional
+instructions, request-local context, model, provider or auth routing,
+keep-alive, render metadata, a terminal peer-response intent and directed
+interaction IDs.
+
+A durable in-turn append joins a run that has already started: the run's
+run-start hooks ran when it began and do not run again for the late rows (the
+same as for tool results). Incoming comms blocks among the appends publish the
+same `peer_content_ingested` events the follow-up path publishes.
 
 A durable steer that arrives while the model is streaming waits for the next
 boundary of the same run. If the run ends first (the model answered without
 another tool call), or the boundary refuses Session writes (structured-output
-extraction), the input takes the ordinary queued follow-up turn, which writes
-the same transcript rows. Exactly one of the two paths writes them:
+extraction), the input takes the ordinary follow-up turn, which writes the same
+transcript rows. It keeps its admitted `steer` lane, so the runtime serves it
+first after the run, ahead of queued work. Exactly one of the two paths writes
+them:
 
 - The input joins the running run as a late contributor before its payload
   reaches the runner. Persistent runtimes make that binding durable first.

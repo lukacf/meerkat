@@ -13,10 +13,25 @@
 \* abandonment, every run-ending arm (commit, fail, cancel, rollback, service
 \* turn commit, executor exit), and lane changes.
 \*
-\* Run with:
-\*   JDK_JAVA_OPTIONS=-Xss1g JAVA_TOOL_OPTIONS='-Xss1g -XX:+UseParallelGC' \
-\*     tlc -workers auto -config audit.cfg durable_in_turn_steer_audit.tla
+\* The TLC config is DERIVED from the generated ci.cfg on every run by
+\* durable_in_turn_steer_audit.sh (same constants and every generated
+\* invariant, plus the audit values, invariants and step bound below), so a
+\* DSL change can never leave the audit on a stale constant block or a
+\* narrower invariant set. The canonical TLC lane
+\* (crates/xtask/tests/machine_verify_all_tlc_test.sh, `make machine-verify`,
+\* the machine-codegen-verify pre-push hook and the nightly machine-verify
+\* job) runs it at a lane-sized bound; run a deeper bound by hand with:
+\*   specs/machines/meerkat_machine/durable_in_turn_steer_audit.sh 22
+\*
+\* Scope limit: the generated model has no crash action, so durable-row
+\* recovery (RecoverInputLifecycle and durable-tail adoption after a process
+\* dies mid-run) is outside this audit. The Rust test
+\* persistent_crash_after_the_join_recovers_the_input_for_exactly_one_follow_up
+\* covers that path.
 EXTENDS model
+
+\* Upper bound on model_step_count, including the deterministic prefix.
+CONSTANT AuditMaxSteps
 
 AuditRun == "runid_1"
 AuditSession == "sessionid_1"
@@ -99,7 +114,7 @@ AuditNext ==
 
 AuditSpec == Init /\ [][AuditNext]_vars
 
-AuditStateConstraint == model_step_count <= 22
+AuditStateConstraint == model_step_count <= AuditMaxSteps
 
 \* Exactly-once, checked on every explored state: an input whose join the
 \* machine has resolved as Retained (its append survives in the run's image)

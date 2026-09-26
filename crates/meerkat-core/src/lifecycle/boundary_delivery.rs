@@ -52,9 +52,55 @@ pub enum DurableTurnBoundaryAppendsError {
     /// Only ordinary System appends may carry an append identity.
     #[error("conversation append identity is valid only for role=system")]
     IdentityOnNonSystemRole,
+    /// The notice is a synthetic refresh projection
+    /// ([`crate::types::SystemNoticeMessage::is_synthetic_refresh_projection`]):
+    /// the runner's next boundary notice refresh replaces every notice of
+    /// that kind, so it would not survive in the running turn's transcript.
+    #[error(
+        "system notice kind {kind:?} is a synthetic refresh projection and cannot join a running turn"
+    )]
+    RefreshProjectionNotice {
+        kind: crate::types::SystemNoticeKind,
+    },
     /// The append content cannot be lowered into its transcript role.
     #[error("{0}")]
     Lowering(String),
+}
+
+/// Whether one typed conversation append may be written into a running turn.
+///
+/// Reads typed structure only: the role, the identity slot and, for a
+/// `SystemNotice`, the typed refresh-projection predicate. The accepted roles
+/// are exactly those every provider accepts in the middle of a conversation
+/// (`SystemNotice`, `User`, `InjectedContext`), without an append identity
+/// (reserved for `System` rows). A `SystemNotice` that is a synthetic refresh
+/// projection is refused: the next boundary's notice refresh would remove it
+/// from the running turn after it was delivered. Runtime admission classifies
+/// with this predicate, and [`DurableTurnBoundaryAppends::try_new`] enforces
+/// the same rule, so the two can never disagree.
+#[must_use]
+pub fn conversation_append_joins_running_turn(append: &ConversationAppend) -> bool {
+    in_turn_append_refusal(append).is_none()
+}
+
+fn in_turn_append_refusal(append: &ConversationAppend) -> Option<DurableTurnBoundaryAppendsError> {
+    if append.identity.is_some() {
+        return Some(DurableTurnBoundaryAppendsError::IdentityOnNonSystemRole);
+    }
+    match append.role {
+        ConversationAppendRole::SystemNotice => {
+            let notice = append.content.clone().into_system_notice_message();
+            notice.is_synthetic_refresh_projection().then_some(
+                DurableTurnBoundaryAppendsError::RefreshProjectionNotice { kind: notice.kind },
+            )
+        }
+        ConversationAppendRole::User | ConversationAppendRole::InjectedContext => None,
+        role @ (ConversationAppendRole::System
+        | ConversationAppendRole::Assistant
+        | ConversationAppendRole::Tool) => {
+            Some(DurableTurnBoundaryAppendsError::RoleNotInTurnEligible { role })
+        }
+    }
 }
 
 /// Typed conversation appends of one runtime input, already lowered into the
@@ -70,6 +116,10 @@ pub struct DurableTurnBoundaryAppends {
     input_id: InputId,
     messages: Vec<Message>,
     model_projection: ContentInput,
+    /// `PeerContentIngested` facts for the incoming comms blocks the appends
+    /// carry, projected before lowering exactly as the turn-start path does,
+    /// so both delivery paths publish the same ingestion events.
+    peer_ingested_events: Vec<crate::event::AgentEvent>,
 }
 
 impl DurableTurnBoundaryAppends {
@@ -93,10 +143,13 @@ impl DurableTurnBoundaryAppends {
                 &appends,
             );
         let mut messages = Vec::with_capacity(appends.len());
+        let mut peer_ingested_events = Vec::new();
         for append in appends {
-            if append.identity.is_some() {
-                return Err(DurableTurnBoundaryAppendsError::IdentityOnNonSystemRole);
+            if let Some(refusal) = in_turn_append_refusal(&append) {
+                return Err(refusal);
             }
+            peer_ingested_events
+                .extend(crate::event::peer_content_ingested_events(&append.content));
             let message = match append.role {
                 ConversationAppendRole::SystemNotice => {
                     Message::SystemNotice(append.content.into_system_notice_message())
@@ -137,6 +190,7 @@ impl DurableTurnBoundaryAppends {
             input_id,
             messages,
             model_projection,
+            peer_ingested_events,
         })
     }
 
@@ -159,9 +213,29 @@ impl DurableTurnBoundaryAppends {
         &self.model_projection
     }
 
-    pub(crate) fn into_parts(self) -> (InputId, Vec<Message>, ContentInput) {
-        (self.input_id, self.messages, self.model_projection)
+    /// `PeerContentIngested` events the runner publishes when it applies
+    /// these appends (one per incoming comms block, in append order).
+    #[must_use]
+    pub fn peer_ingested_events(&self) -> &[crate::event::AgentEvent] {
+        &self.peer_ingested_events
     }
+
+    pub(crate) fn into_parts(self) -> DurableTurnBoundaryAppendParts {
+        DurableTurnBoundaryAppendParts {
+            input_id: self.input_id,
+            messages: self.messages,
+            model_projection: self.model_projection,
+            peer_ingested_events: self.peer_ingested_events,
+        }
+    }
+}
+
+/// The owned pieces of one accepted durable delivery, split for the runner.
+pub(crate) struct DurableTurnBoundaryAppendParts {
+    pub(crate) input_id: InputId,
+    pub(crate) messages: Vec<Message>,
+    pub(crate) model_projection: ContentInput,
+    pub(crate) peer_ingested_events: Vec<crate::event::AgentEvent>,
 }
 
 /// What became of one durable boundary delivery, as observed by the runtime
@@ -379,6 +453,90 @@ mod tests {
             DurableTurnBoundaryAppends::try_new(InputId::new(), Vec::new(), None)
                 .expect_err("empty is refused"),
             DurableTurnBoundaryAppendsError::Empty
+        );
+    }
+
+    fn notice_of(kind: SystemNoticeKind, blocks: Vec<SystemNoticeBlock>) -> ConversationAppend {
+        ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::SystemNotice {
+                kind,
+                body: Some("notice".to_string()),
+                blocks,
+            },
+            identity: None,
+        }
+    }
+
+    fn mcp_block(persisted: bool) -> SystemNoticeBlock {
+        SystemNoticeBlock::Mcp {
+            server_id: Some("server".to_string()),
+            operation: None,
+            phase: None,
+            persisted,
+            detail: None,
+            pending_sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn durable_appends_refuse_refresh_projection_notices() {
+        // The next boundary's synthetic-notice refresh strips every notice of
+        // these kinds, so an in-turn write would be gone from later requests
+        // and from the committed transcript while its witness said Applied.
+        for (kind, blocks) in [
+            (SystemNoticeKind::BackgroundJob, Vec::new()),
+            (SystemNoticeKind::AuthReauthRequired, Vec::new()),
+            (SystemNoticeKind::McpPending, vec![mcp_block(false)]),
+        ] {
+            let append = notice_of(kind, blocks);
+            assert!(!conversation_append_joins_running_turn(&append));
+            assert_eq!(
+                DurableTurnBoundaryAppends::try_new(InputId::new(), vec![append], None)
+                    .expect_err("a refresh projection never joins a running turn"),
+                DurableTurnBoundaryAppendsError::RefreshProjectionNotice { kind }
+            );
+        }
+        // A persisted pending-MCP notice is durable history: the typed notice
+        // predicate, not the kind, decides.
+        let persisted = notice_of(SystemNoticeKind::McpPending, vec![mcp_block(true)]);
+        assert!(conversation_append_joins_running_turn(&persisted));
+        assert!(DurableTurnBoundaryAppends::try_new(InputId::new(), vec![persisted], None).is_ok());
+        assert!(conversation_append_joins_running_turn(&notice("generic")));
+    }
+
+    #[test]
+    fn durable_appends_project_peer_ingestion_events_like_the_turn_start_path() {
+        let comms = ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::SystemNotice {
+                kind: SystemNoticeKind::Comms,
+                body: None,
+                blocks: vec![SystemNoticeBlock::Comms {
+                    kind: crate::types::CommsNoticeKind::Message,
+                    direction: crate::types::SystemNoticeDirection::Incoming,
+                    peer: None,
+                    sender_taint: None,
+                    request_id: None,
+                    intent: None,
+                    status: None,
+                    summary: None,
+                    payload: None,
+                    content: vec![crate::types::ContentBlock::Text {
+                        text: "hello".to_string(),
+                    }],
+                }],
+            },
+            identity: None,
+        };
+        let expected = crate::event::peer_content_ingested_events(&comms.content);
+        assert_eq!(expected.len(), 1);
+        let appends =
+            DurableTurnBoundaryAppends::try_new(InputId::new(), vec![notice("n"), comms], None)
+                .expect("eligible appends lower");
+        assert_eq!(
+            format!("{:?}", appends.peer_ingested_events()),
+            format!("{expected:?}")
         );
     }
 

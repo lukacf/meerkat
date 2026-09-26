@@ -37307,4 +37307,385 @@ mod tests {
             "the read must stop at the counted budget"
         );
     }
+
+    /// Test runner seam for one exact durable boundary of the runtime turn the
+    /// test applies: the agent opens the boundary run, parks until the test
+    /// has registered a delivery, then consumes the boundary exactly like the
+    /// agent loop does (the delivery witness becomes `Applied`).
+    #[derive(Default)]
+    struct DurableBoundaryProbe {
+        run_id: std::sync::Mutex<Option<RunId>>,
+        state: std::sync::Mutex<Option<meerkat_core::TransientTurnContextStateHandle>>,
+        parked: AtomicBool,
+        released: AtomicBool,
+    }
+
+    impl DurableBoundaryProbe {
+        async fn take_one_durable_boundary(
+            &self,
+            state: &meerkat_core::TransientTurnContextStateHandle,
+        ) -> Result<meerkat_core::session::TransientTurnContextBoundaryRunGuardForTest, AgentError>
+        {
+            let run_id = self
+                .run_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .ok_or_else(|| AgentError::InternalError("probe run id unset".to_string()))?;
+            let guard = state
+                .begin_boundary_run_for_test(run_id.clone())
+                .map_err(|error| AgentError::InternalError(error.to_string()))?;
+            *self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state.clone());
+            self.parked.store(true, Ordering::SeqCst);
+            while !self.released.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            let taken = state
+                .take_boundary_for_test(&run_id, true)
+                .await
+                .map_err(|error| AgentError::InternalError(error.to_string()))?;
+            if taken.applied_durable.is_none() {
+                return Err(AgentError::InternalError(
+                    "the probe boundary carried no durable delivery".to_string(),
+                ));
+            }
+            Ok(guard)
+        }
+    }
+
+    struct DurableBoundaryProbeAgent {
+        inner: DummyAgent,
+        probe: Arc<DurableBoundaryProbe>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionAgent for DurableBoundaryProbeAgent {
+        async fn run_with_events(
+            &mut self,
+            prompt: meerkat_core::types::ContentInput,
+            event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<RunResult, meerkat_core::error::AgentError> {
+            // The agent loop's run guard closes the run when the run returns.
+            let state = self.inner.transient_turn_context_state();
+            let _run_guard = self.probe.take_one_durable_boundary(&state).await?;
+            self.inner.run_with_events(prompt, event_tx).await
+        }
+
+        fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
+            self.inner.set_skill_references(refs);
+        }
+
+        fn set_turn_tool_overlay(
+            &mut self,
+            overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner.set_turn_tool_overlay(overlay)
+        }
+
+        fn cancel(&mut self) {
+            self.inner.cancel();
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            client: Arc<dyn meerkat_core::AgentLlmClient>,
+            identity: meerkat_core::SessionLlmIdentity,
+            request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner
+                .hot_swap_llm_identity(client, identity, request_policy)
+        }
+
+        fn stage_external_tool_filter(
+            &mut self,
+            filter: meerkat_core::ToolFilter,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner.stage_external_tool_filter(filter)
+        }
+
+        fn set_tool_visibility_state(
+            &mut self,
+            state: Option<meerkat_core::SessionToolVisibilityState>,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner.set_tool_visibility_state(state)
+        }
+
+        fn session_id(&self) -> SessionId {
+            self.inner.session_id()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            self.inner.snapshot()
+        }
+
+        fn execution_snapshot(
+            &self,
+        ) -> Result<
+            Option<meerkat_core::AgentExecutionSnapshot>,
+            meerkat_core::SnapshotProjectionError,
+        > {
+            self.inner.execution_snapshot()
+        }
+
+        fn session_clone(&self) -> Result<Session, AgentError> {
+            self.inner.session_clone()
+        }
+
+        fn session_transcript_authority(
+            &self,
+        ) -> Result<SessionTranscriptAuthoritySnapshot, AgentError> {
+            self.inner.session_transcript_authority()
+        }
+
+        fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+            self.inner.durable_llm_identity()
+        }
+
+        fn observed_session_tail(&self) -> ObservedSessionTailKind {
+            self.inner.observed_session_tail()
+        }
+
+        fn update_keep_alive(&mut self, keep_alive: bool) {
+            self.inner.update_keep_alive(keep_alive);
+        }
+
+        fn update_mob_tool_authority_context(
+            &mut self,
+            authority_context: Option<MobToolAuthorityContext>,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner
+                .update_mob_tool_authority_context(authority_context)
+        }
+
+        fn append_system_messages(
+            &mut self,
+            contents: Vec<String>,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            self.inner.append_system_messages(contents)
+        }
+
+        fn transient_turn_context_state(&self) -> meerkat_core::TransientTurnContextStateHandle {
+            self.inner.transient_turn_context_state()
+        }
+    }
+
+    struct DurableBoundaryProbeBuilder {
+        probe: Arc<DurableBoundaryProbe>,
+        run_failure: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for DurableBoundaryProbeBuilder {
+        type Agent = DurableBoundaryProbeAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            Ok(DurableBoundaryProbeAgent {
+                inner: DummyAgent {
+                    session: Arc::new(std::sync::Mutex::new(session)),
+                    transient_turn_context_state: test_transient_turn_context_state_handle(),
+                    run_failure: self.run_failure.clone(),
+                    flow_overlay_failure: None,
+                    callback_pending_after_run: false,
+                    execution_snapshot: None,
+                    compaction_abort_failure: None,
+                    export_failure_after_activation: None,
+                    pending_head_canonical_boundary: None,
+                },
+                probe: Arc::clone(&self.probe),
+            })
+        }
+    }
+
+    /// The two public persistent runtime-turn entries the runtime executors
+    /// call (`apply_runtime_turn` for mob members and the CLI, the reserved
+    /// admission entry for RPC, REST and MCP sessions).
+    #[derive(Clone, Copy)]
+    enum RuntimeTurnEntry {
+        Plain,
+        ReservedAdmission,
+    }
+
+    /// Apply one runtime turn through a PUBLIC persistent service entry,
+    /// deliver one durable boundary append into it, and return the turn's
+    /// result with the delivery witness.
+    async fn apply_runtime_turn_with_one_durable_boundary_append(
+        entry: RuntimeTurnEntry,
+        run_failure: Option<String>,
+    ) -> (
+        Result<CoreApplyOutput, SessionError>,
+        meerkat_core::lifecycle::CoreBoundaryDeliveryWitness,
+    ) {
+        let probe = Arc::new(DurableBoundaryProbe::default());
+        let service = Arc::new(PersistentSessionService::new(
+            DurableBoundaryProbeBuilder {
+                probe: Arc::clone(&probe),
+                run_failure,
+            },
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id.clone();
+        let run_id = RunId::new();
+        *probe
+            .run_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run_id.clone());
+
+        let admission = match entry {
+            RuntimeTurnEntry::Plain => None,
+            RuntimeTurnEntry::ReservedAdmission => Some(
+                service
+                    .reserve_runtime_turn_admission(&session_id)
+                    .await
+                    .expect("reserve runtime turn admission"),
+            ),
+        };
+        let apply_service = Arc::clone(&service);
+        let apply_session_id = session_id.clone();
+        let apply_run_id = run_id.clone();
+        let apply = tokio::spawn(async move {
+            let request = runtime_content_turn_request("durable boundary turn");
+            let contributors = vec![meerkat_core::lifecycle::InputId::new()];
+            match admission {
+                None => {
+                    apply_service
+                        .apply_runtime_turn(
+                            &apply_session_id,
+                            apply_run_id,
+                            request,
+                            RunApplyBoundary::RunStart,
+                            contributors,
+                        )
+                        .await
+                }
+                Some(admission) => apply_service
+                    .apply_runtime_turn_with_recoverable_reserved_admission(
+                        &apply_session_id,
+                        apply_run_id,
+                        request,
+                        RunApplyBoundary::RunStart,
+                        contributors,
+                        admission,
+                    )
+                    .await
+                    .map_err(|(error, _admission)| error),
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !probe.parked.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("the runtime turn reaches its boundary");
+
+        let delivery = meerkat_core::TurnBoundaryDelivery::DurableAppends(
+            meerkat_core::DurableTurnBoundaryAppends::try_new(
+                meerkat_core::lifecycle::InputId::new(),
+                vec![meerkat_core::lifecycle::ConversationAppend {
+                    role: meerkat_core::lifecycle::ConversationAppendRole::SystemNotice,
+                    content: meerkat_core::lifecycle::CoreRenderable::SystemNotice {
+                        kind: meerkat_core::types::SystemNoticeKind::Generic,
+                        body: Some("detached job finished".to_string()),
+                        blocks: Vec::new(),
+                    },
+                    identity: None,
+                }],
+                None,
+            )
+            .expect("eligible durable notice"),
+        );
+        let prepare_service = Arc::clone(&service);
+        let prepare_session_id = session_id.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_service
+                .prepare_live_transient_turn_context_boundary(
+                    &prepare_session_id,
+                    &prepare_run_id,
+                    delivery,
+                )
+                .await
+        });
+        let state = probe
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("the probe recorded its coordinator");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !state.has_waiting_delivery_for_test() {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("the durable delivery registers");
+        probe.released.store(true, Ordering::SeqCst);
+        let stage = tokio::time::timeout(std::time::Duration::from_secs(5), prepare)
+            .await
+            .expect("the runner parks at its boundary")
+            .expect("prepare task")
+            .expect("durable preparation");
+        let witness = stage
+            .delivery_witness()
+            .cloned()
+            .expect("durable delivery witness");
+        stage.commit().expect("publish the durable append");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), apply)
+            .await
+            .expect("the runtime turn returns")
+            .expect("apply task");
+        (result, witness)
+    }
+
+    #[tokio::test]
+    async fn failed_runtime_turn_discards_the_durable_boundary_appends_its_image_held() {
+        for entry in [RuntimeTurnEntry::Plain, RuntimeTurnEntry::ReservedAdmission] {
+            let (result, witness) = apply_runtime_turn_with_one_durable_boundary_append(
+                entry,
+                Some("provider failed after the durable boundary".to_string()),
+            )
+            .await;
+            assert!(result.is_err(), "the runtime turn fails without a commit");
+            // The failed turn commits no boundary and the next turn resyncs
+            // the live image from durable authority, so the applied append
+            // does not survive: the service reports it and the runtime
+            // redelivers the input once.
+            assert_eq!(
+                witness.outcome(),
+                meerkat_core::lifecycle::CoreBoundaryDeliveryOutcome::Discarded
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn committed_runtime_turn_keeps_its_durable_boundary_appends_applied() {
+        for entry in [RuntimeTurnEntry::Plain, RuntimeTurnEntry::ReservedAdmission] {
+            let (result, witness) =
+                apply_runtime_turn_with_one_durable_boundary_append(entry, None).await;
+            result.expect("the runtime turn commits");
+            assert_eq!(
+                witness.outcome(),
+                meerkat_core::lifecycle::CoreBoundaryDeliveryOutcome::Applied
+            );
+        }
+    }
 }

@@ -8662,6 +8662,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .map_err(|err| SessionError::Store(Box::new(err)))
     }
 
+    /// Publish an already-persisted durable-join discard through the exact
+    /// live actor. This is ordinary source-event projection, not a terminal
+    /// receipt CAS and not another persistence or execution decision.
+    pub async fn publish_boundary_appends_discarded_for_actor(
+        &self,
+        witness: &crate::ephemeral::LiveSessionActorWitness,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), SessionError> {
+        let id = witness.session_id();
+        if let Some(event_store) = self.event_store.as_ref()
+            && let Some(cause) = event_projection_admission_fault(
+                &self.event_projection_faults,
+                &self.event_projection_gates,
+                event_store,
+                id,
+            )
+            .await
+        {
+            return Err(event_projection_halted_error(id, cause));
+        }
+        self.inner
+            .publish_boundary_appends_discarded_for_actor(witness, discarded)
+            .await
+    }
+
     /// Publish an ordered exact-terminal batch only through the service-minted
     /// actor incarnation carried by `witness`.
     ///
@@ -36315,6 +36340,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn boundary_discard_publication_uses_exact_actor_and_original_run() {
+        use futures::StreamExt;
+        use meerkat_core::event::BoundaryAppendsDiscarded;
+
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request_with_metadata(
+                "actor A",
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create actor A");
+        let session_id = created.session_id;
+        let actor_a = service
+            .live_session_actor_witness(&session_id)
+            .await
+            .unwrap();
+        let before = service
+            .inner
+            .observe_session_transcript_authority(&session_id)
+            .await
+            .unwrap();
+        let mut events = service.subscribe_session_events(&session_id).await.unwrap();
+        let first = BoundaryAppendsDiscarded {
+            session_id: session_id.clone(),
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            input_ids: vec![
+                meerkat_core::lifecycle::InputId::new(),
+                meerkat_core::lifecycle::InputId::new(),
+            ],
+        };
+        service
+            .publish_boundary_appends_discarded_for_actor(&actor_a, &first)
+            .await
+            .unwrap();
+        let published = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.source_session_id(), Some(&session_id));
+        assert!(matches!(&published.payload,
+            AgentEvent::BoundaryAppendsDiscarded(discarded) if discarded == &first));
+        assert!(published.seq > 0);
+        let mut mismatch = first.clone();
+        mismatch.session_id = SessionId::new();
+        assert!(
+            service
+                .publish_boundary_appends_discarded_for_actor(&actor_a, &mismatch)
+                .await
+                .is_err()
+        );
+        service
+            .publish_boundary_appends_discarded_for_actor(&actor_a, &first)
+            .await
+            .unwrap();
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second.seq,
+            published.seq + 1,
+            "one ordinary session sequencer owns publication"
+        );
+        assert_eq!(second.source, published.source);
+        let after = service
+            .inner
+            .observe_session_transcript_authority(&session_id)
+            .await
+            .unwrap();
+        assert_eq!(after.transcript_revision(), before.transcript_revision());
+        assert_eq!(after.message_count(), before.message_count());
+        assert_eq!(
+            after.mutation_generation(),
+            before.mutation_generation(),
+            "discard publication does not mutate the current transcript image"
+        );
+
+        let session = service.export_live_session(&session_id).await.unwrap();
+        let lease = service
+            .acquire_live_session_actor_turn_boundary_lease_exact(&actor_a)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(service.discard_live_session_actor(&lease).await.unwrap());
+        drop(lease);
+        let slot = LiveSessionActorWitnessSlot::default();
+        let admission = service.reserve_create_session_admission().await.unwrap();
+        service
+            .create_session_with_reserved_admission_and_actor_witness(
+                resume_request(session),
+                admission,
+                &slot,
+            )
+            .await
+            .unwrap();
+        let actor_b = slot.witness().unwrap();
+        assert_ne!(actor_a, actor_b);
+        let mut successor = service.subscribe_session_events(&session_id).await.unwrap();
+        assert!(matches!(
+            service
+                .publish_boundary_appends_discarded_for_actor(&actor_a, &first)
+                .await,
+            Err(SessionError::NotFound { .. })
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), successor.next())
+                .await
+                .is_err(),
+            "predecessor cannot publish through successor"
+        );
+        let next = BoundaryAppendsDiscarded {
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            ..first
+        };
+        service
+            .publish_boundary_appends_discarded_for_actor(&actor_b, &next)
+            .await
+            .unwrap();
+        let published = tokio::time::timeout(std::time::Duration::from_secs(2), successor.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.source_session_id(), Some(&session_id));
+        assert!(matches!(published.payload,
+            AgentEvent::BoundaryAppendsDiscarded(discarded) if discarded == next));
+    }
+
+    #[tokio::test]
     async fn test_event_replay_projection_reads_ordered_session_events() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let event_store = Arc::new(RecordingEventStore::default());
@@ -37931,6 +38091,7 @@ mod tests {
             meerkat_core::DurableTurnBoundaryAppends::try_new(
                 meerkat_core::lifecycle::InputId::new(),
                 vec![meerkat_core::lifecycle::ConversationAppend {
+                    runtime_source: None,
                     role: meerkat_core::lifecycle::ConversationAppendRole::SystemNotice,
                     content: meerkat_core::lifecycle::CoreRenderable::SystemNotice {
                         kind: meerkat_core::types::SystemNoticeKind::Generic,

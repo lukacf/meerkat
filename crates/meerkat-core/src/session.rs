@@ -626,6 +626,7 @@ fn erase_message_construction_bookkeeping(message: &mut Message) {
         }
         Message::SystemNotice(notice) => {
             notice.created_at = digest_timestamp_sentinel();
+            notice.runtime_origin = None;
         }
         Message::User(user) => {
             user.identity = crate::types::TranscriptMessageIdentity::default();
@@ -7027,6 +7028,7 @@ impl Session {
             match message {
                 Message::User(user) => user.identity.realtime_origin = None,
                 Message::BlockAssistant(assistant) => assistant.identity.realtime_origin = None,
+                Message::SystemNotice(notice) => notice.runtime_origin = None,
                 _ => {}
             }
         }
@@ -8604,6 +8606,7 @@ mod tests {
             crate::lifecycle::DurableTurnBoundaryAppends::try_new(
                 crate::lifecycle::InputId::new(),
                 vec![crate::lifecycle::ConversationAppend {
+                    runtime_source: None,
                     role: crate::lifecycle::ConversationAppendRole::SystemNotice,
                     content: crate::lifecycle::CoreRenderable::SystemNotice {
                         kind: crate::types::SystemNoticeKind::Generic,
@@ -9242,6 +9245,108 @@ mod tests {
             crate::generated::session_document::RealtimeUserContentBlobStageDisposition::StageNew
         );
         session.append_realtime_transcript_event(pending.canonical_event())
+    }
+
+    fn runtime_notice_origin_wire(session_id: &crate::types::SessionId) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": session_id,
+            "run_id": crate::lifecycle::RunId::new(),
+            "input_id": crate::lifecycle::InputId::new(),
+            "append_ordinal": 3,
+        })
+    }
+
+    #[test]
+    fn durable_notice_origin_roundtrips_without_changing_content_digest() {
+        let base = crate::types::SystemNoticeMessage::new(
+            crate::types::SystemNoticeKind::Generic,
+            "  exact\nnotice  ",
+        );
+        let mut wire = serde_json::to_value(&base).unwrap();
+        let origin = runtime_notice_origin_wire(&crate::types::SessionId::new());
+        wire["runtime_origin"] = origin.clone();
+        let decoded: crate::types::SystemNoticeMessage = serde_json::from_value(wire).unwrap();
+        let roundtrip = serde_json::to_value(&decoded).unwrap();
+        assert_eq!(
+            roundtrip["runtime_origin"], origin,
+            "canonical notice preserves exact provenance"
+        );
+        assert_eq!(
+            decoded.model_projection_text(),
+            base.model_projection_text()
+        );
+        assert_eq!(
+            transcript_messages_digest(&[Message::SystemNotice(base.clone())]).unwrap(),
+            transcript_messages_digest(&[Message::SystemNotice(decoded)]).unwrap(),
+            "construction provenance is not semantic content",
+        );
+        let legacy: crate::types::SystemNoticeMessage =
+            serde_json::from_value(serde_json::to_value(base).unwrap()).unwrap();
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("runtime_origin")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn generic_rewrite_cannot_copy_runtime_notice_origin() {
+        let mut session = Session::new();
+        let mut wire = serde_json::to_value(crate::types::SystemNoticeMessage::new(
+            crate::types::SystemNoticeKind::Generic,
+            "canonical notice",
+        ))
+        .unwrap();
+        wire["runtime_origin"] = runtime_notice_origin_wire(session.id());
+        let notice: crate::types::SystemNoticeMessage =
+            serde_json::from_value(wire.clone()).unwrap();
+        session.push(Message::SystemNotice(notice));
+        wire["body"] = serde_json::json!("caller replacement");
+        let replacement: crate::types::SystemNoticeMessage = serde_json::from_value(wire).unwrap();
+        let revision = session.transcript_revision().unwrap();
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::SystemNotice(replacement)],
+                TranscriptRewriteReason::new("edit notice"),
+                None,
+                Some(revision),
+            )
+            .expect("ordinary rewrite is permitted");
+        let Message::SystemNotice(rewritten) = &session.messages()[0] else {
+            panic!("rewritten notice");
+        };
+        assert_eq!(rewritten.body.as_deref(), Some("caller replacement"));
+        assert!(
+            serde_json::to_value(rewritten)
+                .unwrap()
+                .get("runtime_origin")
+                .is_none(),
+            "generic replacement cannot manufacture a runtime application"
+        );
+    }
+
+    #[test]
+    fn forked_runtime_notice_keeps_its_source_session_scope() {
+        let mut session = Session::new();
+        let mut wire = serde_json::to_value(crate::types::SystemNoticeMessage::new(
+            crate::types::SystemNoticeKind::Generic,
+            "parent notice",
+        ))
+        .unwrap();
+        let origin = runtime_notice_origin_wire(session.id());
+        wire["runtime_origin"] = origin.clone();
+        session.push(Message::SystemNotice(serde_json::from_value(wire).unwrap()));
+
+        let fork = session.fork();
+        let Message::SystemNotice(notice) = &fork.messages()[0] else {
+            panic!("fork retained the canonical parent notice");
+        };
+        let inherited = notice.runtime_origin.as_ref().expect("original provenance");
+        assert_eq!(&inherited.session_id, session.id());
+        assert_ne!(&inherited.session_id, fork.id());
+        assert_eq!(serde_json::to_value(inherited).unwrap(), origin);
     }
 
     #[test]

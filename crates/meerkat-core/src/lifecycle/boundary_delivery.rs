@@ -128,8 +128,9 @@ impl DurableTurnBoundaryAppends {
     /// `transcript_identity` is the late input's own transcript identity (the
     /// identity its fallback follow-up turn would stamp on `User` and
     /// `InjectedContext` rows), so both delivery paths attribute those rows to
-    /// the input rather than to the batch the run started with. `SystemNotice`
-    /// rows carry no identity.
+    /// the input rather than to the batch the run started with. The runner
+    /// stamps `SystemNotice` application origin when it writes these ordered
+    /// rows into the exact running session image.
     pub fn try_new(
         input_id: InputId,
         appends: Vec<ConversationAppend>,
@@ -382,6 +383,7 @@ mod tests {
 
     fn notice(detail: &str) -> ConversationAppend {
         ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::SystemNotice {
                 kind: SystemNoticeKind::Generic,
@@ -407,6 +409,7 @@ mod tests {
             vec![
                 notice("n"),
                 ConversationAppend {
+                    runtime_source: None,
                     role: ConversationAppendRole::User,
                     content: CoreRenderable::Text {
                         text: "hello".to_string(),
@@ -435,6 +438,7 @@ mod tests {
             let error = DurableTurnBoundaryAppends::try_new(
                 InputId::new(),
                 vec![ConversationAppend {
+                    runtime_source: None,
                     role,
                     content: CoreRenderable::Text {
                         text: "x".to_string(),
@@ -458,6 +462,7 @@ mod tests {
 
     fn notice_of(kind: SystemNoticeKind, blocks: Vec<SystemNoticeBlock>) -> ConversationAppend {
         ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::SystemNotice {
                 kind,
@@ -508,6 +513,7 @@ mod tests {
     #[test]
     fn durable_appends_project_peer_ingestion_events_like_the_turn_start_path() {
         let comms = ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::SystemNotice {
                 kind: SystemNoticeKind::Comms,

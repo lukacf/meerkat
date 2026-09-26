@@ -150,6 +150,7 @@ fn lower_skill_context_into_turn_appends(
         // authored sequence intact and add only the derived user context.
         // In particular, do not turn activation into a nonleading System.
         appends.push(ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::User,
             content: CoreRenderable::Blocks {
                 blocks: skill_blocks,
@@ -1530,7 +1531,18 @@ where
             peer_ingested_events,
         } = appends.into_parts();
         let append_count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
-        for message in messages {
+        let transcript_start = self.session.messages().len() as u64;
+        let mut notices = Vec::new();
+        for (append_ordinal, mut message) in messages.into_iter().enumerate() {
+            if let Message::SystemNotice(notice) = &mut message {
+                notice.runtime_origin = Some(crate::types::RuntimeAppendOrigin {
+                    session_id: self.session.id().clone(),
+                    run_id: run_id.clone(),
+                    input_id: input_id.clone(),
+                    append_ordinal: append_ordinal as u64,
+                });
+                notices.push(notice.clone());
+            }
             self.session.push(message);
         }
         let mut events = Vec::with_capacity(1 + peer_ingested_events.len());
@@ -1539,6 +1551,8 @@ where
             input_id,
             content: model_projection,
             append_count,
+            notices,
+            transcript_start: Some(transcript_start),
         });
         events.extend(peer_ingested_events);
         Some(events)
@@ -2250,7 +2264,27 @@ where
                 self.session.push(Message::User(message));
             }
             ConversationAppendRole::SystemNotice => {
-                let notice = append.content.into_system_notice_message();
+                let mut notice = append.content.into_system_notice_message();
+                if let Some(source) = append.runtime_source {
+                    // Queued appends are written before run_loop caches its run.
+                    // The runtime has already started this exact primitive in
+                    // generated authority; neither caller metadata nor the
+                    // predecessor's cached run may name this application.
+                    let run_id = self
+                        .started_primitive_run_from_authority()?
+                        .ok_or_else(|| {
+                            AgentError::InternalError(
+                                "runtime notice source requires an already-started primitive"
+                                    .to_string(),
+                            )
+                        })?;
+                    notice.runtime_origin = Some(crate::types::RuntimeAppendOrigin {
+                        session_id: self.session.id().clone(),
+                        run_id,
+                        input_id: source.input_id,
+                        append_ordinal: source.append_ordinal,
+                    });
+                }
                 self.session.push(Message::SystemNotice(notice));
             }
             ConversationAppendRole::InjectedContext => {
@@ -3499,6 +3533,7 @@ mod skill_activation_effect_tests {
 
     fn skill_append(role: ConversationAppendRole, content: CoreRenderable) -> ConversationAppend {
         ConversationAppend {
+            runtime_source: None,
             role,
             content,
             identity: None,
@@ -4137,6 +4172,7 @@ mod skill_activation_effect_tests {
             .run_with_events_and_typed_turn_appends(
                 "same text".into(),
                 vec![ConversationAppend {
+                    runtime_source: None,
                     role: ConversationAppendRole::SystemNotice,
                     content: CoreRenderable::SystemNotice {
                         kind: crate::types::SystemNoticeKind::Comms,
@@ -4599,6 +4635,7 @@ mod skill_activation_effect_tests {
             .run_with_events_and_typed_turn_appends(
                 "prompt".to_string().into(),
                 vec![crate::lifecycle::run_primitive::ConversationAppend {
+                    runtime_source: None,
                     role: ConversationAppendRole::User,
                     identity: None,
                     content: CoreRenderable::Text {
@@ -4656,6 +4693,7 @@ mod skill_activation_effect_tests {
                 "projected prompt".to_string().into(),
                 vec![
                     crate::lifecycle::run_primitive::ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::System,
                         identity: None,
                         content: CoreRenderable::Text {
@@ -4663,6 +4701,7 @@ mod skill_activation_effect_tests {
                         },
                     },
                     crate::lifecycle::run_primitive::ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::User,
                         identity: None,
                         content: CoreRenderable::Text {
@@ -4742,6 +4781,7 @@ mod skill_activation_effect_tests {
                 "projected prompt".to_string().into(),
                 vec![
                     crate::lifecycle::run_primitive::ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::InjectedContext,
                         identity: None,
                         content: CoreRenderable::Text {
@@ -4749,6 +4789,7 @@ mod skill_activation_effect_tests {
                         },
                     },
                     crate::lifecycle::run_primitive::ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::User,
                         identity: None,
                         content: CoreRenderable::Text {
@@ -4793,6 +4834,7 @@ mod skill_activation_effect_tests {
             .run_with_events_and_typed_turn_appends(
                 "prompt".to_string().into(),
                 vec![crate::lifecycle::run_primitive::ConversationAppend {
+                    runtime_source: None,
                     role: ConversationAppendRole::InjectedContext,
                     identity: None,
                     content: CoreRenderable::Json {
@@ -4812,9 +4854,117 @@ mod skill_activation_effect_tests {
     }
 
     #[tokio::test]
+    async fn queued_notice_retry_preserves_origin_and_stamps_actual_run() {
+        use crate::lifecycle::run_primitive::RuntimeAppendSource;
+        use crate::turn_execution_authority::{
+            ContentShape, TurnExecutionInput, TurnPrimitiveKind,
+        };
+
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let input_id = crate::lifecycle::InputId::new();
+        let old_run = crate::lifecycle::RunId::new();
+        let actual_run = crate::lifecycle::RunId::new();
+        agent.runtime_started_run_id = Some(old_run.clone());
+        agent.set_active_transcript_identity(Some(TranscriptMessageIdentity {
+            run_id: Some(old_run),
+            ..Default::default()
+        }));
+        agent
+            .apply_turn_input(TurnExecutionInput::StartConversationRun {
+                run_id: actual_run.clone(),
+                primitive_kind: TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape: ContentShape::Conversation,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
+            })
+            .expect("generated runtime starts this exact queued attempt");
+        let append = ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::text("  exact queued notice  "),
+            identity: None,
+            runtime_source: Some(RuntimeAppendSource {
+                input_id: input_id.clone(),
+                append_ordinal: 3,
+            }),
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "  exact queued notice  ".into(),
+                vec![append],
+                Vec::new(),
+                Some(TranscriptMessageIdentity {
+                    run_id: Some(crate::lifecycle::RunId::new()),
+                    ..Default::default()
+                }),
+                tx,
+            )
+            .await
+            .expect("queued runtime turn");
+        let notice = agent
+            .session()
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::SystemNotice(notice)
+                    if notice.body.as_deref() == Some("  exact queued notice  ") =>
+                {
+                    Some(notice)
+                }
+                _ => None,
+            })
+            .expect("queued notice persisted");
+        assert_eq!(
+            notice.runtime_origin,
+            Some(crate::types::RuntimeAppendOrigin {
+                session_id: agent.session().id().clone(),
+                run_id: actual_run,
+                input_id,
+                append_ordinal: 3,
+            })
+        );
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event, AgentEvent::BoundaryAppendApplied { .. }),
+                "ordinary queued delivery does not claim an in-turn apply event"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_notice_seed_requires_started_runtime_authority() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let before = agent.session().messages().to_vec();
+        let mut append = skill_append(
+            ConversationAppendRole::SystemNotice,
+            CoreRenderable::text("notice"),
+        );
+        append.runtime_source = Some(crate::lifecycle::run_primitive::RuntimeAppendSource {
+            input_id: crate::lifecycle::InputId::new(),
+            append_ordinal: 0,
+        });
+        agent
+            .push_transcript_append(append)
+            .expect_err("a seed cannot mint its own run");
+        assert_eq!(agent.session().messages(), before);
+        agent
+            .push_transcript_append(skill_append(
+                ConversationAppendRole::SystemNotice,
+                CoreRenderable::text("unseeded notice"),
+            ))
+            .expect("unseeded direct notices retain their current behavior");
+        let Message::SystemNotice(notice) = agent.session().messages().last().unwrap() else {
+            panic!("notice");
+        };
+        assert!(notice.runtime_origin.is_none());
+    }
+
+    #[tokio::test]
     async fn keyed_system_append_converges_mirrors_and_conflicts_fail_closed() {
         let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
         let keyed = |text: &str| crate::lifecycle::run_primitive::ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::System,
             identity: Some(crate::types::SystemMessageIdentity {
                 source: Some("released-0.8.10".to_string()),
@@ -4871,6 +5021,7 @@ mod skill_activation_effect_tests {
         for text in ["", " \t ", " \t "] {
             agent
                 .push_transcript_append(crate::lifecycle::run_primitive::ConversationAppend {
+                    runtime_source: None,
                     role: ConversationAppendRole::System,
                     identity: None,
                     content: CoreRenderable::Text {

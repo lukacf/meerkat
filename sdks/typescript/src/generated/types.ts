@@ -6433,6 +6433,7 @@ export interface WireSessionMessageSystemNotice {
   created_at: string;
   kind: SystemNoticeKind;
   role: "system_notice";
+  runtime_origin?: Record<string, unknown> | null;
 }
 
 export interface WireSessionMessageUser {

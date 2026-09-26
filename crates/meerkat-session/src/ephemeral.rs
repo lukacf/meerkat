@@ -835,7 +835,6 @@ impl LiveSessionActorWitness {
             && Arc::ptr_eq(&self.incarnation, &handle.actor_witness.incarnation)
     }
 
-    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     fn same_incarnation(&self, other: &Self) -> bool {
         self.session_id == other.session_id && Arc::ptr_eq(&self.incarnation, &other.incarnation)
     }
@@ -1218,6 +1217,11 @@ enum SessionCommand {
             >,
         >,
     },
+    PublishBoundaryAppendsDiscarded {
+        expected_actor: LiveSessionActorWitness,
+        discarded: meerkat_core::event::BoundaryAppendsDiscarded,
+        reply_tx: oneshot::Sender<Result<(), SessionError>>,
+    },
     RecordLiveTerminalError {
         cause: meerkat_core::live_adapter::LiveAdapterErrorCode,
         reply_tx: oneshot::Sender<()>,
@@ -1394,6 +1398,7 @@ impl SessionCommand {
                 | Self::ExportSession { .. }
                 | Self::ObserveSessionTranscriptAuthority { .. }
                 | Self::ExportSessionIfTranscriptAuthority { .. }
+                | Self::PublishBoundaryAppendsDiscarded { .. }
         )
     }
 }
@@ -1669,12 +1674,7 @@ impl RuntimeContextAdmissionGuard {
 }
 
 struct SessionTaskControl {
-    // Browser sessions retain the exact witness in the shared task-control
-    // shape, but exact durable terminal publication is native-only.
-    #[cfg_attr(
-        any(target_arch = "wasm32", not(feature = "session-store")),
-        allow(dead_code)
-    )]
+    // Source-event publication remains bound to this exact actor incarnation.
     actor_witness: LiveSessionActorWitness,
     state_tx: watch::Sender<SessionState>,
     summary_tx: watch::Sender<SessionSummaryCache>,
@@ -3869,6 +3869,50 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         reply_rx.await.map_err(|_| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                 "Exact session actor dropped interaction-terminal reply channel".to_string(),
+            ))
+        })?
+    }
+
+    /// Publish a resolved discarded application through its exact actor.
+    /// The payload cannot inject arbitrary events or choose a source sequence.
+    pub async fn publish_boundary_appends_discarded_for_actor(
+        &self,
+        witness: &LiveSessionActorWitness,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), SessionError> {
+        if discarded.session_id != *witness.session_id() {
+            return Err(SessionError::Agent(AgentError::InternalError(
+                "boundary discard session does not match the exact actor".to_string(),
+            )));
+        }
+        let command_tx = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(witness.session_id())
+                .filter(|handle| {
+                    witness.is_handle(handle) && witness.is_live() && !handle.command_tx.is_closed()
+                })
+                .map(|handle| handle.command_tx.clone())
+                .ok_or_else(|| SessionError::NotFound {
+                    id: witness.session_id().clone(),
+                })?
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::PublishBoundaryAppendsDiscarded {
+                expected_actor: witness.clone(),
+                discarded: discarded.clone(),
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "exact session actor exited before boundary discard publication".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(AgentError::InternalError(
+                "exact session actor dropped boundary discard publication reply".to_string(),
             ))
         })?
     }
@@ -6564,6 +6608,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
                     meerkat_core::error::AgentError::Cancelled,
                 )));
             }
+            SessionCommand::PublishBoundaryAppendsDiscarded { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(SessionError::Agent(AgentError::Cancelled)));
+            }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
             }
@@ -7602,6 +7649,31 @@ async fn session_task<A: SessionAgent>(
                     events,
                 )
                 .await;
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::PublishBoundaryAppendsDiscarded {
+                expected_actor,
+                discarded,
+                reply_tx,
+            } => {
+                let result = if discarded.session_id != session_id
+                    || !expected_actor.same_incarnation(&control.actor_witness)
+                    || !expected_actor.is_live()
+                {
+                    Err(SessionError::NotFound {
+                        id: expected_actor.session_id().clone(),
+                    })
+                } else {
+                    if !discarded.input_ids.is_empty() {
+                        let event = stamp_event_envelope(
+                            &mut next_seq,
+                            &source,
+                            AgentEvent::BoundaryAppendsDiscarded(discarded),
+                        );
+                        control.publish_session_event(event).await;
+                    }
+                    Ok(())
+                };
                 let _ = reply_tx.send(result);
             }
             SessionCommand::RecordLiveTerminalError { cause, reply_tx } => {

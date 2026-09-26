@@ -35,6 +35,9 @@ from .types import (  # noqa: F401
     SenderContentTaint,
     SkillName,
     SourceUuid,
+    SystemNoticeBlock,
+    SystemNoticeDirection,
+    SystemNoticeKind,
     ToolConfigChangeDomain,
     ToolConfigChangeOperation,
     ToolConfigChangeStatus,
@@ -217,6 +220,28 @@ class AssistantImageEvent(TypedDict, total=False):
     meta: Required[ProviderImageMetadata]
     revised_prompt: Required[RevisedPromptDisposition]
     width: Required[int]
+
+
+# Opaque identifier for an input accepted by the runtime layer.
+#
+# Core passes this through in `contributing_input_ids` on receipts and events
+# but NEVER interprets it. The runtime layer creates and manages these.
+InputId = str
+
+
+# Unique identifier for a session (UUID v7 for time-ordering)
+SessionId = str
+
+
+class BoundaryAppendsDiscarded(TypedDict, total=False):
+    """Exact negative application fact projected from durable boundary join resolution.
+
+    This does not terminalize an input or invalidate a later application in a
+    different run. A canonical retained history row remains authoritative.
+    """
+    input_ids: Required[list[InputId]]
+    run_id: Required[RunId]
+    session_id: Required[SessionId]
 
 
 # Type of budget being tracked
@@ -585,13 +610,6 @@ class HookFailureReasonObserveOnlyViolation(TypedDict, total=False):
 #
 # [`Display`]: std::fmt::Display
 HookFailureReason = HookFailureReasonTimeout | HookFailureReasonExecutionFailed | HookFailureReasonConfigInvalid | HookFailureReasonObserveOnlyViolation
-
-
-# Opaque identifier for an input accepted by the runtime layer.
-#
-# Core passes this through in `contributing_input_ids` on receipts and events
-# but NEVER interprets it. The runtime layer creates and manages these.
-InputId = str
 
 
 # Typed reason an interaction stream was abandoned before normal terminal
@@ -1130,10 +1148,6 @@ class ServerToolKindProviderNative(TypedDict, total=False):
 ServerToolKind = ServerToolKindWebSearch | ServerToolKindGoogleSearch | ServerToolKindProviderNative
 
 
-# Unique identifier for a session (UUID v7 for time-ordering)
-SessionId = str
-
-
 # Slug-validated capability identifier for skill requirements.
 #
 # Replaces the legacy `Vec<String>` capability lists with a typed
@@ -1270,6 +1284,18 @@ StreamTruncationReason = StreamTruncationReasonChannelFull | StreamTruncationRea
 StructuredOutputOrigin = Literal['extraction_request', 'final_reply']
 
 
+class RuntimeAppendOrigin(TypedDict, total=False):
+    """Exact runtime application provenance for one canonical notice.
+
+    Input and ordinal identify the logical append; session and run identify
+    its application attempt. This record grants no execution or commit authority.
+    """
+    append_ordinal: Required[int]
+    input_id: Required[InputId]
+    run_id: Required[RunId]
+    session_id: Required[SessionId]
+
+
 class SystemNoticePeer(TypedDict, total=False):
     """Peer identity carried in a typed comms transcript block.
 
@@ -1280,9 +1306,6 @@ class SystemNoticePeer(TypedDict, total=False):
     """
     display_name: NotRequired[Optional[str]]
     id: Required[PeerId]
-
-
-ToolCallArguments = dict[str, Any]
 
 
 class DeferredCatalogDelta(TypedDict, total=False):
@@ -1306,6 +1329,19 @@ class ToolConfigChangedPayload(TypedDict, total=False):
     persisted: Required[bool]
     status_info: Required[ToolConfigChangeStatus]
     target: Required[str]
+
+
+class SystemNoticeMessage(TypedDict, total=False):
+    """System notice message stored in the canonical transcript.
+    """
+    blocks: NotRequired[list[SystemNoticeBlock]]
+    body: NotRequired[Optional[str]]
+    created_at: NotRequired[str]
+    kind: Required[SystemNoticeKind]
+    runtime_origin: NotRequired[Optional[RuntimeAppendOrigin]]
+
+
+ToolCallArguments = dict[str, Any]
 
 
 # Durable correlation identity for one delegated objective.
@@ -2015,20 +2051,35 @@ class AgentEventBoundaryAppendApplied(TypedDict, total=False):
     with the run like tool results. If the image that carried them is later
     discarded (an uncommitted persistent run, or a compaction rollback),
     the runtime redelivers the input in exactly one follow-up turn, so
-    consumers should reconcile this event against the run terminal and the
-    committed transcript. Request-only steers never emit it.
+    consumers should reconcile against exact discard facts and canonical
+    transcript history. A run terminal alone is not proof of discard.
+    Request-only steers never emit it.
     """
     append_count: Required[int]
     content: Required[ContentInput]
     input_id: Required[InputId]
+    notices: NotRequired[list[SystemNoticeMessage]]
     run_id: Required[RunId]
+    transcript_start: NotRequired[Optional[int]]
     type: Required[Literal['boundary_append_applied']]
+
+
+class AgentEventBoundaryAppendsDiscarded(TypedDict, total=False):
+    """Exact negative application fact projected from durable boundary join resolution.
+
+    This does not terminalize an input or invalidate a later application in a
+    different run. A canonical retained history row remains authoritative.
+    """
+    input_ids: Required[list[InputId]]
+    run_id: Required[RunId]
+    session_id: Required[SessionId]
+    type: Required[Literal['boundary_appends_discarded']]
 
 
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

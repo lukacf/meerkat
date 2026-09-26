@@ -1589,7 +1589,7 @@
             "type": "object"
           },
           {
-            "description": "A durable runtime input joined the running turn at a cooperative model\nboundary: its typed conversation appends (for example a background\njob's persisted system notice delivered as a Steer) were written into\nthe session transcript before the next model request of the same run.\n\nEmitted once, after the append is applied, so live streams and consoles\nsee a mid-turn append without waiting for history. The appends commit\nwith the run like tool results. If the image that carried them is later\ndiscarded (an uncommitted persistent run, or a compaction rollback),\nthe runtime redelivers the input in exactly one follow-up turn, so\nconsumers should reconcile this event against the run terminal and the\ncommitted transcript. Request-only steers never emit it.",
+            "description": "A durable runtime input joined the running turn at a cooperative model\nboundary: its typed conversation appends (for example a background\njob's persisted system notice delivered as a Steer) were written into\nthe session transcript before the next model request of the same run.\n\nEmitted once, after the append is applied, so live streams and consoles\nsee a mid-turn append without waiting for history. The appends commit\nwith the run like tool results. If the image that carried them is later\ndiscarded (an uncommitted persistent run, or a compaction rollback),\nthe runtime redelivers the input in exactly one follow-up turn, so\nconsumers should reconcile against exact discard facts and canonical\ntranscript history. A run terminal alone is not proof of discard.\nRequest-only steers never emit it.",
             "properties": {
               "append_count": {
                 "description": "Number of transcript rows appended.",
@@ -1605,9 +1605,25 @@
                 "$ref": "#/components/schemas/InputId",
                 "description": "The runtime input that carried the appends."
               },
+              "notices": {
+                "description": "Exact canonical notice rows, in order within the applied append list.",
+                "items": {
+                  "$ref": "#/components/schemas/SystemNoticeMessage"
+                },
+                "type": "array"
+              },
               "run_id": {
                 "$ref": "#/components/schemas/RunId",
                 "description": "The running turn the appends joined."
+              },
+              "transcript_start": {
+                "description": "First appended row's offset in the image at application time.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "type": {
                 "const": "boundary_append_applied",
@@ -1620,6 +1636,20 @@
               "input_id",
               "content",
               "append_count"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/BoundaryAppendsDiscarded",
+            "description": "Existing durable-join authority resolved these applications as discarded.\nPublished only after any required requeue persistence succeeds.",
+            "properties": {
+              "type": {
+                "const": "boundary_appends_discarded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -2103,6 +2133,29 @@
         "required": [
           "blob_id",
           "media_type"
+        ],
+        "type": "object"
+      },
+      "BoundaryAppendsDiscarded": {
+        "description": "Exact negative application fact projected from durable boundary join resolution.\n\nThis does not terminalize an input or invalidate a later application in a\ndifferent run. A canonical retained history row remains authoritative.",
+        "properties": {
+          "input_ids": {
+            "items": {
+              "$ref": "#/components/schemas/InputId"
+            },
+            "type": "array"
+          },
+          "run_id": {
+            "$ref": "#/components/schemas/RunId"
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/SessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "run_id",
+          "input_ids"
         ],
         "type": "object"
       },
@@ -14804,6 +14857,33 @@
           }
         ]
       },
+      "RuntimeAppendOrigin": {
+        "description": "Exact runtime application provenance for one canonical notice.\n\nInput and ordinal identify the logical append; session and run identify\nits application attempt. This record grants no execution or commit authority.",
+        "properties": {
+          "append_ordinal": {
+            "description": "Zero-based position in the input's complete projected append list.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_id": {
+            "$ref": "#/components/schemas/InputId"
+          },
+          "run_id": {
+            "$ref": "#/components/schemas/RunId"
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/SessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "run_id",
+          "input_id",
+          "append_ordinal"
+        ],
+        "type": "object"
+      },
       "RuntimeDeliveryOutcome": {
         "oneOf": [
           {
@@ -16897,6 +16977,45 @@
             "type": "string"
           }
         ]
+      },
+      "SystemNoticeMessage": {
+        "description": "System notice message stored in the canonical transcript.",
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/SystemNoticeBlock"
+            },
+            "type": "array"
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "default": "2026-09-26T04:16:40.839620Z",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SystemNoticeKind"
+          },
+          "runtime_origin": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeAppendOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Runtime-owned provenance, absent for legacy and direct notices."
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
       },
       "SystemNoticePeer": {
         "description": "Peer identity carried in a typed comms transcript block.\n\n`id` is the canonical routing identity ([`crate::comms::PeerId`]), serialized\nas a hyphenated UUID string on the wire; `display_name` is the presentation\nlabel. Keeping `id` typed lets the projection logic consume the identity\ndirectly instead of re-parsing a `String` back into a `PeerId`.",
@@ -22429,6 +22548,17 @@
               "role": {
                 "const": "system_notice",
                 "type": "string"
+              },
+              "runtime_origin": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RuntimeAppendOrigin"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Exact application provenance copied from the canonical notice."
               }
             },
             "required": [

@@ -2641,7 +2641,7 @@ where
             })
     }
 
-    fn started_primitive_run_from_authority(&self) -> Result<Option<RunId>, AgentError> {
+    pub(super) fn started_primitive_run_from_authority(&self) -> Result<Option<RunId>, AgentError> {
         let snapshot = self.runtime_turn_authority_snapshot()?;
         if snapshot.turn_phase != TurnPhase::ApplyingPrimitive {
             return Ok(None);
@@ -11372,6 +11372,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
         let appends = vec![
             crate::lifecycle::run_primitive::ConversationAppend {
+                runtime_source: None,
                 role: crate::lifecycle::run_primitive::ConversationAppendRole::SystemNotice,
                 identity: None,
                 content: incoming_peer_comms_renderable(Some(
@@ -11379,6 +11380,7 @@ mod tests {
                 )),
             },
             crate::lifecycle::run_primitive::ConversationAppend {
+                runtime_source: None,
                 role: crate::lifecycle::run_primitive::ConversationAppendRole::User,
                 identity: None,
                 content: crate::lifecycle::run_primitive::CoreRenderable::text(

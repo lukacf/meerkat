@@ -1044,6 +1044,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         }
         AgentEvent::PeerContentIngested { .. } => "peer_content_ingested",
         AgentEvent::BoundaryAppendApplied { .. } => "boundary_append_applied",
+        AgentEvent::BoundaryAppendsDiscarded(_) => "boundary_appends_discarded",
         AgentEvent::ProviderCacheBreakpointsDiscarded { .. } => {
             "provider_cache_breakpoints_discarded"
         }
@@ -2577,8 +2578,9 @@ pub enum AgentEvent {
     /// with the run like tool results. If the image that carried them is later
     /// discarded (an uncommitted persistent run, or a compaction rollback),
     /// the runtime redelivers the input in exactly one follow-up turn, so
-    /// consumers should reconcile this event against the run terminal and the
-    /// committed transcript. Request-only steers never emit it.
+    /// consumers should reconcile against exact discard facts and canonical
+    /// transcript history. A run terminal alone is not proof of discard.
+    /// Request-only steers never emit it.
     BoundaryAppendApplied {
         /// The running turn the appends joined.
         run_id: crate::lifecycle::RunId,
@@ -2588,7 +2590,28 @@ pub enum AgentEvent {
         content: crate::types::ContentInput,
         /// Number of transcript rows appended.
         append_count: u32,
+        /// Exact canonical notice rows, in order within the applied append list.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notices: Vec<crate::types::SystemNoticeMessage>,
+        /// First appended row's offset in the image at application time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transcript_start: Option<u64>,
     },
+    /// Existing durable-join authority resolved these applications as discarded.
+    /// Published only after any required requeue persistence succeeds.
+    BoundaryAppendsDiscarded(BoundaryAppendsDiscarded),
+}
+
+/// Exact negative application fact projected from durable boundary join resolution.
+///
+/// This does not terminalize an input or invalidate a later application in a
+/// different run. A canonical retained history row remains authoritative.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryAppendsDiscarded {
+    pub session_id: SessionId,
+    pub run_id: crate::lifecycle::RunId,
+    pub input_ids: Vec<crate::lifecycle::InputId>,
 }
 
 impl AgentEvent {
@@ -2953,6 +2976,35 @@ mod tests {
     use crate::retry::{LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule};
     use crate::skills::SkillName;
     use crate::types::{ContentBlock, Usage};
+
+    #[test]
+    fn boundary_appends_discarded_has_flat_exact_source_wire_shape() {
+        let discarded = BoundaryAppendsDiscarded {
+            session_id: SessionId::new(),
+            run_id: crate::lifecycle::RunId::new(),
+            input_ids: vec![
+                crate::lifecycle::InputId::new(),
+                crate::lifecycle::InputId::new(),
+            ],
+        };
+        let event = AgentEvent::BoundaryAppendsDiscarded(discarded.clone());
+        assert_eq!(agent_event_type(&event), "boundary_appends_discarded");
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "type": "boundary_appends_discarded",
+                "session_id": discarded.session_id,
+                "run_id": discarded.run_id,
+                "input_ids": discarded.input_ids,
+            })
+        );
+        let decoded: AgentEvent = serde_json::from_value(wire).unwrap();
+        let AgentEvent::BoundaryAppendsDiscarded(decoded) = decoded else {
+            panic!("exact discard event");
+        };
+        assert_eq!(decoded, discarded);
+    }
 
     /// A fit is a conjunction over both axes and either axis alone can prove
     /// an excess. Absence on either axis is reported as absence, never as a

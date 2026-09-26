@@ -10317,6 +10317,29 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     }
 
     #[cfg(feature = "session-store")]
+    async fn publish_boundary_appends_discarded(
+        &mut self,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        use meerkat_core::lifecycle::core_executor::CoreExecutorError;
+        let persistent = self.persistent_service.as_ref().ok_or_else(|| {
+            CoreExecutorError::Internal(
+                "exact boundary discard publication requires a persistent CLI service".to_string(),
+            )
+        })?;
+        let witness = self.publication_actor_witness.as_ref().ok_or_else(|| {
+            CoreExecutorError::control_failed_runtime(format!(
+                "CLI discard publication for session {} has no exact actor witness",
+                self.session_id
+            ))
+        })?;
+        persistent
+            .publish_boundary_appends_discarded_for_actor(witness, discarded)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    #[cfg(feature = "session-store")]
     async fn publish_interaction_terminals(
         &mut self,
         events: &[AgentEvent],
@@ -23030,6 +23053,7 @@ default_model = "gemma"
         };
         let primitive = meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateAppend(
             meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                runtime_source: None,
                 role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
                 content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
                     text: "hello".to_string(),
@@ -23118,6 +23142,7 @@ default_model = "gemma"
         };
         let primitive = meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateAppend(
             meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                runtime_source: None,
                 role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
                 content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
                     text: "hello".to_string(),
@@ -23172,6 +23197,7 @@ default_model = "gemma"
             meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(StagedRunInput {
                 boundary: RunApplyBoundary::RunStart,
                 appends: vec![ConversationAppend {
+                    runtime_source: None,
                     role: ConversationAppendRole::SystemNotice,
                     content: CoreRenderable::Text {
                         text: "terminal peer response token: ash twelve".to_string(),

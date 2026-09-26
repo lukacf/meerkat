@@ -1253,6 +1253,7 @@ impl TranscriptRewriteMessage {
                 blocks,
                 created_at,
             } => Ok(Message::SystemNotice(SystemNoticeMessage {
+                runtime_origin: None,
                 kind,
                 body,
                 blocks,
@@ -1463,6 +1464,9 @@ pub enum WireSessionMessage {
     },
     SystemNotice {
         kind: SystemNoticeKind,
+        /// Exact application provenance copied from the canonical notice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_origin: Option<meerkat_core::types::RuntimeAppendOrigin>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1537,6 +1541,7 @@ impl From<Message> for WireSessionMessage {
             },
             Message::SystemNotice(message) => Self::SystemNotice {
                 kind: message.kind,
+                runtime_origin: message.runtime_origin,
                 body: message.body,
                 blocks: message.blocks,
                 created_at: message.created_at.to_rfc3339(),
@@ -2442,6 +2447,113 @@ mod tests {
             wire.messages[2],
             WireSessionMessage::BlockAssistant { .. }
         ));
+    }
+
+    fn canonical_runtime_notice() -> SystemNoticeMessage {
+        let mut notice = SystemNoticeMessage::with_blocks(
+            SystemNoticeKind::Generic,
+            Some("  exact notice\nsecond line  ".to_string()),
+            vec![meerkat_core::SystemNoticeBlock::RuntimeNotice {
+                category: "wire_probe".to_string(),
+                detail: Some("typed block".to_string()),
+                payload: Some(serde_json::json!({"preserved": true})),
+            }],
+        );
+        notice.runtime_origin = Some(meerkat_core::types::RuntimeAppendOrigin {
+            session_id: SessionId::new(),
+            run_id: RunId::new(),
+            input_id: meerkat_core::lifecycle::InputId::new(),
+            append_ordinal: 3,
+        });
+        notice
+    }
+
+    #[test]
+    fn runtime_notice_origin_survives_history_and_revision_wire_projection() {
+        let notice = canonical_runtime_notice();
+        let messages = vec![Message::SystemNotice(notice.clone())];
+        let session_id = notice.runtime_origin.as_ref().unwrap().session_id.clone();
+        let history: WireSessionHistory = SessionHistoryPage {
+            session_id: session_id.clone(),
+            message_count: 1,
+            offset: 0,
+            limit: None,
+            has_more: false,
+            messages: messages.clone(),
+        }
+        .into();
+        let revision: WireSessionTranscriptRevision = SessionTranscriptRevisionPage {
+            session_id,
+            revision: "retained-revision".to_string(),
+            head_revision: "current-revision".to_string(),
+            message_count: 1,
+            offset: 0,
+            limit: None,
+            has_more: false,
+            messages,
+        }
+        .into();
+
+        for message in [&history.messages[0], &revision.messages[0]] {
+            let wire = serde_json::to_value(message).unwrap();
+            assert_eq!(wire["role"], "system_notice");
+            assert_eq!(
+                wire["runtime_origin"],
+                serde_json::to_value(&notice.runtime_origin).unwrap()
+            );
+            assert_eq!(wire["body"], notice.body.as_ref().unwrap().as_str());
+            assert_eq!(
+                wire["blocks"],
+                serde_json::to_value(&notice.blocks).unwrap()
+            );
+            assert_eq!(wire["created_at"], notice.created_at.to_rfc3339());
+            let decoded: WireSessionMessage = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn legacy_wire_notice_without_runtime_origin_remains_compatible() {
+        let wire = serde_json::json!({
+            "role": "system_notice",
+            "kind": "generic",
+            "body": "legacy notice",
+            "created_at": "2026-09-26T00:00:00Z",
+        });
+        let message: WireSessionMessage = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(message).unwrap(), wire);
+        let direct: WireSessionMessage = Message::SystemNotice(SystemNoticeMessage::new(
+            SystemNoticeKind::Generic,
+            "direct notice",
+        ))
+        .into();
+        assert!(
+            serde_json::to_value(direct)
+                .unwrap()
+                .get("runtime_origin")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rewrite_wire_cannot_import_runtime_notice_origin() {
+        let notice = canonical_runtime_notice();
+        let mut wire = serde_json::to_value(WireSessionMessage::from(Message::SystemNotice(
+            notice.clone(),
+        )))
+        .unwrap();
+        // Include a caller-supplied value explicitly so this ingress test does
+        // not depend on the outbound conversion preserving provenance.
+        wire["runtime_origin"] = serde_json::to_value(&notice.runtime_origin).unwrap();
+        let rewrite: TranscriptRewriteMessage = serde_json::from_value(wire).unwrap();
+        let Message::SystemNotice(rewritten) = rewrite.into_core().unwrap() else {
+            panic!("ordinary notice rewrite");
+        };
+        assert!(rewritten.runtime_origin.is_none());
+        assert_eq!(rewritten.kind, notice.kind);
+        assert_eq!(rewritten.body, notice.body);
+        assert_eq!(rewritten.blocks, notice.blocks);
+        assert_eq!(rewritten.created_at, notice.created_at);
     }
 
     #[test]

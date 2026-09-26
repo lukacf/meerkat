@@ -490,6 +490,7 @@ fn repair_interrupted_tail(
         )));
     }
     recovered.push(Message::SystemNotice(SystemNoticeMessage {
+        runtime_origin: None,
         kind: SystemNoticeKind::Generic,
         body: Some(
             "A previous run was interrupted before its boundary committed. Recovery preserved \

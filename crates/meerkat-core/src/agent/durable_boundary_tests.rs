@@ -182,6 +182,7 @@ fn durable_notice() -> meerkat_core::lifecycle::TurnBoundaryDelivery {
         meerkat_core::lifecycle::DurableTurnBoundaryAppends::try_new(
             meerkat_core::lifecycle::InputId::new(),
             vec![meerkat_core::lifecycle::ConversationAppend {
+                runtime_source: None,
                 role: meerkat_core::lifecycle::ConversationAppendRole::SystemNotice,
                 content: meerkat_core::lifecycle::CoreRenderable::SystemNotice {
                     kind: meerkat_core::types::SystemNoticeKind::Generic,
@@ -470,6 +471,16 @@ async fn compaction_rollback_discards_only_the_durable_appends_applied_after_its
     // A rollback captured AFTER the apply restores an image that still holds
     // the notice: the delivery stays Applied and its input is consumed.
     let post_apply_session = agent.session().clone();
+    let original_notice = post_apply_session
+        .messages()
+        .iter()
+        .find(|message| carries_notice(message))
+        .expect("applied canonical notice")
+        .clone();
+    let Message::SystemNotice(notice) = &original_notice else {
+        panic!("typed notice");
+    };
+    assert!(notice.runtime_origin.is_some());
     agent.compaction_transaction = Some(uncommitted_compaction_rollback(
         &agent,
         post_apply_session,
@@ -491,6 +502,17 @@ async fn compaction_rollback_discards_only_the_durable_appends_applied_after_its
             .filter(|message| carries_notice(message))
             .count(),
         1
+    );
+    let retained_notice = agent
+        .session()
+        .messages()
+        .iter()
+        .find(|message| carries_notice(message))
+        .expect("rollback retained the exact canonical notice");
+    assert_eq!(
+        serde_json::to_value(retained_notice).unwrap(),
+        serde_json::to_value(original_notice).unwrap(),
+        "a retained image keeps notice content, timestamp and runtime origin"
     );
 
     // A rollback captured BEFORE the apply restores an image without the
@@ -515,6 +537,7 @@ async fn compaction_rollback_discards_only_the_durable_appends_applied_after_its
 #[tokio::test]
 async fn durable_comms_notice_publishes_peer_content_ingested_in_turn() {
     let comms_notice = meerkat_core::lifecycle::ConversationAppend {
+        runtime_source: None,
         role: meerkat_core::lifecycle::ConversationAppendRole::SystemNotice,
         content: meerkat_core::lifecycle::CoreRenderable::SystemNotice {
             kind: meerkat_core::types::SystemNoticeKind::Comms,
@@ -567,4 +590,179 @@ async fn durable_comms_notice_publishes_peer_content_ingested_in_turn() {
         &events[applied_at + 1],
         AgentEvent::PeerContentIngested { request_id, .. } if request_id.as_deref() == Some("req-1")
     ));
+}
+
+// These contract tests deliberately inspect serialized public facts so they
+// compile against the pre-origin API and fail on absent behavior, not types.
+fn projection_contract_append(
+    role: &str,
+    content: serde_json::Value,
+) -> meerkat_core::lifecycle::ConversationAppend {
+    serde_json::from_value(serde_json::json!({
+        "role": role,
+        "content": content,
+    }))
+    .expect("existing typed append wire shape")
+}
+
+fn projection_contract_notice() -> meerkat_core::lifecycle::ConversationAppend {
+    projection_contract_append(
+        "system_notice",
+        serde_json::json!({
+            "type": "system_notice",
+            "kind": "generic",
+            "body": "  same notice\nsecond paragraph  ",
+            "blocks": [{
+                "type": "runtime_notice",
+                "category": "contract_probe",
+                "detail": "exact block text",
+                "payload": {"ordinal_is_not_text": true},
+            }],
+        }),
+    )
+}
+
+#[tokio::test]
+async fn durable_notice_event_rows_equal_applied_transcript_rows() {
+    let input_id = meerkat_core::lifecycle::InputId::new();
+    let appends = vec![
+        projection_contract_append(
+            "injected_context",
+            serde_json::json!({
+                "type": "text", "text": "host context",
+            }),
+        ),
+        projection_contract_notice(),
+        projection_contract_append(
+            "user",
+            serde_json::json!({
+                "type": "text", "text": "follow-up instruction",
+            }),
+        ),
+        projection_contract_notice(),
+    ];
+    let expected_projection = serde_json::to_value(
+        meerkat_core::lifecycle::run_primitive::model_projection_content_input_from_conversation_appends(&appends),
+    ).unwrap();
+    let delivery = meerkat_core::lifecycle::TurnBoundaryDelivery::DurableAppends(
+        meerkat_core::lifecycle::DurableTurnBoundaryAppends::try_new(
+            input_id.clone(),
+            appends,
+            None,
+        )
+        .expect("mixed eligible appends"),
+    );
+    let (agent, _, witness, events) =
+        run_with_durable_delivery_at_post_tool_boundary(delivery).await;
+    assert_eq!(
+        witness.outcome(),
+        meerkat_core::CoreBoundaryDeliveryOutcome::Applied
+    );
+    let applied = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::BoundaryAppendApplied { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        applied.len(),
+        1,
+        "one application event carries both notices"
+    );
+    let event = serde_json::to_value(applied[0]).unwrap();
+    assert_eq!(event["append_count"], 4);
+    assert_eq!(
+        event["content"], expected_projection,
+        "compatibility content remains the model projection"
+    );
+    let emitted = event["notices"]
+        .as_array()
+        .expect("typed canonical notice delta");
+    assert_eq!(
+        emitted.len(),
+        2,
+        "equal bodies are distinct accepted appends"
+    );
+    let history = agent.session().messages();
+    let rows = history
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, message)| match message {
+            Message::SystemNotice(notice)
+                if notice.body.as_deref() == Some("  same notice\nsecond paragraph  ") =>
+            {
+                Some((offset, notice))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2);
+    let start = event["transcript_start"]
+        .as_u64()
+        .expect("application image position") as usize;
+    for ((offset, notice), ordinal) in rows.iter().zip([1_u64, 3]) {
+        let wire = serde_json::to_value(notice).unwrap();
+        assert_eq!(
+            wire["runtime_origin"],
+            serde_json::json!({
+                "session_id": agent.session().id(),
+                "run_id": event["run_id"],
+                "input_id": input_id,
+                "append_ordinal": ordinal,
+            })
+        );
+        assert_eq!(*offset, start + ordinal as usize);
+        assert_eq!(wire["body"], "  same notice\nsecond paragraph  ");
+        assert_eq!(wire["blocks"][0]["payload"]["ordinal_is_not_text"], true);
+    }
+    let canonical = rows
+        .iter()
+        .map(|(_, notice)| serde_json::to_value(notice).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        *emitted, canonical,
+        "event carries the actual typed rows including timestamps"
+    );
+    assert!(matches!(&history[start - 1], Message::ToolResults { .. }));
+    assert!(matches!(&history[start + 4], Message::BlockAssistant(_)));
+    let requests = agent.client.requests();
+    assert_eq!(requests.len(), 3);
+    for request in &requests[1..] {
+        let notices = request
+            .iter()
+            .filter_map(|message| match message {
+                Message::SystemNotice(notice)
+                    if notice.body.as_deref() == Some("  same notice\nsecond paragraph  ") =>
+                {
+                    Some(serde_json::to_value(notice).unwrap())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices, canonical,
+            "every later request preserves canonical bytes and provenance"
+        );
+    }
+}
+
+#[test]
+fn legacy_boundary_event_deserializes_without_typed_notice_projection() {
+    let old = serde_json::json!({
+        "type": "boundary_append_applied",
+        "run_id": meerkat_core::lifecycle::RunId::new(),
+        "input_id": meerkat_core::lifecycle::InputId::new(),
+        "content": "legacy model projection",
+        "append_count": 1,
+    });
+    let event: AgentEvent = serde_json::from_value(old).expect("old event remains supported");
+    let current = serde_json::to_value(event).unwrap();
+    assert!(
+        current
+            .get("notices")
+            .is_none_or(|rows| rows.as_array().is_some_and(Vec::is_empty))
+    );
+    assert!(
+        current
+            .get("transcript_start")
+            .is_none_or(serde_json::Value::is_null)
+    );
 }

@@ -2651,12 +2651,29 @@ fn format_notice_payload(payload: &Value) -> String {
     serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string())
 }
 
+/// Exact runtime application provenance for one canonical notice.
+///
+/// Input and ordinal identify the logical append; session and run identify
+/// its application attempt. This record grants no execution or commit authority.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeAppendOrigin {
+    pub session_id: SessionId,
+    pub run_id: crate::lifecycle::RunId,
+    pub input_id: crate::lifecycle::InputId,
+    /// Zero-based position in the input's complete projected append list.
+    pub append_ordinal: u64,
+}
+
 /// System notice message stored in the canonical transcript.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SystemNoticeMessage {
     pub kind: SystemNoticeKind,
+    /// Runtime-owned provenance, absent for legacy and direct notices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_origin: Option<RuntimeAppendOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2671,6 +2688,7 @@ impl SystemNoticeMessage {
         let body = body.into();
         Self {
             kind,
+            runtime_origin: None,
             body: if body.is_empty() { None } else { Some(body) },
             blocks: Vec::new(),
             created_at: message_timestamp_now(),
@@ -2684,6 +2702,7 @@ impl SystemNoticeMessage {
     ) -> Self {
         Self {
             kind,
+            runtime_origin: None,
             body,
             blocks,
             created_at: message_timestamp_now(),

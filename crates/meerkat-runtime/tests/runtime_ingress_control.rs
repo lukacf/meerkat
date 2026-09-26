@@ -244,6 +244,7 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
         // the lane and runtime semantics from it, not from overlay strings.
         continuation.continuation_kind = meerkat_runtime::ContinuationKind::WorkgraphAttention;
         continuation.turn_append = Some(ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::Text {
                 text: "attention turn".to_string(),

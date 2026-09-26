@@ -2900,8 +2900,15 @@ impl EphemeralRuntimeDriver {
         let checkpoint = self.rollback_snapshot();
         for input_id in joined {
             match self.resolve_one_live_boundary_join(run_id, &input_id) {
-                Ok(true) => resolution.retained.push(input_id),
-                Ok(false) => resolution.requeued.push(input_id),
+                Ok(mm_dsl::LiveBoundaryJoinObservation::AppliedRetained) => {
+                    resolution.retained.push(input_id)
+                }
+                Ok(observation) => {
+                    if observation == mm_dsl::LiveBoundaryJoinObservation::AppliedDiscarded {
+                        resolution.discarded.push(input_id.clone());
+                    }
+                    resolution.requeued.push(input_id);
+                }
                 Err(error) => {
                     self.restore_rollback_snapshot(checkpoint);
                     return Err(error);
@@ -2916,7 +2923,7 @@ impl EphemeralRuntimeDriver {
         &mut self,
         run_id: &RunId,
         input_id: &InputId,
-    ) -> Result<bool, RuntimeDriverError> {
+    ) -> Result<mm_dsl::LiveBoundaryJoinObservation, RuntimeDriverError> {
         let outcome = self
             .live_boundary_join_witnesses
             .get(input_id)
@@ -2975,7 +2982,7 @@ impl EphemeralRuntimeDriver {
                 input_id: input_id.clone(),
             }));
         }
-        Ok(retained)
+        Ok(observation)
     }
 
     /// Drop witnesses whose join the machine no longer holds (resolved, or

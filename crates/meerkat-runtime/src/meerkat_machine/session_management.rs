@@ -508,6 +508,15 @@ impl meerkat_core::lifecycle::CoreExecutor for MachineManagedPostStopExecutor {
         self.inner.abort_rejected_run_projections().await
     }
 
+    async fn publish_boundary_appends_discarded(
+        &mut self,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.inner
+            .publish_boundary_appends_discarded(discarded)
+            .await
+    }
+
     async fn publish_interaction_terminals(
         &mut self,
         events: &[meerkat_core::event::AgentEvent],

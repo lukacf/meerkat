@@ -2732,6 +2732,27 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
             .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
+    async fn publish_boundary_appends_discarded(
+        &mut self,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), CoreExecutorError> {
+        let actor_witness = self
+            .actor_witness_slot
+            .as_ref()
+            .and_then(meerkat::LiveSessionActorWitnessSlot::witness)
+            .ok_or_else(|| {
+                CoreExecutorError::Internal(format!(
+                    "MCP runtime {} has no exact service actor publication authority",
+                    self.session_id
+                ))
+            })?;
+        self.context
+            .service
+            .publish_boundary_appends_discarded_for_actor(&actor_witness, discarded)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn publish_interaction_terminals(
         &mut self,
         events: &[AgentEvent],
@@ -3074,6 +3095,7 @@ mod tests {
         let primitive = RunPrimitive::StagedInput(StagedRunInput {
             boundary: RunApplyBoundary::Immediate,
             appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                runtime_source: None,
                 role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice,
                 content: CoreRenderable::Text {
                     text: "Peer terminal response from 550e8400-e29b-41d4-a716-446655440000\nRequest ID: req-invalid\nStatus: completed\ninvalid".to_string(),
@@ -3163,6 +3185,7 @@ mod tests {
         let primitive = RunPrimitive::StagedInput(StagedRunInput {
             boundary: RunApplyBoundary::RunCheckpoint,
             appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                runtime_source: None,
                 role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
                 content: CoreRenderable::Text {
                     text: "must not rematerialize from apply".to_string(),
@@ -4336,6 +4359,7 @@ mod tests {
             .expect("archive should succeed");
         let primitive = RunPrimitive::ImmediateAppend(
             meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                runtime_source: None,
                 role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
                 content: CoreRenderable::Text {
                     text: "after archive".to_string(),

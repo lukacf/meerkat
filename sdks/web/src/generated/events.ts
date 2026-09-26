@@ -138,6 +138,12 @@ export interface BlobRef {
   media_type: string;
 }
 
+export interface BoundaryAppendsDiscarded {
+  input_ids: InputId[];
+  run_id: RunId;
+  session_id: SessionId;
+}
+
 export type BudgetType = "tokens" | "time" | "tool_calls";
 
 export type CacheBreakpointBoundary = {
@@ -552,6 +558,13 @@ export type RunInput = {
   kind: "pending_tool_results";
 };
 
+export interface RuntimeAppendOrigin {
+  append_ordinal: number;
+  input_id: InputId;
+  run_id: RunId;
+  session_id: SessionId;
+}
+
 export type SchemaCompat = "lossy" | "strict";
 
 export type SchemaFormat = "meerkat_v1";
@@ -673,6 +686,71 @@ export interface StructuredProviderExtension {
   key: string;
   namespace: string;
 }
+
+export type SystemNoticeBlock = {
+  content?: ContentBlock[];
+  direction: SystemNoticeDirection;
+  intent?: string | null;
+  kind: CommsNoticeKind;
+  payload?: unknown;
+  peer?: SystemNoticePeer | null;
+  request_id?: string | null;
+  sender_taint?: SenderContentTaint | null;
+  status?: string | null;
+  summary?: string | null;
+  type: "comms";
+} | {
+  body?: string | null;
+  content?: ContentBlock[];
+  event_type: string;
+  payload?: unknown;
+  source: string;
+  summary?: string | null;
+  type: "external_event";
+} | {
+  payload: ToolConfigChangedPayload;
+  type: "tool_config";
+} | {
+  detail?: string | null;
+  operation?: ToolConfigChangeOperation | null;
+  pending_sources?: string[];
+  persisted?: boolean;
+  phase?: ExternalToolDeltaPhase | null;
+  server_id?: string | null;
+  type: "mcp";
+} | {
+  detail?: string | null;
+  display_name?: string | null;
+  job_id: string;
+  status: BackgroundJobTerminalStatus;
+  type: "background_job";
+} | {
+  binding?: string | null;
+  detail?: string | null;
+  state: string;
+  type: "auth";
+} | {
+  category: string;
+  detail?: string | null;
+  payload?: unknown;
+  type: "runtime_notice";
+} | {
+  payload?: unknown;
+  summary?: string | null;
+  type: "unknown";
+};
+
+export type SystemNoticeDirection = "incoming" | "outgoing" | "internal";
+
+export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required";
+
+export type SystemNoticeMessage = {
+  blocks?: SystemNoticeBlock[];
+  body?: string | null;
+  created_at?: string;
+  kind: SystemNoticeKind;
+  runtime_origin?: RuntimeAppendOrigin | null;
+};
 
 export type SystemNoticePeer = {
   display_name?: string | null;
@@ -1126,8 +1204,14 @@ export interface BoundaryAppendAppliedEvent {
   append_count: number;
   content: ContentInput;
   input_id: InputId;
+  notices?: SystemNoticeMessage[];
   run_id: RunId;
+  transcript_start?: number | null;
   type: "boundary_append_applied";
+}
+
+export interface BoundaryAppendsDiscardedEvent {
+  type: "boundary_appends_discarded";
 }
 
 export const KNOWN_AGENT_EVENT_TYPES = [
@@ -1221,4 +1305,5 @@ export type AgentEvent =
   ModelFallbackStagedEvent |
   ModelFallbackCommittedEvent |
   ModelFallbackTargetFailedEvent |
-  BoundaryAppendAppliedEvent;
+  BoundaryAppendAppliedEvent |
+  BoundaryAppendsDiscardedEvent;

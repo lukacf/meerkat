@@ -1960,6 +1960,27 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
             .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
+    async fn publish_boundary_appends_discarded(
+        &mut self,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), CoreExecutorError> {
+        let actor_witness = self
+            .actor_witness_slot
+            .as_ref()
+            .and_then(meerkat::LiveSessionActorWitnessSlot::witness)
+            .ok_or_else(|| {
+                CoreExecutorError::Internal(format!(
+                    "REST runtime {} has no exact service actor publication authority",
+                    self.session_id
+                ))
+            })?;
+        self.context
+            .session_service
+            .publish_boundary_appends_discarded_for_actor(&actor_witness, discarded)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn publish_interaction_terminals(
         &mut self,
         events: &[AgentEvent],
@@ -9432,6 +9453,7 @@ mod tests {
             RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
                 boundary: RunApplyBoundary::RunCheckpoint,
                 appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                    runtime_source: None,
                     role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
                     content: CoreRenderable::Text {
                         text: "must not rematerialize from apply".to_string(),
@@ -11040,6 +11062,7 @@ mod tests {
 
         let primitive = RunPrimitive::ImmediateAppend(
             meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                runtime_source: None,
                 role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
                 content: CoreRenderable::Text {
                     text: "after archive".to_string(),

@@ -4306,11 +4306,27 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
     // Injected-context appends chain BEFORE the input's own append: the
     // delivery invariant is that host-attached injected context lands in the
     // transcript immediately before the turn's user/peer message, in order.
-    let appends = projections
+    let appends = inputs
         .iter()
+        .zip(projections)
         .zip(semantics.iter().copied())
-        .flat_map(|(projection, semantics)| {
+        .flat_map(|(((input_id, _), projection), semantics)| {
             crate::input::projection_conversation_appends(projection, semantics)
+                .into_iter()
+                .enumerate()
+                .map(move |(append_ordinal, mut append)| {
+                    // Assign before flattening loses the per-input boundary.
+                    // Count all roles, and replace any caller-carried seed.
+                    append.runtime_source = (append.role
+                        == meerkat_core::lifecycle::ConversationAppendRole::SystemNotice)
+                        .then(
+                            || meerkat_core::lifecycle::run_primitive::RuntimeAppendSource {
+                                input_id: input_id.clone(),
+                                append_ordinal: append_ordinal as u64,
+                            },
+                        );
+                    append
+                })
         })
         .collect::<Vec<_>>();
     let contributing_input_ids = inputs
@@ -5775,13 +5791,33 @@ async fn resolve_failed_batch_backlog(
 /// their lane for exactly one follow-up turn.
 async fn resolve_live_boundary_joins_for_terminal(
     driver: &crate::meerkat_machine::SharedDriver,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    session_id: &meerkat_core::types::SessionId,
     run_id: &RunId,
 ) -> Result<crate::meerkat_machine::driver::LiveBoundaryJoinResolution, crate::RuntimeDriverError> {
-    driver
+    let resolution = driver
         .lock()
         .await
         .machine_resolve_live_boundary_joins_for_terminal(run_id)
-        .await
+        .await?;
+    // The persistent driver has committed every requeue before returning.
+    // Release its mutex before invoking actor publication. A publication
+    // failure cannot reverse that truth or admit a second application.
+    if !resolution.discarded.is_empty() {
+        let discarded = meerkat_core::event::BoundaryAppendsDiscarded {
+            session_id: session_id.clone(),
+            run_id: run_id.clone(),
+            input_ids: resolution.discarded.clone(),
+        };
+        if let Err(error) = executor
+            .publish_boundary_appends_discarded(&discarded)
+            .await
+        {
+            tracing::error!(%session_id, %run_id, %error,
+                "durable boundary requeue committed but discard projection publication failed");
+        }
+    }
+    Ok(resolution)
 }
 
 /// A run that ends without a committed boundary (failed or cancelled) still
@@ -6594,7 +6630,10 @@ async fn process_queue(
                         // commit (they are receipt contributors, like the
                         // batch); the others are already back in their lane.
                         let join_resolution = match resolve_live_boundary_joins_for_terminal(
-                            driver, &run_id,
+                            driver,
+                            executor,
+                            &authority_binding.session_id,
+                            &run_id,
                         )
                         .await
                         {
@@ -7113,7 +7152,10 @@ async fn process_queue(
                         // a retained one is consumed now, because this run
                         // commits no boundary but its image keeps the append.
                         let join_resolution = match resolve_live_boundary_joins_for_terminal(
-                            driver, &run_id,
+                            driver,
+                            executor,
+                            &authority_binding.session_id,
+                            &run_id,
                         )
                         .await
                         {
@@ -8777,6 +8819,7 @@ mod tests {
     #[test]
     fn input_to_primitive_preserves_typed_prompt_appends_without_user_text() -> Result<(), String> {
         let typed_append = ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::SystemNotice {
                 kind: meerkat_core::types::SystemNoticeKind::Comms,
@@ -12654,6 +12697,87 @@ mod tests {
 
     /// Delivery-order invariant: injected-context appends land in the staged
     /// primitive immediately BEFORE the turn's user append, in order.
+
+    #[test]
+    fn durable_notice_origins_survive_mixed_input_flattening() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationAppend, ConversationAppendRole as Role, CoreRenderable, RuntimeAppendSource,
+        };
+        let first = make_prompt("first");
+        let second = make_prompt("second");
+        let first_id = first.id().clone();
+        let second_id = second.id().clone();
+        let foreign = InputId::new();
+        let append = |role| ConversationAppend {
+            role,
+            content: CoreRenderable::text("identical"),
+            identity: None,
+            runtime_source: Some(RuntimeAppendSource {
+                input_id: foreign.clone(),
+                append_ordinal: 99,
+            }),
+        };
+        let projections = [
+            crate::ingress_types::RuntimeInputProjection {
+                injected_context_appends: vec![append(Role::InjectedContext)],
+                append: Some(append(Role::User)),
+                additional_appends: vec![append(Role::SystemNotice), append(Role::SystemNotice)],
+            },
+            crate::ingress_types::RuntimeInputProjection {
+                injected_context_appends: Vec::new(),
+                append: Some(append(Role::SystemNotice)),
+                additional_appends: Vec::new(),
+            },
+        ];
+        let inputs = vec![(first_id.clone(), first), (second_id.clone(), second)];
+        let semantics = fallback_batch_semantics(&inputs);
+        let primitive = try_projected_inputs_to_primitive_with_boundary(
+            &inputs,
+            &projections,
+            RunApplyBoundary::RunStart,
+            &semantics,
+        )
+        .unwrap();
+        let RunPrimitive::StagedInput(staged) = primitive else {
+            panic!("staged input");
+        };
+        assert_eq!(
+            staged
+                .appends
+                .iter()
+                .map(|row| row.role)
+                .collect::<Vec<_>>(),
+            vec![
+                Role::InjectedContext,
+                Role::User,
+                Role::SystemNotice,
+                Role::SystemNotice,
+                Role::SystemNotice
+            ]
+        );
+        assert_eq!(
+            staged.contributing_input_ids,
+            vec![first_id.clone(), second_id.clone()]
+        );
+        assert!(
+            staged.appends[..2]
+                .iter()
+                .all(|row| row.runtime_source.is_none()),
+            "non-notice rows cannot retain foreign notice provenance"
+        );
+        let expected = [(first_id.clone(), 2), (first_id, 3), (second_id, 0)];
+        for (row, (input_id, append_ordinal)) in staged.appends[2..].iter().zip(expected) {
+            assert_eq!(
+                row.runtime_source,
+                Some(RuntimeAppendSource {
+                    input_id,
+                    append_ordinal
+                })
+            );
+            assert_eq!(row.content.render_text(), "identical");
+        }
+    }
+
     #[test]
     fn primitive_places_injected_context_appends_before_user_append() {
         let mut input = make_prompt("the prompt");

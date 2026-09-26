@@ -59,6 +59,15 @@ struct RunnerScript {
     steps_done: AtomicUsize,
     primitives: std::sync::Mutex<Vec<Vec<InputId>>>,
     applied_durable: std::sync::Mutex<Vec<InputId>>,
+    discarded: std::sync::Mutex<Vec<meerkat_core::event::BoundaryAppendsDiscarded>>,
+    applied_runs: std::sync::Mutex<Vec<RunId>>,
+    publication_store: std::sync::Mutex<
+        Option<(
+            Arc<dyn crate::store::RuntimeStore>,
+            crate::identifiers::LogicalRuntimeId,
+        )>,
+    >,
+    runtime_stopped: Notify,
     /// While armed, the ingress side of a boundary preparation is held after
     /// the core coordinator resolved it, so the runtime loop can win the
     /// mutation gate first (the "run advanced during preparation" ordering).
@@ -82,6 +91,10 @@ impl RunnerScript {
             steps_done: AtomicUsize::new(0),
             primitives: std::sync::Mutex::new(Vec::new()),
             applied_durable: std::sync::Mutex::new(Vec::new()),
+            discarded: std::sync::Mutex::new(Vec::new()),
+            applied_runs: std::sync::Mutex::new(Vec::new()),
+            publication_store: std::sync::Mutex::new(None),
+            runtime_stopped: Notify::new(),
             prepare_hold_armed: AtomicBool::new(false),
             prepare_hold_released: AtomicBool::new(false),
             prepare_hold_reached: AtomicBool::new(false),
@@ -175,6 +188,38 @@ struct DurableSteerExecutor {
 
 #[async_trait::async_trait]
 impl CoreExecutor for DurableSteerExecutor {
+    async fn publish_boundary_appends_discarded(
+        &mut self,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), CoreExecutorError> {
+        assert_eq!(
+            self.script.apply_calls.load(Ordering::SeqCst),
+            1,
+            "discard publication must precede the requeued apply"
+        );
+        let stored = self.script.publication_store.lock().unwrap().clone();
+        if let Some((store, runtime_id)) = stored {
+            for input in &discarded.input_ids {
+                let row = store
+                    .load_input_state(&runtime_id, input)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    row.seed.phase,
+                    InputLifecycleState::Queued,
+                    "discard publication must follow the durable requeue write"
+                );
+            }
+        }
+        self.script
+            .discarded
+            .lock()
+            .unwrap()
+            .push(discarded.clone());
+        Ok(())
+    }
+
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(DurableSteerBoundaryHandle {
             state: self.state.clone(),
@@ -188,6 +233,11 @@ impl CoreExecutor for DurableSteerExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         self.script.apply_calls.fetch_add(1, Ordering::SeqCst);
+        self.script
+            .applied_runs
+            .lock()
+            .unwrap()
+            .push(run_id.clone());
         let contributors = primitive.contributing_input_ids().to_vec();
         self.script
             .primitives
@@ -299,6 +349,7 @@ impl CoreExecutor for DurableSteerExecutor {
     }
 
     async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.script.runtime_stopped.notify_one();
         Ok(())
     }
 }
@@ -316,7 +367,13 @@ impl DurableSteerRig {
     }
 
     async fn persistent(store: Arc<dyn crate::store::RuntimeStore>) -> Self {
-        Self::with_adapter(Arc::new(MeerkatMachine::persistent_without_blobs(store))).await
+        let rig = Self::with_adapter(Arc::new(MeerkatMachine::persistent_without_blobs(
+            Arc::clone(&store),
+        )))
+        .await;
+        *rig.script.publication_store.lock().unwrap() =
+            Some((store, MeerkatMachine::logical_runtime_id(&rig.session_id)));
+        rig
     }
 
     async fn with_adapter(adapter: Arc<MeerkatMachine>) -> Self {
@@ -462,6 +519,7 @@ impl DurableSteerRig {
 
 fn notice_append(detail: &str, role: ConversationAppendRole) -> ConversationAppend {
     ConversationAppend {
+        runtime_source: None,
         role,
         content: match role {
             ConversationAppendRole::SystemNotice => CoreRenderable::SystemNotice {
@@ -661,6 +719,10 @@ async fn durable_steer_with_no_later_boundary_runs_as_exactly_one_follow_up() {
     rig.wait_for_phase(&steer_id, InputLifecycleState::Consumed)
         .await;
     assert!(rig.script.applied_durable().is_empty());
+    assert!(
+        rig.script.discarded.lock().unwrap().is_empty(),
+        "unapplied input is not discarded"
+    );
     assert_eq!(
         contributions(&rig.script.primitives(), &steer_id),
         1,
@@ -739,6 +801,10 @@ async fn applied_then_run_cancelled_is_consumed_when_the_image_is_kept(
         0,
         "a retained append is never delivered again"
     );
+    assert!(
+        rig.script.discarded.lock().unwrap().is_empty(),
+        "cancellation retains the applied input and publishes no discard"
+    );
     steer_id
 }
 
@@ -788,6 +854,10 @@ async fn applied_then_run_failed_with_a_kept_image_is_consumed_not_replayed(
         .await;
     assert_eq!(contributions(&rig.script.primitives(), &batch), 2);
     assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
+    assert!(
+        rig.script.discarded.lock().unwrap().is_empty(),
+        "retained input is not discarded"
+    );
     steer_id
 }
 
@@ -835,6 +905,17 @@ async fn applied_then_image_discarded_is_redelivered_exactly_once(rig: DurableSt
         contributions(&rig.script.primitives(), &steer_id),
         1,
         "a discarded append is redelivered by exactly one follow-up turn"
+    );
+    let applied_runs = rig.script.applied_runs.lock().unwrap();
+    assert_ne!(applied_runs[0], applied_runs[1]);
+    assert_eq!(
+        *rig.script.discarded.lock().unwrap(),
+        vec![meerkat_core::event::BoundaryAppendsDiscarded {
+            session_id: rig.session_id.clone(),
+            run_id: applied_runs[0].clone(),
+            input_ids: vec![steer_id.clone()],
+        }],
+        "discard must publish the original application, including without a completion observer"
     );
     steer_id
 }
@@ -1222,4 +1303,104 @@ async fn persistent_crash_after_the_join(append_record_lag: Duration) {
         Some(crashed_run),
         "a follow-up run of the recovered runtime consumed it"
     );
+}
+
+#[tokio::test]
+async fn discarded_boundary_batch_preserves_order_and_excludes_unapplied_input() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let rig = DurableSteerRig::persistent(store).await;
+    let batch = rig.start_busy_turn().await;
+    let mut discarded_ids = Vec::new();
+    for body in ["first application", "second application"] {
+        let steer = typed_steer(body, ConversationAppendRole::SystemNotice);
+        let input_id = steer.id().clone();
+        rig.admit(steer).await;
+        rig.wait_for_waiting_delivery().await;
+        rig.script.step(RunnerStep::BoundaryThenToolCalls);
+        rig.wait_for_phase(&input_id, InputLifecycleState::Staged)
+            .await;
+        discarded_ids.push(input_id);
+    }
+    let unapplied = typed_steer("not applied", ConversationAppendRole::SystemNotice);
+    let unapplied_id = unapplied.id().clone();
+    rig.admit(unapplied).await;
+    rig.wait_for_waiting_delivery().await;
+    rig.script.step(RunnerStep::FailDiscardingImage);
+    rig.wait_for_apply_calls(2).await;
+    assert_eq!(
+        *rig.script.discarded.lock().unwrap(),
+        vec![meerkat_core::event::BoundaryAppendsDiscarded {
+            session_id: rig.session_id.clone(),
+            run_id: rig.script.applied_runs.lock().unwrap()[0].clone(),
+            input_ids: discarded_ids.clone(),
+        }]
+    );
+    assert_eq!(rig.script.applied_durable(), discarded_ids);
+    // Each queued input can take its own follow-up; extra script steps remain
+    // inert if the existing batching policy combines any of them.
+    for _ in 0..4 {
+        rig.script.step(RunnerStep::Finish);
+    }
+    for input_id in discarded_ids.iter().chain(std::iter::once(&unapplied_id)) {
+        rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+            .await;
+        assert_eq!(contributions(&rig.script.primitives(), input_id), 1);
+    }
+    rig.wait_for_phase(&batch, InputLifecycleState::Consumed)
+        .await;
+    assert_eq!(rig.script.discarded.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn boundary_discard_write_failure_emits_no_source_event() {
+    use crate::store::RuntimeStore;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(directory.path().join("runtime.sqlite")).unwrap(),
+    );
+    let rig = DurableSteerRig::persistent(store.clone()).await;
+    rig.start_busy_turn().await;
+    let steer = typed_steer(
+        "discard write failure",
+        ConversationAppendRole::SystemNotice,
+    );
+    let input_id = steer.id().clone();
+    rig.admit(steer).await;
+    rig.wait_for_waiting_delivery().await;
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    rig.wait_for_phase(&input_id, InputLifecycleState::Staged)
+        .await;
+    let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
+    let connection = rusqlite::Connection::open(store.path()).unwrap();
+    connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER fail_discard_requeue BEFORE UPDATE ON runtime_input_states
+         WHEN NEW.runtime_id = '{}' AND NEW.input_id = '{}'
+         BEGIN SELECT RAISE(ABORT, 'boundary discard requeue failure'); END;",
+            runtime_id, input_id,
+        ))
+        .unwrap();
+    rig.script.step(RunnerStep::FailDiscardingImage);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        rig.script.runtime_stopped.notified(),
+    )
+    .await
+    .expect("persistence failure stops the exact executor");
+    assert!(rig.script.discarded.lock().unwrap().is_empty());
+    assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 1);
+    let row = store
+        .load_input_state(&runtime_id, &input_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.seed.phase,
+        InputLifecycleState::Staged,
+        "failed requeue persistence must not project committed discard truth"
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_discard_requeue;")
+        .unwrap();
 }

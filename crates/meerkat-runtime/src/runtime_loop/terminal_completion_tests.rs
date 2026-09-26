@@ -986,6 +986,7 @@ async fn retained_live_boundary_join_without_observers_finalizes_before_return()
     .unwrap();
 
     let append = meerkat_core::lifecycle::ConversationAppend {
+        runtime_source: None,
         role: meerkat_core::lifecycle::ConversationAppendRole::SystemNotice,
         content: meerkat_core::lifecycle::CoreRenderable::SystemNotice {
             kind: meerkat_core::types::SystemNoticeKind::Generic,
@@ -1078,9 +1079,10 @@ async fn retained_live_boundary_join_without_observers_finalizes_before_return()
         witness.outcome(),
         meerkat_core::CoreBoundaryDeliveryOutcome::Applied
     );
-    let resolution = resolve_live_boundary_joins_for_terminal(&driver, &run_id)
-        .await
-        .unwrap();
+    let resolution =
+        resolve_live_boundary_joins_for_terminal(&driver, &mut NoExecution, &session_id, &run_id)
+            .await
+            .unwrap();
     assert_eq!(resolution.retained, vec![input_id.clone()]);
 
     consume_retained_live_boundary_joins_without_commit(

@@ -705,6 +705,29 @@
         ],
         "type": "object"
       },
+      "BoundaryAppendsDiscarded": {
+        "description": "Exact negative application fact projected from durable boundary join resolution.\n\nThis does not terminalize an input or invalidate a later application in a\ndifferent run. A canonical retained history row remains authoritative.",
+        "properties": {
+          "input_ids": {
+            "items": {
+              "$ref": "#/$defs/InputId"
+            },
+            "type": "array"
+          },
+          "run_id": {
+            "$ref": "#/$defs/RunId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "run_id",
+          "input_ids"
+        ],
+        "type": "object"
+      },
       "BudgetType": {
         "description": "Type of budget being tracked",
         "enum": [
@@ -3104,6 +3127,33 @@
           }
         ]
       },
+      "RuntimeAppendOrigin": {
+        "description": "Exact runtime application provenance for one canonical notice.\n\nInput and ordinal identify the logical append; session and run identify\nits application attempt. This record grants no execution or commit authority.",
+        "properties": {
+          "append_ordinal": {
+            "description": "Zero-based position in the input's complete projected append list.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_id": {
+            "$ref": "#/$defs/InputId"
+          },
+          "run_id": {
+            "$ref": "#/$defs/RunId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "run_id",
+          "input_id",
+          "append_ordinal"
+        ],
+        "type": "object"
+      },
       "SchemaCompat": {
         "description": "Compatibility mode for provider lowering.",
         "enum": [
@@ -3672,6 +3722,365 @@
         "required": [
           "namespace",
           "key"
+        ],
+        "type": "object"
+      },
+      "SystemNoticeBlock": {
+        "description": "Typed runtime-authored transcript metadata.\n\nThese blocks are the durable contract for comms, tool/MCP state, auth,\nbackground work, and other runtime facts. They are never user-authored text.",
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "items": {
+                  "$ref": "#/$defs/ContentBlock"
+                },
+                "type": "array"
+              },
+              "direction": {
+                "$ref": "#/$defs/SystemNoticeDirection"
+              },
+              "intent": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "$ref": "#/$defs/CommsNoticeKind"
+              },
+              "payload": true,
+              "peer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SystemNoticePeer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sender_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Sender-declared content taint carried in the signed envelope.\n`None` means the sender made no declaration — a real third state\nthat must never be coalesced into\n[`crate::comms::SenderContentTaint::Clean`]."
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "comms",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "kind",
+              "direction"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "body": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "content": {
+                "items": {
+                  "$ref": "#/$defs/ContentBlock"
+                },
+                "type": "array"
+              },
+              "event_type": {
+                "type": "string"
+              },
+              "payload": true,
+              "source": {
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "external_event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "source",
+              "event_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/ToolConfigChangedPayload"
+              },
+              "type": {
+                "const": "tool_config",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "payload"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "operation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ToolConfigChangeOperation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pending_sources": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "persisted": {
+                "default": false,
+                "type": "boolean"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExternalToolDeltaPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "server_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "mcp",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "display_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "job_id": {
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/BackgroundJobTerminalStatus"
+              },
+              "type": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "job_id",
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "binding": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              },
+              "type": {
+                "const": "auth",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "category": {
+                "type": "string"
+              },
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "payload": true,
+              "type": {
+                "const": "runtime_notice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "category"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": true,
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SystemNoticeDirection": {
+        "description": "Direction for runtime-authored communication metadata.",
+        "enum": [
+          "incoming",
+          "outgoing",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "SystemNoticeKind": {
+        "description": "Typed system notice content carried in the transcript.",
+        "oneOf": [
+          {
+            "enum": [
+              "generic",
+              "comms",
+              "external_event",
+              "mcp_pending",
+              "mcp",
+              "background_job",
+              "tool_scope",
+              "tool_scope_warning"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "auth_reauth_required",
+            "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          }
+        ]
+      },
+      "SystemNoticeMessage": {
+        "description": "System notice message stored in the canonical transcript.",
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/$defs/SystemNoticeBlock"
+            },
+            "type": "array"
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "default": "2026-09-26T04:16:40.973972Z",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/SystemNoticeKind"
+          },
+          "runtime_origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RuntimeAppendOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Runtime-owned provenance, absent for legacy and direct notices."
+          }
+        },
+        "required": [
+          "kind"
         ],
         "type": "object"
       },
@@ -5569,7 +5978,7 @@
         "type": "object"
       },
       {
-        "description": "A durable runtime input joined the running turn at a cooperative model\nboundary: its typed conversation appends (for example a background\njob's persisted system notice delivered as a Steer) were written into\nthe session transcript before the next model request of the same run.\n\nEmitted once, after the append is applied, so live streams and consoles\nsee a mid-turn append without waiting for history. The appends commit\nwith the run like tool results. If the image that carried them is later\ndiscarded (an uncommitted persistent run, or a compaction rollback),\nthe runtime redelivers the input in exactly one follow-up turn, so\nconsumers should reconcile this event against the run terminal and the\ncommitted transcript. Request-only steers never emit it.",
+        "description": "A durable runtime input joined the running turn at a cooperative model\nboundary: its typed conversation appends (for example a background\njob's persisted system notice delivered as a Steer) were written into\nthe session transcript before the next model request of the same run.\n\nEmitted once, after the append is applied, so live streams and consoles\nsee a mid-turn append without waiting for history. The appends commit\nwith the run like tool results. If the image that carried them is later\ndiscarded (an uncommitted persistent run, or a compaction rollback),\nthe runtime redelivers the input in exactly one follow-up turn, so\nconsumers should reconcile against exact discard facts and canonical\ntranscript history. A run terminal alone is not proof of discard.\nRequest-only steers never emit it.",
         "properties": {
           "append_count": {
             "description": "Number of transcript rows appended.",
@@ -5585,9 +5994,25 @@
             "$ref": "#/$defs/InputId",
             "description": "The runtime input that carried the appends."
           },
+          "notices": {
+            "description": "Exact canonical notice rows, in order within the applied append list.",
+            "items": {
+              "$ref": "#/$defs/SystemNoticeMessage"
+            },
+            "type": "array"
+          },
           "run_id": {
             "$ref": "#/$defs/RunId",
             "description": "The running turn the appends joined."
+          },
+          "transcript_start": {
+            "description": "First appended row's offset in the image at application time.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "type": {
             "const": "boundary_append_applied",
@@ -5600,6 +6025,20 @@
           "input_id",
           "content",
           "append_count"
+        ],
+        "type": "object"
+      },
+      {
+        "$ref": "#/$defs/BoundaryAppendsDiscarded",
+        "description": "Existing durable-join authority resolved these applications as discarded.\nPublished only after any required requeue persistence succeeds.",
+        "properties": {
+          "type": {
+            "const": "boundary_appends_discarded",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
         ],
         "type": "object"
       }
@@ -7196,7 +7635,7 @@
             "type": "object"
           },
           {
-            "description": "A durable runtime input joined the running turn at a cooperative model\nboundary: its typed conversation appends (for example a background\njob's persisted system notice delivered as a Steer) were written into\nthe session transcript before the next model request of the same run.\n\nEmitted once, after the append is applied, so live streams and consoles\nsee a mid-turn append without waiting for history. The appends commit\nwith the run like tool results. If the image that carried them is later\ndiscarded (an uncommitted persistent run, or a compaction rollback),\nthe runtime redelivers the input in exactly one follow-up turn, so\nconsumers should reconcile this event against the run terminal and the\ncommitted transcript. Request-only steers never emit it.",
+            "description": "A durable runtime input joined the running turn at a cooperative model\nboundary: its typed conversation appends (for example a background\njob's persisted system notice delivered as a Steer) were written into\nthe session transcript before the next model request of the same run.\n\nEmitted once, after the append is applied, so live streams and consoles\nsee a mid-turn append without waiting for history. The appends commit\nwith the run like tool results. If the image that carried them is later\ndiscarded (an uncommitted persistent run, or a compaction rollback),\nthe runtime redelivers the input in exactly one follow-up turn, so\nconsumers should reconcile against exact discard facts and canonical\ntranscript history. A run terminal alone is not proof of discard.\nRequest-only steers never emit it.",
             "properties": {
               "append_count": {
                 "description": "Number of transcript rows appended.",
@@ -7212,9 +7651,25 @@
                 "$ref": "#/$defs/InputId",
                 "description": "The runtime input that carried the appends."
               },
+              "notices": {
+                "description": "Exact canonical notice rows, in order within the applied append list.",
+                "items": {
+                  "$ref": "#/$defs/SystemNoticeMessage"
+                },
+                "type": "array"
+              },
               "run_id": {
                 "$ref": "#/$defs/RunId",
                 "description": "The running turn the appends joined."
+              },
+              "transcript_start": {
+                "description": "First appended row's offset in the image at application time.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "type": {
                 "const": "boundary_append_applied",
@@ -7227,6 +7682,20 @@
               "input_id",
               "content",
               "append_count"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/BoundaryAppendsDiscarded",
+            "description": "Existing durable-join authority resolved these applications as discarded.\nPublished only after any required requeue persistence succeeds.",
+            "properties": {
+              "type": {
+                "const": "boundary_appends_discarded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -7531,6 +8000,29 @@
         "required": [
           "blob_id",
           "media_type"
+        ],
+        "type": "object"
+      },
+      "BoundaryAppendsDiscarded": {
+        "description": "Exact negative application fact projected from durable boundary join resolution.\n\nThis does not terminalize an input or invalidate a later application in a\ndifferent run. A canonical retained history row remains authoritative.",
+        "properties": {
+          "input_ids": {
+            "items": {
+              "$ref": "#/$defs/InputId"
+            },
+            "type": "array"
+          },
+          "run_id": {
+            "$ref": "#/$defs/RunId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "run_id",
+          "input_ids"
         ],
         "type": "object"
       },
@@ -9933,6 +10425,33 @@
           }
         ]
       },
+      "RuntimeAppendOrigin": {
+        "description": "Exact runtime application provenance for one canonical notice.\n\nInput and ordinal identify the logical append; session and run identify\nits application attempt. This record grants no execution or commit authority.",
+        "properties": {
+          "append_ordinal": {
+            "description": "Zero-based position in the input's complete projected append list.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_id": {
+            "$ref": "#/$defs/InputId"
+          },
+          "run_id": {
+            "$ref": "#/$defs/RunId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "run_id",
+          "input_id",
+          "append_ordinal"
+        ],
+        "type": "object"
+      },
       "SchemaCompat": {
         "description": "Compatibility mode for provider lowering.",
         "enum": [
@@ -10544,6 +11063,365 @@
         "required": [
           "namespace",
           "key"
+        ],
+        "type": "object"
+      },
+      "SystemNoticeBlock": {
+        "description": "Typed runtime-authored transcript metadata.\n\nThese blocks are the durable contract for comms, tool/MCP state, auth,\nbackground work, and other runtime facts. They are never user-authored text.",
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "items": {
+                  "$ref": "#/$defs/ContentBlock"
+                },
+                "type": "array"
+              },
+              "direction": {
+                "$ref": "#/$defs/SystemNoticeDirection"
+              },
+              "intent": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "$ref": "#/$defs/CommsNoticeKind"
+              },
+              "payload": true,
+              "peer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SystemNoticePeer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sender_taint": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SenderContentTaint"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Sender-declared content taint carried in the signed envelope.\n`None` means the sender made no declaration — a real third state\nthat must never be coalesced into\n[`crate::comms::SenderContentTaint::Clean`]."
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "comms",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "kind",
+              "direction"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "body": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "content": {
+                "items": {
+                  "$ref": "#/$defs/ContentBlock"
+                },
+                "type": "array"
+              },
+              "event_type": {
+                "type": "string"
+              },
+              "payload": true,
+              "source": {
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "external_event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "source",
+              "event_type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/ToolConfigChangedPayload"
+              },
+              "type": {
+                "const": "tool_config",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "payload"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "operation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ToolConfigChangeOperation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pending_sources": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "persisted": {
+                "default": false,
+                "type": "boolean"
+              },
+              "phase": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExternalToolDeltaPhase"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "server_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "mcp",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "display_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "job_id": {
+                "type": "string"
+              },
+              "status": {
+                "$ref": "#/$defs/BackgroundJobTerminalStatus"
+              },
+              "type": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "job_id",
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "binding": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              },
+              "type": {
+                "const": "auth",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "category": {
+                "type": "string"
+              },
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "payload": true,
+              "type": {
+                "const": "runtime_notice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "category"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": true,
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "SystemNoticeDirection": {
+        "description": "Direction for runtime-authored communication metadata.",
+        "enum": [
+          "incoming",
+          "outgoing",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "SystemNoticeKind": {
+        "description": "Typed system notice content carried in the transcript.",
+        "oneOf": [
+          {
+            "enum": [
+              "generic",
+              "comms",
+              "external_event",
+              "mcp_pending",
+              "mcp",
+              "background_job",
+              "tool_scope",
+              "tool_scope_warning"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "auth_reauth_required",
+            "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          }
+        ]
+      },
+      "SystemNoticeMessage": {
+        "description": "System notice message stored in the canonical transcript.",
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/$defs/SystemNoticeBlock"
+            },
+            "type": "array"
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "default": "2026-09-26T04:16:40.976871Z",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/SystemNoticeKind"
+          },
+          "runtime_origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RuntimeAppendOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Runtime-owned provenance, absent for legacy and direct notices."
+          }
+        },
+        "required": [
+          "kind"
         ],
         "type": "object"
       },

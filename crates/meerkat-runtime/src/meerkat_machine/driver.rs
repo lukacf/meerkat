@@ -5840,6 +5840,9 @@ pub(crate) struct LiveBoundaryJoinResolution {
     /// Unapplied or discarded appends: back at the head of their lane for
     /// exactly one follow-up turn.
     pub(crate) requeued: Vec<InputId>,
+    /// Exact AppliedDiscarded subset of requeued, in original join order.
+    /// This is a projection of the existing owner observation, not new state.
+    pub(crate) discarded: Vec<InputId>,
 }
 
 #[derive(Clone, Copy)]

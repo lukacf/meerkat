@@ -10437,6 +10437,22 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn publish_boundary_appends_discarded(
+        &mut self,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), CoreExecutorError> {
+        let actor_witness = self.state.actor_witness().ok_or_else(|| {
+            CoreExecutorError::control_failed_runtime(format!(
+                "runtime sidecar for session '{}' has no exact actor witness for boundary discard publication",
+                self.bridge_session_id,
+            ))
+        })?;
+        self.session_service
+            .publish_boundary_appends_discarded_for_actor(&actor_witness, discarded)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn publish_interaction_terminals(
         &mut self,
         events: &[meerkat_core::event::AgentEvent],

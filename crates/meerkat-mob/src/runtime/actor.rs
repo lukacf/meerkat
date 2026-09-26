@@ -2919,6 +2919,7 @@ fn lower_work_content_attribution(
                 ContentInput::Blocks(blocks) => CoreRenderable::Blocks { blocks },
             };
         request.runtime.typed_turn_appends.push(ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::InjectedContext,
             content,
             identity: None,

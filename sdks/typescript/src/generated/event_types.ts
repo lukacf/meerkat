@@ -39,6 +39,9 @@ import type {
   SkillName,
   SourceUuid,
   StructuredProviderExtension,
+  SystemNoticeBlock,
+  SystemNoticeDirection,
+  SystemNoticeKind,
   SystemNoticePeer,
   ToolConfigChangeDomain,
   ToolConfigChangeOperation,
@@ -166,6 +169,31 @@ export interface AssistantImageEvent {
   meta: ProviderImageMetadata;
   revised_prompt: RevisedPromptDisposition;
   width: number;
+}
+
+/**
+ * Opaque identifier for an input accepted by the runtime layer.
+ *
+ * Core passes this through in `contributing_input_ids` on receipts and events
+ * but NEVER interprets it. The runtime layer creates and manages these.
+ */
+export type InputId = string;
+
+/**
+ * Unique identifier for a session (UUID v7 for time-ordering)
+ */
+export type SessionId = string;
+
+/**
+ * Exact negative application fact projected from durable boundary join resolution.
+ *
+ * This does not terminalize an input or invalidate a later application in a
+ * different run. A canonical retained history row remains authoritative.
+ */
+export interface BoundaryAppendsDiscarded {
+  input_ids: InputId[];
+  run_id: RunId;
+  session_id: SessionId;
 }
 
 /**
@@ -454,14 +482,6 @@ export type HookFailureReason = {
 } | {
   reason_code: "observe_only_violation";
 };
-
-/**
- * Opaque identifier for an input accepted by the runtime layer.
- *
- * Core passes this through in `contributing_input_ids` on receipts and events
- * but NEVER interprets it. The runtime layer creates and manages these.
- */
-export type InputId = string;
 
 /**
  * Typed reason an interaction stream was abandoned before normal terminal
@@ -894,11 +914,6 @@ export type ServerToolKind = {
 };
 
 /**
- * Unique identifier for a session (UUID v7 for time-ordering)
- */
-export type SessionId = string;
-
-/**
  * Slug-validated capability identifier for skill requirements.
  *
  * Replaces the legacy `Vec<String>` capability lists with a typed
@@ -987,6 +1002,30 @@ export type StreamTruncationReason = {
  * Which request produced a run's structured output.
  */
 export type StructuredOutputOrigin = "extraction_request" | "final_reply";
+
+/**
+ * Exact runtime application provenance for one canonical notice.
+ *
+ * Input and ordinal identify the logical append; session and run identify
+ * its application attempt. This record grants no execution or commit authority.
+ */
+export interface RuntimeAppendOrigin {
+  append_ordinal: number;
+  input_id: InputId;
+  run_id: RunId;
+  session_id: SessionId;
+}
+
+/**
+ * System notice message stored in the canonical transcript.
+ */
+export type SystemNoticeMessage = {
+  blocks?: SystemNoticeBlock[];
+  body?: string | null;
+  created_at?: string;
+  kind: SystemNoticeKind;
+  runtime_origin?: RuntimeAppendOrigin | null;
+};
 
 export type ToolCallArguments = Record<string, unknown>;
 
@@ -1388,9 +1427,11 @@ export type AgentEvent = {
   append_count: number;
   content: ContentInput;
   input_id: InputId;
+  notices?: SystemNoticeMessage[];
   run_id: RunId;
+  transcript_start?: number | null;
   type: "boundary_append_applied";
-};
+} | BoundaryAppendsDiscarded;
 
 /**
  * Scope attribution frame for multi-agent streaming.

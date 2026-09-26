@@ -141,8 +141,10 @@ them.
   completion record of a detached job; behavior-only:
   `SystemNoticeMessage::is_synthetic_refresh_projection` now returns `false`
   for a `BackgroundJob` notice with a persisted block, so such a notice stays
-  in the transcript instead of being replaced at the next model call. New
-  method `SystemNoticeMessage::persisted_background_job_id`.
+  in the transcript instead of being replaced at the next model call, and it
+  renders to the model as its body alone. New methods
+  `SystemNoticeMessage::persisted_background_job` (builds the record) and
+  `SystemNoticeMessage::persisted_background_job_id` (recognizes it).
 - `meerkat_mob::store::TemporaryCouncilRecord` gains the public field
   `detached_job: Option<TemporaryCouncilJobBinding>` (struct literals must
   name it): the convener's detached job, so a restarted host can deliver the
@@ -303,6 +305,14 @@ them.
   never re-executed. A job whose owner no longer exists (a convener session
   that was deleted or archived, or a forker no longer seated) is reported as
   owner gone and settled, so later restarts do not retry it.
+- Member status never waits for the member's running turn.
+  `MobHandle::member_status` (and so RPC `mob/member_status`,
+  `mob_check_member`, and the operator tool `member_status`) still tries the
+  bounded execution snapshot; when the session is busy, `progress.run_state`
+  now comes from the runtime machine (`run_open` mid-turn) and the output
+  preview and token count from the committed transcript as of the last
+  commit, instead of reporting progress as unavailable. `mob_check_member`
+  adds a plain `note` while the member's turn is running.
 - A completed `fork_off` child stays seated until its forker retires it.
   Meerkat adds no retention limit of its own; MobKit applies its
   `idle_retire_secs` policy to fork children.

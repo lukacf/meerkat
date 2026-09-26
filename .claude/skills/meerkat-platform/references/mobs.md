@@ -649,7 +649,9 @@ as a "Background council job ... finished" notice; a failure exit reason gives
 it status `failed`. A detached council also re-links after a restart: its
 custody record carries the convener's job, and the outcome (or
 `coordinator_interrupted` once the dead coordinator's lease expires) is
-delivered once. `council_id` may contain only ASCII alphanumerics,
+delivered once. The council recovery sweep that does this runs only on a
+`MobMcpState` built with `into_shared()` (MobKit 0.8.43 does; a plain
+`Arc::new` never runs it). `council_id` may contain only ASCII alphanumerics,
 `-` and `_` (the derived default is `agent-<uuid>`). On a
 one-shot host the call blocks and returns the sealed outcome.
 `timeout_seconds` bounds it; the agent loop's default tool deadline does not.

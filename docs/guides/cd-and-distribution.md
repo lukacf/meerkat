@@ -86,7 +86,14 @@ describes the enforcement point and narrower manual recovery paths.
 
 0.x patch releases may break public API; every break must be declared. The
 `semver-breaks` gate runs cargo-semver-checks against the published crates.io
-baseline and fails the release unless all three hold:
+baseline and fails the release unless all three hold. After a release, until
+the next version bump, the workspace version is still the stamped release and
+new notes gather under a non-empty `## [Unreleased]` above it; those notes
+declare the breaks since that release, so once HEAD has moved past its tag
+the gate measures against the workspace version's own tag instead
+(`scripts/semver-baseline.sh`). That is also the state `make release-preflight`
+checks. Such a tree is not evidence for the released version, so Release
+semver readiness measures it without uploading an attestation.
 
 1. **Measured.** Every crate the release publishes was either rebuilt and
    compared, or proven identical to the baseline release. Only crates whose
@@ -154,7 +161,7 @@ Where it runs:
 | Local preflight | `make semver-breaks` (part of `make release-preflight`) |
 | Release semver readiness | Separate workflow on `Cargo.toml`/`CHANGELOG.md` changes to `main` or PRs, plus manual dispatch; measures unpublished candidates and uploads main-push evidence or preview evidence |
 | Release workflow | job `release_semver_gate`, required on tag publication and package recovery; normally consumes unexpired exact-tree, exact-version main-push readiness evidence; asset-only and Web-SDK-only recovery explicitly accept a skipped gate |
-| Parser self-test | `make semver-breaks-selftest`, included in local `make ci` and the separate reusable/manual Cargo workflow's `ratchets` job: unit-tests the report parser against committed real reports, without needing cargo-semver-checks installed |
+| Parser self-test | `make semver-breaks-selftest`, included in local `make ci` and the separate reusable/manual Cargo workflow's `ratchets` job: unit-tests the report parser against committed real reports and the baseline selection against scratch repositories, without needing cargo-semver-checks installed |
 
 The judgement lives in `scripts/check_semver_breaks.py`, which is a pure
 function of (report, changelog, version, tool exit code) and has no environment

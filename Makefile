@@ -736,6 +736,7 @@ semver-breaks-selftest:
 	@$(PYTHON) scripts/test_check_semver_breaks.py
 	@$(PYTHON) scripts/test_semver_changed_crates.py
 	@$(PYTHON) scripts/test_verify_semver_recovery_evidence.py
+	@PYTHON=$(PYTHON) scripts/test-semver-baseline.sh
 
 # Full pre-release checklist
 release-preflight: release-doctor verify-lock-consistency verify-bazel-locks-strict ci verify-schema-freshness check-rust-release-packaging semver-breaks

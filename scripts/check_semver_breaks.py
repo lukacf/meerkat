@@ -458,6 +458,38 @@ def pending_section(sections: list[Section]) -> Section | None:
     return sections[0]
 
 
+# What the pending notes are measured against (`--notes-baseline`).
+NOTES_BASELINE_PUBLISHED = "published"
+NOTES_BASELINE_WORKSPACE = "workspace-version"
+
+
+def notes_baseline(sections: list[Section], version: str) -> str:
+    """Which release the pending notes declare their breaks against.
+
+    A release tree carries its notes stamped `## [<version>] - DATE`, with at
+    most an empty `## [Unreleased]` stub above them, and those notes declare
+    the breaks since the release before it: the newest published version
+    (`published`).
+
+    After that release is cut the workspace version stays at it until the next
+    bump, and new notes gather under a non-empty `## [Unreleased]` above the
+    stamped section, the pre-bump state `check_stamped` accepts. Those notes
+    belong to the release AFTER the workspace version and declare the breaks
+    since it, so their baseline is the workspace version itself
+    (`workspace-version`). Measured against the version below it instead, the
+    stamped section's own breaks are reported again and demanded again under
+    `## [Unreleased]`, which fails every post-release tree whose notes are not
+    empty until crates.io publishes the workspace version.
+    """
+    pending = pending_section(sections)
+    if pending is None or pending.version is not None:
+        return NOTES_BASELINE_PUBLISHED
+    stamped = next((section for section in sections if section.version is not None), None)
+    if stamped is not None and stamped.version == version and stamped.is_stamped:
+        return NOTES_BASELINE_WORKSPACE
+    return NOTES_BASELINE_PUBLISHED
+
+
 def breaking_body(section: Section) -> str | None:
     """The `### Breaking` subsection body, or None when there is no such heading.
 
@@ -702,9 +734,16 @@ def check_named(parsed: ReportParse, section: Section) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--report", required=True, type=pathlib.Path)
+    parser.add_argument("--report", type=pathlib.Path)
     parser.add_argument("--changelog", required=True, type=pathlib.Path)
-    parser.add_argument("--tool-exit-code", required=True, type=int)
+    parser.add_argument("--tool-exit-code", type=int)
+    parser.add_argument(
+        "--notes-baseline",
+        action="store_true",
+        help=f"print which release the pending notes are measured against "
+        f"({NOTES_BASELINE_PUBLISHED} or {NOTES_BASELINE_WORKSPACE}) and exit; "
+        f"needs only --changelog and --version or --repo-root",
+    )
     parser.add_argument("--repo-root", type=pathlib.Path)
     parser.add_argument("--version", help="workspace version (defaults to --repo-root Cargo.toml)")
     parser.add_argument(
@@ -741,6 +780,14 @@ def main() -> int:
         version = workspace_version(args.repo_root)
     else:
         print("error: one of --version or --repo-root is required", file=sys.stderr)
+        return 2
+
+    if args.notes_baseline:
+        sections = parse_changelog(args.changelog.read_text(encoding="utf-8"))
+        print(notes_baseline(sections, version))
+        return 0
+    if args.report is None or args.tool_exit_code is None:
+        print("error: --report and --tool-exit-code are required", file=sys.stderr)
         return 2
 
     scope: CrateScope | None = None
@@ -824,9 +871,12 @@ def main() -> int:
         )
         return 0
 
+    declared_in = (
+        section.heading.strip() if section is not None else f"the {version} release notes"
+    )
     print(
         f"semver-breaks: {len(parsed.findings)} public-API break(s) detected, all named under "
-        f"`### Breaking` in the {version} release notes:"
+        f"`### Breaking` in `{declared_in}`:"
     )
     for finding in parsed.findings:
         print(f"  [{finding.crate}] {finding.lint_id}: {finding.item}")

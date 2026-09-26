@@ -37,6 +37,20 @@ them.
 
 ### Fixed
 
+- The semver-breaks gate measures notes pending under `## [Unreleased]` after
+  a release against that release's tag. With the workspace version still at
+  the just-tagged 0.8.44 and crates.io not yet caught up, it measured 0.8.44
+  against 0.8.43 and demanded the 66 breaks the stamped 0.8.44 section already
+  declared again under `## [Unreleased]`. That failed Release semver readiness
+  for every tree with post-release notes (#1208's first run), and `make
+  release-preflight` could never pass once crates.io had published the
+  workspace version. Now, when the pending notes follow the stamped workspace
+  version and HEAD has moved past its tag, that tag is the baseline. The
+  release tree itself, the tagged commit, and trees whose bump landed without
+  stamped notes keep the published baseline. Release semver readiness no
+  longer uploads an attestation for such a post-release tree, because it is
+  not evidence for the released version.
+
 - Full-fresh BuildBuddy validation no longer runs out of its 50-minute SLO
   on integration-fast. The Native submitter waited for the `//...` prebuild
   (18 minutes on the v0.8.44 tag run) and then ran clippy, unit and

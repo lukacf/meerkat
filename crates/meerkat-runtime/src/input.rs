@@ -380,10 +380,7 @@ impl PromptInput {
                 identity: None,
             }],
             injected_context: Vec::new(),
-            turn_metadata: Some(RuntimeTurnMetadata {
-                handling_mode: Some(HandlingMode::Steer),
-                ..RuntimeTurnMetadata::default()
-            }),
+            turn_metadata: Some(crate::runtime_loop::for_detached_job_completed()),
         }
     }
 

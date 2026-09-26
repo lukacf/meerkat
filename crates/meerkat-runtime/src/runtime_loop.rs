@@ -127,6 +127,18 @@ pub(crate) fn for_bridge_turn_directive(
     }
 }
 
+/// Canonical turn metadata of a detached job's completion input (see
+/// `PromptInput::detached_job_completed`): `Steer` handling and nothing else.
+/// Lives HERE because this file is the single sanctioned construction site
+/// for `RuntimeTurnMetadata` (see `turn_metadata_single_construction_site`).
+pub(crate) fn for_detached_job_completed()
+-> meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+        ..Default::default()
+    }
+}
+
 /// Merge the per-input turn metadata carried by a staged batch into a single
 /// typed carrier. Scalar conflicts (two inputs disagreeing on e.g. `model`)
 /// are refused with a typed error so caller policy is not silently replaced by

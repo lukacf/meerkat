@@ -512,6 +512,42 @@ impl AgentMobToolSurface {
         Ok(bound.and_then(|(bound_mob, identity)| (&bound_mob == mob_id).then_some(identity)))
     }
 
+    /// The mob member this surface's session is bound to, with a handle to
+    /// its mob, so a detached job can revive it through the mob when the
+    /// runtime no longer has it live. `None` for a session that is not a
+    /// mob member (it has no mob to revive it) or whose binding cannot be
+    /// read now; delivery then goes straight to the runtime.
+    async fn convener_member(&self) -> Option<(MobHandle, AgentIdentity)> {
+        let (mob_id, identity) = match self
+            .state
+            .member_for_bridge_session(&self.owner_bridge_session_id)
+            .await
+        {
+            Ok(bound) => bound?,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %self.owner_bridge_session_id,
+                    error = %error,
+                    "could not resolve the convener's mob membership; its council \
+                     completion will not revive it"
+                );
+                return None;
+            }
+        };
+        match self.bound_handle(&mob_id).await {
+            Ok(handle) => Some((handle, identity)),
+            Err(error) => {
+                tracing::warn!(
+                    %mob_id,
+                    error = %error,
+                    "could not bind the convener's mob; its council completion will \
+                     not revive it"
+                );
+                None
+            }
+        }
+    }
+
     /// Admission to observe or retire one member: manage scope over the mob,
     /// or durable spawner provenance naming the calling member. MobMachine
     /// decides; this mirrors its verdict (Denied -> access_denied).
@@ -1378,9 +1414,12 @@ impl AgentMobToolSurface {
                 job_id,
                 TOOL_FORK_OFF,
                 async move {
-                    let (completion, failed) =
+                    let completion =
                         ForkOffCompletion::from_outcome(identity, member_ref, run.outcome().await);
-                    (serde_json::to_value(&completion), failed)
+                    (
+                        serde_json::to_value(&completion),
+                        completion.status.terminal_status(),
+                    )
                 },
             );
             Ok((fork, None))
@@ -1420,8 +1459,7 @@ impl AgentMobToolSurface {
                     Self::encode_result(call, value)
                 }
                 other => {
-                    let (completion, _) =
-                        ForkOffCompletion::from_outcome(identity, member_ref, other);
+                    let completion = ForkOffCompletion::from_outcome(identity, member_ref, other);
                     Err(ToolError::execution_failed(format!(
                         "tool '{}' child did not complete: {}",
                         call.name,
@@ -1610,23 +1648,30 @@ impl AgentMobToolSurface {
                 // outcome either way.
                 Ok(outcome) => (
                     Ok(council_outcome_json(&outcome)),
-                    outcome.result.exit_reason.is_failure(),
+                    council_terminal_status(&outcome),
                 ),
-                Err(error) => (Ok(json!({"error": error.to_string()})), true),
+                Err(error) => (
+                    Ok(json!({"error": error.to_string()})),
+                    meerkat_core::event::BackgroundJobTerminalStatus::Failed,
+                ),
             };
             let _ = outcome_tx.send(outcome);
         });
+        // A convener that is a mob member is revived through its mob when
+        // the runtime no longer has it live (its idle executor retired while
+        // the council ran), exactly like a fork_off owner.
+        let convener = self.convener_member().await;
         spawn_detached_completion_custodian(
             runtime,
             self.owner_bridge_session_id.clone(),
-            None,
+            convener,
             job_id.clone(),
             TOOL_COUNCIL,
             async move {
                 outcome_rx.await.unwrap_or_else(|_| {
                     (
                         Ok(json!({"error": "the council task ended without an outcome"})),
-                        true,
+                        meerkat_core::event::BackgroundJobTerminalStatus::Failed,
                     )
                 })
             },
@@ -2795,10 +2840,12 @@ struct ForkOffArgs {
     result_label: String,
     /// Maximum UTF-8 bytes returned, including any truncation marker.
     #[serde(default = "fork_off_default_max_text_bytes")]
+    #[schemars(range(min = meerkat_mob::HELPER_RESULT_TRUNCATION_MARKER.len()))]
     max_text_bytes: usize,
     /// Optional limit: cancel the child's run and retire it (and its
-    /// descendants) after this many seconds. Omit for no limit.
+    /// descendants) after this many seconds, at least 1. Omit for no limit.
     #[serde(default)]
+    #[schemars(range(min = 1))]
     max_run_secs: Option<u64>,
 }
 
@@ -2813,15 +2860,29 @@ struct CouncilArgs {
     participants: Vec<CouncilParticipantArgs>,
     /// Sequential discussion rounds.
     #[serde(default = "council_default_rounds")]
+    #[schemars(range(min = 1, max = meerkat_mob::temporary_council::MAX_TEMPORARY_COUNCIL_ROUNDS))]
     max_rounds: u32,
     /// Total participant turns. Defaults to participants × rounds.
     #[serde(default)]
+    #[schemars(range(
+        min = 1,
+        max = meerkat_mob::temporary_council::MAX_TEMPORARY_COUNCIL_EXCHANGES
+    ))]
     max_exchanges: Option<u32>,
     /// Per-exchange UTF-8 result ceiling.
     #[serde(default = "council_default_result_bytes")]
+    #[schemars(range(
+        min = meerkat_mob::temporary_council::MIN_TEMPORARY_COUNCIL_RESULT_BYTES,
+        max = meerkat_mob::temporary_council::MAX_TEMPORARY_COUNCIL_RESULT_BYTES
+    ))]
     max_result_bytes: usize,
-    /// Absolute execution budget for discussion, merge, and cleanup.
+    /// Absolute execution budget for discussion, merge, and cleanup, in
+    /// seconds.
     #[serde(default = "council_default_timeout_seconds")]
+    #[schemars(range(
+        min = 1,
+        max = meerkat_mob::temporary_council::MAX_TEMPORARY_COUNCIL_DURATION.as_secs()
+    ))]
     timeout_seconds: u64,
     /// Explicit result merge policy. Defaults to a bounded summary by the last participant.
     #[serde(default)]
@@ -3129,6 +3190,22 @@ pub(crate) enum ForkOffCompletionStatus {
     RestartInterrupted,
 }
 
+impl ForkOffCompletionStatus {
+    /// The typed status of the forker's completion record. One mapping for
+    /// the live custodian and the restart re-link: an opt-in max_run
+    /// autokill is `Terminated`, every other outcome that is not a
+    /// completed turn is `Failed`.
+    pub(crate) fn terminal_status(&self) -> meerkat_core::event::BackgroundJobTerminalStatus {
+        match self {
+            Self::Completed => meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+            Self::MaxRunElapsed => meerkat_core::event::BackgroundJobTerminalStatus::Terminated,
+            Self::Failed | Self::SupervisorStopped | Self::RestartInterrupted => {
+                meerkat_core::event::BackgroundJobTerminalStatus::Failed
+            }
+        }
+    }
+}
+
 impl ForkOffCompletion {
     pub(crate) fn empty(
         agent_identity: String,
@@ -3154,7 +3231,7 @@ impl ForkOffCompletion {
         agent_identity: String,
         member_ref: meerkat_contracts::WireMemberRef,
         outcome: Option<meerkat_mob::ForkChildRunOutcome>,
-    ) -> (Self, bool) {
+    ) -> Self {
         let mut completion = Self {
             agent_identity,
             member_ref,
@@ -3167,19 +3244,17 @@ impl ForkOffCompletion {
             max_run_secs: None,
             retirement_error: None,
         };
-        let failed = match outcome {
+        match outcome {
             Some(meerkat_mob::ForkChildRunOutcome::Completed(turn)) => {
                 completion.status = ForkOffCompletionStatus::Completed;
                 completion.bounded_result = Some(turn.result().result().to_wire());
                 completion.usage = Some(turn.result().usage().clone());
                 completion.turns = Some(turn.result().turns());
                 completion.tool_calls = Some(turn.result().tool_calls());
-                false
             }
             Some(meerkat_mob::ForkChildRunOutcome::Failed(error)) => {
                 completion.status = ForkOffCompletionStatus::Failed;
                 completion.error = Some(error.to_string());
-                true
             }
             Some(meerkat_mob::ForkChildRunOutcome::MaxRunElapsed {
                 max_run,
@@ -3188,11 +3263,10 @@ impl ForkOffCompletion {
                 completion.status = ForkOffCompletionStatus::MaxRunElapsed;
                 completion.max_run_secs = Some(max_run.as_secs());
                 completion.retirement_error = retirement_error;
-                true
             }
-            Some(_) | None => true,
-        };
-        (completion, failed)
+            Some(_) | None => {}
+        }
+        completion
     }
 }
 
@@ -3207,20 +3281,19 @@ fn spawn_detached_completion_custodian<F>(
     tool_name: &'static str,
     outcome: F,
 ) where
-    F: std::future::Future<Output = (Result<serde_json::Value, serde_json::Error>, bool)>
-        + Send
+    F: std::future::Future<
+            Output = (
+                Result<serde_json::Value, serde_json::Error>,
+                meerkat_core::event::BackgroundJobTerminalStatus,
+            ),
+        > + Send
         + 'static,
 {
     tokio::spawn(async move {
-        let (value, failed) = outcome.await;
+        let (value, status) = outcome.await;
         let value = value.unwrap_or_else(|error| {
             json!({ "error": format!("{tool_name} could not encode its outcome: {error}") })
         });
-        let status = if failed {
-            meerkat_core::event::BackgroundJobTerminalStatus::Failed
-        } else {
-            meerkat_core::event::BackgroundJobTerminalStatus::Completed
-        };
         let delivered = match owner_member {
             Some((handle, identity)) => {
                 crate::detached_delivery::deliver_detached_completion_to_member(
@@ -3266,6 +3339,18 @@ fn detached_started_note(tool: &'static str, job_id: &str, control: &str) -> Str
     format!(
         "Running in the background. When it ends, the result is added to your conversation as \"Background {tool} job {job_id} finished\": right after your current turn if you are mid-turn, or in a new turn if you are idle. Nothing is waiting on it: continue with other work. {control}"
     )
+}
+
+/// The typed status of a council's completion record, for the live
+/// custodian and the restart re-link alike.
+fn council_terminal_status(
+    outcome: &crate::temporary_council::TemporaryCouncilOutcome,
+) -> meerkat_core::event::BackgroundJobTerminalStatus {
+    if outcome.result.exit_reason.is_failure() {
+        meerkat_core::event::BackgroundJobTerminalStatus::Failed
+    } else {
+        meerkat_core::event::BackgroundJobTerminalStatus::Completed
+    }
 }
 
 pub(crate) fn council_outcome_json(
@@ -3711,6 +3796,58 @@ mod tests {
                 "fork_off must infer {forbidden} from the current durable session binding"
             );
         }
+    }
+
+    /// The schemas advertise the numeric bounds the tools enforce, so a
+    /// value the schema allows is never rejected (0 used to be advertised for
+    /// max_run_secs and the council bounds, and refused).
+    #[test]
+    fn fork_off_and_council_schemas_advertise_the_enforced_numeric_bounds() {
+        use meerkat_mob::temporary_council::{
+            MAX_TEMPORARY_COUNCIL_DURATION, MAX_TEMPORARY_COUNCIL_EXCHANGES,
+            MAX_TEMPORARY_COUNCIL_RESULT_BYTES, MAX_TEMPORARY_COUNCIL_ROUNDS,
+            MIN_TEMPORARY_COUNCIL_RESULT_BYTES,
+        };
+        let definitions = build_tool_defs();
+        let property = |tool: &str, field: &str| {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == tool)
+                .unwrap_or_else(|| panic!("{tool} tool definition"));
+            definition.input_schema["properties"][field].clone()
+        };
+        let bounds = |tool: &str, field: &str| {
+            let schema = property(tool, field);
+            (schema["minimum"].as_u64(), schema["maximum"].as_u64())
+        };
+
+        assert_eq!(bounds("fork_off", "max_run_secs"), (Some(1), None));
+        assert_eq!(
+            bounds("fork_off", "max_text_bytes"),
+            (
+                Some(meerkat_mob::HELPER_RESULT_TRUNCATION_MARKER.len() as u64),
+                None
+            )
+        );
+        assert_eq!(
+            bounds("council", "timeout_seconds"),
+            (Some(1), Some(MAX_TEMPORARY_COUNCIL_DURATION.as_secs()))
+        );
+        assert_eq!(
+            bounds("council", "max_rounds"),
+            (Some(1), Some(u64::from(MAX_TEMPORARY_COUNCIL_ROUNDS)))
+        );
+        assert_eq!(
+            bounds("council", "max_exchanges"),
+            (Some(1), Some(u64::from(MAX_TEMPORARY_COUNCIL_EXCHANGES)))
+        );
+        assert_eq!(
+            bounds("council", "max_result_bytes"),
+            (
+                Some(MIN_TEMPORARY_COUNCIL_RESULT_BYTES as u64),
+                Some(MAX_TEMPORARY_COUNCIL_RESULT_BYTES as u64)
+            )
+        );
     }
 
     #[test]

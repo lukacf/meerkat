@@ -34,9 +34,22 @@ fn persisted_background_job_record_is_durable_and_sent_once() {
     );
     assert_eq!(record.persisted_background_job_id(), Some("job-7"));
     assert!(!record.is_synthetic_refresh_projection());
+    // The outcome is stored once, in the block; the body is the header.
+    assert_eq!(
+        record.body.as_deref(),
+        Some("Background fork_off job job-7 finished (completed):")
+    );
+    assert_eq!(
+        serde_json::to_string(&record)
+            .unwrap()
+            .matches("CHILD-TOKEN-4K")
+            .count(),
+        1
+    );
+    // The model sees the header, then the outcome, once.
     let projected = record.model_projection_text();
     assert!(
-        projected.starts_with("Background fork_off job job-7 finished (completed):"),
+        projected.starts_with("Background fork_off job job-7 finished (completed):\n"),
         "{projected}"
     );
     assert_eq!(

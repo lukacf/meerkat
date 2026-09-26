@@ -401,10 +401,18 @@ async fn e2e_fast_detached_fork_off_reaches_the_forker_and_its_next_turn() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    let content = completion["body"].as_str().expect("completion body");
+    let header = completion["body"].as_str().expect("completion header");
     assert!(
-        content.contains(CHILD_REPLY) && content.contains("completed"),
-        "the completion carries the child's completed outcome: {content}"
+        header.contains("(completed)"),
+        "the record says the child completed: {completion}"
+    );
+    let detail = completion["blocks"]
+        .as_array()
+        .and_then(|blocks| blocks.iter().find_map(|block| block["detail"].as_str()))
+        .expect("completion detail");
+    assert!(
+        detail.contains(CHILD_REPLY),
+        "the record carries the child's outcome: {completion}"
     );
 
     // The idle forker is woken by the completion and runs exactly one turn

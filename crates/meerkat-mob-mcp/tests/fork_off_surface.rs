@@ -1142,6 +1142,106 @@ async fn detached_completion_reaches_an_owner_whose_executor_was_torn_down() {
     fixture.teardown().await;
 }
 
+/// A convener that is a mob member has run a turn, and the runtime retires
+/// its idle executor while its detached council runs: the council's
+/// completion still lands once, revives the convener through its mob, and
+/// wakes it for one turn, as for a fork_off owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn detached_council_completion_revives_a_convener_whose_executor_was_torn_down() {
+    let log = RequestLog::default();
+    let gate = TurnGate::new();
+    let _release_on_exit = OpenOnDrop(gate.clone());
+    let inner = routed_script(log.clone(), Vec::new());
+    let gate_for_script = gate.clone();
+    // Participants' discussion turns wait on the gate, so the convener's
+    // executor is retired while the council is still running.
+    let fixture = CouncilFixture::new_runtime_backed(move |request: &LlmRequest| {
+        if !support::user_text(request).contains("bounded plain-text summary")
+            && let Some(role) = support::role_in_request(request)
+        {
+            return ScriptedTurn::Gated(gate_for_script.clone(), format!("position from {role}"));
+        }
+        inner(request)
+    });
+    fixture.seed_source_mob(&["convener", "alice", "bob"]).await;
+    let mob_id = fixture.source_mob_id().to_string();
+    let convener = bind_surface(
+        &fixture.state,
+        member_session(&fixture, "convener").await,
+        convener_authority(&mob_id),
+    );
+    assert_eq!(
+        drive_turn(&fixture, "convener", "FOLLOW-UP-W warm up").await,
+        FOLLOW_UP_REPLY
+    );
+
+    let started = call(&convener.surface, "council", council_args(&fixture, None))
+        .await
+        .expect("council starts");
+    let job_id = started["job_id"].as_str().expect("job id").to_string();
+    gate.wait_entered(1).await;
+    let runtime = fixture
+        .runtime_adapter
+        .as_ref()
+        .expect("runtime-backed fixture");
+    runtime
+        .unregister_session(&convener.session)
+        .await
+        .expect("the runtime retires the convener's idle executor");
+    assert!(!runtime.contains_session(&convener.session).await);
+    gate.open();
+
+    let record = wait_for_completion(&fixture, &convener.session, &job_id).await;
+    assert_eq!(
+        record.status,
+        BackgroundJobTerminalStatus::Completed,
+        "{record:?}"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let woken = loop {
+        let woken = log
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| {
+                request.rendered.contains(&job_id) && !request.last_user.contains("FOLLOW-UP-C")
+            })
+            .count();
+        if woken >= 1 {
+            break woken;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the revived convener was never woken"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(woken, 1, "the convener is woken for one turn");
+    assert!(
+        runtime.contains_session(&convener.session).await,
+        "the convener was revived"
+    );
+    let prompt = "FOLLOW-UP-C after the revival";
+    assert_eq!(
+        drive_turn(&fixture, "convener", prompt).await,
+        FOLLOW_UP_REPLY
+    );
+    let request = log.request_for(prompt);
+    assert!(
+        request.rendered.contains(&job_id) && request.rendered.contains("COUNCIL-SUMMARY-9Z"),
+        "{}",
+        request.rendered
+    );
+    assert_one_completion_record(
+        &persisted_messages(fixture.service.as_ref(), &convener.session).await,
+        "council",
+        &job_id,
+        "COUNCIL-SUMMARY-9Z",
+    );
+    fixture.teardown().await;
+}
+
 /// The fixture's role profile defaults to autonomous_host, which cannot run a
 /// tracked turn. fork_off still works: the child runs turn-driven.
 #[tokio::test(flavor = "multi_thread")]
@@ -1348,9 +1448,10 @@ async fn autokill_cascades_down_the_spawn_tree_the_root_forker_owns() {
     ));
 
     let record = wait_for_completion(&fixture, &a.session, &c_job).await;
+    // An autokill is Terminated, live as after a restart (the re-link).
     assert_eq!(
         record.status,
-        BackgroundJobTerminalStatus::Failed,
+        BackgroundJobTerminalStatus::Terminated,
         "{record:?}"
     );
     assert!(record.detail.contains("max_run_elapsed"), "{record:?}");

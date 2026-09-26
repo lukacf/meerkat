@@ -1242,6 +1242,84 @@ async fn detached_council_completion_revives_a_convener_whose_executor_was_torn_
     fixture.teardown().await;
 }
 
+/// The live custodian's delivery waits out a deferred owner revival: the
+/// owner is not live and its mob is stopped when the job ends, so revival is
+/// deferred; once the mob runs again the completion is delivered, exactly
+/// once, without a restart (lifecycle review: the single live attempt used to
+/// drop it until the next restart).
+#[tokio::test(flavor = "multi_thread")]
+async fn live_delivery_waits_for_a_stopped_owner_mob_and_delivers_once() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(routed_script(RequestLog::default(), Vec::new()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let handle = source_handle(&fixture).await;
+    let owner = member_session(&fixture, "forker").await;
+    let runtime = fixture
+        .runtime_adapter
+        .clone()
+        .expect("runtime-backed fixture");
+    handle.stop().await.expect("stop the mob");
+    runtime
+        .unregister_session(&owner)
+        .await
+        .expect("the owner is not live");
+
+    let job_id = "job-live-deferred".to_string();
+    let delivery = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let handle = handle.clone();
+        let owner = owner.clone();
+        let job_id = job_id.clone();
+        async move {
+            meerkat_mob_mcp::deliver_detached_completion_to_member_when_revivable(
+                &runtime,
+                &handle,
+                &AgentIdentity::from("forker"),
+                &owner,
+                "fork_off",
+                &job_id,
+                BackgroundJobTerminalStatus::Completed,
+                json!({"text": CHILD_REPLY}),
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !delivery.is_finished(),
+        "delivery waits while the mob is stopped"
+    );
+    assert!(
+        completion_records(
+            &persisted_messages(fixture.service.as_ref(), &owner).await,
+            &job_id
+        )
+        .is_empty()
+    );
+
+    handle.resume().await.expect("the mob runs again");
+    let delivered = tokio::time::timeout(Duration::from_secs(60), delivery)
+        .await
+        .expect("delivery ends once the mob runs")
+        .expect("delivery task");
+    assert_eq!(
+        delivered,
+        Ok(meerkat_mob_mcp::DetachedCompletionDelivered::Delivered)
+    );
+    wait_for_completion(&fixture, &owner, &job_id).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        completion_records(
+            &persisted_messages(fixture.service.as_ref(), &owner).await,
+            &job_id
+        )
+        .len(),
+        1,
+        "delivered exactly once"
+    );
+    fixture.teardown().await;
+}
+
 /// The fixture's role profile defaults to autonomous_host, which cannot run a
 /// tracked turn. fork_off still works: the child runs turn-driven.
 #[tokio::test(flavor = "multi_thread")]

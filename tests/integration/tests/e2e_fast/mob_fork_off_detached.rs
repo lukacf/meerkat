@@ -1386,3 +1386,355 @@ async fn e2e_fast_forker_observes_a_running_child_without_waiting_for_its_turn()
 
     let _ = mob_state.mob_destroy(&mob_id).await;
 }
+
+// ===========================================================================
+// A top-level RPC session convenes a detached council
+// ===========================================================================
+
+const CONVENE_PROMPT: &str = "CONVENE-4Q hold a council in mob=";
+const CONVENE_DONE: &str = "CONVENE_DONE";
+const COUNCIL_SUMMARY: &str = "COUNCIL-SUMMARY-8R the council agreed";
+const CONVENER_FOLLOW_UP: &str = "CONVENER-FOLLOW-UP-2 what did the council decide?";
+
+fn all_user_text(request: &LlmRequest) -> String {
+    request
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => Some(user.text_content()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The council role a participant fork was seated with, from its prompt.
+fn council_role(request: &LlmRequest) -> Option<String> {
+    let haystack = all_user_text(request);
+    let marker = "You are '";
+    let start = haystack.rfind(marker)? + marker.len();
+    let rest = &haystack[start..];
+    Some(rest[..rest.find('\'')?].to_string())
+}
+
+fn council_call(model: &str, mob_id: &str) -> Vec<LlmEvent> {
+    scripted_tool_call(
+        model,
+        "toolu_council",
+        "council",
+        json!({
+            "topic": "Should we ship the migration this week?",
+            "participants": [
+                {"mob_id": mob_id, "member_id": "alice", "role": "analyst"},
+                {"mob_id": mob_id, "member_id": "bob", "role": "critic"},
+            ],
+            "max_rounds": 1,
+            "timeout_seconds": 120,
+        }),
+    )
+}
+
+/// The top-level session calls `council` once; the participants' discussion
+/// turns wait on `release`; the merge answers with the summary; every other
+/// turn acknowledges. Requests are recorded as (last user text, rendered).
+struct ConvenerScript {
+    requests: Arc<Mutex<Vec<(String, String)>>>,
+    release: Arc<tokio::sync::Notify>,
+    released: Arc<std::sync::atomic::AtomicBool>,
+    participants_started: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl LlmClient for ConvenerScript {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        let last_user = last_user_text(request);
+        self.requests
+            .lock()
+            .unwrap()
+            .push((last_user.clone(), format!("{:?}", request.messages)));
+        let ready = |events: Vec<LlmEvent>| -> LlmStream<'a> {
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        };
+        if let Some(mob_id) = last_user.strip_prefix(CONVENE_PROMPT) {
+            // The session builds its own source mob (which gives it manage
+            // scope over it), seats two participants, then convenes.
+            let convene_at = request
+                .messages
+                .iter()
+                .rposition(|message| matches!(message, Message::User(_)))
+                .unwrap_or(0);
+            let step = request.messages[convene_at..]
+                .iter()
+                .filter(|message| matches!(message, Message::ToolResults { .. }))
+                .count();
+            let spawn = |member: &str| {
+                json!({
+                    "mob_id": mob_id,
+                    "profile": "keeper",
+                    "member_id": member,
+                    "runtime_mode": "turn_driven",
+                })
+            };
+            return ready(match step {
+                0 => scripted_tool_call(
+                    &request.model,
+                    "toolu_mob_create",
+                    "mob_create",
+                    json!({"definition": serde_json::to_value(mob_definition(mob_id)).unwrap()}),
+                ),
+                1 => scripted_tool_call(
+                    &request.model,
+                    "toolu_spawn_alice",
+                    "mob_spawn_member",
+                    spawn("alice"),
+                ),
+                2 => scripted_tool_call(
+                    &request.model,
+                    "toolu_spawn_bob",
+                    "mob_spawn_member",
+                    spawn("bob"),
+                ),
+                3 => council_call(&request.model, mob_id),
+                _ => scripted_text(&request.model, CONVENE_DONE),
+            });
+        }
+        if all_user_text(request).contains("bounded plain-text summary") {
+            return ready(scripted_text(&request.model, COUNCIL_SUMMARY));
+        }
+        if let Some(role) = council_role(request) {
+            let events = scripted_text(&request.model, &format!("position from {role}"));
+            let release = Arc::clone(&self.release);
+            let released = Arc::clone(&self.released);
+            let started = Arc::clone(&self.participants_started);
+            return Box::pin(futures::StreamExt::flat_map(
+                futures::stream::once(async move {
+                    started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    while !released.load(std::sync::atomic::Ordering::SeqCst) {
+                        let notified = release.notified();
+                        if released.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        notified.await;
+                    }
+                    events
+                }),
+                |events| futures::stream::iter(events.into_iter().map(Ok)),
+            ));
+        }
+        ready(scripted_text(&request.model, FOLLOW_UP_REPLY))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+}
+
+async fn rpc_call(router: &MethodRouter, method: &str, params: Value) -> Value {
+    let response = router
+        .dispatch(RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RpcId::Num(1)),
+            method: method.to_string(),
+            params: Some(serde_json::value::RawValue::from_string(params.to_string()).unwrap()),
+        })
+        .await
+        .unwrap_or_else(|| panic!("{method} dispatch"));
+    assert!(
+        response.error.is_none(),
+        "{method} error: {:?}",
+        response.error
+    );
+    serde_json::from_str(response.result.as_ref().expect("result").get()).expect("result JSON")
+}
+
+/// A top-level RPC session (not a mob member) convenes a detached council,
+/// and the runtime retires its idle executor while the council runs. The
+/// RPC host's owner hook makes the session live again: the council's result
+/// is recorded once, wakes the session for one turn, and its next turn sees
+/// the summary. Without the hook it would arrive only after a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_top_level_rpc_convener_is_revived_for_its_council_result() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let participants_started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let client: Arc<dyn LlmClient> = Arc::new(ConvenerScript {
+        requests: Arc::clone(&requests),
+        release: Arc::clone(&release),
+        released: Arc::clone(&released),
+        participants_started: Arc::clone(&participants_started),
+    });
+    let open_gate = {
+        let release = Arc::clone(&release);
+        let released = Arc::clone(&released);
+        move || {
+            released.store(true, std::sync::atomic::Ordering::SeqCst);
+            release.notify_waiters();
+        }
+    };
+
+    // The production RPC composition, which installs the owner hook.
+    let root = temp.path();
+    let project_root = root.join("project-root");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::write(project_root.join("AGENTS.md"), "# Detached council\n").unwrap();
+    let runtime_root = root.join("runtime-root");
+    let factory = AgentFactory::new(runtime_root.join("factory-store"))
+        .user_config_root(root.join("user-config"))
+        .runtime_root(runtime_root.clone())
+        .project_root(project_root.clone())
+        .context_root(project_root)
+        .builtins(false)
+        .shell(false)
+        .comms(true)
+        .mob(true);
+    let config = Config::default();
+    let persistence = meerkat::PersistenceBundle::new(
+        Arc::new(meerkat::MemoryStore::new()),
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    );
+    let runtime = SessionRuntime::new(
+        factory,
+        config.clone(),
+        64,
+        persistence,
+        NotificationSink::noop(),
+    );
+    runtime.set_default_llm_client(Some(Arc::clone(&client)));
+    let config_store: Arc<dyn meerkat_core::ConfigStore> =
+        Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical()));
+    runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+        Arc::clone(&config_store),
+        runtime_root.join("config_state.json"),
+    )));
+    let runtime = Arc::new(runtime);
+    let mob_state = meerkat_rpc::router::compose_rpc_mob_state(&runtime, &config_store, None);
+    assert!(mob_state.detached_owner_host().is_some());
+    // Councils seat on the RPC host: its session service exposes the
+    // persistent service as the forked-participant source runtime.
+    assert!(
+        runtime
+            .session_service()
+            .forked_participant_source_runtime()
+            .is_some()
+    );
+    *runtime.builder_mob_tools_slot.write().unwrap() = Some(Arc::new(
+        meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
+    ));
+    let (notif_tx, _notif_rx) = mpsc::channel(256);
+    let router = MethodRouter::new_with_mob_state(
+        Arc::clone(&runtime),
+        config_store,
+        NotificationSink::new(notif_tx),
+        Arc::clone(&mob_state),
+    );
+
+    // A top-level session with mob tools; it builds the source mob itself.
+    let mob_id = format!("convened-{}", uuid::Uuid::new_v4().simple());
+    let created = rpc_call(
+        &router,
+        "session/create",
+        json!({
+            "model": "claude-sonnet-4-5",
+            "prompt": "CONVENER-HELLO warm up",
+            "enable_mob": true,
+        }),
+    )
+    .await;
+    let session = SessionId::parse(created["session_id"].as_str().expect("session id")).unwrap();
+
+    let turn = rpc_call(
+        &router,
+        "turn/start",
+        json!({"session_id": session.to_string(), "prompt": format!("{CONVENE_PROMPT}{mob_id}")}),
+    )
+    .await;
+    assert!(turn.to_string().contains(CONVENE_DONE), "{turn}");
+    let history = session_history(&router, &session).await;
+    let started = recorded_tool_result(&history, "toolu_council")
+        .unwrap_or_else(|| panic!("no council result: {history}"));
+    assert_eq!(started["status"], "running", "{started}");
+    let job_id = started["job_id"].as_str().expect("job id").to_string();
+
+    // The council is running; the runtime retires the idle session.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while participants_started.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "no participant started: {}",
+                session_history(&router, &session).await
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    runtime
+        .runtime_adapter()
+        .unregister_session(&session)
+        .await
+        .expect("the runtime retires the session's idle executor");
+    assert!(!runtime.runtime_adapter().contains_session(&session).await);
+    open_gate();
+
+    wait_for_single_record(&router, &session, &job_id).await;
+    // The record's header; the started note names the same job but not its
+    // status.
+    let marker = format!("Background council job {job_id} finished (");
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let woken = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(last_user, rendered)| {
+                rendered.contains(&marker) && !last_user.contains(CONVENER_FOLLOW_UP)
+            })
+            .count();
+        if woken >= 1 {
+            assert_eq!(woken, 1, "the convener is woken for one turn");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the revived convener was never woken"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let follow_up = rpc_call(
+        &router,
+        "turn/start",
+        json!({"session_id": session.to_string(), "prompt": CONVENER_FOLLOW_UP}),
+    )
+    .await;
+    assert!(
+        follow_up.to_string().contains(FOLLOW_UP_REPLY),
+        "{follow_up}"
+    );
+    let follow_up_request = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(last_user, _)| last_user.contains(CONVENER_FOLLOW_UP))
+        .map(|(_, rendered)| rendered.clone())
+        .expect("the follow-up request");
+    assert!(
+        follow_up_request.contains(&marker) && follow_up_request.contains("COUNCIL-SUMMARY-8R"),
+        "{follow_up_request}"
+    );
+    wait_for_single_record(&router, &session, &job_id).await;
+
+    open_gate();
+    let _ = mob_state
+        .mob_destroy(&meerkat_mob::MobId::from(mob_id))
+        .await;
+}

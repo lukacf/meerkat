@@ -1410,7 +1410,7 @@ impl AgentMobToolSurface {
             spawn_detached_completion_custodian(
                 runtime,
                 owner_session_id,
-                Some((owner, source)),
+                DetachedCompletionOwner::Member(owner, source),
                 job_id,
                 TOOL_FORK_OFF,
                 async move {
@@ -1659,8 +1659,12 @@ impl AgentMobToolSurface {
         });
         // A convener that is a mob member is revived through its mob when
         // the runtime no longer has it live (its idle executor retired while
-        // the council ran), exactly like a fork_off owner.
-        let convener = self.convener_member().await;
+        // the council ran), exactly like a fork_off owner; a plain-session
+        // convener is revived through the host's owner hook.
+        let convener = match self.convener_member().await {
+            Some((handle, identity)) => DetachedCompletionOwner::Member(handle, identity),
+            None => DetachedCompletionOwner::Session(self.state.detached_owner_host()),
+        };
         spawn_detached_completion_custodian(
             runtime,
             self.owner_bridge_session_id.clone(),
@@ -3270,13 +3274,23 @@ impl ForkOffCompletion {
     }
 }
 
+/// Who owns a detached job's completion, and so how a not-live owner is
+/// revived before the completion is admitted.
+enum DetachedCompletionOwner {
+    /// A mob member: revived through its mob.
+    Member(MobHandle, AgentIdentity),
+    /// A plain session: revived through the host's owner hook, when the
+    /// host supplied one.
+    Session(Option<Arc<dyn crate::detached_delivery::DetachedOwnerHost>>),
+}
+
 /// Own one detached tool run's completion: when `outcome` resolves, deliver
 /// the owner's one durable completion record (see
 /// [`crate::detached_delivery`]).
 fn spawn_detached_completion_custodian<F>(
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     owner_session_id: SessionId,
-    owner_member: Option<(MobHandle, AgentIdentity)>,
+    owner: DetachedCompletionOwner,
     job_id: String,
     tool_name: &'static str,
     outcome: F,
@@ -3294,9 +3308,9 @@ fn spawn_detached_completion_custodian<F>(
         let value = value.unwrap_or_else(|error| {
             json!({ "error": format!("{tool_name} could not encode its outcome: {error}") })
         });
-        let delivered = match owner_member {
-            Some((handle, identity)) => {
-                crate::detached_delivery::deliver_detached_completion_to_member(
+        let delivered = match owner {
+            DetachedCompletionOwner::Member(handle, identity) => {
+                crate::detached_delivery::deliver_detached_completion_to_member_when_revivable(
                     &runtime,
                     &handle,
                     &identity,
@@ -3308,9 +3322,10 @@ fn spawn_detached_completion_custodian<F>(
                 )
                 .await
             }
-            None => {
-                crate::detached_delivery::deliver_detached_completion(
+            DetachedCompletionOwner::Session(host) => {
+                crate::detached_delivery::deliver_detached_completion_to_session(
                     &runtime,
+                    host.as_deref(),
                     &owner_session_id,
                     tool_name,
                     &job_id,

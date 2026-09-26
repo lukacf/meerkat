@@ -1153,6 +1153,17 @@ impl SessionServiceHistoryExt for RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RpcMobSessionService {
+    /// The persistent service this RPC service wraps owns the durable
+    /// session bodies, so it is the source runtime for forked council
+    /// participants, exactly as when it serves mobs directly.
+    fn forked_participant_source_runtime(
+        self: Arc<Self>,
+    ) -> Option<Arc<dyn meerkat_mob::forked_participant::ForkedParticipantSourceRuntime>> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::forked_participant_source_runtime(
+            Arc::clone(&self.service),
+        )
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         machine: &meerkat_runtime::MeerkatMachine,

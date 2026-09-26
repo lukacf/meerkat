@@ -24,7 +24,9 @@ pub use agent_tools::{
 };
 pub use detached_delivery::{
     DetachedCompletionDelivered, DetachedCompletionError, DetachedDeliveryUnavailable,
-    deliver_detached_completion, deliver_detached_completion_to_member, detached_completion_notice,
+    DetachedOwnerError, DetachedOwnerHost, deliver_detached_completion,
+    deliver_detached_completion_to_member, deliver_detached_completion_to_member_when_revivable,
+    deliver_detached_completion_to_session, detached_completion_notice,
 };
 pub use public_definition::decode_public_mob_definition;
 pub use public_mcp::{
@@ -469,6 +471,9 @@ pub struct MobMcpState {
     /// owner session after the tool call returns. Declared by the host;
     /// never inferred.
     detached_completion_delivery: std::sync::atomic::AtomicBool,
+    /// The host hook that makes a plain-session owner of a detached job live
+    /// again (see [`DetachedOwnerHost`]). `None` when the host supplies none.
+    detached_owner_host: std::sync::RwLock<Option<Arc<dyn DetachedOwnerHost>>>,
     /// When this state was built (Unix ms). Fork children whose job started
     /// earlier belonged to a previous process and are re-linked on restore.
     created_at_ms: u64,
@@ -567,6 +572,7 @@ impl MobMcpState {
             // default follows the runtime's presence: a host built without one
             // is declared unable to deliver, never silently mismatched.
             detached_completion_delivery: std::sync::atomic::AtomicBool::new(can_deliver_detached),
+            detached_owner_host: std::sync::RwLock::new(None),
             created_at_ms: u64::try_from(
                 SystemTime::now()
                     .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
@@ -669,6 +675,34 @@ impl MobMcpState {
             matches!(delivery, DetachedCompletionDelivery::Available),
             std::sync::atomic::Ordering::Release,
         );
+    }
+
+    /// Supply the host hook that makes a plain-session owner of a detached
+    /// job (a top-level session that called `council`) live again when the
+    /// runtime has retired its executor. Mob member owners are revived
+    /// through their mob and need no hook.
+    #[must_use]
+    pub fn with_detached_owner_host(self, host: Arc<dyn DetachedOwnerHost>) -> Self {
+        self.set_detached_owner_host(Some(host));
+        self
+    }
+
+    /// Replace the plain-session owner hook on a shared state.
+    pub fn set_detached_owner_host(&self, host: Option<Arc<dyn DetachedOwnerHost>>) {
+        *self
+            .detached_owner_host
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = host;
+    }
+
+    /// The plain-session owner hook, if the host supplied one. Delivery
+    /// paths (the live custodian and the restart re-link) use it for owners
+    /// that are not mob members.
+    pub fn detached_owner_host(&self) -> Option<Arc<dyn DetachedOwnerHost>> {
+        self.detached_owner_host
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The runtime that admits detached completions for this host, or why

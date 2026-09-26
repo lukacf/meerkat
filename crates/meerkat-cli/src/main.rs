@@ -13825,6 +13825,16 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
+    /// The wrapped persistent service owns the durable session bodies, so it
+    /// is the source runtime for forked council participants.
+    fn forked_participant_source_runtime(
+        self: Arc<Self>,
+    ) -> Option<Arc<dyn meerkat_mob::ForkedParticipantSourceRuntime>> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::forked_participant_source_runtime(
+            Arc::clone(&self.inner),
+        )
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &meerkat_core::SessionId,
@@ -26925,6 +26935,39 @@ default_model = "gpt-5.4"
             )) => assert_eq!(run_result.text, "ok"),
             other => panic!("expected terminal run result, got {other:?}"),
         }
+    }
+
+    /// Council participants are forked from durable bodies, which the
+    /// wrapped persistent service owns: the CLI wrapper must expose it as the
+    /// forked-participant source runtime, or no council ever seats.
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    #[tokio::test]
+    async fn test_mob_cli_session_service_forwards_forked_participant_source_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let session_store = sqlite_session_store(&temp);
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&session_store),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        );
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(session_store)
+            .builtins(false)
+            .shell(false);
+        let (service, _runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            temp.path().join("config_state.json"),
+            None,
+            None,
+        );
+        let wrapper = Arc::new(MobCliSessionService::new(service));
+        assert!(
+            <MobCliSessionService as meerkat_mob::MobSessionService>::forked_participant_source_runtime(wrapper)
+                .is_some(),
+            "MobCliSessionService must expose its persistent inner service as the council source runtime"
+        );
     }
 
     #[cfg(all(feature = "mob", feature = "session-store"))]

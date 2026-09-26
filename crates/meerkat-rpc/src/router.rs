@@ -192,7 +192,12 @@ pub fn compose_rpc_mob_state(
         }),
     )
     .with_default_llm_client_provider(Some(llm_provider))
-    .with_external_tools_provider(Some(tools_provider));
+    .with_external_tools_provider(Some(tools_provider))
+    // A top-level session that convenes a detached council is revived
+    // through this runtime when its idle executor was retired meanwhile.
+    .with_detached_owner_host(Arc::new(crate::detached_owner::RpcDetachedOwnerHost::new(
+        runtime,
+    )));
     if let Some(acceptor) = controlling_acceptor {
         state = state.with_controlling_acceptor(acceptor);
     }

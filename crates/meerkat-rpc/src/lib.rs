@@ -16,6 +16,8 @@
 // Phase 0 smokes directly. The heavier router/runtime behavior suites still run
 // through integration-test targets and the phase verification commands.
 pub mod callback_dispatcher;
+#[cfg(feature = "mob")]
+pub mod detached_owner;
 pub mod error;
 pub mod handlers;
 pub mod live_projection_sink;

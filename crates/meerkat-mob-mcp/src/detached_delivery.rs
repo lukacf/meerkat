@@ -276,6 +276,125 @@ pub async fn deliver_detached_completion_to_member(
     }
 }
 
+/// How many times a delivery waits for an owner whose revival is deferred
+/// before it gives up (the restart re-link then recovers the completion).
+pub(crate) const MAX_LIVE_OWNER_REVIVAL_WAITS: u32 = 16;
+
+/// [`deliver_detached_completion_to_member`], waiting out a deferred owner
+/// revival: while the owner's mob is not running, or a lifecycle operation
+/// on the owner is in progress, wait until that clears and deliver again.
+/// Waiting ends when the mob completes or is destroyed (the error is then
+/// returned) or after a bounded number of waits. The job's idempotency key
+/// keeps the record single however often delivery runs.
+#[allow(clippy::too_many_arguments)]
+pub async fn deliver_detached_completion_to_member_when_revivable(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    owner: &meerkat_mob::MobHandle,
+    owner_identity: &meerkat_mob::AgentIdentity,
+    owner_session_id: &SessionId,
+    tool: &'static str,
+    job_id: &str,
+    status: BackgroundJobTerminalStatus,
+    outcome: serde_json::Value,
+) -> Result<DetachedCompletionDelivered, DetachedCompletionError> {
+    let mut attempt = 0_u32;
+    loop {
+        let result = deliver_detached_completion_to_member(
+            runtime,
+            owner,
+            owner_identity,
+            owner_session_id,
+            tool,
+            job_id,
+            status,
+            outcome.clone(),
+        )
+        .await;
+        let Err(DetachedCompletionError::OwnerRevivalDeferred { reason, .. }) = &result else {
+            return result;
+        };
+        if attempt >= MAX_LIVE_OWNER_REVIVAL_WAITS || !reason.cleared(owner, attempt).await {
+            return result;
+        }
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+/// Why a host could not make a non-member owner session live.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum DetachedOwnerError {
+    /// The owner session no longer exists (archived or deleted): a
+    /// completion for it can never be delivered.
+    #[error("the owner session is gone: {detail}")]
+    OwnerGone { detail: String },
+    /// The host could not make the session live now.
+    #[error("the owner session could not be made live: {detail}")]
+    Failed { detail: String },
+}
+
+/// Host hook that makes a detached job's owner live in the runtime when the
+/// owner is a plain session, not a mob member (a top-level RPC, REST or CLI
+/// session that called `council`).
+///
+/// A mob member owner is revived through its mob. A plain session is
+/// materialized by the host that serves it: the runtime retires an idle
+/// session's executor routinely, and only the host knows how to attach its
+/// executor again. Hosts implement this with the same path their own next
+/// turn takes, so a revived owner is indistinguishable from one the host
+/// resumed itself. Without a hook, a completion for a retired plain session
+/// is not admitted live (it arrives through the restart re-link).
+#[async_trait::async_trait]
+pub trait DetachedOwnerHost: Send + Sync {
+    /// Make `session_id` live in the runtime: attach its executor, and
+    /// materialize the session from its durable record if it has no live
+    /// actor. A session that is already live is left as it is.
+    async fn ensure_owner_live(&self, session_id: &SessionId) -> Result<(), DetachedOwnerError>;
+}
+
+/// Deliver to an owner that is a plain session (not a mob member). When the
+/// runtime refuses because the session is not live, `host` makes it live and
+/// the delivery is retried once, as [`deliver_detached_completion_to_member`]
+/// does for a member. Without a host the runtime's refusal is returned.
+#[allow(clippy::too_many_arguments)]
+pub async fn deliver_detached_completion_to_session(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    host: Option<&dyn DetachedOwnerHost>,
+    owner_session_id: &SessionId,
+    tool: &'static str,
+    job_id: &str,
+    status: BackgroundJobTerminalStatus,
+    outcome: serde_json::Value,
+) -> Result<DetachedCompletionDelivered, DetachedCompletionError> {
+    let first = deliver_detached_completion(
+        runtime,
+        owner_session_id,
+        tool,
+        job_id,
+        status,
+        outcome.clone(),
+    )
+    .await;
+    match (first, host) {
+        (Err(DetachedCompletionError::Runtime { .. }), Some(host)) => {
+            host.ensure_owner_live(owner_session_id)
+                .await
+                .map_err(|error| match error {
+                    DetachedOwnerError::OwnerGone { detail } => {
+                        DetachedCompletionError::OwnerGone { tool, detail }
+                    }
+                    DetachedOwnerError::Failed { detail } => DetachedCompletionError::Runtime {
+                        tool,
+                        detail: format!("reviving the owner session failed: {detail}"),
+                    },
+                })?;
+            deliver_detached_completion(runtime, owner_session_id, tool, job_id, status, outcome)
+                .await
+        }
+        (other, _) => other,
+    }
+}
+
 /// Why a host cannot use detached delivery for a call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -289,3 +408,90 @@ pub enum DetachedDeliveryUnavailable {
 
 pub(crate) type DetachedDeliveryRoute =
     Result<Arc<meerkat_runtime::MeerkatMachine>, DetachedDeliveryUnavailable>;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// A host that answers every revival with a fixed verdict and counts
+    /// the calls.
+    struct FixedOwnerHost {
+        verdict: Result<(), DetachedOwnerError>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DetachedOwnerHost for FixedOwnerHost {
+        async fn ensure_owner_live(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), DetachedOwnerError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.verdict.clone()
+        }
+    }
+
+    async fn deliver_to_unknown_session(
+        host: Option<&dyn DetachedOwnerHost>,
+    ) -> Result<DetachedCompletionDelivered, DetachedCompletionError> {
+        // The runtime has never had this session: exactly what it answers
+        // for a plain session whose idle executor it retired.
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        deliver_detached_completion_to_session(
+            &runtime,
+            host,
+            &SessionId::new(),
+            "council",
+            "job-1",
+            BackgroundJobTerminalStatus::Completed,
+            serde_json::json!({"summary": "done"}),
+        )
+        .await
+    }
+
+    /// Without a host, a plain-session owner the runtime does not have live
+    /// keeps today's behaviour: the runtime's refusal, for the caller to log
+    /// and the restart re-link to recover.
+    #[tokio::test]
+    async fn without_an_owner_host_a_session_the_runtime_lacks_is_refused() {
+        assert!(matches!(
+            deliver_to_unknown_session(None).await,
+            Err(DetachedCompletionError::Runtime { .. })
+        ));
+    }
+
+    /// With a host, the runtime's refusal asks the host to revive the owner:
+    /// a session the host reports gone settles as the typed OwnerGone, and a
+    /// revival the host could not do stays a retryable runtime error.
+    #[tokio::test]
+    async fn an_owner_host_is_asked_once_and_its_verdict_is_typed() {
+        let gone = FixedOwnerHost {
+            verdict: Err(DetachedOwnerError::OwnerGone {
+                detail: "archived".to_string(),
+            }),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        assert!(matches!(
+            deliver_to_unknown_session(Some(&gone)).await,
+            Err(DetachedCompletionError::OwnerGone {
+                tool: "council",
+                ..
+            })
+        ));
+        assert_eq!(gone.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let failed = FixedOwnerHost {
+            verdict: Err(DetachedOwnerError::Failed {
+                detail: "materialization failed".to_string(),
+            }),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        assert!(matches!(
+            deliver_to_unknown_session(Some(&failed)).await,
+            Err(DetachedCompletionError::Runtime { detail, .. })
+                if detail.contains("reviving the owner session failed")
+        ));
+        assert_eq!(failed.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}

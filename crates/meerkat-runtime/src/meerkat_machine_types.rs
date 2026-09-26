@@ -953,6 +953,7 @@ meerkat_machine_runtime_internal_inputs!(
         ResolveRuntimeCompletionCleanup,
         ResolveRuntimeCompletionResult,
         ResolveCheckpointCompletionResult,
+        ResolveAbandonedCompletionResult,
         ResolveRuntimeCompletionWaitFailure,
         ResolveTurnSurfaceResult,
         RollbackRun,

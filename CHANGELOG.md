@@ -812,6 +812,13 @@ them.
   coordinator-owned binding of a member that never joined the roster: its
   rollback retires the coordinator's operation and releases the binding, so a
   later spawn of the same session under another owner is no longer rejected.
+- Terminal peer responses are selected individually so each run receives one
+  valid terminal notice. Ordinary peer batching retains its existing order.
+- Failed input receipts retain their retry carrier until exact durable
+  finalization succeeds. Recovery checks the abandoned batch's own run and
+  failure evidence without replacing a newer run's correlation.
+- Retained in-turn appends finalize their durable completion receipt even
+  when no process-local completion observer is registered.
 - Run boundary events carry the same interaction, run, objective, and realtime
   lineage as persisted assistant history. The start is published after the
   existing execution authority selects the run ID and before its model output;

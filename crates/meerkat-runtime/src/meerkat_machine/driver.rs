@@ -64,6 +64,13 @@ enum RuntimeCompletionAuthorityCorrelation {
         completion_input_ids_digest: String,
         requires_session_checkpoint: bool,
     },
+    AbandonedInput {
+        owner_input_id: InputId,
+        recipient_input_ids: std::collections::HashSet<InputId>,
+        candidate_digest: String,
+        completion_input_ids_digest: String,
+        requires_session_checkpoint: bool,
+    },
 }
 
 /// Attempted local closure of a generated runtime-completion result effect.
@@ -200,6 +207,7 @@ pub(crate) struct InputTerminalCompletionAuthorizationWitness {
     batch_key: crate::input_state::InputTerminalCompletionBatchKey,
     owner_input_id: InputId,
     requires_session_checkpoint: bool,
+    has_interaction_terminal_outbox: bool,
     completion_boundary: Option<crate::meerkat_machine::dsl::RecoveredRunApplyBoundary>,
     candidate_digest: String,
     completion_input_ids_digest: String,
@@ -450,6 +458,29 @@ impl RuntimeCompletionResultAuthority {
                         )
                     && witness.recipients.get(owner_input_id)
                         == Some(&InputTerminalOutcome::Consumed),
+                RuntimeCompletionAuthorityCorrelation::AbandonedInput {
+                    owner_input_id,
+                    recipient_input_ids,
+                    candidate_digest,
+                    completion_input_ids_digest,
+                    requires_session_checkpoint,
+                } => {
+                    owner_input_id == &witness.owner_input_id
+                        && candidate_digest == &witness.candidate_digest
+                        && completion_input_ids_digest == &witness.completion_input_ids_digest
+                        && requires_session_checkpoint == &witness.requires_session_checkpoint
+                        && recipient_input_ids.len() == witness.recipients.len()
+                        && witness.recipients.iter().all(|(input_id, outcome)| {
+                            recipient_input_ids.contains(input_id)
+                                && matches!(outcome, InputTerminalOutcome::Abandoned { .. })
+                        })
+                        && !witness.requires_session_checkpoint
+                        && !witness.has_interaction_terminal_outbox
+                        && matches!(
+                            witness.recipients.get(owner_input_id),
+                            Some(InputTerminalOutcome::Abandoned { .. })
+                        )
+                }
             }
     }
 
@@ -502,6 +533,7 @@ impl RuntimeCompletionResultAuthority {
             runtime_epoch_id: self.runtime_epoch_id.as_ref().map(|value| value.0.clone()),
             owner_input_id: owner_input_id.clone(),
             requires_session_checkpoint: false,
+            has_interaction_terminal_outbox: false,
             completion_boundary: None,
             batch_key: match self.run_id.as_ref() {
                 Some(run_id) => InputTerminalCompletionBatchKey::Run {
@@ -3145,8 +3177,7 @@ impl DriverEntry {
                 ));
             let disposition = machine_classify_recovered_terminal_completion_batch(
                 &batch_audit_key,
-                correlation
-                    == crate::meerkat_machine::dsl::TerminalCompletionCorrelation::CheckpointInput
+                correlation != crate::meerkat_machine::dsl::TerminalCompletionCorrelation::Run
                     || batch_key.run_id().is_none()
                     || run_scoped_pending == 1,
                 owner.candidate.is_some(),
@@ -3313,6 +3344,13 @@ impl DriverEntry {
                 Ok((input_id.clone(), terminal_outcome))
             })
             .collect::<Result<indexmap::IndexMap<_, _>, _>>()?;
+        // Reading a stored input also reads its DSL-owned seed. Finish these
+        // reads before taking the shared authority lock below.
+        let has_interaction_terminal_outbox = persisted_input_ids.iter().any(|input_id| {
+            self.as_driver()
+                .stored_input_state(input_id)
+                .is_some_and(|stored| stored.state.interaction_terminal_outbox.is_some())
+        });
         let authority = self.shared_dsl_authority();
         let authority = authority
             .lock()
@@ -3382,6 +3420,7 @@ impl DriverEntry {
             batch_key: owner.batch_key.clone(),
             owner_input_id: owner.owner_input_id.clone(),
             requires_session_checkpoint: owner.requires_session_checkpoint,
+            has_interaction_terminal_outbox,
             completion_boundary: state
                 .input_completion_boundaries
                 .get(&owner.owner_input_id.to_string())
@@ -9390,6 +9429,33 @@ fn machine_classify_terminal_completion_correlation(
     use crate::meerkat_machine::dsl as mm;
     let owner_input_id = owner.owner_input_id.to_string();
     let run_id = owner.batch_key.run_id().map(mm::RunId::from_domain);
+    let (terminal_outcome, terminal_cause_kind) = match owner
+        .candidate
+        .as_ref()
+        .map(crate::input_state::InteractionTerminalCandidate::runtime_completion_terminal_recovery)
+        .transpose()
+        .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?
+    {
+        Some(crate::input_state::RuntimeCompletionTerminalRecovery::MachineFailure {
+            outcome,
+            cause,
+        }) => (
+            Some(mm::TurnTerminalOutcome::from(outcome)),
+            Some(mm::TurnTerminalCauseKind::from(cause)),
+        ),
+        _ => (None, None),
+    };
+    let has_interaction_terminal_outbox = owner
+        .completion_input_ids
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .any(|id| {
+            driver
+                .as_driver()
+                .stored_input_state(id)
+                .is_some_and(|stored| stored.state.interaction_terminal_outbox.is_some())
+        });
     // Pass the whole batch so generated authority rejects partial consumption,
     // rather than treating the owner's completion as proof for every recipient.
     let shared = driver.shared_dsl_authority();
@@ -9402,6 +9468,10 @@ fn machine_classify_terminal_completion_correlation(
             owner_input_id: owner_input_id.clone(),
             run_id: run_id.clone(),
             terminal,
+            terminal_outcome,
+            terminal_cause_kind,
+            requires_session_checkpoint: owner.requires_session_checkpoint,
+            has_interaction_terminal_outbox,
             recipient_input_ids: owner
                 .completion_input_ids
                 .as_deref()
@@ -9433,8 +9503,47 @@ fn machine_classify_terminal_completion_correlation(
         })
 }
 
-/// Resolve a checkpoint's exact consumed input without replacing the live
-/// run's correlation. Ordinary run results retain their existing authority.
+/// Read a canonical failure only after generated authority classifies its
+/// exact input-owned batch independently of the live run's terminal facts.
+pub(crate) fn machine_abandoned_completion_error_for_batch(
+    driver: &DriverEntry,
+    witness: &InputTerminalCompletionAuthorizationWitness,
+) -> Result<Option<meerkat_core::TurnErrorMetadata>, RuntimeDriverError> {
+    use crate::meerkat_machine::dsl as mm;
+    let input_ids = witness.input_ids().cloned().collect::<Vec<_>>();
+    if driver.input_terminal_completion_authorization_witness(&input_ids)? != *witness {
+        return Err(RuntimeDriverError::StaleAuthority {
+            reason: "abandoned completion metadata lost its exact durable batch".to_string(),
+        });
+    }
+    let owner = driver
+        .as_driver()
+        .stored_input_state(&witness.owner_input_id)
+        .and_then(|stored| stored.state.terminal_completion)
+        .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+            reason: "abandoned completion metadata lost its canonical owner".to_string(),
+        })?;
+    if machine_classify_terminal_completion_correlation(
+        driver,
+        &owner,
+        Some(mm::RuntimeCompletionTerminalObservation::MachineTerminal),
+    )? != mm::TerminalCompletionCorrelation::AbandonedInput
+    {
+        return Ok(None);
+    }
+    owner
+        .candidate
+        .as_ref()
+        .and_then(crate::input_state::InteractionTerminalCandidate::completion_error_metadata)
+        .map(Some)
+        .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+            reason: "abandoned completion authority lost its canonical failure metadata"
+                .to_string(),
+        })
+}
+
+/// Resolve an exact checkpoint or abandoned input receipt without replacing
+/// the live run's correlation. Ordinary run results retain their authority.
 pub(crate) fn machine_resolve_runtime_completion_result_for_batch(
     driver: &DriverEntry,
     witness: &InputTerminalCompletionAuthorizationWitness,
@@ -9560,6 +9669,126 @@ pub(crate) fn machine_resolve_runtime_completion_result_for_batch(
             }
             resolved.ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
                 reason: "checkpoint completion emitted no exact result authority".to_string(),
+            })
+        }
+        mm::TerminalCompletionCorrelation::AbandonedInput => {
+            let run_id = witness.batch_key.run_id().ok_or_else(|| {
+                RuntimeDriverError::RecoveryCorruption {
+                    reason: "abandoned completion has no exact run".to_string(),
+                }
+            })?;
+            let candidate =
+                owner
+                    .candidate
+                    .as_ref()
+                    .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                        reason: "abandoned completion lost its canonical failure candidate"
+                            .to_string(),
+                    })?;
+            let crate::input_state::RuntimeCompletionTerminalRecovery::MachineFailure {
+                outcome,
+                cause,
+            } = candidate
+                .runtime_completion_terminal_recovery()
+                .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?
+            else {
+                return Err(RuntimeDriverError::RecoveryCorruption {
+                    reason: "abandoned completion candidate is not a typed machine failure"
+                        .to_string(),
+                });
+            };
+            let shared = driver.shared_dsl_authority();
+            let expected_recipients = witness
+                .input_ids()
+                .map(ToString::to_string)
+                .collect::<std::collections::HashSet<_>>();
+            let mut authority = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let transition = mm::MeerkatMachineMutator::apply(
+                &mut *authority,
+                mm::MeerkatMachineInput::ResolveAbandonedCompletionResult {
+                    owner_input_id: witness.owner_input_id.to_string(),
+                    run_id: mm::RunId::from_domain(run_id),
+                    candidate_digest: witness.candidate_digest.clone(),
+                    completion_input_ids_digest: witness.completion_input_ids_digest.clone(),
+                    requires_session_checkpoint: witness.requires_session_checkpoint,
+                    has_interaction_terminal_outbox: witness.has_interaction_terminal_outbox,
+                    terminal_outcome: mm::TurnTerminalOutcome::from(outcome),
+                    terminal_cause_kind: mm::TurnTerminalCauseKind::from(cause),
+                    recipient_input_ids: expected_recipients.iter().cloned().collect(),
+                    finalization,
+                },
+            )
+            .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                reason: crate::meerkat_machine::dsl_authority::map_error(
+                    error,
+                    "ResolveAbandonedCompletionResult",
+                ),
+            })?;
+            let mut resolved = None;
+            for effect in transition.effects() {
+                let mm::MeerkatMachineEffect::AbandonedCompletionResultResolved {
+                    session_id,
+                    agent_runtime_id,
+                    fence_token,
+                    runtime_generation,
+                    runtime_epoch_id,
+                    run_id: emitted_run,
+                    owner_input_id,
+                    candidate_digest,
+                    completion_input_ids_digest,
+                    recipient_input_ids,
+                    requires_session_checkpoint,
+                    result_class,
+                    cleanup_outcome,
+                } = effect
+                else {
+                    continue;
+                };
+                if emitted_run != &mm::RunId::from_domain(run_id)
+                    || owner_input_id != &witness.owner_input_id.to_string()
+                    || candidate_digest != &witness.candidate_digest
+                    || completion_input_ids_digest != &witness.completion_input_ids_digest
+                    || *requires_session_checkpoint != witness.requires_session_checkpoint
+                    || recipient_input_ids.len() != expected_recipients.len()
+                    || !recipient_input_ids
+                        .iter()
+                        .all(|input_id| expected_recipients.contains(input_id))
+                    || resolved.is_some()
+                {
+                    return Err(RuntimeDriverError::RecoveryCorruption {
+                        reason: "abandoned result effect changed its exact batch binding"
+                            .to_string(),
+                    });
+                }
+                let session_id = SessionId::parse(&session_id.0).map_err(|error| {
+                    RuntimeDriverError::RecoveryCorruption {
+                        reason: error.to_string(),
+                    }
+                })?;
+                let mut projected = RuntimeCompletionResultAuthority::from_generated_effect(
+                    session_id,
+                    agent_runtime_id.clone(),
+                    *fence_token,
+                    *runtime_generation,
+                    runtime_epoch_id.clone(),
+                    Some(run_id.clone()),
+                    finalization,
+                    *result_class,
+                    *cleanup_outcome,
+                );
+                projected.correlation = RuntimeCompletionAuthorityCorrelation::AbandonedInput {
+                    owner_input_id: witness.owner_input_id.clone(),
+                    recipient_input_ids: witness.input_ids().cloned().collect(),
+                    candidate_digest: candidate_digest.clone(),
+                    completion_input_ids_digest: completion_input_ids_digest.clone(),
+                    requires_session_checkpoint: *requires_session_checkpoint,
+                };
+                resolved = Some(projected);
+            }
+            resolved.ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                reason: "abandoned completion emitted no exact result authority".to_string(),
             })
         }
     }

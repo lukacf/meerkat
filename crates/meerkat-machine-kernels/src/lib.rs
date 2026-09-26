@@ -1,6 +1,8 @@
 pub mod generated;
 #[cfg(feature = "test-oracle")]
 mod runtime;
+#[cfg(test)]
+mod runtime_batch_tests;
 #[allow(dead_code)]
 pub(crate) mod ids {
     use serde::{Deserialize, Serialize};

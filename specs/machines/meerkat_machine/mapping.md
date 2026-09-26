@@ -7313,6 +7313,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyTerminalCompletionCorrelationCheckpointStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationAbandonedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationAbandonedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationAbandonedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationAbandonedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationAbandonedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyTerminalCompletionCorrelationAbandonedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyTerminalCompletionCorrelationRunInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7332,6 +7350,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ClassifyTerminalCompletionCorrelationRunDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyFailedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyFailedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyFailedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyFailedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyFailedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAbandonedCompletionResultRuntimeApplyFailedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveCheckpointCompletionResultSucceededInitializing`
@@ -8087,6 +8123,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `CheckpointCompletionResultResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonedCompletionResultResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

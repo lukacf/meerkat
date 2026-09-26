@@ -1045,15 +1045,26 @@ fn render_command_capability_section(out: &mut String, schema: &MachineSchema) {
             "        let ordered = ordered_queued_lane_inputs(state, lane)?;"
         );
         pushln!(out, "        let first = ordered.first()?;");
-        pushln!(out, "        let selected = match source {{");
         pushln!(
             out,
-            "            RuntimeLoopBatchSource::Steer => select_steer_batch(state, &ordered, first),"
+            "        // AppendContentAndRun owns exactly one SystemNotice per run."
         );
         pushln!(
             out,
-            "            RuntimeLoopBatchSource::Queue => select_queue_batch(state, &ordered, first),"
+            "        let selected = if state.input_runtime_peer_response_terminal_apply_intent.get(first) == Some(&super::RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun) {{"
         );
+        pushln!(out, "            vec![first.clone()]");
+        pushln!(out, "        }} else {{");
+        pushln!(out, "            match source {{");
+        pushln!(
+            out,
+            "                RuntimeLoopBatchSource::Steer => select_steer_batch(state, &ordered, first),"
+        );
+        pushln!(
+            out,
+            "                RuntimeLoopBatchSource::Queue => select_queue_batch(state, &ordered, first),"
+        );
+        pushln!(out, "            }}");
         pushln!(out, "        }};");
         pushln!(out, "        if selected.is_empty() {{");
         pushln!(out, "            None");
@@ -1076,6 +1087,16 @@ fn render_command_capability_section(out: &mut String, schema: &MachineSchema) {
         pushln!(out, "        source: RuntimeLoopBatchSource,");
         pushln!(out, "    ) -> Option<StageForRunPlan> {{");
         pushln!(out, "        if input_ids.is_empty() {{");
+        pushln!(out, "            return None;");
+        pushln!(out, "        }}");
+        pushln!(
+            out,
+            "        // A separately requested stage must preserve terminal-response cardinality."
+        );
+        pushln!(
+            out,
+            "        if input_ids.len() > 1 && input_ids.iter().any(|input_id| state.input_runtime_peer_response_terminal_apply_intent.get(input_id) == Some(&super::RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun)) {{"
+        );
         pushln!(out, "            return None;");
         pushln!(out, "        }}");
         pushln!(

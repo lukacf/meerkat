@@ -2297,6 +2297,7 @@ pub enum TerminalCompletionCorrelation {
     #[default]
     Run,
     CheckpointInput,
+    AbandonedInput,
 }
 
 /// Typed observation of the live-session projection available to generated

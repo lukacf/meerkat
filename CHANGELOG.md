@@ -464,7 +464,11 @@ them.
   is a plain session rather than a mob member asks the host's
   `DetachedOwnerHost` to make it live; the JSON-RPC host installs one, so a
   top-level RPC session that convened a council gets one record and one wake
-  turn even after its idle executor was retired.
+  turn even after its idle executor was retired. The restart re-link does the
+  same for fork_off and council jobs owned by a plain session. An embedder
+  must install the hook (`with_detached_owner_host` /
+  `set_detached_owner_host`) before inserting restored mob handles, because
+  `mob_insert_handle` reads it at insert; `compose_rpc_mob_state` does this.
 - Member status never waits for the member's running turn.
   `MobHandle::member_status` (and so RPC `mob/member_status`,
   `mob_check_member`, and the operator tool `member_status`) still tries the
@@ -748,11 +752,16 @@ them.
   OpenAI-compatible and Gemini requests are unchanged.
 ### Known limitations
 
-- A detached council's convener that is a plain session is revived live only
-  on hosts that install a `DetachedOwnerHost` (the JSON-RPC host does). A REST
-  top-level convener, and a `rkat run --keep-alive` top-level convener whose
-  idle executor the runtime retired, receive the council result through the
-  restart re-link, not live.
+- A detached job's owner that is a plain session (a top-level council
+  convener, or a session a library host bound a fork job to) is made live only
+  on hosts that install a `DetachedOwnerHost` (the JSON-RPC host does). On a
+  host without one (REST, or a `rkat run --keep-alive` session whose idle
+  executor the runtime retired), a completion for such an owner that is not
+  live is not queued: the runtime refuses it, no record is written, and the
+  owner's next turn does not see it. The job stays owed (the council binding
+  unsettled, the fork job not admitted, reported as `Failed`) and is
+  delivered by a later re-link while the owner is live, or at once by a
+  re-link on a host that installs the hook.
 - One-shot `rkat run` (without `--keep-alive`) keeps blocking `fork_off` and
   `council`, with `blocked_because: "host_declared_unavailable"` in the
   result.

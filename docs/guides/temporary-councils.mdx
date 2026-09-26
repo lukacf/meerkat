@@ -200,9 +200,10 @@ council. How the sealed result reaches the caller depends on the host:
   convener that is no longer live (the runtime retired its idle executor) is
   revived first: through its mob when it is a mob member, or through the
   host's `DetachedOwnerHost` when it is a plain session (the JSON-RPC host
-  installs one). A REST top-level convener, or a `rkat run --keep-alive` one
-  whose executor was retired, receives the result through the restart re-link
-  instead. The status is
+  installs one). On a host without one (REST, or a `rkat run --keep-alive`
+  session whose executor was retired), a completion for a top-level convener
+  that is not live is refused and not recorded; the job stays owed and a
+  later re-link delivers it once the convener is live. The status is
   **`failed`** when the exit reason is a failure (`participant_seating_failed`,
   `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`); the
   record still carries the full sealed outcome, and bound-limited ends

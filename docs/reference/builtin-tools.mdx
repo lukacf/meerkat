@@ -447,8 +447,9 @@ result, with `blocked_because`. A convener that is a mob member and is not
 live is revived through its mob; a convener that is a plain session is made
 live through the host's `DetachedOwnerHost`, which the JSON-RPC host installs.
 On a host without one (REST, or a `rkat run --keep-alive` session whose idle
-executor was retired), a top-level convener receives the result through the
-restart re-link instead of live. Its own `timeout_seconds` bounds it in both
+executor was retired), a completion for a top-level convener that is not live
+is refused by the runtime and not recorded; the job stays owed and a later
+re-link delivers it once the convener is live. Its own `timeout_seconds` bounds it in both
 forms, and the agent loop's default tool deadline does not. See
 [Temporary Councils](/guides/temporary-councils#agent-tool).
 
@@ -457,9 +458,11 @@ An embedding host declares the capability on its `MobMcpState`
 `DetachedCompletionDelivery::Available` or `Unavailable`). The default follows
 the presence of a runtime adapter, and `detached_delivery_blocked_because`
 reports why the tools would block. A host whose detached-job owners can be
-plain sessions installs a `DetachedOwnerHost` (`with_detached_owner_host`) so
-their results can be delivered live after the runtime retired an idle
-executor.
+plain sessions installs a `DetachedOwnerHost` (`with_detached_owner_host` /
+`set_detached_owner_host`) so their results are delivered, live and by the
+restart re-link, after the runtime retired an idle executor. Install it before
+inserting restored mob handles: `mob_insert_handle` reads it at insert.
+`compose_rpc_mob_state` does this for the JSON-RPC host.
 
 ### Forked children belong to their forker
 

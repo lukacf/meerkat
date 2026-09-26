@@ -316,15 +316,16 @@ them.
   (`deliver_detached_completion`, `deliver_detached_completion_to_member`,
   `detached_completion_notice`, `DetachedCompletionDelivered`,
   `DetachedCompletionError` (`Encode`, `Rejected`, `Runtime`, `OwnerGone` for
-  an owner that no longer exists, and `OwnerRevivalDeferred` for one that
-  cannot be revived yet), `OwnerRevivalDeferral` (`MobNotRunning { phase }`,
+  an owner that no longer exists, and `OwnerRevivalDeferred { tool, mob_id,
+  reason }` for one that cannot be revived yet), `OwnerRevivalDeferral`
+  (`MobNotRunning { phase }`,
   `LifecycleOperationPending { intent }`), `DetachedDeliveryUnavailable` with
   `HostDeclaredUnavailable` and `NoRuntimeAdapter`),
   `MobMcpState::detached_delivery_blocked_because`, the `council_relink` module
   (`relink_detached_councils`, `relink_council`, `CouncilRelinkReport`), and
   `MobMcpState::relink_detached_councils`, `CouncilRelinkAction`
   (`Delivered`, `AlreadyDelivered`, `AwaitingSeal { claim_lease_expires_at }`,
-  `OwnerGone`, `AwaitingConvener`, `Failed`), `TemporaryCouncilCoordinator::run_detached`,
+  `OwnerGone`, `AwaitingConvener { mob_id, reason }`, `Failed`), `TemporaryCouncilCoordinator::run_detached`,
   `TemporaryCouncilCoordinator::sweep_unfinished`,
   `TemporaryCouncilRecoverySweep` (`recovered`, `held`), and
   `TemporaryCouncilHeldRecord` (`council_id`, `current_claim_epoch`,
@@ -421,7 +422,9 @@ them.
   fork the child made itself never stands in for it. A status read that does
   not observe the child (the mob's single status lane held by another reader,
   a slow actor, a failed read) is not taken as "not running": the pass checks
-  the durable transcript for a finished reply and reads again. An owner that
+  the durable transcript for a finished reply and reads again (reads are
+  classified as running, settled or unobserved, and an unobserved read, such
+  as a busy `LifecycleOperationAdmissionPending`, is never terminal). An owner that
   cannot be revived yet, because its mob is not running (MobKit restores a
   cleanly stopped mob Stopped) or a lifecycle operation is still reviving it,
   is reported as awaiting, and delivery is retried when the mob starts running

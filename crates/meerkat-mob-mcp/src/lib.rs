@@ -722,25 +722,41 @@ impl MobMcpState {
     }
 
     /// [`Self::detached_delivery_route`] for a call whose result belongs to
-    /// `owner_session_id`. Also unavailable when that result could not reach
-    /// the owner later: the owner is not a member of a mob this state
-    /// manages (whose mob revives it) and the host installed no
-    /// [`DetachedOwnerHost`]. An owner whose membership cannot be read is not
-    /// known to be revivable, so it is treated as a non-member.
+    /// `owner_session_id`, with the owner the result goes to. One membership
+    /// read decides both: a member of a mob this state manages is revived
+    /// through its mob; any other owner is a plain session, revived through
+    /// the host's [`DetachedOwnerHost`]. Without that hook the route is
+    /// unavailable (`NoOwnerRevivalHost`): the result could not reach the
+    /// owner later. An owner whose membership cannot be read is not known to
+    /// be a member, so it is treated as a plain session.
     pub(crate) async fn detached_delivery_route_for_owner(
         &self,
         owner_session_id: &SessionId,
-    ) -> crate::detached_delivery::DetachedDeliveryRoute {
+    ) -> Result<
+        (
+            Arc<meerkat_runtime::MeerkatMachine>,
+            crate::detached_delivery::DetachedCompletionOwner,
+        ),
+        crate::detached_delivery::DetachedDeliveryUnavailable,
+    > {
         let runtime = self.detached_delivery_route()?;
-        if self.detached_owner_host().is_some() {
-            return Ok(runtime);
-        }
-        match self.member_for_bridge_session(owner_session_id).await {
-            Ok(Some(_)) => Ok(runtime),
-            Ok(None) | Err(_) => {
-                Err(crate::detached_delivery::DetachedDeliveryUnavailable::NoOwnerRevivalHost)
+        let owner = match self
+            .member_handle_for_bridge_session(owner_session_id)
+            .await
+        {
+            Ok(Some((_, handle, identity))) => {
+                crate::detached_delivery::DetachedCompletionOwner::Member(handle, identity)
             }
-        }
+            Ok(None) | Err(_) => match self.detached_owner_host() {
+                Some(host) => crate::detached_delivery::DetachedCompletionOwner::Session(host),
+                None => {
+                    return Err(
+                        crate::detached_delivery::DetachedDeliveryUnavailable::NoOwnerRevivalHost,
+                    );
+                }
+            },
+        };
+        Ok((runtime, owner))
     }
 
     /// Why fork_off and council would block on this host, or `None` when
@@ -1768,14 +1784,12 @@ impl MobMcpState {
         self.schedule_temporary_council_recovery();
         if self.claim_fork_relink(&mob_id) {
             let service = self.session_service.clone();
-            let runtime = self.runtime_adapter.clone();
-            let owner_host = self.detached_owner_host();
+            let delivery = crate::fork_relink::RelinkDelivery::from_state(self).await;
             let restored_before_ms = self.created_at_ms;
             tokio::spawn(async move {
                 let reports = crate::fork_relink::relink_mob_fork_children(
                     Arc::clone(&service),
-                    runtime.clone(),
-                    owner_host.clone(),
+                    delivery.clone(),
                     &mob_id,
                     &handle,
                     restored_before_ms,
@@ -1786,8 +1800,7 @@ impl MobMcpState {
                 // forker yet: those outcomes are delivered once it can.
                 let reports = crate::fork_relink::redeliver_when_owners_revivable(
                     service,
-                    runtime,
-                    owner_host,
+                    delivery,
                     &mob_id,
                     &handle,
                     restored_before_ms,
@@ -1803,6 +1816,24 @@ impl MobMcpState {
                 }
             });
         }
+    }
+
+    /// The handles of every mob this state manages now, without restoring
+    /// (the re-link's possible owner mobs).
+    pub(crate) async fn managed_mob_handles(&self) -> Vec<MobHandle> {
+        self.mobs
+            .read()
+            .await
+            .values()
+            .map(|managed| {
+                managed
+                    .handle
+                    .clone()
+                    .with_command_authority(CommandAuthority::principal(
+                        self.console_principal.clone(),
+                    ))
+            })
+            .collect()
     }
 
     pub(crate) fn runtime_adapter_for_relink(
@@ -2718,12 +2749,34 @@ impl MobMcpState {
         &self,
         bridge_session_id: &SessionId,
     ) -> Result<Option<(MobId, meerkat_mob::AgentIdentity)>, MobError> {
+        Ok(self
+            .member_handle_for_bridge_session(bridge_session_id)
+            .await?
+            .map(|(mob_id, _, identity)| (mob_id, identity)))
+    }
+
+    /// The member seated on `bridge_session_id` in a mob this state manages,
+    /// with that mob's handle. A mob removed while the read runs (a
+    /// concurrent destroy) is skipped, not an error.
+    pub(crate) async fn member_handle_for_bridge_session(
+        &self,
+        bridge_session_id: &SessionId,
+    ) -> Result<Option<(MobId, MobHandle, meerkat_mob::AgentIdentity)>, MobError> {
         self.ensure_restored().await?;
         let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
         for mob_id in mob_ids {
-            let roster = self.handle_for(&mob_id).await?.roster().await;
-            if let Some(entry) = roster.find_by_bridge_session_id(bridge_session_id) {
-                return Ok(Some((mob_id, entry.agent_identity.clone())));
+            let handle = match self.handle_for(&mob_id).await {
+                Ok(handle) => handle,
+                Err(MobError::MobNotFound(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            if let Some(entry) = handle
+                .roster()
+                .await
+                .find_by_bridge_session_id(bridge_session_id)
+            {
+                let identity = entry.agent_identity.clone();
+                return Ok(Some((mob_id, handle, identity)));
             }
         }
         Ok(None)

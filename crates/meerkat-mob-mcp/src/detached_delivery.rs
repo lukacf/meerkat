@@ -396,6 +396,16 @@ pub async fn deliver_detached_completion_to_session(
     }
 }
 
+/// Who receives a detached job's completion, and how it is made live when
+/// the runtime no longer has it.
+#[derive(Clone)]
+pub(crate) enum DetachedCompletionOwner {
+    /// A mob member: revived through its mob.
+    Member(meerkat_mob::MobHandle, meerkat_mob::AgentIdentity),
+    /// A plain session: revived through the host's owner hook.
+    Session(Arc<dyn DetachedOwnerHost>),
+}
+
 /// Why a host cannot use detached delivery for a call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -12,7 +12,10 @@
 //!   delivers that result, however late the restart landed, and leaves the
 //!   child seated; the opt-in `max_run` limit only bounds a run still going;
 //! - still running: waits for the run to end, racing the opt-in `max_run`
-//!   limit measured from the original start, then delivers the outcome;
+//!   limit measured from the original start, then delivers the outcome; when
+//!   the limit wins, the run is cancelled and `max_run_elapsed` delivered,
+//!   and the child (with its descendants) is retired only once that outcome
+//!   is settled, so a delivery that must wait keeps the job on record;
 //! - idle with its own reply after the fork prefix: delivers that result;
 //! - idle without one (the turn did not survive the restart): delivers a
 //!   `restart_interrupted` outcome and leaves the child seated for its forker.
@@ -20,6 +23,14 @@
 //! A status read that does not observe the child (the mob has one status
 //! observation lane, so another reader can hold it) says nothing about the
 //! child's state: the pass reads again, and never takes it for an idle child.
+//! A read whose run state is unknown (the member was busy and the status
+//! projection's bounded runtime read did not answer) is settled by reading
+//! the child's runtime state directly.
+//!
+//! The owner is resolved from the job's owner session before anything can
+//! retire the child, never from the child's roster entry: a member of the
+//! child's mob or of another managed mob is revived through its mob, and a
+//! plain session through the host's owner hook.
 //!
 //! Delivery is the same durable completion record the live custodian admits
 //! ([`crate::detached_delivery`]), under the same idempotency key, so a job
@@ -33,9 +44,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use meerkat_mob::{
-    AgentIdentity, ForkJobRecord, MemberRunState, MobError, MobHandle, MobId, MobMemberSnapshot,
-};
+use meerkat_mob::{AgentIdentity, ForkJobRecord, MemberRunState, MobError, MobHandle, MobId};
 
 use crate::MobMcpState;
 use crate::agent_tools::{ForkOffCompletion, ForkOffCompletionStatus, TOOL_FORK_OFF};
@@ -71,6 +80,36 @@ pub struct ForkRelinkReport {
     pub action: ForkRelinkAction,
 }
 
+/// How a re-link delivers an outcome to a job's owner.
+#[derive(Clone, Default)]
+pub struct RelinkDelivery {
+    /// The runtime that admits completions. Without one nothing can be
+    /// delivered on this host.
+    pub runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    /// The host hook that makes an owner that is a plain session live (see
+    /// [`DetachedOwnerHost`]).
+    pub owner_host: Option<Arc<dyn DetachedOwnerHost>>,
+    /// Managed mobs, besides the child's own, whose members may own a job:
+    /// such an owner is revived through its mob.
+    pub owner_mobs: Vec<MobHandle>,
+}
+
+impl RelinkDelivery {
+    fn for_state(state: &MobMcpState, owner_mobs: Vec<MobHandle>) -> Self {
+        Self {
+            runtime: state.runtime_adapter_for_relink(),
+            owner_host: state.detached_owner_host(),
+            owner_mobs,
+        }
+    }
+
+    /// The delivery of `state`, with every mob it manages now as a
+    /// possible owner mob.
+    pub(crate) async fn from_state(state: &MobMcpState) -> Self {
+        Self::for_state(state, state.managed_mob_handles().await)
+    }
+}
+
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Pause before reading a child's status again after a read that did not
@@ -103,13 +142,16 @@ pub async fn relink_restored_fork_children(
     let Ok(handles) = state.mob_handles_snapshot().await else {
         return reports;
     };
+    let delivery = RelinkDelivery::for_state(
+        state,
+        handles.iter().map(|(_, handle)| handle.clone()).collect(),
+    );
     for (mob_id, handle) in handles {
         let claimed = state.claim_fork_relink(&mob_id);
         if claimed || !respect_claims {
             let mob_reports = relink_mob_fork_children(
                 state.session_service(),
-                state.runtime_adapter_for_relink(),
-                state.detached_owner_host(),
+                delivery.clone(),
                 &mob_id,
                 &handle,
                 restored_before_ms,
@@ -123,15 +165,13 @@ pub async fn relink_restored_fork_children(
                 // also owns delivering again once a deferred forker
                 // revival clears.
                 let service = state.session_service();
-                let runtime = state.runtime_adapter_for_relink();
-                let owner_host = state.detached_owner_host();
+                let delivery = delivery.clone();
                 let pending = mob_reports.clone();
                 let (mob_id, handle) = (mob_id.clone(), handle.clone());
                 tokio::spawn(async move {
                     redeliver_when_owners_revivable(
                         service,
-                        runtime,
-                        owner_host,
+                        delivery,
                         &mob_id,
                         &handle,
                         restored_before_ms,
@@ -156,8 +196,7 @@ pub async fn relink_restored_fork_children(
 /// nothing is recorded twice.
 pub(crate) async fn redeliver_when_owners_revivable(
     service: Arc<dyn meerkat_mob::MobSessionService>,
-    runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
-    owner_host: Option<Arc<dyn DetachedOwnerHost>>,
+    delivery: RelinkDelivery,
     mob_id: &MobId,
     handle: &MobHandle,
     restored_before_ms: u64,
@@ -192,8 +231,7 @@ pub(crate) async fn redeliver_when_owners_revivable(
         }
         let retried = relink_mob_fork_children_where(
             Arc::clone(&service),
-            runtime.clone(),
-            owner_host.clone(),
+            delivery.clone(),
             mob_id,
             handle,
             restored_before_ms,
@@ -218,20 +256,16 @@ pub(crate) async fn redeliver_when_owners_revivable(
 }
 
 /// Re-link the fork children of one mob (see the module docs).
-/// `owner_host` makes an owner that is a plain session, not a mob member,
-/// live for its delivery (see [`DetachedOwnerHost`]).
 pub async fn relink_mob_fork_children(
     service: Arc<dyn meerkat_mob::MobSessionService>,
-    runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
-    owner_host: Option<Arc<dyn DetachedOwnerHost>>,
+    delivery: RelinkDelivery,
     mob_id: &MobId,
     handle: &MobHandle,
     restored_before_ms: u64,
 ) -> Vec<ForkRelinkReport> {
     relink_mob_fork_children_where(
         service,
-        runtime,
-        owner_host,
+        delivery,
         mob_id,
         handle,
         restored_before_ms,
@@ -243,36 +277,39 @@ pub async fn relink_mob_fork_children(
 /// [`relink_mob_fork_children`] for the children whose job `select` picks.
 async fn relink_mob_fork_children_where(
     service: Arc<dyn meerkat_mob::MobSessionService>,
-    runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
-    owner_host: Option<Arc<dyn DetachedOwnerHost>>,
+    delivery: RelinkDelivery,
     mob_id: &MobId,
     handle: &MobHandle,
     restored_before_ms: u64,
     select: impl Fn(&ForkJobRecord) -> bool,
 ) -> Vec<ForkRelinkReport> {
-    let children: Vec<(AgentIdentity, ForkJobRecord)> = handle
-        .roster()
-        .await
-        .list()
-        .filter_map(|entry| {
-            entry
-                .fork_job
-                .clone()
-                .map(|job| (entry.agent_identity.clone(), job))
-        })
-        .filter(|(_, job)| job.started_at_ms < restored_before_ms && select(job))
-        .collect();
+    // One roster read lists the children and, before anything can retire a
+    // child, resolves each job's owner among the mob's members.
+    let roster = handle.roster().await;
+    let mut children = Vec::new();
+    for entry in roster.list() {
+        let Some(job) = entry.fork_job.clone() else {
+            continue;
+        };
+        if job.started_at_ms >= restored_before_ms || !select(&job) {
+            continue;
+        }
+        let owner = match roster.find_by_bridge_session_id(&job.owner_session_id) {
+            Some(owner) => JobOwner::Member(handle.clone(), owner.agent_identity.clone()),
+            None => JobOwner::among_other_mobs(handle, &delivery, &job.owner_session_id).await,
+        };
+        children.push((entry.agent_identity.clone(), job, owner));
+    }
     // Each child settles on its own task: observing a member waits for its
     // turn boundary, so one busy child must not hold up the others.
-    let tasks = children.into_iter().map(|(child, job)| {
+    let tasks = children.into_iter().map(|(child, job, owner)| {
         let service = Arc::clone(&service);
-        let runtime = runtime.clone();
-        let owner_host = owner_host.clone();
+        let delivery = delivery.clone();
         let mob_id = mob_id.clone();
         let handle = handle.clone();
         tokio::spawn(async move {
             let action =
-                relink_child(service, runtime, owner_host, &mob_id, &handle, &child, &job).await;
+                relink_owned_child(service, &delivery, &mob_id, &handle, &child, &job, owner).await;
             ForkRelinkReport {
                 mob_id,
                 child,
@@ -288,33 +325,99 @@ async fn relink_mob_fork_children_where(
         .collect()
 }
 
-/// Settle one fork child and deliver its outcome to the forker.
+/// Who receives a fork job's outcome. Resolved from the job's owner session
+/// before anything can retire the child, never from the child's own roster
+/// entry (a retired child has none).
+#[derive(Clone)]
+enum JobOwner {
+    /// A member of a managed mob: revived through its mob.
+    Member(MobHandle, AgentIdentity),
+    /// A plain session: revived through the host's owner hook, if any.
+    Session,
+}
+
+impl JobOwner {
+    /// The owner of a job bound to `owner_session_id`: a member of the
+    /// child's mob (`handle`) or of another managed mob, else a plain
+    /// session.
+    async fn resolve(
+        handle: &MobHandle,
+        delivery: &RelinkDelivery,
+        owner_session_id: &meerkat_core::SessionId,
+    ) -> Self {
+        match handle
+            .roster()
+            .await
+            .find_by_bridge_session_id(owner_session_id)
+        {
+            Some(owner) => Self::Member(handle.clone(), owner.agent_identity.clone()),
+            None => Self::among_other_mobs(handle, delivery, owner_session_id).await,
+        }
+    }
+
+    async fn among_other_mobs(
+        handle: &MobHandle,
+        delivery: &RelinkDelivery,
+        owner_session_id: &meerkat_core::SessionId,
+    ) -> Self {
+        for other in &delivery.owner_mobs {
+            if other.mob_id() == handle.mob_id() {
+                continue;
+            }
+            if let Some(owner) = other
+                .roster()
+                .await
+                .find_by_bridge_session_id(owner_session_id)
+            {
+                return Self::Member(other.clone(), owner.agent_identity.clone());
+            }
+        }
+        Self::Session
+    }
+}
+
+/// Settle one fork child and deliver its outcome to the job's owner.
 ///
 /// A child whose reply to the job is already durable delivers that reply
 /// first, before any limit is evaluated: the restart may land long after the
 /// child finished within its limit, and its real outcome must not be replaced
 /// by `max_run_elapsed`. Otherwise observing the child waits for its current
 /// turn boundary. With an opt-in `max_run`, that wait is raced against the
-/// limit measured from the job's original start; the limit winning (with
-/// still no durable reply) cancels and retires the child (and its
-/// descendants) and delivers `max_run_elapsed`.
+/// limit measured from the job's original start. When the limit wins (with
+/// still no durable reply) the child's run is cancelled and
+/// `max_run_elapsed` delivered; the child and its descendants are retired
+/// only once that outcome is settled (delivered, or its owner gone), so a
+/// delivery that must wait leaves the job on record for the next pass.
 ///
-/// An owner that is not the child's forker in the mob (a plain session the
-/// job was bound to) is made live through `owner_host` when the runtime does
-/// not have it live; without a host the runtime's refusal is reported.
+/// The owner is resolved from the job's owner session first (see the module
+/// docs); a plain-session owner is made live through
+/// [`RelinkDelivery::owner_host`] when the runtime does not have it live.
 pub async fn relink_child(
     service: Arc<dyn meerkat_mob::MobSessionService>,
-    runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
-    owner_host: Option<Arc<dyn DetachedOwnerHost>>,
+    delivery: &RelinkDelivery,
     mob_id: &MobId,
     handle: &MobHandle,
     child: &AgentIdentity,
     job: &ForkJobRecord,
 ) -> ForkRelinkAction {
+    let owner = JobOwner::resolve(handle, delivery, &job.owner_session_id).await;
+    relink_owned_child(service, delivery, mob_id, handle, child, job, owner).await
+}
+
+async fn relink_owned_child(
+    service: Arc<dyn meerkat_mob::MobSessionService>,
+    delivery: &RelinkDelivery,
+    mob_id: &MobId,
+    handle: &MobHandle,
+    child: &AgentIdentity,
+    job: &ForkJobRecord,
+    owner: JobOwner,
+) -> ForkRelinkAction {
+    let runtime = delivery.runtime.as_deref();
     // A job whose completion the forker's runtime already admitted is over.
     // The child stays seated for further work that is no longer this job's,
     // so neither the job's limit nor another delivery applies to it.
-    if let Some(runtime) = runtime.as_deref()
+    if let Some(runtime) = runtime
         && crate::detached_delivery::detached_completion_admitted(
             runtime,
             &job.owner_session_id,
@@ -326,80 +429,48 @@ pub async fn relink_child(
         return ForkRelinkAction::AlreadyDelivered;
     }
     if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await {
-        return deliver(
-            runtime.as_deref(),
-            owner_host.as_deref(),
-            handle,
-            child,
-            job,
-            completion,
-        )
-        .await;
+        return deliver(delivery, &owner, job, completion).await;
     }
     let deadline_ms = job
         .max_run_ms
         .map(|limit| job.started_at_ms.saturating_add(limit));
     loop {
+        let observe = observe_child(runtime, handle, child);
         let observed = match deadline_ms {
-            None => Some(handle.member_status(child).await),
+            None => Some(observe.await),
             Some(deadline) => {
                 let remaining = Duration::from_millis(deadline.saturating_sub(now_ms()));
                 tokio::select! {
-                    observed = handle.member_status(child) => Some(observed),
+                    observed = observe => Some(observed),
                     () = tokio::time::sleep(remaining) => None,
                 }
             }
         };
         let Some(observed) = observed else {
             // The child may have finished while the limit ran down.
-            let completion = match durable_reply(&service, mob_id, handle, child, job).await {
-                Some(completion) => completion,
-                None => autokill(mob_id, handle, child, job).await,
-            };
-            return deliver(
-                runtime.as_deref(),
-                owner_host.as_deref(),
-                handle,
-                child,
-                job,
-                completion,
-            )
-            .await;
+            if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await {
+                return deliver(delivery, &owner, job, completion).await;
+            }
+            return limit_elapsed(delivery, &owner, mob_id, handle, child, job).await;
         };
-        match ChildObservation::of(observed) {
+        match observed {
             ChildObservation::Running => tokio::time::sleep(WATCH_INTERVAL).await,
             ChildObservation::Settled => {
                 let completion = settled_outcome(&service, mob_id, handle, child, job).await;
-                return deliver(
-                    runtime.as_deref(),
-                    owner_host.as_deref(),
-                    handle,
-                    child,
-                    job,
-                    completion,
-                )
-                .await;
+                return deliver(delivery, &owner, job, completion).await;
             }
-            ChildObservation::Unobserved(error) => {
+            ChildObservation::Unobserved(detail) => {
                 // The read says nothing about the child's state. A child
                 // that finished meanwhile shows in its durable transcript;
                 // otherwise read again.
                 if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await
                 {
-                    return deliver(
-                        runtime.as_deref(),
-                        owner_host.as_deref(),
-                        handle,
-                        child,
-                        job,
-                        completion,
-                    )
-                    .await;
+                    return deliver(delivery, &owner, job, completion).await;
                 }
                 tracing::debug!(
                     mob_id = %mob_id,
                     child = %child,
-                    error = %error,
+                    detail = %detail,
                     "fork_off re-link could not observe the child; reading again"
                 );
                 tokio::time::sleep(UNOBSERVED_RETRY_INTERVAL).await;
@@ -408,37 +479,121 @@ pub async fn relink_child(
     }
 }
 
-/// What one status read says about a fork child.
+/// What reading a fork child's status says about it.
+#[derive(Debug, PartialEq, Eq)]
 enum ChildObservation {
     /// The child has a run open or work in flight.
     Running,
-    /// The child is not running: idle, no longer seated, or its mob's actor
-    /// is gone (nothing runs it any more).
+    /// The child is not running: idle, no longer seated, its runtime no
+    /// longer holds it, or its mob's actor is gone (nothing runs it any
+    /// more).
     Settled,
     /// The read did not observe the child, so it says nothing about the
     /// child's state: another reader held the mob's one status observation
-    /// lane, the actor did not answer in time, or the read failed.
-    Unobserved(MobError),
+    /// lane, the actor did not answer in time, or a read failed.
+    Unobserved(String),
 }
 
-impl ChildObservation {
-    fn of(read: Result<MobMemberSnapshot, MobError>) -> Self {
-        match read {
-            Ok(snapshot) => {
-                let running = snapshot.progress.as_ref().is_some_and(|progress| {
-                    progress.run_state == MemberRunState::RunOpen || progress.in_flight_work > 0
-                });
-                if running {
-                    Self::Running
-                } else {
-                    Self::Settled
-                }
-            }
-            Err(MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed) => {
-                Self::Settled
-            }
-            Err(error) => Self::Unobserved(error),
+/// What a status read's run progress says, before any further read.
+#[derive(Debug, PartialEq, Eq)]
+enum ProgressVerdict {
+    Running,
+    Settled,
+    /// The run state is unknown: the member was busy and the status
+    /// projection's bounded runtime read did not answer. The runtime is
+    /// asked directly.
+    Undetermined,
+}
+
+impl ProgressVerdict {
+    /// `progress` is the run state and in-flight work count of a status
+    /// read, `None` when the read carries no run progress (a member placed
+    /// on another host).
+    fn of(progress: Option<(MemberRunState, u64)>) -> Self {
+        match progress {
+            Some((_, in_flight_work)) if in_flight_work > 0 => Self::Running,
+            Some((MemberRunState::RunOpen, _)) => Self::Running,
+            Some((MemberRunState::Unknown, _)) => Self::Undetermined,
+            Some((MemberRunState::Idle, _)) | None => Self::Settled,
         }
+    }
+}
+
+/// Read a fork child's status: its member status, and when that leaves the
+/// run state unknown, its runtime state.
+async fn observe_child(
+    runtime: Option<&meerkat_runtime::MeerkatMachine>,
+    handle: &MobHandle,
+    child: &AgentIdentity,
+) -> ChildObservation {
+    let snapshot = match handle.member_status(child).await {
+        Ok(snapshot) => snapshot,
+        Err(MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed) => {
+            return ChildObservation::Settled;
+        }
+        Err(error) => return ChildObservation::Unobserved(error.to_string()),
+    };
+    let progress = snapshot
+        .progress
+        .as_ref()
+        .map(|progress| (progress.run_state, progress.in_flight_work));
+    match ProgressVerdict::of(progress) {
+        ProgressVerdict::Running => ChildObservation::Running,
+        ProgressVerdict::Settled => ChildObservation::Settled,
+        ProgressVerdict::Undetermined => {
+            let Some(runtime) = runtime else {
+                // Nothing to ask; nothing can be delivered on this host
+                // either.
+                return ChildObservation::Settled;
+            };
+            let Some(session_id) = handle.resolve_bridge_session_id(child).await else {
+                return ChildObservation::Settled;
+            };
+            use meerkat_runtime::SessionServiceRuntimeExt as _;
+            let state = runtime.runtime_state(&session_id).await;
+            let active_inputs = runtime
+                .list_active_inputs(&session_id)
+                .await
+                .map(|inputs| inputs.len());
+            from_runtime(state, active_inputs)
+        }
+    }
+}
+
+/// The child's runtime state, read directly: a run in progress, or a retired
+/// runtime still draining admitted input, is running; a runtime that is idle,
+/// attached with no run, stopped, destroyed or not held any more is settled;
+/// a failed read or a state that says nothing yet is unobserved.
+fn from_runtime(
+    state: Result<meerkat_runtime::RuntimeState, meerkat_runtime::RuntimeDriverError>,
+    active_inputs: Result<usize, meerkat_runtime::RuntimeDriverError>,
+) -> ChildObservation {
+    use meerkat_runtime::{RuntimeDriverError, RuntimeState};
+    let gone = |error: &RuntimeDriverError| {
+        matches!(
+            error,
+            RuntimeDriverError::NotFound { .. }
+                | RuntimeDriverError::Destroyed
+                | RuntimeDriverError::NotReady { .. }
+        )
+    };
+    match state {
+        Ok(RuntimeState::Running) => ChildObservation::Running,
+        Ok(RuntimeState::Retired) => match active_inputs {
+            Ok(0) => ChildObservation::Settled,
+            Ok(_) => ChildObservation::Running,
+            Err(error) if gone(&error) => ChildObservation::Settled,
+            Err(error) => ChildObservation::Unobserved(error.to_string()),
+        },
+        Ok(
+            RuntimeState::Idle
+            | RuntimeState::Attached
+            | RuntimeState::Stopped
+            | RuntimeState::Destroyed,
+        ) => ChildObservation::Settled,
+        Ok(other) => ChildObservation::Unobserved(format!("the child's runtime is {other}")),
+        Err(error) if gone(&error) => ChildObservation::Settled,
+        Err(error) => ChildObservation::Unobserved(error.to_string()),
     }
 }
 
@@ -467,26 +622,42 @@ async fn durable_reply(
     Some(completion)
 }
 
-async fn autokill(
+/// The opt-in limit won: cancel the child's run and deliver
+/// `max_run_elapsed`, then retire the child with its descendants once that
+/// outcome is settled. A delivery that must wait (or failed) keeps the child,
+/// cancelled, and its job record, so the next pass delivers it.
+async fn limit_elapsed(
+    delivery: &RelinkDelivery,
+    owner: &JobOwner,
     mob_id: &MobId,
     handle: &MobHandle,
     child: &AgentIdentity,
     job: &ForkJobRecord,
-) -> ForkOffCompletion {
+) -> ForkRelinkAction {
     let _ = handle.force_cancel_member(child.clone()).await;
-    let retirement_error = handle
-        .retire_with_descendants(child.clone())
-        .await
-        .err()
-        .map(|error| error.to_string());
     let mut completion = ForkOffCompletion::empty(
         child.to_string(),
         member_ref(mob_id, child),
         ForkOffCompletionStatus::MaxRunElapsed,
     );
     completion.max_run_secs = job.max_run_ms.map(|limit| limit / 1000);
-    completion.retirement_error = retirement_error;
-    completion
+    let action = deliver(delivery, owner, job, completion).await;
+    if matches!(
+        action,
+        ForkRelinkAction::Delivered
+            | ForkRelinkAction::AlreadyDelivered
+            | ForkRelinkAction::OwnerGone
+    ) && let Err(error) = handle.retire_with_descendants(child.clone()).await
+    {
+        tracing::warn!(
+            mob_id = %mob_id,
+            child = %child,
+            error = %error,
+            "fork_off re-link delivered max_run_elapsed but could not retire the child; \
+             it stays seated, cancelled, for its forker"
+        );
+    }
+    action
 }
 
 /// The outcome of an idle child: its own reply after the fork prefix, or
@@ -513,44 +684,27 @@ fn member_ref(mob_id: &MobId, child: &AgentIdentity) -> meerkat_contracts::WireM
 }
 
 async fn deliver(
-    runtime: Option<&meerkat_runtime::MeerkatMachine>,
-    owner_host: Option<&dyn DetachedOwnerHost>,
-    handle: &MobHandle,
-    child: &AgentIdentity,
+    delivery: &RelinkDelivery,
+    owner: &JobOwner,
     job: &ForkJobRecord,
     completion: ForkOffCompletion,
 ) -> ForkRelinkAction {
-    let Some(runtime) = runtime else {
+    let Some(runtime) = delivery.runtime.as_deref() else {
         return ForkRelinkAction::Failed(
             "no runtime to admit the completion on this host".to_string(),
         );
     };
-    let status = match completion.status {
-        ForkOffCompletionStatus::Completed => {
-            meerkat_core::event::BackgroundJobTerminalStatus::Completed
-        }
-        ForkOffCompletionStatus::MaxRunElapsed => {
-            meerkat_core::event::BackgroundJobTerminalStatus::Terminated
-        }
-        _ => meerkat_core::event::BackgroundJobTerminalStatus::Failed,
-    };
+    let status = completion.status.terminal_status();
     let value = match serde_json::to_value(&completion) {
         Ok(value) => value,
         Err(error) => return ForkRelinkAction::Failed(error.to_string()),
     };
-    // The forker is the child's spawner; reviving it through the mob covers
-    // an owner the restarted runtime does not have live.
-    let owner = handle
-        .roster()
-        .await
-        .get_by_identity(child)
-        .and_then(|entry| entry.spawned_by.clone());
     let delivered = match owner {
-        Some(owner) => {
+        JobOwner::Member(owner_mob, owner_identity) => {
             crate::detached_delivery::deliver_detached_completion_to_member(
                 runtime,
-                handle,
-                &owner,
+                owner_mob,
+                owner_identity,
                 &job.owner_session_id,
                 TOOL_FORK_OFF,
                 &job.job_id,
@@ -559,12 +713,10 @@ async fn deliver(
             )
             .await
         }
-        // An owner that is not the child's forker in the mob is a plain
-        // session; the host makes it live when the runtime does not have it.
-        None => {
+        JobOwner::Session => {
             crate::detached_delivery::deliver_detached_completion_to_session(
                 runtime,
-                owner_host,
+                delivery.owner_host.as_deref(),
                 &job.owner_session_id,
                 TOOL_FORK_OFF,
                 &job.job_id,
@@ -587,5 +739,91 @@ async fn deliver(
             ..
         }) => ForkRelinkAction::AwaitingOwner(reason),
         Err(error) => ForkRelinkAction::Failed(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChildObservation, ProgressVerdict, from_runtime};
+    use meerkat_mob::MemberRunState;
+    use meerkat_runtime::{RuntimeDriverError, RuntimeState};
+
+    /// An unknown run state (the member was busy and the projection's
+    /// bounded runtime read did not answer) is never taken for a settled
+    /// child; the runtime is asked (lifecycle review: it was read as idle).
+    #[test]
+    fn an_unknown_run_state_is_not_settled() {
+        assert_eq!(
+            ProgressVerdict::of(Some((MemberRunState::Unknown, 0))),
+            ProgressVerdict::Undetermined
+        );
+        assert_eq!(
+            ProgressVerdict::of(Some((MemberRunState::Idle, 0))),
+            ProgressVerdict::Settled
+        );
+        assert_eq!(
+            ProgressVerdict::of(Some((MemberRunState::RunOpen, 0))),
+            ProgressVerdict::Running
+        );
+        assert_eq!(
+            ProgressVerdict::of(Some((MemberRunState::Unknown, 1))),
+            ProgressVerdict::Running
+        );
+        assert_eq!(ProgressVerdict::of(None), ProgressVerdict::Settled);
+    }
+
+    /// The direct runtime read: a run in progress, or a retired runtime still
+    /// draining admitted input, is running; no run, or a runtime that no
+    /// longer holds the child (the turn did not survive a restart), is
+    /// settled; a failed read or an initializing runtime is unobserved.
+    #[test]
+    fn the_runtime_state_settles_an_unknown_run_state() {
+        let gone = || RuntimeDriverError::Destroyed;
+        assert_eq!(
+            from_runtime(Ok(RuntimeState::Running), Ok(0)),
+            ChildObservation::Running
+        );
+        assert_eq!(
+            from_runtime(Ok(RuntimeState::Retired), Ok(1)),
+            ChildObservation::Running
+        );
+        assert_eq!(
+            from_runtime(Ok(RuntimeState::Retired), Ok(0)),
+            ChildObservation::Settled
+        );
+        for settled in [
+            RuntimeState::Idle,
+            RuntimeState::Attached,
+            RuntimeState::Stopped,
+            RuntimeState::Destroyed,
+        ] {
+            assert_eq!(from_runtime(Ok(settled), Ok(0)), ChildObservation::Settled);
+        }
+        assert_eq!(
+            from_runtime(Err(gone()), Err(gone())),
+            ChildObservation::Settled
+        );
+        assert!(matches!(
+            from_runtime(Ok(RuntimeState::Initializing), Ok(0)),
+            ChildObservation::Unobserved(_)
+        ));
+        assert!(matches!(
+            from_runtime(
+                Err(RuntimeDriverError::Internal(
+                    "store unavailable".to_string()
+                )),
+                Ok(0)
+            ),
+            ChildObservation::Unobserved(_)
+        ));
+        assert!(matches!(
+            from_runtime(
+                Ok(RuntimeState::Retired),
+                Err(RuntimeDriverError::Internal(
+                    "store unavailable".to_string()
+                ))
+            ),
+            ChildObservation::Unobserved(_)
+        ));
     }
 }

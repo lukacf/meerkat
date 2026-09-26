@@ -40,6 +40,7 @@ use tokio_with_wasm::alias::{
 };
 
 use crate::MobMcpState;
+use crate::detached_delivery::DetachedCompletionOwner;
 use crate::temporary_council::{
     MergeBackPolicy, TemporaryCouncilBounds, TemporaryCouncilDeadline, TemporaryCouncilError,
     TemporaryCouncilParticipantSpec, TemporaryCouncilRequest, TemporaryCouncilStructuredContract,
@@ -510,42 +511,6 @@ impl AgentMobToolSurface {
                 ))
             })?;
         Ok(bound.and_then(|(bound_mob, identity)| (&bound_mob == mob_id).then_some(identity)))
-    }
-
-    /// The mob member this surface's session is bound to, with a handle to
-    /// its mob, so a detached job can revive it through the mob when the
-    /// runtime no longer has it live. `None` for a session that is not a
-    /// mob member (it has no mob to revive it) or whose binding cannot be
-    /// read now; delivery then goes straight to the runtime.
-    async fn convener_member(&self) -> Option<(MobHandle, AgentIdentity)> {
-        let (mob_id, identity) = match self
-            .state
-            .member_for_bridge_session(&self.owner_bridge_session_id)
-            .await
-        {
-            Ok(bound) => bound?,
-            Err(error) => {
-                tracing::warn!(
-                    session_id = %self.owner_bridge_session_id,
-                    error = %error,
-                    "could not resolve the convener's mob membership; its council \
-                     completion will not revive it"
-                );
-                return None;
-            }
-        };
-        match self.bound_handle(&mob_id).await {
-            Ok(handle) => Some((handle, identity)),
-            Err(error) => {
-                tracing::warn!(
-                    %mob_id,
-                    error = %error,
-                    "could not bind the convener's mob; its council completion will \
-                     not revive it"
-                );
-                None
-            }
-        }
     }
 
     /// Admission to observe or retire one member: manage scope over the mob,
@@ -1359,7 +1324,9 @@ impl AgentMobToolSurface {
                 "fork_off blocks: the host declares detached delivery but has no runtime to admit the completion"
             );
         }
-        let runtime = route.ok();
+        // A fork_off caller is the source member itself, revived through the
+        // mob with the bound handle below.
+        let runtime = route.ok().map(|(runtime, _)| runtime);
         let job_id = uuid::Uuid::new_v4().to_string();
         // A detached child's job is recorded durably with the child so a
         // restarted host can still deliver its outcome.
@@ -1613,8 +1580,8 @@ impl AgentMobToolSurface {
             .state
             .detached_delivery_route_for_owner(&self.owner_bridge_session_id)
             .await;
-        let runtime = match route {
-            Ok(runtime) => runtime,
+        let (runtime, convener) = match route {
+            Ok(route) => route,
             Err(reason) => {
                 if reason == crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter
                 {
@@ -1663,13 +1630,20 @@ impl AgentMobToolSurface {
             };
             let _ = outcome_tx.send(outcome);
         });
-        // A convener that is a mob member is revived through its mob when
-        // the runtime no longer has it live (its idle executor retired while
-        // the council ran), exactly like a fork_off owner; a plain-session
-        // convener is revived through the host's owner hook.
-        let convener = match self.convener_member().await {
-            Some((handle, identity)) => DetachedCompletionOwner::Member(handle, identity),
-            None => DetachedCompletionOwner::Session(self.state.detached_owner_host()),
+        // The route's one membership read decided the owner: a convener that
+        // is a mob member is revived through its mob when the runtime no
+        // longer has it live (its idle executor retired while the council
+        // ran), exactly like a fork_off owner, acting as this surface's
+        // principal; a plain-session convener is revived through the host's
+        // owner hook.
+        let convener = match convener {
+            DetachedCompletionOwner::Member(handle, identity) => DetachedCompletionOwner::Member(
+                handle.with_command_authority(meerkat_mob::CommandAuthority::principal(
+                    self.control_principal.clone(),
+                )),
+                identity,
+            ),
+            session @ DetachedCompletionOwner::Session(_) => session,
         };
         spawn_detached_completion_custodian(
             runtime,
@@ -3280,16 +3254,6 @@ impl ForkOffCompletion {
     }
 }
 
-/// Who owns a detached job's completion, and so how a not-live owner is
-/// revived before the completion is admitted.
-enum DetachedCompletionOwner {
-    /// A mob member: revived through its mob.
-    Member(MobHandle, AgentIdentity),
-    /// A plain session: revived through the host's owner hook, when the
-    /// host supplied one.
-    Session(Option<Arc<dyn crate::detached_delivery::DetachedOwnerHost>>),
-}
-
 /// Own one detached tool run's completion: when `outcome` resolves, deliver
 /// the owner's one durable completion record (see
 /// [`crate::detached_delivery`]).
@@ -3331,7 +3295,7 @@ fn spawn_detached_completion_custodian<F>(
             DetachedCompletionOwner::Session(host) => {
                 crate::detached_delivery::deliver_detached_completion_to_session(
                     &runtime,
-                    host.as_deref(),
+                    Some(host.as_ref()),
                     &owner_session_id,
                     tool_name,
                     &job_id,

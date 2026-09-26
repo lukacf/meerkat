@@ -1985,3 +1985,81 @@ async fn an_owner_hook_lets_a_plain_session_convener_run_the_council_detached() 
     assert_eq!(owed_council_jobs(&fixture).await, 1, "the job is bound");
     fixture.teardown().await;
 }
+
+/// An owner hook that counts its calls and cannot make anything live.
+#[derive(Default)]
+struct CountingOwnerHost(std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl meerkat_mob_mcp::DetachedOwnerHost for CountingOwnerHost {
+    async fn ensure_owner_live(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), meerkat_mob_mcp::DetachedOwnerError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(meerkat_mob_mcp::DetachedOwnerError::Failed {
+            detail: "this hook is not the way to revive a mob member".to_string(),
+        })
+    }
+}
+
+/// On a host with an owner hook, a member convener is still revived through
+/// its mob: the route's one membership read decides the custodian's owner,
+/// and the hook is never asked (lifecycle review: the gate skipped the read
+/// when a hook existed, and a second read decided the owner separately).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hooked_host_revives_a_member_convener_through_its_mob() {
+    let gate = TurnGate::new();
+    let _release_on_exit = OpenOnDrop(gate.clone());
+    let inner = routed_script(RequestLog::default(), Vec::new());
+    let gate_for_script = gate.clone();
+    let fixture = CouncilFixture::new_runtime_backed(move |request: &LlmRequest| {
+        if !support::user_text(request).contains("bounded plain-text summary")
+            && let Some(role) = support::role_in_request(request)
+        {
+            return ScriptedTurn::Gated(gate_for_script.clone(), format!("position from {role}"));
+        }
+        inner(request)
+    });
+    fixture.seed_source_mob(&["convener", "alice", "bob"]).await;
+    let host = Arc::new(CountingOwnerHost::default());
+    fixture.state.set_detached_owner_host(Some(host.clone()));
+    let mob_id = fixture.source_mob_id().to_string();
+    let convener = bind_surface(
+        &fixture.state,
+        member_session(&fixture, "convener").await,
+        convener_authority(&mob_id),
+    );
+    assert_eq!(
+        drive_turn(&fixture, "convener", "FOLLOW-UP-W warm up").await,
+        FOLLOW_UP_REPLY
+    );
+
+    let started = call(&convener.surface, "council", council_args(&fixture, None))
+        .await
+        .expect("council starts");
+    let job_id = started["job_id"].as_str().expect("job id").to_string();
+    gate.wait_entered(1).await;
+    let runtime = fixture
+        .runtime_adapter
+        .as_ref()
+        .expect("runtime-backed fixture");
+    runtime
+        .unregister_session(&convener.session)
+        .await
+        .expect("the runtime retires the convener's idle executor");
+    gate.open();
+
+    let record = wait_for_completion(&fixture, &convener.session, &job_id).await;
+    assert_eq!(
+        record.status,
+        BackgroundJobTerminalStatus::Completed,
+        "{record:?}"
+    );
+    assert_eq!(
+        host.0.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the owner hook is not asked for a mob member"
+    );
+    fixture.teardown().await;
+}

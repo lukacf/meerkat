@@ -1789,6 +1789,8 @@ async fn e2e_fast_top_level_rpc_convener_is_revived_for_its_council_result() {
 
 const IN_TURN_PROMPT: &str = "IN-TURN-7K fork, keep working, then finish";
 const IN_TURN_DONE: &str = "IN-TURN-DONE";
+/// Final text of a forker run that follows its own turn (a wake).
+const IN_TURN_FOLLOW_UP: &str = "IN-TURN-FOLLOW-UP";
 const GATE_TIMEOUT: &str = "GATE-TIMEOUT";
 const BUS_PROBE: &str = "bus-probe";
 const BUS_PROBE_PROMPT: &str = "BUS-PROBE-2W reply";
@@ -1981,7 +1983,10 @@ impl LlmClient for InTurnScript {
                     }
                     return scripted_text(&model, CHILD_REPLY);
                 }
-                if turn_finished || !last_user.contains(IN_TURN_PROMPT) {
+                if turn_finished {
+                    return scripted_text(&model, IN_TURN_FOLLOW_UP);
+                }
+                if !last_user.contains(IN_TURN_PROMPT) {
                     return scripted_text(&model, FOLLOW_UP_REPLY);
                 }
                 match in_turn_progress(&rendered) {
@@ -2069,11 +2074,26 @@ struct InTurnRun {
     admitted_input: String,
     /// Every forker input as the runtime settled it.
     inputs: Vec<InputFact>,
+    /// The finalized public completion of each forker input, by input id.
+    completions: std::collections::BTreeMap<String, String>,
     /// BoundaryAppendApplied events of the forker: (run id, input id).
     boundary_appends: Vec<(String, String)>,
-    /// RunCompleted / RunFailed events of the forker.
-    runs_completed: usize,
+    /// Final texts of the forker's RunCompleted events, in order.
+    runs_completed: Vec<String>,
     runs_failed: usize,
+}
+
+/// A finalized public completion, reduced to what the tests compare.
+fn describe_completion(outcome: &meerkat_runtime::completion::CompletionOutcome) -> String {
+    match outcome {
+        meerkat_runtime::completion::CompletionOutcome::Completed(result) => {
+            format!("completed:{}", result.text)
+        }
+        meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
+            "completed_without_result".to_string()
+        }
+        other => format!("unsuccessful:{other:?}"),
+    }
 }
 
 impl InTurnRun {
@@ -2109,6 +2129,27 @@ impl InTurnRun {
         assert_eq!(found.len(), 1, "one completion input: {:#?}", self.inputs);
         assert_eq!(found[0].input_id, self.admitted_input, "{:#?}", self.inputs);
         found[0]
+    }
+
+    /// The forker's own prompt input: its one input that is not the
+    /// completion.
+    fn prompt_input(&self) -> &InputFact {
+        let key = format!("fork_off:{}", self.job_id);
+        let found: Vec<_> = self
+            .inputs
+            .iter()
+            .filter(|input| input.key.as_deref() != Some(key.as_str()))
+            .collect();
+        assert_eq!(found.len(), 1, "one prompt input: {:#?}", self.inputs);
+        found[0]
+    }
+
+    /// The finalized public completion of `input`.
+    fn completion_of(&self, input: &InputFact) -> &str {
+        self.completions
+            .get(&input.input_id)
+            .map(String::as_str)
+            .unwrap_or_else(|| panic!("no finalized completion for {input:#?}"))
     }
 
     /// Distinct runs the forker's inputs were consumed by.
@@ -2172,6 +2213,10 @@ async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun
         after_child,
     });
     let (router, mob_state) = make_stack_over(temp.path(), client, runtime_store).await;
+    let runtime = mob_state
+        .session_service()
+        .runtime_adapter()
+        .expect("runtime-backed stack");
     let mob_id = format!("in-turn-{label}-{}", uuid::Uuid::new_v4().simple());
     let mob_id = mob_state
         .mob_create_definition(mob_definition(&mob_id))
@@ -2272,7 +2317,32 @@ async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun
         AfterChild::MoreToolCalls => 1,
         AfterChild::FinishTurn => 2,
     };
-    loop {
+    // Finalized public completions, not just consumed phases: the input
+    // lifecycle does not establish the completion class.
+    let finalized = |inputs: Vec<InputFact>| {
+        let runtime = Arc::clone(&runtime);
+        let session = session.clone();
+        async move {
+            let mut completions = std::collections::BTreeMap::new();
+            for input in &inputs {
+                let input_id: meerkat_core::lifecycle::InputId =
+                    serde_json::from_value(json!(input.input_id)).expect("input id");
+                if let Some(outcome) =
+                    meerkat_runtime::SessionServiceRuntimeExt::input_terminal_completion(
+                        runtime.as_ref(),
+                        &session,
+                        &input_id,
+                    )
+                    .await
+                    .expect("input terminal completion query")
+                {
+                    completions.insert(input.input_id.clone(), describe_completion(&outcome));
+                }
+            }
+            completions
+        }
+    };
+    let completions = loop {
         let inputs = probe.forker_inputs().await;
         let completion_settled = inputs
             .iter()
@@ -2281,14 +2351,18 @@ async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun
         let events_owed = count(&seen, run_completed) + count(&seen, run_failed) >= expected_runs
             && (after_child == AfterChild::FinishTurn || count(&seen, boundary_append) >= 1);
         if completion_settled && inputs.iter().all(InputFact::settled) && events_owed {
-            break;
+            let input_count = inputs.len();
+            let completions = finalized(inputs.clone()).await;
+            if completions.len() == input_count {
+                break completions;
+            }
         }
         assert!(
             tokio::time::Instant::now() < deadline,
             "the scenario never settled: inputs {inputs:#?}, forker events {seen:#?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    };
     // A bounded window in which nothing new may happen.
     let requests_before = requests.lock().unwrap().len();
     let inputs_before = probe.forker_inputs().await;
@@ -2312,6 +2386,13 @@ async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun
             _ => None,
         })
         .collect();
+    let runs_completed = seen
+        .iter()
+        .filter_map(|event| match event {
+            meerkat_core::event::AgentEvent::RunCompleted { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .collect();
     let requests = requests.lock().unwrap().clone();
     let inputs = after.1;
     let _ = mob_state.mob_destroy(&mob_id).await;
@@ -2321,8 +2402,9 @@ async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun
         job_id,
         admitted_input,
         inputs,
+        completions,
         boundary_appends,
-        runs_completed: count(&seen, run_completed),
+        runs_completed,
         runs_failed: count(&seen, run_failed),
     }
 }
@@ -2382,7 +2464,21 @@ async fn e2e_fast_in_turn_record_is_carried_once_by_every_later_call_of_the_turn
         run.inputs
     );
     run.assert_clean_terminals();
-    assert_eq!(run.runs_completed, 1, "one run, one terminal");
+    assert_eq!(
+        run.completion_of(run.prompt_input()),
+        format!("completed:{IN_TURN_DONE}"),
+        "the original run finalized successfully"
+    );
+    let joined = run.completion_of(run.completion_input());
+    assert!(
+        joined == format!("completed:{IN_TURN_DONE}") || joined == "completed_without_result",
+        "the joined completion input finalized with the original run: {joined}"
+    );
+    assert_eq!(
+        run.runs_completed,
+        vec![IN_TURN_DONE.to_string()],
+        "exactly one run, the original, completed"
+    );
     let runs = run.assistant_runs();
     assert!(runs.iter().all(|run_id| *run_id == the_run), "{runs:?}");
     let rows = run.record_rows();
@@ -2426,8 +2522,21 @@ async fn e2e_fast_detached_completion_without_a_later_boundary_takes_exactly_one
     );
     run.assert_clean_terminals();
     assert_eq!(
-        run.runs_completed, 2,
-        "the original run and one follow-up run"
+        run.completion_of(run.prompt_input()),
+        format!("completed:{IN_TURN_DONE}"),
+        "the original run finalized successfully"
+    );
+    assert_eq!(
+        run.completion_of(run.completion_input()),
+        format!("completed:{IN_TURN_FOLLOW_UP}"),
+        "the completion input finalized successfully with the follow-up run"
+    );
+    let mut completed = run.runs_completed.clone();
+    completed.sort();
+    assert_eq!(
+        completed,
+        vec![IN_TURN_DONE.to_string(), IN_TURN_FOLLOW_UP.to_string()],
+        "exactly one original and one follow-up run completed"
     );
     let runs = run.assistant_runs();
     assert!(

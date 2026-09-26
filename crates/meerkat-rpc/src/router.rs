@@ -13107,6 +13107,33 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         }
     }
 
+    /// Create a real, materialized session through `session/create` (its
+    /// initial turn runs against the mock LLM). This is the state every live
+    /// channel's session is in by the time `live/open` admits a channel:
+    /// `live/open` refuses a session the session service does not hold and
+    /// materializes a staged one before admission, close settlement resolves
+    /// assistant playback against that live session, and the runtime-backed
+    /// create path prepares the exact runtime generation/fence that remote
+    /// WebRTC signaling requires. A bare `register_session` provides none of
+    /// these.
+    #[cfg(feature = "live-webrtc")]
+    async fn create_live_fixture_session(router: &MethodRouter) -> SessionId {
+        let create = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({"prompt": "live fixture session"}),
+            ))
+            .await
+            .expect("session/create response");
+        assert!(create.error.is_none(), "session/create failed: {create:?}");
+        SessionId::parse(
+            result_value(&create)["session_id"]
+                .as_str()
+                .expect("session_id"),
+        )
+        .expect("canonical session id")
+    }
+
     #[cfg(all(feature = "live-webrtc", feature = "comms"))]
     #[tokio::test]
     async fn webrtc_only_composition_installs_transport_neutral_lifecycle_cleanup() {
@@ -13134,12 +13161,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 log: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             }));
 
-        let session_id = SessionId::new();
-        router
-            .runtime_adapter
-            .register_session(session_id.clone())
-            .await
-            .expect("register WebRTC-only session");
+        let session_id = create_live_fixture_session(&router).await;
         let channel_id = meerkat_live::LiveChannelId::random_uuid();
         let identity = meerkat_core::SessionLlmIdentity {
             model: "gpt-realtime-2".to_string(),
@@ -13178,6 +13200,9 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
     #[cfg(feature = "live-webrtc")]
     struct TestRemoteAnswerTransport {
         calls: std::sync::atomic::AtomicUsize,
+        /// Offers that carried the exact runtime binding into a provider
+        /// offer, so an outcome is attributable to the strategy itself.
+        provider_offers: std::sync::atomic::AtomicUsize,
         fail: bool,
     }
 
@@ -13190,6 +13215,8 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         ) -> Result<meerkat_live::LiveWebrtcAnswerAccepted, meerkat_live::LiveWebrtcError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let provider_offer = offer.into_provider_offer()?;
+            self.provider_offers
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert!(!provider_offer.offer_sdp().is_empty());
             if self.fail {
                 return Err(meerkat_live::LiveWebrtcError::RemoteSignaling {
@@ -13259,12 +13286,16 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         let router = router
             .with_live_webrtc(local)
             .with_live_webrtc_answer_transport(transport);
-        let session_id = SessionId::new();
-        router
-            .runtime_adapter
-            .register_session(session_id.clone())
-            .await
-            .expect("register remote WebRTC session");
+        let session_id = create_live_fixture_session(&router).await;
+        assert!(
+            router
+                .runtime_adapter
+                .live_webrtc_runtime_binding(&session_id)
+                .await
+                .expect("runtime binding authority")
+                .is_some(),
+            "remote signaling fixture must hold the exact runtime binding it requires"
+        );
         let channel_id = meerkat_live::LiveChannelId::random_uuid();
         let identity = meerkat_core::SessionLlmIdentity {
             model: "gpt-realtime-2".to_string(),
@@ -13286,6 +13317,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
     async fn remote_answer_strategy_is_not_called_before_machine_token_admission() {
         let transport = Arc::new(TestRemoteAnswerTransport {
             calls: std::sync::atomic::AtomicUsize::new(0),
+            provider_offers: std::sync::atomic::AtomicUsize::new(0),
             fail: false,
         });
         let (router, _session_id, channel_id) =
@@ -13312,6 +13344,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
     async fn admitted_remote_answer_uses_injected_strategy_and_machine_result_projection() {
         let transport = Arc::new(TestRemoteAnswerTransport {
             calls: std::sync::atomic::AtomicUsize::new(0),
+            provider_offers: std::sync::atomic::AtomicUsize::new(0),
             fail: false,
         });
         let (router, session_id, channel_id) =
@@ -13340,6 +13373,12 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
 
         assert_eq!(result_value(&response)["answer_sdp"], "remote-answer");
         assert_eq!(transport.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            transport
+                .provider_offers
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[cfg(feature = "live-webrtc")]
@@ -13347,6 +13386,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
     async fn admitted_remote_answer_failure_is_machine_projected_without_success() {
         let transport = Arc::new(TestRemoteAnswerTransport {
             calls: std::sync::atomic::AtomicUsize::new(0),
+            provider_offers: std::sync::atomic::AtomicUsize::new(0),
             fail: true,
         });
         let (router, session_id, channel_id) =
@@ -13375,6 +13415,13 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
 
         assert!(response.error.is_some());
         assert_eq!(transport.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            transport
+                .provider_offers
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the failure must come from the strategy, not from a missing runtime binding"
+        );
     }
 
     #[tokio::test]
@@ -14120,6 +14167,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         let authority = Arc::new(ExperimentalAuthorityTestProvider { log, deny: false });
         let transport = Arc::new(TestRemoteAnswerTransport {
             calls: std::sync::atomic::AtomicUsize::new(0),
+            provider_offers: std::sync::atomic::AtomicUsize::new(0),
             fail: false,
         });
         let router = attach_experimental_test_webrtc(router)

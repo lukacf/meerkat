@@ -8,7 +8,8 @@ name: Nightly
 #
 # Coverage rationale:
 #   workspace-unit    - `make test-unit`: every workspace unit test (PR CI
-#                       runs only the directly changed packages)
+#                       runs only the directly changed packages), plus
+#                       meerkat-rpc unit tests with all features
 #   workspace-int     - `make test-int`: every integration-fast test
 #   e2e-fast          - deterministic real-binary end-to-end lane
 #   dense-topology    - the exact 300-member/150-peer Mob stress on hosted
@@ -95,6 +96,11 @@ jobs:
 
       - name: Workspace unit tests
         run: make test-unit
+
+      # meerkat-rpc gates its WebRTC router tests on `live-webrtc`, which no
+      # default feature set enables, so `make test-unit` compiles them out.
+      - name: meerkat-rpc unit tests (all features)
+        run: ./scripts/repo-cargo nextest run -p meerkat-rpc --all-features --lib --no-fail-fast --show-progress none --status-level none --final-status-level fail
 
   workspace-int:
     name: Workspace integration-fast tests

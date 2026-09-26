@@ -454,7 +454,10 @@ seated, survives resume and respawn (including a respawn with a successor
 spec), and is checked against the caller's own session binding, never against
 tool arguments. Without manage scope over the mob, the forker can still:
 
-- read any of its descendants with `mob_check_member`;
+- read any of its descendants with `mob_check_member`, which answers at once
+  even while the member's turn runs (`progress.run_state` is `run_open`, the
+  output preview and token count are from its last completed turn, and a
+  `note` says so);
 - retire any of its descendants with `mob_retire_member`;
 - list its descendants, and only those, with `mob_list_members`.
 

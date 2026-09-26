@@ -1376,9 +1376,8 @@ async fn boundary_discard_write_failure_emits_no_source_event() {
     connection
         .execute_batch(&format!(
             "CREATE TRIGGER fail_discard_requeue BEFORE UPDATE ON runtime_input_states
-         WHEN NEW.runtime_id = '{}' AND NEW.input_id = '{}'
-         BEGIN SELECT RAISE(ABORT, 'boundary discard requeue failure'); END;",
-            runtime_id, input_id,
+         WHEN NEW.runtime_id = '{runtime_id}' AND NEW.input_id = '{input_id}'
+         BEGIN SELECT RAISE(ABORT, 'boundary discard requeue failure'); END;"
         ))
         .unwrap();
     rig.script.step(RunnerStep::FailDiscardingImage);

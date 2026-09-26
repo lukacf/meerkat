@@ -10878,7 +10878,7 @@ mod tests {
             let batch =
                 crate::meerkat_machine::driver::machine_authorize_runtime_loop_batch(&guard)
                     .expect("real terminal-response ingress produces a generated queue batch");
-            assert_eq!(batch.input_ids(), &[first_id.clone()]);
+            assert_eq!(batch.input_ids(), std::slice::from_ref(&first_id));
         }
 
         let mut executor = RecordingExecutor {

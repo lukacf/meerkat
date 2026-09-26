@@ -4098,6 +4098,7 @@ rust_test(
     ],
     srcs = [
         "tests/live_meerkat_regression.rs",
+        "tests/live_meerkat_regression/optional_tool_contract.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {

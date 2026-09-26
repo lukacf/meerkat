@@ -658,7 +658,7 @@ fn recorded_openai_turn(
             reasoning_tokens: Some(reasoning),
             provider_accounting: None,
         },
-        crate::ProviderTokenAccounting::openai("gpt-5.6-luna", input),
+        crate::ProviderTokenAccounting::openai("gpt-test", input),
     )
 }
 
@@ -701,7 +701,7 @@ fn cumulative_usage_keeps_absent_detail_counters_absent() {
             output_tokens: 5,
             ..Default::default()
         },
-        crate::ProviderTokenAccounting::openai("gpt-5.6-luna", 40),
+        crate::ProviderTokenAccounting::openai("gpt-test", 40),
     );
     let mut cumulative = CumulativeUsage::default();
     cumulative.add_turn(&turn);

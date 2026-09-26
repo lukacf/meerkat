@@ -16661,6 +16661,10 @@
               "job_id": {
                 "type": "string"
               },
+              "persisted": {
+                "description": "Durable completion record rather than a refresh projection.\n\n`false` (the default): a progress/completion notice the agent\nrefreshes at each model call and never stores. `true`: the one\ndurable record of a detached job's outcome (fork_off, council),\nkept in the transcript like other history. This flag is the typed\nmarker hosts use to recognise completion entries.",
+                "type": "boolean"
+              },
               "status": {
                 "$ref": "#/components/schemas/BackgroundJobTerminalStatus"
               },

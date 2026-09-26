@@ -11205,8 +11205,12 @@ mod tests {
         // runtime_adapter is always present (non-optional)
     }
 
+    /// A pre-0.8.37 `[model_fallback] enabled = true` document (no chain)
+    /// loads with fallback disabled instead of refusing startup, and loading
+    /// never rewrites it. Writes stay strict
+    /// (`config_writes_reject_enabled_fallback_without_chain`).
     #[tokio::test]
-    async fn explicit_user_config_root_preserves_fallback_validation() {
+    async fn explicit_user_config_root_loads_legacy_fallback_default_disabled() {
         let temp = TempDir::new().unwrap();
         let user_root = temp.path().join("user");
         let config_dir = user_root.join(".rkat");
@@ -11222,21 +11226,62 @@ mod tests {
         bootstrap.context.context_root = Some(temp.path().to_path_buf());
         bootstrap.context.user_config_root = Some(user_root);
 
-        let result =
-            AppState::load_from_with_bootstrap(temp.path().to_path_buf(), bootstrap, false).await;
-        let error = result
-            .err()
-            .expect("invalid explicit config must reject startup");
+        let state = AppState::load_from_with_bootstrap(temp.path().to_path_buf(), bootstrap, false)
+            .await
+            .expect("legacy fallback default must not refuse startup");
         assert!(
-            error
-                .to_string()
-                .contains("model_fallback.enabled = true requires a nonempty explicit chain"),
-            "{error}"
+            !effective_config_for_state(&state)
+                .await
+                .unwrap()
+                .model_fallback
+                .is_enabled()
         );
         assert_eq!(
-            tokio::fs::read_to_string(config_path).await.unwrap(),
+            tokio::fs::read_to_string(&config_path).await.unwrap(),
             invalid
         );
+
+        // Read-modify-write over the legacy head doc succeeds (the load half
+        // normalized it) and persists fallback disabled.
+        let Json(after_patch) = patch_config(
+            State(state),
+            Json(PatchConfigRequest::Wrapped {
+                patch: serde_json::json!({"max_tokens": 3072}),
+                expected_generation: None,
+            }),
+        )
+        .await
+        .expect("patch over a legacy head doc");
+        assert_eq!(after_patch.config.max_tokens, Some(3072));
+        assert_eq!(after_patch.config.model_fallback.enabled, Some(false));
+    }
+
+    /// Writes stay strict: a config write that introduces
+    /// `model_fallback.enabled = true` with an empty chain is refused.
+    #[tokio::test]
+    async fn config_writes_reject_enabled_fallback_without_chain() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+
+        let patch_err = patch_config(
+            State(state),
+            Json(PatchConfigRequest::Wrapped {
+                patch: serde_json::json!({"model_fallback": {"enabled": true}}),
+                expected_generation: None,
+            }),
+        )
+        .await
+        .expect_err("patch must reject enabled fallback without a chain");
+        match patch_err {
+            ApiError::BadRequest(message) => assert!(
+                message
+                    .contains("model_fallback.enabled = true requires a nonempty explicit chain"),
+                "{message}"
+            ),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 
     /// Regression (default-model ladder): with `config.agent.model` EMPTY the

@@ -165,11 +165,12 @@ pub use completion_feed::{
 pub use config::{
     AgentConfig, BudgetConfig, CallTimeoutOverride, CommandRuntimeConfig, CommsAuthMode,
     CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope,
-    HookAdapterConfig, HookEntryConfig, HookInProcessHandlerId, HookInProcessRuntimeConfig,
-    HookRunOverrides, HookRuntimeKind, HooksConfig, HttpRuntimeConfig, LimitsConfig, ModelDefaults,
-    PlainEventSource, ProviderToolsConfig, RetryConfig, SelfHostedApiStyle, SelfHostedConfig,
-    SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport, ShellDefaults,
-    StorageConfig, StoreConfig, SystemPromptOverride, ToolsConfig,
+    ConfigWarning, HookAdapterConfig, HookEntryConfig, HookInProcessHandlerId,
+    HookInProcessRuntimeConfig, HookRunOverrides, HookRuntimeKind, HooksConfig, HttpRuntimeConfig,
+    LimitsConfig, ModelDefaults, PlainEventSource, ProviderToolsConfig, RetryConfig,
+    SelfHostedApiStyle, SelfHostedConfig, SelfHostedModelConfig, SelfHostedServerConfig,
+    SelfHostedTransport, ShellDefaults, StorageConfig, StoreConfig, SystemPromptOverride,
+    ToolsConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_runtime::{
@@ -178,8 +179,8 @@ pub use config_runtime::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_store::{
     ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata, EffectiveConfigReader, FileConfigStore,
-    MemoryConfigStore, RealmConfigSource, TaggedConfigStore, apply_config_patch_preview,
-    merge_patch,
+    MemoryConfigStore, RealmConfigSource, RealmConfigWarning, TaggedConfigStore,
+    apply_config_patch_preview, merge_patch,
 };
 pub use context_budget::{
     ContextBudgetEstimateProvenance, ContextBudgetFact, ContextBudgetFactError, ContextBudgetState,

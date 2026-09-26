@@ -127,6 +127,28 @@ impl Config {
     pub fn template() -> Result<Self, ConfigError> {
         toml::from_str(CONFIG_TEMPLATE_TOML).map_err(ConfigError::Parse)
     }
+
+    /// Parse one persisted config document (a realm or user `config.toml`).
+    ///
+    /// This is the load boundary for documents written by earlier releases:
+    /// shapes that were valid defaults then are normalized here and reported
+    /// as typed [`ConfigWarning`]s instead of failing every later
+    /// [`Config::validate`]. Writes do not pass through this and stay strict.
+    pub fn from_persisted_toml(content: &str) -> Result<(Self, Vec<ConfigWarning>), ConfigError> {
+        let mut config: Self = toml::from_str(content).map_err(ConfigError::Parse)?;
+        config.reject_unwired_agent_provider_params()?;
+        let warnings = config.normalize_persisted();
+        Ok((config, warnings))
+    }
+
+    /// Apply the persisted-document load normalization in place; see
+    /// [`Config::from_persisted_toml`].
+    pub fn normalize_persisted(&mut self) -> Vec<ConfigWarning> {
+        self.model_fallback
+            .normalize_persisted()
+            .into_iter()
+            .collect()
+    }
 }
 
 // File-system dependent methods — not available on wasm32.
@@ -263,8 +285,10 @@ impl Config {
 
     /// Merge configuration from a TOML string.
     pub fn merge_toml_str(&mut self, content: &str) -> Result<(), ConfigError> {
-        let file_config: Config = toml::from_str(content).map_err(ConfigError::Parse)?;
-        file_config.reject_unwired_agent_provider_params()?;
+        let (file_config, warnings) = Config::from_persisted_toml(content)?;
+        for warning in warnings {
+            tracing::warn!(%warning, "normalized persisted config layer");
+        }
         let tools_layer = file_config.tools.clone();
         let retry_layer = file_config.retry.clone();
         let self_hosted_layer = file_config.self_hosted.clone();
@@ -1550,6 +1574,21 @@ impl ModelFallbackConfig {
         self.enabled == Some(true)
     }
 
+    /// Load-boundary normalization for a persisted document.
+    ///
+    /// Through 0.8.36 the config template wrote `enabled = true` with no
+    /// chain, meaning "use the catalog default chain". 0.8.37 removed that
+    /// chain, so such a document is loaded with fallback disabled (never an
+    /// unreviewed backup model) and a typed warning. Only persisted-document
+    /// loads call this; writes keep [`Self::validate`]'s strict rejection.
+    pub fn normalize_persisted(&mut self) -> Option<ConfigWarning> {
+        if self.is_enabled() && self.chain.is_empty() {
+            self.enabled = Some(false);
+            return Some(ConfigWarning::LegacyModelFallbackDefault);
+        }
+        None
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.is_enabled() && self.chain.is_empty() {
             return Err(ConfigError::Validation(
@@ -2764,6 +2803,33 @@ pub enum ConfigError {
     RealmChain(#[from] crate::connection::RealmChainError),
 }
 
+/// Typed, non-fatal diagnostic produced while loading a persisted config
+/// document. The document still loads (normalized); the surface reports the
+/// warning to the operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum ConfigWarning {
+    /// `[model_fallback] enabled = true` without any `[[model_fallback.chain]]`
+    /// target: the config-template default through 0.8.36, when an empty
+    /// chain meant the catalog default chain. 0.8.37 removed that chain and
+    /// made fallback explicit, so the loaded policy is disabled.
+    LegacyModelFallbackDefault,
+}
+
+impl std::fmt::Display for ConfigWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LegacyModelFallbackDefault => f.write_str(
+                "model_fallback.enabled = true with no [[model_fallback.chain]] was the \
+                 config default before 0.8.37 (it meant the removed catalog fallback chain); \
+                 model fallback is disabled for this config. Set `enabled = false` under \
+                 [model_fallback] to silence this warning, or add a reviewed \
+                 [[model_fallback.chain]] target to keep fallback on",
+            ),
+        }
+    }
+}
+
 /// Compose the effective flat [`Config`] for `head` by folding the per-realm
 /// config docs along `head`'s parent chain, root-first / child-wins.
 ///
@@ -2797,7 +2863,13 @@ pub fn compose_effective_config(
     let default_provider_tools = ProviderToolsConfig::default();
     for member in chain.realms().iter().rev() {
         if let Some(doc) = docs.get(member) {
-            effective.merge(doc.clone());
+            // Persisted documents are normalized where they are parsed
+            // (`Config::from_persisted_toml`); re-applying the idempotent
+            // normalization here keeps a source that bypasses that parser
+            // from composing a policy no later validation can accept.
+            let mut normalized = doc.clone();
+            normalized.normalize_persisted();
+            effective.merge(normalized);
             // Presence-aware correction. `Config::merge` uses a `!= default`
             // heuristic that cannot distinguish an unset scalar from one
             // explicitly set to its struct default — so a child cannot override
@@ -4714,6 +4786,115 @@ enabled = false
                     .is_err()
             );
         }
+    }
+
+    /// The config template shipped through 0.8.36 wrote `[model_fallback]
+    /// enabled = true` with no chain (then: "use the catalog default chain").
+    /// 0.8.37 removed the catalog chain, so a persisted document with that
+    /// shape must still LOAD: fallback off, one typed warning, never an
+    /// unreviewed backup model.
+    #[test]
+    fn test_legacy_model_fallback_default_loads_disabled_with_typed_warning() {
+        let (config, warnings) =
+            Config::from_persisted_toml("[model_fallback]\nenabled = true\n").unwrap();
+
+        assert!(!config.model_fallback.is_enabled());
+        assert!(config.model_fallback.chain.is_empty());
+        assert_eq!(warnings, vec![ConfigWarning::LegacyModelFallbackDefault]);
+        config
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect("a normalized legacy document validates");
+
+        let rendered = ConfigWarning::LegacyModelFallbackDefault.to_string();
+        for needle in [
+            "model_fallback.enabled = true",
+            "0.8.37",
+            "enabled = false",
+            "[[model_fallback.chain]]",
+        ] {
+            assert!(rendered.contains(needle), "{needle} missing: {rendered}");
+        }
+    }
+
+    #[test]
+    fn test_persisted_model_fallback_explicit_shapes_are_unchanged() {
+        let with_chain = "[model_fallback]\nenabled = true\n\n[[model_fallback.chain]]\nmodel = \"backup-openai\"\nprovider = \"openai\"\n";
+        let (config, warnings) = Config::from_persisted_toml(with_chain).unwrap();
+        assert!(config.model_fallback.is_enabled());
+        assert_eq!(config.model_fallback.chain.len(), 1);
+        assert!(warnings.is_empty());
+
+        for (text, expected) in [
+            ("[model_fallback]\nenabled = false\n", Some(false)),
+            ("[agent]\n", None),
+        ] {
+            let (config, warnings) = Config::from_persisted_toml(text).unwrap();
+            assert_eq!(config.model_fallback.enabled, expected, "{text}");
+            assert!(!config.model_fallback.is_enabled(), "{text}");
+            assert!(warnings.is_empty(), "{text}");
+        }
+    }
+
+    /// Writes stay strict: only the persisted-document load boundary
+    /// normalizes. A write that introduces the legacy shape is still refused.
+    #[test]
+    fn test_legacy_model_fallback_default_rejected_on_validate_without_load() {
+        let config: Config = toml::from_str("[model_fallback]\nenabled = true\n").unwrap();
+        let error = config
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect_err("validate (the write-path check) stays strict");
+        assert!(
+            error
+                .to_string()
+                .contains("model_fallback.enabled = true requires a nonempty explicit chain"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_merge_toml_str_normalizes_legacy_model_fallback_default() {
+        let mut config = Config::default();
+        config
+            .merge_toml_str("[model_fallback]\nenabled = true\n")
+            .unwrap();
+        assert!(!config.model_fallback.is_enabled());
+        config
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect("merged legacy layer validates");
+    }
+
+    #[test]
+    fn test_compose_effective_config_normalizes_legacy_model_fallback_default() {
+        use crate::connection::RealmId;
+        let head = RealmId::parse("child").unwrap();
+        let mut parent: Config = toml::from_str(
+            "[model_fallback]\nenabled = true\n\n[[model_fallback.chain]]\nmodel = \"backup-openai\"\n",
+        )
+        .unwrap();
+        parent
+            .realm
+            .insert("global".to_string(), crate::RealmConfigSection::default());
+        let mut child: Config = toml::from_str("[model_fallback]\nenabled = true\n").unwrap();
+        child.realm.insert(
+            "child".to_string(),
+            crate::RealmConfigSection {
+                parent: Some(RealmId::global()),
+                ..Default::default()
+            },
+        );
+        let mut docs = std::collections::BTreeMap::new();
+        docs.insert(RealmId::global(), parent);
+        docs.insert(head.clone(), child);
+
+        let effective =
+            compose_effective_config(&docs, &std::collections::BTreeMap::new(), &head).unwrap();
+        assert!(
+            !effective.model_fallback.is_enabled(),
+            "the legacy child table replaces the inherited policy and is off"
+        );
+        effective
+            .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
+            .expect("composed config validates");
     }
 
     #[test]

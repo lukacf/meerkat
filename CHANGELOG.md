@@ -475,6 +475,15 @@ them.
 - `fork_off` accepts `max_run_secs`: an optional autokill that cancels the
   child's run and retires the child once it has run that long. Omitted means no
   limit.
+- Typed config load warnings (meerkat-core): `ConfigWarning`,
+  `RealmConfigWarning`, `Config::from_persisted_toml`,
+  `Config::normalize_persisted`, `ModelFallbackConfig::normalize_persisted`,
+  `FileConfigStore::get_with_warnings`,
+  `EffectiveConfigReader::effective_config_with_warnings`, and the defaulted
+  trait method `RealmConfigSource::config_for_realm_with_warnings`
+  (`FilesystemRealmConfigSource` implements it). `FileConfigStore::get`,
+  `Config::merge_toml_str` and `compose_effective_config` apply the same load
+  normalization.
 - Cumulative usage reports cached input, cache writes and reasoning. The run
   result's `usage` (what `rkat run --output json` prints), `run_completed.usage`,
   the RPC and REST run results and mob run accounting now carry
@@ -874,6 +883,17 @@ them.
   forward `has_live_session`, `fork_persisted_session` and the other
   live-session, checkpointer and fork methods of `SessionService` and
   `MobSessionService` instead of falling back to the trait defaults.
+- Config documents written by rkat 0.8.36 and earlier load again. Their template
+  wrote `[model_fallback] enabled = true` with no chain (then meaning the
+  catalog default chain, removed in 0.8.37), so after upgrading every `rkat`
+  command failed with "model_fallback.enabled = true requires a nonempty
+  explicit chain", and REST/RPC/MCP startup refused the realm. Loading a
+  persisted document now turns that shape into fallback disabled - no unreviewed
+  backup model is ever used - and reports the typed
+  `ConfigWarning::LegacyModelFallbackDefault`; `rkat` prints it to stderr once,
+  naming the file, without changing the exit status. Loading never rewrites the
+  file; the next config write persists `enabled = false`. Writes that introduce
+  `enabled = true` with an empty chain are still rejected.
 - The `shell` schema no longer advertises values the tool rejects:
   `timeout_secs` declares a minimum of 1, and `background` is offered only when
   durable background jobs are available, instead of failing with "requested

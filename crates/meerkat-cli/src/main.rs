@@ -4903,14 +4903,64 @@ fn cli_global_config_store(scope: &RuntimeScope) -> Arc<dyn ConfigStore> {
 /// per-realm config (owned by `meerkat-store`, the realm-layout authority, so
 /// CLI/REST/RPC don't each re-derive the projection).
 fn cli_realm_config_source(scope: &RuntimeScope) -> Arc<dyn meerkat_core::RealmConfigSource> {
-    Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+    Arc::new(cli_filesystem_realm_config_source(scope))
+}
+
+fn cli_filesystem_realm_config_source(
+    scope: &RuntimeScope,
+) -> meerkat_store::FilesystemRealmConfigSource {
+    meerkat_store::FilesystemRealmConfigSource::new(
         scope.locator.state_root.clone(),
         cli_global_config_path(scope),
         meerkat_models::canonical(),
-    ))
+    )
 }
 
 async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> {
+    let (config, root, warnings) = load_config_with_warnings(scope).await?;
+    report_config_load_warnings(scope, &warnings);
+    Ok((config, root))
+}
+
+/// Operator-facing line for a typed config load warning, naming the document
+/// to edit.
+fn render_config_load_warning(
+    scope: &RuntimeScope,
+    warning: &meerkat_core::RealmConfigWarning,
+) -> String {
+    let path = cli_filesystem_realm_config_source(scope).config_doc_path(&warning.realm);
+    format!(
+        "warning: config {} (realm '{}'): {}",
+        path.display(),
+        warning.realm,
+        warning.warning
+    )
+}
+
+/// Print config load warnings to stderr, each at most once per process: a
+/// single command may load its config several times. Never affects the exit
+/// status.
+fn report_config_load_warnings(
+    scope: &RuntimeScope,
+    warnings: &[meerkat_core::RealmConfigWarning],
+) {
+    static REPORTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    for warning in warnings {
+        let line = render_config_load_warning(scope, warning);
+        let first = REPORTED
+            .lock()
+            .map(|mut reported| reported.insert(line.clone()))
+            .unwrap_or(true);
+        if first {
+            eprintln!("{line}");
+        }
+    }
+}
+
+async fn load_config_with_warnings(
+    scope: &RuntimeScope,
+) -> anyhow::Result<(Config, PathBuf, Vec<meerkat_core::RealmConfigWarning>)> {
     let paths =
         meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
     if let Some(parent) = paths.config_path.parent() {
@@ -4922,8 +4972,8 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
     // `global`) into the effective config the agent reads. Composition is
     // read-only; `config get/set` use the raw head store (resolve_config_store).
     let reader = meerkat_core::EffectiveConfigReader::new(cli_realm_config_source(scope));
-    let mut config = reader
-        .effective_config(&scope.locator.realm)
+    let (mut config, warnings) = reader
+        .effective_config_with_warnings(&scope.locator.realm)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     config
@@ -4932,7 +4982,7 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
     config
         .validate(meerkat_models::canonical())
         .map_err(|e| anyhow::anyhow!("Invalid runtime config: {e}"))?;
-    Ok((config, paths.root))
+    Ok((config, paths.root, warnings))
 }
 
 fn resolve_cli_create_session_model(
@@ -28779,6 +28829,49 @@ supports_reasoning = true
         assert_eq!(matches[1].state_root, state_root);
         assert_eq!(matches[0].session_id, sid);
         assert_eq!(matches[1].session_id, sid);
+    }
+
+    /// P0 regression (0.8.42): a realm doc materialized by <= 0.8.36 carries
+    /// the template's `[model_fallback] enabled = true` with no chain. The
+    /// released-realm fixture has exactly that shape; loading it through the
+    /// real CLI path must succeed with fallback off.
+    #[tokio::test]
+    async fn test_load_config_accepts_released_realm_legacy_model_fallback_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let original = include_str!(
+            "../../meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/config.toml"
+        );
+        assert!(original.contains("[model_fallback]\nenabled = true\n"));
+        let doc = meerkat_store::realm_paths_in(&state_root, "fixture-realm").config_path;
+        std::fs::create_dir_all(doc.parent().expect("realm dir")).expect("mkdir realm");
+        std::fs::write(&doc, original).expect("write released fixture config");
+
+        let scope = test_scope(state_root, "fixture-realm");
+        let (config, _) = load_config(&scope)
+            .await
+            .expect("a released pre-0.8.37 realm config must load");
+        assert!(!config.model_fallback.is_enabled());
+        let (config, _, warnings) = load_config_with_warnings(&scope)
+            .await
+            .expect("load with warnings");
+        assert!(!config.model_fallback.is_enabled());
+        let realm = meerkat_core::connection::RealmId::parse("fixture-realm").expect("realm id");
+        assert_eq!(
+            warnings,
+            vec![meerkat_core::RealmConfigWarning {
+                realm,
+                warning: meerkat_core::ConfigWarning::LegacyModelFallbackDefault,
+            }]
+        );
+        let line = render_config_load_warning(&scope, &warnings[0]);
+        assert!(line.contains(&doc.display().to_string()), "{line}");
+        assert!(line.contains("0.8.37"), "{line}");
+        assert_eq!(
+            std::fs::read_to_string(&doc).expect("reread"),
+            original,
+            "loading never rewrites the document"
+        );
     }
 
     #[tokio::test]

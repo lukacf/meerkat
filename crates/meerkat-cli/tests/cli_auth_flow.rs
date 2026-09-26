@@ -690,3 +690,95 @@ fn rkat_auth_logout_clears_scripted_login_token_key() {
         "repeat logout must not panic; stderr={stderr}"
     );
 }
+
+/// P0 regression (0.8.42): the config template shipped through 0.8.36 wrote
+/// `[model_fallback] enabled = true` with no chain into `~/.rkat/config.toml`.
+/// After 0.8.37 removed the catalog chain, every `rkat` command failed with
+/// "Invalid runtime config: ... requires a nonempty explicit chain". Such a
+/// document must load with fallback off: the command proceeds to its next
+/// step (here: no credentials) and stderr carries the typed warning once.
+#[test]
+fn rkat_prompt_loads_legacy_model_fallback_default_with_warning() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let home = tmp.path().join("home");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(home.join(".rkat")).expect("mkdir ~/.rkat");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    // Shape of a pre-0.8.37 user-global doc: the template's fallback table
+    // plus the `[realm.global]` section `rkat auth login` adds, which puts the
+    // doc on every workspace realm's inheritance chain.
+    let legacy_doc = "[model_fallback]\nenabled = true\n\n[realm.global]\n";
+    let global_doc = home.join(".rkat").join("config.toml");
+    std::fs::write(&global_doc, legacy_doc).expect("write legacy global config");
+
+    let mut command = Command::new(&rkat);
+    command
+        .arg("Hello")
+        .current_dir(&workspace)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env_remove("RKAT_TEST_CLIENT")
+        .stdin(Stdio::null());
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "RKAT_ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "RKAT_OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "RKAT_GEMINI_API_KEY",
+    ] {
+        command.env_remove(key);
+    }
+    let out = command.output().expect("rkat must spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        !stderr.contains("requires a nonempty explicit chain"),
+        "a pre-0.8.37 config must not brick rkat; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Invalid runtime config"),
+        "config must load; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "rkat must not panic; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("missing_secret"),
+        "rkat must proceed past config loading to credential resolution; stderr:\n{stderr}"
+    );
+    let warning_lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("model_fallback.enabled = true"))
+        .collect();
+    assert_eq!(
+        warning_lines.len(),
+        1,
+        "the legacy-default warning prints exactly once; stderr:\n{stderr}"
+    );
+    let warning = warning_lines[0];
+    for needle in ["0.8.37", "enabled = false", "[[model_fallback.chain]]"] {
+        assert!(
+            warning.contains(needle),
+            "warning must mention {needle}; line: {warning}"
+        );
+    }
+    assert!(
+        warning.contains(&global_doc.display().to_string()),
+        "warning names the document to fix; line: {warning}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&global_doc).expect("read global config"),
+        legacy_doc,
+        "loading must not rewrite the operator's document"
+    );
+}

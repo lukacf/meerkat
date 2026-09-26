@@ -144,7 +144,10 @@ them.
   in the transcript instead of being replaced at the next model call, and it
   renders to the model as its body alone. New methods
   `SystemNoticeMessage::persisted_background_job` (builds the record) and
-  `SystemNoticeMessage::persisted_background_job_id` (recognizes it).
+  `SystemNoticeMessage::persisted_background_job_id` (recognizes it). The
+  flag is part of the wire schema: the generated SDK types gain an optional
+  `persisted` on `SystemNoticeBlockBackgroundJob` (TypeScript) and its Python
+  twin, omitted when `false`.
 - `meerkat_mob::store::TemporaryCouncilRecord` gains the public field
   `detached_job: Option<TemporaryCouncilJobBinding>` (struct literals must
   name it): the convener's detached job, so a restarted host can deliver the

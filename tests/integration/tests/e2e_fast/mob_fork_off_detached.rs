@@ -1701,26 +1701,28 @@ async fn e2e_fast_top_level_rpc_convener_is_revived_for_its_council_result() {
     // The record's header; the started note names the same job but not its
     // status.
     let marker = format!("Background council job {job_id} finished (");
-    let deadline = tokio::time::Instant::now() + WAIT;
-    loop {
-        let woken = requests
+    let wakes = || {
+        requests
             .lock()
             .unwrap()
             .iter()
             .filter(|(last_user, rendered)| {
                 rendered.contains(&marker) && !last_user.contains(CONVENER_FOLLOW_UP)
             })
-            .count();
-        if woken >= 1 {
-            assert_eq!(woken, 1, "the convener is woken for one turn");
-            break;
-        }
+            .count()
+    };
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while wakes() == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the revived convener was never woken"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    // A duplicate wake would arrive a few ms after the first: settle, then
+    // count again with the same filter.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(wakes(), 1, "the convener is woken for exactly one turn");
 
     let follow_up = rpc_call(
         &router,
@@ -1743,10 +1745,295 @@ async fn e2e_fast_top_level_rpc_convener_is_revived_for_its_council_result() {
         follow_up_request.contains(&marker) && follow_up_request.contains("COUNCIL-SUMMARY-8R"),
         "{follow_up_request}"
     );
+    assert_eq!(
+        wakes(),
+        1,
+        "no further wake after the follow-up turn: {:#?}",
+        requests.lock().unwrap()
+    );
     wait_for_single_record(&router, &session, &job_id).await;
 
     open_gate();
     let _ = mob_state
         .mob_destroy(&meerkat_mob::MobId::from(mob_id))
         .await;
+}
+
+// ===========================================================================
+// In-turn delivery (#1199 durable in-turn steer): the completion joins the
+// forker's RUNNING turn at its next model boundary.
+// ===========================================================================
+
+const IN_TURN_PROMPT: &str = "IN-TURN-7K fork, keep working, then finish";
+const IN_TURN_DONE: &str = "IN-TURN-DONE";
+
+/// How the forker's turn continues once its child has replied.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AfterChild {
+    /// Two more tool calls, then final text: later boundaries exist.
+    MoreToolCalls,
+    /// Final text straight away: no later boundary opens in this turn.
+    FinishTurn,
+}
+
+/// One recorded provider request of the in-turn scenarios.
+#[derive(Debug, Clone)]
+struct InTurnRequest {
+    last_user: String,
+    rendered: String,
+    /// Persisted `BackgroundJob` notices in the request.
+    records: usize,
+    /// The request belongs to a wake turn after the forker's turn finished.
+    wake: bool,
+}
+
+fn persisted_records(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| {
+            matches!(message, Message::SystemNotice(notice) if notice.blocks.iter().any(|block| {
+                matches!(block, meerkat_core::types::SystemNoticeBlock::BackgroundJob { persisted: true, .. })
+            }))
+        })
+        .count()
+}
+
+/// The forker forks in its own turn, holds that turn open while the child
+/// replies (the model is "streaming" the whole time), then either keeps
+/// calling tools or finishes. Every request is recorded.
+struct InTurnScript {
+    requests: Arc<Mutex<Vec<InTurnRequest>>>,
+    child_replied: Arc<std::sync::atomic::AtomicBool>,
+    after_child: AfterChild,
+}
+
+/// 0 before fork_off, then one step per tool result in the forker's turn.
+fn in_turn_stage(rendered: &str) -> usize {
+    [
+        "toolu_in_turn_fork",
+        "toolu_in_turn_list_1",
+        "toolu_in_turn_list_2",
+    ]
+    .iter()
+    .filter(|id| rendered.contains(*id))
+    .count()
+}
+
+#[async_trait::async_trait]
+impl LlmClient for InTurnScript {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        let last_user = last_user_text(request);
+        let rendered = format!("{:?}", request.messages);
+        // A wake is a turn AFTER the forker's own turn finished. Inside the
+        // running turn a joined record also ends the request (it is appended
+        // after the tool results), so the tail alone does not decide.
+        let wake = matches!(request.messages.last(), Some(Message::SystemNotice(_)))
+            && rendered.contains(IN_TURN_DONE);
+        self.requests.lock().unwrap().push(InTurnRequest {
+            last_user: last_user.clone(),
+            rendered: rendered.clone(),
+            records: persisted_records(&request.messages),
+            wake,
+        });
+        let model = request.model.clone();
+        let child_replied = Arc::clone(&self.child_replied);
+        let after_child = self.after_child;
+        Box::pin(futures::StreamExt::flat_map(
+            futures::stream::once(async move {
+                if last_user.contains(CHILD_TASK) {
+                    child_replied.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return scripted_text(&model, CHILD_REPLY);
+                }
+                if wake || !last_user.contains(IN_TURN_PROMPT) {
+                    return scripted_text(&model, FOLLOW_UP_REPLY);
+                }
+                match in_turn_stage(&rendered) {
+                    0 => scripted_tool_call(
+                        &model,
+                        "toolu_in_turn_fork",
+                        "fork_off",
+                        json!({"member_id": CHILD, "task": CHILD_TASK}),
+                    ),
+                    1 => {
+                        // The model is mid-stream while the child finishes
+                        // and its completion is admitted.
+                        while !child_replied.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        match after_child {
+                            AfterChild::MoreToolCalls => scripted_tool_call(
+                                &model,
+                                "toolu_in_turn_list_1",
+                                "mob_list",
+                                json!({}),
+                            ),
+                            AfterChild::FinishTurn => scripted_text(&model, IN_TURN_DONE),
+                        }
+                    }
+                    2 => scripted_tool_call(&model, "toolu_in_turn_list_2", "mob_list", json!({})),
+                    _ => scripted_text(&model, IN_TURN_DONE),
+                }
+            }),
+            |events| futures::stream::iter(events.into_iter().map(Ok)),
+        ))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+}
+
+struct InTurnRun {
+    requests: Vec<InTurnRequest>,
+    history: Vec<Value>,
+    job_id: String,
+}
+
+async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun {
+    let temp = tempfile::TempDir::new().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let client: Arc<dyn LlmClient> = Arc::new(InTurnScript {
+        requests: Arc::clone(&requests),
+        child_replied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        after_child,
+    });
+    let (router, mob_state) = make_stack(temp.path(), client).await;
+    let mob_id = format!("in-turn-{label}-{}", uuid::Uuid::new_v4().simple());
+    let mob_id = mob_state
+        .mob_create_definition(mob_definition(&mob_id))
+        .await
+        .expect("create mob");
+    let handle = mob_state.handle_for(&mob_id).await.expect("mob handle");
+    handle
+        .spawn_spec(SpawnMemberSpec::new("keeper", AgentIdentity::from(PARENT)))
+        .await
+        .expect("spawn forker");
+    let session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from(PARENT))
+        .await
+        .expect("forker session");
+
+    assert_eq!(
+        bounded_turn(&handle, PARENT, IN_TURN_PROMPT).await,
+        IN_TURN_DONE
+    );
+    let history = session_history(&router, &session).await;
+    let job_id =
+        recorded_fork_off_start(&history).unwrap_or_else(|| {
+            panic!("the forker's transcript holds no fork_off result: {history}")
+        })["job_id"]
+            .as_str()
+            .expect("job id")
+            .to_string();
+    wait_for_single_record(&router, &session, &job_id).await;
+    // Anything replayed or woken after the turn would arrive by now.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let history = history_messages(&session_history(&router, &session).await).clone();
+    let requests = requests.lock().unwrap().clone();
+    let _ = mob_state.mob_destroy(&mob_id).await;
+    InTurnRun {
+        requests,
+        history,
+        job_id,
+    }
+}
+
+fn forker_turn_requests(run: &InTurnRun) -> Vec<&InTurnRequest> {
+    run.requests
+        .iter()
+        .filter(|request| request.last_user.contains(IN_TURN_PROMPT) && !request.wake)
+        .collect()
+}
+
+/// A running turn that keeps working after its child's record joined it
+/// (two more tool calls) carries the record in EVERY later model call of
+/// the turn, exactly once each, never re-appended; it is saved once and no
+/// wake turn or replay follows. (The single-next-call case is
+/// e2e_fast_detached_completion_during_a_running_turn_joins_it.)
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_in_turn_record_is_carried_once_by_every_later_call_of_the_turn() {
+    let run = run_in_turn_scenario(AfterChild::MoreToolCalls, "joins").await;
+    let turn = forker_turn_requests(&run);
+    assert_eq!(
+        turn.len(),
+        4,
+        "fork, streaming wait, two tool steps: {turn:#?}"
+    );
+    assert_eq!(turn[0].records, 0, "nothing before the fork");
+    assert_eq!(turn[1].records, 0, "the child has not finished yet");
+    for (step, request) in turn.iter().enumerate().skip(2) {
+        assert_eq!(
+            request.records, 1,
+            "request {step} of the same turn carries the record exactly once: {request:#?}"
+        );
+        assert!(
+            request.rendered.contains(&run.job_id) && request.rendered.contains(CHILD_REPLY),
+            "request {step} carries the child's outcome: {}",
+            request.rendered
+        );
+    }
+    assert!(
+        run.requests.iter().all(|request| !request.wake),
+        "no wake turn for a completion the running turn already took: {:#?}",
+        run.requests
+    );
+    let after_turn: Vec<_> = run
+        .requests
+        .iter()
+        .filter(|request| {
+            !request.last_user.contains(IN_TURN_PROMPT) && !request.last_user.contains(CHILD_TASK)
+        })
+        .collect();
+    assert!(
+        after_turn.is_empty(),
+        "nothing replayed after the turn: {after_turn:#?}"
+    );
+    let records = recorded_completions(&json!({ "messages": run.history }), &run.job_id);
+    assert_eq!(records.len(), 1, "saved exactly once");
+}
+
+/// The child finishes while the forker's last model call is streaming and
+/// no later boundary opens in that turn: the record takes exactly one
+/// follow-up turn, and is saved once.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_detached_completion_without_a_later_boundary_takes_exactly_one_follow_up_turn() {
+    let run = run_in_turn_scenario(AfterChild::FinishTurn, "fallback").await;
+    let turn = forker_turn_requests(&run);
+    assert_eq!(
+        turn.len(),
+        2,
+        "fork, then the final streaming call: {turn:#?}"
+    );
+    assert!(
+        turn.iter().all(|request| request.records == 0),
+        "the running turn never reached another boundary: {turn:#?}"
+    );
+    let follow_ups: Vec<_> = run
+        .requests
+        .iter()
+        .filter(|request| request.rendered.contains(&run.job_id) && request.records == 1)
+        .filter(|request| {
+            !turn
+                .iter()
+                .any(|in_turn| in_turn.rendered == request.rendered)
+        })
+        .collect();
+    assert_eq!(
+        follow_ups.len(),
+        1,
+        "exactly one follow-up turn sees the record: {:#?}",
+        run.requests
+    );
+    assert!(follow_ups[0].rendered.contains(CHILD_REPLY));
+    let records = recorded_completions(&json!({ "messages": run.history }), &run.job_id);
+    assert_eq!(records.len(), 1, "saved exactly once");
 }

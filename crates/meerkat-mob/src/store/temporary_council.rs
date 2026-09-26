@@ -29,8 +29,8 @@ use crate::machines::temporary_council_lifecycle::{
 };
 use crate::temporary_council::{
     TemporaryCouncilCleanupReceipt, TemporaryCouncilDurability, TemporaryCouncilExchangeReceipt,
-    TemporaryCouncilId, TemporaryCouncilParticipantCustody, TemporaryCouncilResult,
-    TemporaryCouncilStoreDurability,
+    TemporaryCouncilId, TemporaryCouncilJobBinding, TemporaryCouncilParticipantCustody,
+    TemporaryCouncilResult, TemporaryCouncilStoreDurability,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -71,6 +71,10 @@ pub struct TemporaryCouncilRecord {
     /// The most recent cleanup attempt's receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<TemporaryCouncilCleanupReceipt>,
+    /// The convener's detached job awaiting this council's outcome, when the
+    /// council was run detached. Lets a restarted host deliver the outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached_job: Option<TemporaryCouncilJobBinding>,
     /// Optimistic concurrency token.
     pub revision: u64,
     /// Creation instant.
@@ -264,6 +268,7 @@ pub(crate) mod contract_tests {
             exchanges: Vec::new(),
             result: None,
             cleanup: None,
+            detached_job: None,
             revision: 0,
             created_at: now,
             updated_at: now,

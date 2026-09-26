@@ -204,6 +204,84 @@ pub async fn verify_stored_image_blob(
     expected_media_type: &str,
     max_decoded_bytes: usize,
 ) -> Result<VerifiedImageBlob, ImageBlobIntegrityError> {
+    let (verified, _payload) = read_and_validate_stored_image_blob(
+        blob_store,
+        expected_blob_id,
+        expected_media_type,
+        max_decoded_bytes,
+    )
+    .await?;
+    if verified.blob_ref.blob_id != *expected_blob_id {
+        return Err(ImageBlobIntegrityError::BlobIdentityMismatch {
+            expected_blob_id: expected_blob_id.clone(),
+            actual_blob_id: verified.blob_ref.blob_id,
+        });
+    }
+    Ok(verified)
+}
+
+/// Result of [`verify_stored_image_blob_accepting_store_address`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredImageBlobVerification {
+    /// The reference is the payload's meerkat content address.
+    ContentAddressed(VerifiedImageBlob),
+    /// The payload is a valid image whose meerkat content address differs
+    /// from the reference, and the store attested the reference as its own
+    /// address for exactly this payload. `verified.blob_ref` carries the
+    /// meerkat content address; `data` is the payload, so a caller that owns
+    /// a not-yet-durable copy of the reference can re-home it.
+    StoreAttested {
+        verified: VerifiedImageBlob,
+        data: String,
+    },
+}
+
+/// [`verify_stored_image_blob`] that also accepts a reference the store
+/// attests as its own address.
+///
+/// Every structural check is identical and a store that attests nothing
+/// yields exactly the same [`ImageBlobIntegrityError::BlobIdentityMismatch`].
+/// Only the final content-address comparison consults
+/// [`BlobStore::attest_address`].
+pub async fn verify_stored_image_blob_accepting_store_address(
+    blob_store: &dyn BlobStore,
+    expected_blob_id: &BlobId,
+    expected_media_type: &str,
+    max_decoded_bytes: usize,
+) -> Result<StoredImageBlobVerification, ImageBlobIntegrityError> {
+    let (verified, payload) = read_and_validate_stored_image_blob(
+        blob_store,
+        expected_blob_id,
+        expected_media_type,
+        max_decoded_bytes,
+    )
+    .await?;
+    if verified.blob_ref.blob_id == *expected_blob_id {
+        return Ok(StoredImageBlobVerification::ContentAddressed(verified));
+    }
+    match blob_store
+        .attest_address(expected_blob_id, &payload)
+        .await?
+    {
+        BlobAddressAttestation::StoreAddress => Ok(StoredImageBlobVerification::StoreAttested {
+            verified,
+            data: payload.data,
+        }),
+        BlobAddressAttestation::Unattested => Err(ImageBlobIntegrityError::BlobIdentityMismatch {
+            expected_blob_id: expected_blob_id.clone(),
+            actual_blob_id: verified.blob_ref.blob_id,
+        }),
+    }
+}
+
+/// Read one referenced image and run every check except the final
+/// content-address comparison, which the callers above own.
+async fn read_and_validate_stored_image_blob(
+    blob_store: &dyn BlobStore,
+    expected_blob_id: &BlobId,
+    expected_media_type: &str,
+    max_decoded_bytes: usize,
+) -> Result<(VerifiedImageBlob, BlobPayload), ImageBlobIntegrityError> {
     if !expected_blob_id.is_canonical_sha256() {
         return Err(ImageBlobIntegrityError::Store(BlobStoreError::InvalidId(
             expected_blob_id.clone(),
@@ -233,13 +311,7 @@ pub async fn verify_stored_image_blob(
     }
     let verified =
         validate_image_blob_payload(&payload.media_type, &payload.data, max_decoded_bytes)?;
-    if verified.blob_ref.blob_id != *expected_blob_id {
-        return Err(ImageBlobIntegrityError::BlobIdentityMismatch {
-            expected_blob_id: expected_blob_id.clone(),
-            actual_blob_id: verified.blob_ref.blob_id,
-        });
-    }
-    Ok(verified)
+    Ok((verified, payload))
 }
 
 /// Store (or repair) an inline image and verify the durable object before its
@@ -502,6 +574,17 @@ mod tests {
     }
 }
 
+/// A store's answer to [`BlobStore::attest_address`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BlobAddressAttestation {
+    /// The store recomputed its own address recipe over exactly this payload
+    /// and it equals the reference.
+    StoreAddress,
+    /// The store makes no claim about the reference. Callers fail closed.
+    Unattested,
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait BlobStore: Send + Sync {
@@ -512,6 +595,25 @@ pub trait BlobStore: Send + Sync {
     }
 
     async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError>;
+
+    /// Attest that `blob_id` is this store's own address for `payload`.
+    ///
+    /// Meerkat addresses images by [`content_blob_id`] and recomputes it on
+    /// read-back. A store whose earlier writes used a different address
+    /// recipe that it owns can recompute that recipe over the payload it
+    /// returned and attest the match, so meerkat's integrity gates accept
+    /// those historical references instead of refusing them. Implementations
+    /// must recompute the address from `payload`; answering from a lookup or
+    /// attesting unconditionally defeats the gate. The default attests
+    /// nothing, which keeps every gate fail-closed.
+    async fn attest_address(
+        &self,
+        blob_id: &BlobId,
+        payload: &BlobPayload,
+    ) -> Result<BlobAddressAttestation, BlobStoreError> {
+        let _ = (blob_id, payload);
+        Ok(BlobAddressAttestation::Unattested)
+    }
 
     /// Read a blob only when its encoded payload fits `max_encoded_bytes`.
     ///

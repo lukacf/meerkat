@@ -249,6 +249,195 @@ rust_binary(
 )
 
 rust_test(
+    name = "council_relink_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-mob-mcp",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "council_relink",
+    crate_root = "tests/council_relink.rs",
+    crate_features = [
+        "openai-live",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/public_mcp.rs",
+    ],
+    srcs = [
+        "tests/council_relink.rs",
+        "tests/support/mod.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_BIN_NAME": "council_relink",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-mob-mcp",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_client_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-mob-mcp",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "fork_off_surface_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-mob-mcp",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "fork_off_surface",
+    crate_root = "tests/fork_off_surface.rs",
+    crate_features = [
+        "openai-live",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/public_mcp.rs",
+    ],
+    srcs = [
+        "tests/fork_off_surface.rs",
+        "tests/support/mod.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_BIN_NAME": "fork_off_surface",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-mob-mcp",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_client_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-mob-mcp",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "fork_relink_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-mob-mcp",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "fork_relink",
+    crate_root = "tests/fork_relink.rs",
+    crate_features = [
+        "openai-live",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/public_mcp.rs",
+    ],
+    srcs = [
+        "tests/fork_relink.rs",
+        "tests/support/mod.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_BIN_NAME": "fork_relink",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-mcp",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-mob-mcp",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_client_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-mob-mcp",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "temporary_council_test",
     aliases = aliases(
         package_name = "crates/meerkat-mob-mcp",
@@ -316,6 +505,9 @@ rust_test(
 test_suite(
     name = "fast_tests",
     tests = [
+        ":council_relink_test",
+        ":fork_off_surface_test",
+        ":fork_relink_test",
         ":meerkat_mob_mcp_unit_test",
         ":temporary_council_test",
     ],

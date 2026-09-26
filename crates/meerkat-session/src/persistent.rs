@@ -5000,6 +5000,94 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         })
     }
 
+    /// Serialize an external durable fork of a source that must be quiescent
+    /// (`DurableForkSourceAdmission::Quiescent`) without queueing behind it.
+    ///
+    /// A `Quiescent` fork is a readiness check: it answers, it never waits
+    /// for the source's work to finish. The turn-finalization boundary is a
+    /// FIFO mutex the runtime loop holds for a whole lap, from dequeue through
+    /// materialization, revival and the provider call to the boundary commit,
+    /// so an unbounded acquisition here queued an external fork behind an
+    /// admitted turn and then branched whatever that turn left behind. The
+    /// typed refusal comes first (an active runtime admission is `Busy`); the
+    /// boundary and the recovery gate are then only awaited for
+    /// [`Self::QUIESCENT_FORK_BOUNDARY_BOUND`] in total, which covers
+    /// short non-turn holders such as the post-commit tail of a finished lap.
+    /// A boundary still held after that is `Busy`, never awaited silently.
+    async fn quiescent_fork_mutation_guard(
+        &self,
+        id: &SessionId,
+    ) -> Result<SessionMutationGuard, SessionError> {
+        match self.inner.join_active_runtime_context_admission(id).await {
+            Ok(Some(active_admission)) => {
+                drop(active_admission);
+                return Err(SessionError::Busy { id: id.clone() });
+            }
+            Ok(None) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        let started = std::time::Instant::now();
+        let Ok(turn_finalization_guard) = tokio::time::timeout(
+            Self::QUIESCENT_FORK_BOUNDARY_BOUND,
+            self.acquire_runtime_turn_finalization_guard(id),
+        )
+        .await
+        else {
+            return Err(SessionError::Busy { id: id.clone() });
+        };
+        // The recovery gate gets whatever is left of the same bound. A zero
+        // remainder still polls the gate once, so a free gate is taken.
+        let recovery_gate_bound =
+            Self::QUIESCENT_FORK_BOUNDARY_BOUND.saturating_sub(started.elapsed());
+        self.transcript_edit_mutation_guard_with_turn_boundary(
+            id,
+            turn_finalization_guard,
+            recovery_gate_bound,
+        )
+        .await
+    }
+
+    /// Refuse a `Quiescent` fork of the source's committed end when that end
+    /// is an input boundary the source has not answered yet.
+    ///
+    /// The pending-continuation decision belongs to the canonical
+    /// SessionDocumentMachine (`ResolvePendingContinuation`): a committed
+    /// transcript whose tail is a runnable boundary (a user input or tool
+    /// results with no reply after them) is `RunPending`, meaning the source's
+    /// next turn answers it. Branching that end copies the unanswered input
+    /// into the child as its last message, a torn copy of work the source
+    /// still owes, so the source is refused as `Busy` exactly like a running
+    /// one. An explicit shorter prefix is the caller's own boundary choice
+    /// and is not affected.
+    fn refuse_quiescent_fork_of_pending_boundary(
+        id: &SessionId,
+        source: &Session,
+    ) -> Result<(), SessionError> {
+        let resolution = meerkat_core::pending_continuation::resolve_pending_continuation(
+            meerkat_core::pending_continuation::observe_session_tail(source.messages()),
+            0,
+        )
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "generated session document authority rejected the fork source's pending \
+                 continuation for session {id}: {error}"
+            )))
+        })?;
+        match resolution.disposition {
+            meerkat_core::pending_continuation::PendingContinuationDisposition::RunPending => {
+                Err(SessionError::Busy { id: id.clone() })
+            }
+            meerkat_core::pending_continuation::PendingContinuationDisposition::NoPendingBoundary => {
+                Ok(())
+            }
+        }
+    }
+
+    /// Total bound on the waits a `Quiescent` durable fork may spend on the
+    /// source's turn-finalization boundary and recovery gate.
+    pub const QUIESCENT_FORK_BOUNDARY_BOUND: std::time::Duration =
+        std::time::Duration::from_secs(1);
+
     /// [`Self::transcript_edit_mutation_guard`] for a caller that already
     /// holds the session's turn-finalization boundary.
     ///
@@ -5535,9 +5623,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             boundary,
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::CallerTurn)
         );
+        let quiescent = matches!(
+            boundary,
+            ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::Quiescent)
+        );
         let _mutation_guard = match boundary {
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::Quiescent) => {
-                self.transcript_edit_mutation_guard(source_session_id)
+                self.quiescent_fork_mutation_guard(source_session_id)
                     .await?
             }
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::CallerTurn) => {
@@ -5573,6 +5665,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             )))
         })?;
         let message_count = message_count.unwrap_or_else(|| source.messages().len());
+        if quiescent && message_count == source.messages().len() {
+            Self::refuse_quiescent_fork_of_pending_boundary(source_session_id, &source)?;
+        }
         let mut forked = match planned_child_session_id {
             Some(child_session_id) => {
                 source.fork_at_complete_boundary_with_identity(message_count, child_session_id)
@@ -24891,6 +24986,236 @@ mod tests {
             parent_history.message_count >= committed_len,
             "the caller-turn fork must not shrink or disturb the parent transcript"
         );
+    }
+
+    /// Seed a durable fork source the way the runtime does at its first
+    /// boundary (canonical metadata), with `extra` appended to its committed
+    /// transcript.
+    async fn seed_quiescent_fork_source(
+        service: &PersistentSessionService<BlockingRunBuilder>,
+        runtime_store: &Arc<dyn RuntimeStore>,
+        extra: Vec<Message>,
+    ) -> SessionId {
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let parent_id = created.session_id;
+        let parent = service
+            .load_authoritative_session_base(&parent_id)
+            .await
+            .expect("load runtime-authoritative parent")
+            .expect("parent exists");
+        let parent = mutate_test_session(parent, "run boundary", |parent| {
+            parent
+                .set_session_metadata(meerkat_core::SessionMetadata {
+                    model_fallback: None,
+                    schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    structured_output_retries: 2,
+                    provider: meerkat_core::Provider::Anthropic,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    tooling: meerkat_core::SessionTooling::default(),
+                    keep_alive: false,
+                    comms_name: None,
+                    peer_meta: None,
+                    realm_id: None,
+                    instance_id: None,
+                    backend: None,
+                    config_generation: None,
+                    auth_binding: None,
+                    mob_member_binding: None,
+                })
+                .expect("seed canonical parent metadata");
+            for message in extra {
+                parent.push(message);
+            }
+        });
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<BlockingRunBuilder>::runtime_id_for_session(&parent_id),
+                meerkat_runtime::store::SerializedSessionSnapshot {
+                    session_snapshot: (serde_json::to_vec(&parent)
+                        .expect("serialize parent metadata snapshot"))
+                    .into(),
+                },
+            )
+            .await
+            .expect("commit parent metadata snapshot");
+        parent_id
+    }
+
+    fn quiescent_fork_target(
+        member: &str,
+        source_admission: meerkat_core::DurableForkSourceAdmission,
+    ) -> meerkat_core::DurableSessionForkTarget {
+        meerkat_core::DurableSessionForkTarget {
+            member_binding: meerkat_core::MobMemberBinding {
+                mob_id: "mob".to_string(),
+                role: "role".to_string(),
+                member: member.to_string(),
+            },
+            cache_identity: None,
+            source_admission,
+        }
+    }
+
+    fn answered_exchange(prompt: &str) -> Vec<Message> {
+        vec![
+            Message::User(UserMessage::text(prompt.to_string())),
+            Message::BlockAssistant(meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            }),
+        ]
+    }
+
+    /// Regression (#1190): the runtime loop holds the source's
+    /// turn-finalization boundary for a whole lap, from dequeue through
+    /// materialization to the provider call, before the turn holds any live
+    /// admission. A `Quiescent` fork in that window used to queue on the
+    /// boundary until the turn ended. It must answer `Busy` within its bound
+    /// instead, and fork normally once the boundary is free.
+    #[tokio::test]
+    async fn quiescent_durable_fork_answers_busy_instead_of_queueing_on_a_held_turn_boundary() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = Arc::new(PersistentSessionService::new(
+            BlockingRunBuilder::new(),
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        ));
+        let parent_id =
+            seed_quiescent_fork_source(&service, &runtime_store, answered_exchange("first")).await;
+
+        // A lap that has dequeued the next input but not started its turn:
+        // the boundary is held and no runtime admission is active yet.
+        let lap = service
+            .acquire_runtime_turn_finalization_guard(&parent_id)
+            .await;
+        let started = std::time::Instant::now();
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            service.fork_durable_session(
+                &parent_id,
+                None,
+                None,
+                Some(quiescent_fork_target(
+                    "held",
+                    meerkat_core::DurableForkSourceAdmission::Quiescent,
+                )),
+            ),
+        )
+        .await
+        .expect("a quiescent fork must answer instead of queueing on the held boundary");
+        assert!(
+            matches!(refused, Err(SessionError::Busy { ref id }) if id == &parent_id),
+            "a quiescent fork of a source whose boundary is held must be Busy: {refused:?}"
+        );
+        assert!(
+            started.elapsed()
+                < PersistentSessionService::<BlockingRunBuilder>::QUIESCENT_FORK_BOUNDARY_BOUND
+                    + std::time::Duration::from_secs(2),
+            "the refusal answers within the quiescent fork bound, took {:?}",
+            started.elapsed()
+        );
+
+        drop(lap);
+        let forked = service
+            .fork_durable_session(
+                &parent_id,
+                None,
+                None,
+                Some(quiescent_fork_target(
+                    "free",
+                    meerkat_core::DurableForkSourceAdmission::Quiescent,
+                )),
+            )
+            .await
+            .expect("a quiescent fork of an idle source succeeds");
+        assert_ne!(forked.session_id, parent_id);
+    }
+
+    /// Regression (#1190): a source whose committed end is an input it has
+    /// not answered (for example a turn that died after committing its
+    /// input) must not be branched at that end by a `Quiescent` fork, or the
+    /// child inherits the unanswered input as its last message. An explicit
+    /// shorter prefix and the source's own `CallerTurn` fork are unaffected.
+    #[tokio::test]
+    async fn quiescent_durable_fork_refuses_a_committed_end_that_is_an_unanswered_input() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = Arc::new(PersistentSessionService::new(
+            BlockingRunBuilder::new(),
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        ));
+        let mut transcript = answered_exchange("answered");
+        transcript.push(Message::User(UserMessage::text("unanswered".to_string())));
+        let parent_id = seed_quiescent_fork_source(&service, &runtime_store, transcript).await;
+        let committed_len = service
+            .read_history(&parent_id, SessionHistoryQuery::default())
+            .await
+            .expect("source history")
+            .message_count;
+
+        for message_count in [None, Some(committed_len)] {
+            let refused = service
+                .fork_durable_session(
+                    &parent_id,
+                    message_count,
+                    None,
+                    Some(quiescent_fork_target(
+                        "torn",
+                        meerkat_core::DurableForkSourceAdmission::Quiescent,
+                    )),
+                )
+                .await;
+            assert!(
+                matches!(refused, Err(SessionError::Busy { ref id }) if id == &parent_id),
+                "a quiescent fork of an unanswered committed end ({message_count:?}) must be \
+                 Busy: {refused:?}"
+            );
+        }
+
+        let prefix = service
+            .fork_durable_session(
+                &parent_id,
+                Some(committed_len - 1),
+                None,
+                Some(quiescent_fork_target(
+                    "prefix",
+                    meerkat_core::DurableForkSourceAdmission::Quiescent,
+                )),
+            )
+            .await
+            .expect("an explicit prefix before the unanswered input is the caller's boundary");
+        assert_eq!(prefix.message_count, committed_len - 1);
+
+        let own_turn = service
+            .fork_durable_session(
+                &parent_id,
+                None,
+                None,
+                Some(quiescent_fork_target(
+                    "own-turn",
+                    meerkat_core::DurableForkSourceAdmission::CallerTurn,
+                )),
+            )
+            .await
+            .expect("the source's own turn keeps its fork contract");
+        assert_eq!(own_turn.message_count, committed_len);
     }
 
     #[tokio::test]

@@ -21423,6 +21423,866 @@ async fn test_coarse_spawn_tool_admission_is_machine_routed() {
     );
 }
 
+/// Regression (HomeCore): the member granted fork_off could not observe or
+/// retire its own children ("not allowed by policy" on member_status and
+/// list_members), because every per-member tool required manage scope over
+/// the whole mob. A member now sees and retires the members it spawned, and
+/// only those.
+#[tokio::test]
+async fn forker_without_manage_scope_observes_and_retires_only_its_own_children() {
+    let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    service.set_return_exact_run_result(true);
+    let mob_id = handle.definition().id.to_string();
+    let forker = AgentIdentity::from("owner-forker");
+    let bystander = AgentIdentity::from("bystander");
+    spawn_bounded_fork_source(&handle, &forker).await;
+    spawn_bounded_fork_source(&handle, &bystander).await;
+    let forker_session = handle
+        .resolve_bridge_session_id(&forker)
+        .await
+        .expect("forker session");
+
+    let child = AgentIdentity::from("owned-fork-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &forker,
+            bounded_fork_child_spec(&child),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            None,
+        )
+        .await
+        .expect("caller-turn fork");
+    run.outcome().await.expect("child outcome");
+
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline()
+        .unwrap()
+        .clone();
+    let composed = super::tools::compose_external_tools_for_profile(
+        &profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        None,
+        Some(generated_mob_operator_authority_with_spawn_profile(
+            &mob_id, "worker",
+        )),
+    )
+    .expect("compose dispatcher")
+    .expect("operator dispatcher visible");
+    let dispatcher = match composed
+        .bind_ops_lifecycle(
+            Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+            forker_session,
+        )
+        .expect("bind forker session")
+    {
+        meerkat_core::agent::BindOutcome::Bound(bound)
+        | meerkat_core::agent::BindOutcome::Skipped(bound) => bound,
+    };
+    let call = |name: &'static str, args: serde_json::Value| {
+        let dispatcher = Arc::clone(&dispatcher);
+        async move {
+            let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+            dispatcher
+                .dispatch(ToolCallView {
+                    id: "owned-member-call",
+                    name,
+                    args: &raw,
+                })
+                .await
+        }
+    };
+
+    call(
+        "member_status",
+        serde_json::json!({"member_id": "owned-fork-child"}),
+    )
+    .await
+    .expect("the forker must observe its own child");
+    assert!(
+        matches!(
+            call(
+                "member_status",
+                serde_json::json!({"member_id": "bystander"})
+            )
+            .await,
+            Err(ToolError::AccessDenied { .. })
+        ),
+        "a member it did not spawn stays out of reach"
+    );
+    let listed = call("list_members", serde_json::json!({}))
+        .await
+        .expect("the forker lists its own children");
+    let payload: serde_json::Value =
+        serde_json::from_str(&listed.result.text_content()).expect("payload");
+    let names: Vec<_> = payload["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .filter_map(|member| {
+            member["member_id"]
+                .as_str()
+                .or(member["agent_identity"].as_str())
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec!["owned-fork-child"],
+        "only owned children are listed"
+    );
+    assert!(
+        matches!(
+            call(
+                "retire_member",
+                serde_json::json!({"member_id": "bystander"})
+            )
+            .await,
+            Err(ToolError::AccessDenied { .. })
+        ),
+        "the forker cannot retire a member it did not spawn"
+    );
+    call(
+        "retire_member",
+        serde_json::json!({"member_id": "owned-fork-child"}),
+    )
+    .await
+    .expect("the forker retires its own child");
+    assert!(handle.get_member(&child).await.unwrap().is_none());
+    assert!(handle.get_member(&bystander).await.unwrap().is_some());
+}
+
+/// force_cancel_member follows the same ownership admission as member_status
+/// and retire_member: without manage scope the forker cancels the running
+/// runs of members in its own spawn tree (a grandchild included), and no one
+/// else's.
+#[tokio::test]
+async fn forker_force_cancels_only_running_members_it_owns() {
+    let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let mob_id = handle.definition().id.to_string();
+    let forker = AgentIdentity::from("cancel-forker");
+    let bystander = AgentIdentity::from("cancel-bystander");
+    spawn_bounded_fork_source(&handle, &forker).await;
+    spawn_bounded_fork_source(&handle, &bystander).await;
+    let forker_session = handle
+        .resolve_bridge_session_id(&forker)
+        .await
+        .expect("forker session");
+    // Every fork turn from here on runs until something cancels it.
+    service.set_start_turn_delay_ms(600_000);
+    let child = AgentIdentity::from("cancel-child");
+    let child_run = caller_turn_fork_child(&handle, &forker, &child, None).await;
+    let grandchild = AgentIdentity::from("cancel-grandchild");
+    let grandchild_run = caller_turn_fork_child(&handle, &child, &grandchild, None).await;
+
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline()
+        .unwrap()
+        .clone();
+    let composed = super::tools::compose_external_tools_for_profile(
+        &profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        None,
+        Some(generated_mob_operator_authority_with_spawn_profile(
+            &mob_id, "worker",
+        )),
+    )
+    .expect("compose dispatcher")
+    .expect("operator dispatcher visible");
+    let dispatcher = match composed
+        .bind_ops_lifecycle(
+            Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+            forker_session,
+        )
+        .expect("bind forker session")
+    {
+        meerkat_core::agent::BindOutcome::Bound(bound)
+        | meerkat_core::agent::BindOutcome::Skipped(bound) => bound,
+    };
+    let force_cancel = |member: &'static str| {
+        let dispatcher = Arc::clone(&dispatcher);
+        async move {
+            let raw = serde_json::value::RawValue::from_string(
+                serde_json::json!({"member_id": member}).to_string(),
+            )
+            .unwrap();
+            dispatcher
+                .dispatch(ToolCallView {
+                    id: "owned-force-cancel",
+                    name: "force_cancel_member",
+                    args: &raw,
+                })
+                .await
+        }
+    };
+
+    // force_cancel_member requests a cooperative boundary cancel of the
+    // member's in-flight run; count those requests to see which calls reached
+    // a member and which were refused before any effect.
+    let before = service.cancel_after_boundary_call_count();
+    assert!(
+        matches!(
+            force_cancel("cancel-bystander").await,
+            Err(ToolError::AccessDenied { .. })
+        ),
+        "a member the forker did not spawn stays out of reach"
+    );
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        before,
+        "a refused force cancel reaches no member"
+    );
+    force_cancel("cancel-grandchild")
+        .await
+        .expect("the forker cancels its grandchild's run");
+    let after_grandchild = service.cancel_after_boundary_call_count();
+    assert!(
+        after_grandchild > before,
+        "the grandchild's run received the cancel"
+    );
+    force_cancel("cancel-child")
+        .await
+        .expect("the forker cancels its child's run");
+    assert!(
+        service.cancel_after_boundary_call_count() > after_grandchild,
+        "the child's run received the cancel"
+    );
+    assert!(handle.get_member(&bystander).await.unwrap().is_some());
+
+    // Release the deliberately endless runs: retiring the child cascades to
+    // the grandchild, and both supervised runs then reach an outcome.
+    handle
+        .retire_with_descendants(child.clone())
+        .await
+        .expect("retire the cancelled subtree");
+    for (member, run) in [("grandchild", grandchild_run), ("child", child_run)] {
+        tokio::time::timeout(std::time::Duration::from_secs(20), run.outcome())
+            .await
+            .unwrap_or_else(|_| panic!("the retired {member} run must end"));
+    }
+    assert!(handle.get_member(&grandchild).await.unwrap().is_none());
+}
+
+async fn caller_turn_fork_child(
+    handle: &MobHandle,
+    forker: &AgentIdentity,
+    child: &AgentIdentity,
+    max_run: Option<std::time::Duration>,
+) -> ForkChildRun {
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            forker,
+            bounded_fork_child_spec(child),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            max_run,
+            None,
+        )
+        .await
+        .expect("caller-turn fork");
+    run
+}
+
+/// Ownership is durable per identity: both respawn forms keep the spawner,
+/// including a successor spec (MobKit's destructive reset uses it).
+#[tokio::test]
+async fn spawned_by_survives_respawn_and_successor_respawn() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let forker = AgentIdentity::from("respawn-forker");
+    spawn_bounded_fork_source(&handle, &forker).await;
+    let child = AgentIdentity::from("respawn-owned-child");
+    caller_turn_fork_child(&handle, &forker, &child, None)
+        .await
+        .outcome()
+        .await
+        .expect("child outcome");
+
+    handle
+        .respawn(child.clone(), None)
+        .await
+        .expect("plain respawn");
+    assert_eq!(
+        handle
+            .get_member(&child)
+            .await
+            .unwrap()
+            .expect("respawned")
+            .spawned_by,
+        Some(forker.clone()),
+        "respawn keeps the spawner"
+    );
+
+    let mut successor = SpawnMemberSpec::new("worker", child.clone());
+    successor.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .respawn_with_successor_spec(successor)
+        .await
+        .expect("successor respawn");
+    assert_eq!(
+        handle
+            .get_member(&child)
+            .await
+            .unwrap()
+            .expect("successor")
+            .spawned_by,
+        Some(forker),
+        "a successor spec keeps the spawner of the incarnation it replaces"
+    );
+}
+
+/// Process-tree semantics (lifecycle review): A forks C, C forks D. A owns D
+/// transitively, and autokilling C retires D too, deepest first.
+#[tokio::test]
+async fn ownership_is_transitive_and_autokill_cascades_to_grandchildren() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("tree-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let c = AgentIdentity::from("tree-c");
+    caller_turn_fork_child(&handle, &a, &c, None)
+        .await
+        .outcome()
+        .await
+        .expect("c outcome");
+    let d = AgentIdentity::from("tree-d");
+    caller_turn_fork_child(&handle, &c, &d, None)
+        .await
+        .outcome()
+        .await
+        .expect("d outcome");
+
+    assert!(
+        matches!(
+            handle
+                .resolve_owned_member_admission(false, Some(&a), &d)
+                .await
+                .expect("admission"),
+            CurrentMobAdmission::Allowed
+        ),
+        "A transitively owns its grandchild D"
+    );
+    assert!(
+        matches!(
+            handle
+                .resolve_owned_member_admission(false, Some(&d), &a)
+                .await
+                .expect("admission"),
+            CurrentMobAdmission::Denied
+        ),
+        "ownership does not flow upward"
+    );
+    assert_eq!(
+        handle.descendants_deepest_first(&a).await,
+        vec![d.clone(), c.clone()]
+    );
+
+    handle
+        .retire_with_descendants(c.clone())
+        .await
+        .expect("cascading retirement");
+    assert!(handle.get_member(&c).await.unwrap().is_none());
+    assert!(
+        handle.get_member(&d).await.unwrap().is_none(),
+        "retiring C retires its descendant D"
+    );
+    assert!(handle.get_member(&a).await.unwrap().is_some());
+}
+
+/// Plain `MobHandle::retire` cascades too (contracts review): every host
+/// retire path, MobKit's idle sweep included, uses it. A forks C, C forks D;
+/// retiring C alone retires D, and A keeps its seat.
+#[tokio::test]
+async fn plain_retire_cascades_to_the_members_descendants() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("plain-tree-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let c = AgentIdentity::from("plain-tree-c");
+    caller_turn_fork_child(&handle, &a, &c, None)
+        .await
+        .outcome()
+        .await
+        .expect("c outcome");
+    let d = AgentIdentity::from("plain-tree-d");
+    caller_turn_fork_child(&handle, &c, &d, None)
+        .await
+        .outcome()
+        .await
+        .expect("d outcome");
+
+    handle.retire(c.clone()).await.expect("plain retire");
+    assert!(handle.get_member(&c).await.unwrap().is_none());
+    assert!(
+        handle.get_member(&d).await.unwrap().is_none(),
+        "plain retire of C retires its descendant D"
+    );
+    assert!(handle.get_member(&a).await.unwrap().is_some());
+    assert!(handle.descendants_deepest_first(&a).await.is_empty());
+}
+
+/// A member whose subtree is being retired can fork a new child meanwhile
+/// (lifecycle review). The cascade re-collects descendants until none remain,
+/// so that child is retired too instead of escaping unowned.
+#[tokio::test]
+async fn retire_cascade_catches_a_child_forked_while_the_subtree_retires() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("race-tree-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let c = AgentIdentity::from("race-tree-c");
+    caller_turn_fork_child(&handle, &a, &c, None)
+        .await
+        .outcome()
+        .await
+        .expect("c outcome");
+    let d = AgentIdentity::from("race-tree-d");
+    caller_turn_fork_child(&handle, &c, &d, None)
+        .await
+        .outcome()
+        .await
+        .expect("d outcome");
+
+    // Each retirement's archive is slow, so the cascade is still working on
+    // D when C forks E.
+    service.set_archive_delay_ms(1_500);
+    let retiring = {
+        let handle = handle.clone();
+        let c = c.clone();
+        tokio::spawn(async move { handle.retire(c).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        handle.get_member(&c).await.unwrap().is_some(),
+        "C is still seated while its descendants retire"
+    );
+    let e = AgentIdentity::from("race-tree-e");
+    caller_turn_fork_child(&handle, &c, &e, None)
+        .await
+        .outcome()
+        .await
+        .expect("e outcome");
+    tokio::time::timeout(std::time::Duration::from_secs(60), retiring)
+        .await
+        .expect("retirement finishes")
+        .expect("retire task")
+        .expect("plain retire");
+    service.set_archive_delay_ms(0);
+
+    for member in [&c, &d, &e] {
+        assert!(
+            handle.get_member(member).await.unwrap().is_none(),
+            "{member} was retired with C"
+        );
+    }
+    assert!(handle.get_member(&a).await.unwrap().is_some());
+}
+
+/// A fork run armed with `retire_child_if_abandoned` retires its child when
+/// dropped before the outcome (a blocking caller that was cancelled); an
+/// unarmed run keeps the documented contract (dropping only stops
+/// listening), and an armed run whose outcome arrived leaves a completed
+/// child seated.
+#[tokio::test]
+async fn an_abandoned_armed_fork_run_retires_its_child() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("abandon-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+
+    let completed = AgentIdentity::from("abandon-completed");
+    let outcome = caller_turn_fork_child(&handle, &a, &completed, None)
+        .await
+        .retire_child_if_abandoned()
+        .outcome()
+        .await;
+    assert!(matches!(outcome, Some(ForkChildRunOutcome::Completed(_))));
+    assert!(
+        handle.get_member(&completed).await.unwrap().is_some(),
+        "an armed run whose outcome arrived leaves the completed child seated"
+    );
+
+    service.set_start_turn_delay_ms(600_000);
+    let kept = AgentIdentity::from("abandon-kept");
+    drop(caller_turn_fork_child(&handle, &a, &kept, None).await);
+    let abandoned = AgentIdentity::from("abandon-armed");
+    drop(
+        caller_turn_fork_child(&handle, &a, &abandoned, None)
+            .await
+            .retire_child_if_abandoned(),
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while handle.get_member(&abandoned).await.unwrap().is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the abandoned armed run's child was never retired"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        handle.get_member(&kept).await.unwrap().is_some(),
+        "dropping an unarmed run only stops listening"
+    );
+}
+
+/// A fork in its source's own turn owes its job to that source: a job bound
+/// to any other session is refused, typed, before anything is forked or
+/// seated (the restart re-link takes the forker for the owner). Bound to the
+/// source's own session, the same fork is admitted.
+#[tokio::test]
+async fn a_caller_turn_fork_refuses_a_job_bound_to_another_session() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("owner-bound-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let child = AgentIdentity::from("owner-bound-child");
+    let sessions_before = service.persisted_sessions.read().await.len();
+    let elsewhere = SessionId::new();
+    let refused = handle
+        .fork_member_then_run_detached(
+            &a,
+            bounded_fork_child_spec(&child),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            Some(ForkJobBinding {
+                job_id: "job-bound-elsewhere".to_string(),
+                owner_session_id: elsewhere.clone(),
+            }),
+        )
+        .await;
+    match refused {
+        Err(BoundedMemberRunError::Admission(MobError::ForkJobOwnerNotSource {
+            source_member_id,
+            owner_session_id,
+            ..
+        })) => {
+            assert_eq!(source_member_id, a);
+            assert_eq!(owner_session_id, elsewhere);
+        }
+        other => panic!("expected ForkJobOwnerNotSource, got {other:?}"),
+    }
+    assert!(handle.get_member(&child).await.unwrap().is_none());
+    assert_eq!(
+        service.persisted_sessions.read().await.len(),
+        sessions_before,
+        "nothing was forked"
+    );
+
+    let own_session = handle
+        .resolve_bridge_session_id(&a)
+        .await
+        .expect("source session");
+    let (fork, run) = handle
+        .fork_member_then_run_detached(
+            &a,
+            bounded_fork_child_spec(&child),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            Some(ForkJobBinding {
+                job_id: "job-bound-to-the-source".to_string(),
+                owner_session_id: own_session,
+            }),
+        )
+        .await
+        .expect("a job bound to the source's own session is admitted");
+    assert_eq!(fork.agent_identity, child);
+    let _ = run.outcome().await;
+}
+
+/// The CallerTurn owner check uses the source session the fork's admission
+/// resolves, the one the transcript is forked from: a source rebound between
+/// the call and its admission (a respawn) is checked against its new
+/// session, so a job bound to the old one is refused and nothing is forked
+/// (lifecycle review: a separate earlier read validated the old session
+/// while the fork used the successor's).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_turn_fork_checks_the_job_owner_against_the_admitted_source_session() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("admitted-owner-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let child = AgentIdentity::from("admitted-owner-child");
+    let old_session = handle
+        .resolve_bridge_session_id(&a)
+        .await
+        .expect("source session");
+    let (entered, release) = super::handle::pause_fork_admission_for_test(a.clone());
+    let fork = tokio::spawn({
+        let (handle, a, child, old_session) = (
+            handle.clone(),
+            a.clone(),
+            child.clone(),
+            old_session.clone(),
+        );
+        async move {
+            handle
+                .fork_member_then_run_detached(
+                    &a,
+                    bounded_fork_child_spec(&child),
+                    None,
+                    "fork_child_result",
+                    256,
+                    meerkat_core::DurableForkSourceAdmission::CallerTurn,
+                    None,
+                    Some(ForkJobBinding {
+                        job_id: "job-bound-before-the-respawn".to_string(),
+                        owner_session_id: old_session,
+                    }),
+                )
+                .await
+                .map(|(fork, _run)| fork.agent_identity)
+        }
+    });
+    entered.await.expect("the fork reached its admission");
+    handle
+        .respawn(a.clone(), None)
+        .await
+        .expect("respawn the source");
+    let new_session = handle
+        .resolve_bridge_session_id(&a)
+        .await
+        .expect("successor session");
+    assert_ne!(new_session, old_session, "the respawn rebinds the source");
+    let _ = release.send(());
+    match fork.await.expect("fork task") {
+        Err(BoundedMemberRunError::Admission(MobError::ForkJobOwnerNotSource {
+            source_session_id,
+            owner_session_id,
+            ..
+        })) => {
+            assert_eq!(source_session_id, new_session, "checked at admission");
+            assert_eq!(owner_session_id, old_session);
+        }
+        other => panic!("expected ForkJobOwnerNotSource, got {other:?}"),
+    }
+    assert!(handle.get_member(&child).await.unwrap().is_none());
+}
+
+/// A detached fork call dropped while its child's spawn is in flight leaves
+/// no child behind (lifecycle review: a relieved fork_off task is aborted at
+/// its next await, and the actor seats the child anyway). The seat finishes
+/// on a task of its own, and the child, which nobody holds, is retired.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_detached_fork_dropped_mid_spawn_leaves_no_child_seated() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("mid-spawn-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let child = AgentIdentity::from("mid-spawn-child");
+
+    // The child's spawn waits in its session creation.
+    service.set_create_session_delay_ms(1_500);
+    let idle = service.create_session_in_flight.load(Ordering::Relaxed);
+    let fork = tokio::spawn({
+        let (handle, a, child) = (handle.clone(), a.clone(), child.clone());
+        async move { caller_turn_fork_child(&handle, &a, &child, None).await }
+    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while service.create_session_in_flight.load(Ordering::Relaxed) == idle {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child's spawn never started"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    // The call is dropped with the child's spawn in flight.
+    fork.abort();
+    assert!(fork.await.is_err_and(|error| error.is_cancelled()));
+    service.set_create_session_delay_ms(0);
+
+    // The spawn completes regardless; then the unheld child is retired.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let retired = handle
+            .events
+            .replay_all()
+            .await
+            .expect("replay events")
+            .iter()
+            .any(|event| {
+                matches!(
+                    &event.kind,
+                    MobEventKind::MemberRetired { agent_identity, .. } if agent_identity == &child
+                )
+            });
+        if retired && handle.get_member(&child).await.unwrap().is_none() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the dropped call's child was left seated (retired: {retired})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        handle.get_member(&a).await.unwrap().is_some(),
+        "the forker is untouched"
+    );
+}
+
+/// The job record's terminal reply read from a fork child's durable
+/// transcript, around the durable completion record of the child's own
+/// detached job (a nested fork): a record admitted after the child replied
+/// starts a later turn and never displaces the reply; a record admitted
+/// mid-turn is context of the job's turn.
+#[test]
+fn a_fork_jobs_durable_reply_skips_nested_job_completion_records() {
+    use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, UserMessage};
+
+    let text = |text: &str| {
+        Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: text.to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        ))
+    };
+    let tool_call = || {
+        Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::ToolUse {
+                id: "call-fork-d".to_string(),
+                name: "fork_off".to_string(),
+                args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                meta: None,
+            }],
+            StopReason::ToolUse,
+        ))
+    };
+    let tool_result = || {
+        Message::tool_results(vec![ToolResult::new(
+            "call-fork-d".to_string(),
+            "running".to_string(),
+            false,
+        )])
+    };
+    let nested_record = || {
+        Message::SystemNotice(SystemNoticeMessage::persisted_background_job(
+            "fork_off",
+            "job-d",
+            meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+            "{\"status\":\"completed\"}".to_string(),
+        ))
+    };
+    let prefix = [
+        Message::User(UserMessage::text("forker context")),
+        text("forker reply"),
+    ];
+    let job = ForkJobRecord {
+        job_id: "job-c".to_string(),
+        owner_session_id: SessionId::new(),
+        started_at_ms: 0,
+        max_run_ms: None,
+        prefix_message_count: prefix.len(),
+        result_label: "fork_off_result".to_string(),
+        max_text_bytes: 4096,
+    };
+    let reply_of = |own_exchange: Vec<Message>| {
+        let mut session = meerkat_core::Session::new();
+        for message in prefix.iter().cloned().chain(own_exchange) {
+            session.push(message);
+        }
+        job.durable_terminal_result(&session)
+            .expect("the reply fits its bounds")
+            .map(|result| result.text().to_string())
+    };
+    let task = || Message::User(UserMessage::text("the job"));
+
+    // The record of the child's own fork landed after its reply, with or
+    // without the turn that reacted to it.
+    assert_eq!(
+        reply_of(vec![task(), text("R1"), nested_record()]).as_deref(),
+        Some("R1")
+    );
+    assert_eq!(
+        reply_of(vec![task(), text("R1"), nested_record(), text("R2")]).as_deref(),
+        Some("R1")
+    );
+    // Admitted mid-turn, between the child's tool calls: the turn went on to
+    // its reply, or has not replied yet.
+    assert_eq!(
+        reply_of(vec![
+            task(),
+            tool_call(),
+            tool_result(),
+            nested_record(),
+            text("R1"),
+        ])
+        .as_deref(),
+        Some("R1")
+    );
+    assert_eq!(
+        reply_of(vec![task(), tool_call(), tool_result(), nested_record()]),
+        None
+    );
+    // System context after the reply was already skipped.
+    assert_eq!(
+        reply_of(vec![
+            task(),
+            text("R1"),
+            Message::System(meerkat_core::types::SystemMessage::new("context")),
+        ])
+        .as_deref(),
+        Some("R1")
+    );
+}
+
+/// Autokill of a child with its own running child retires both, deepest
+/// first (lifecycle review: C autokilled cascades to D).
+#[tokio::test]
+async fn autokill_retires_the_child_and_its_descendants() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let a = AgentIdentity::from("autokill-tree-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    service.set_start_turn_delay_ms(600_000);
+
+    let c = AgentIdentity::from("autokill-tree-c");
+    let c_run =
+        caller_turn_fork_child(&handle, &a, &c, Some(std::time::Duration::from_millis(500))).await;
+    // C forks D from its own running turn; D has no limit of its own.
+    let d = AgentIdentity::from("autokill-tree-d");
+    let _d_run = caller_turn_fork_child(&handle, &c, &d, None).await;
+    assert!(handle.get_member(&d).await.unwrap().is_some());
+
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(20), c_run.outcome())
+            .await
+            .expect("autokill resolves"),
+        Some(ForkChildRunOutcome::MaxRunElapsed {
+            retirement_error: None,
+            ..
+        })
+    ));
+    assert!(handle.get_member(&c).await.unwrap().is_none());
+    assert!(
+        handle.get_member(&d).await.unwrap().is_none(),
+        "autokilling C retires its running descendant D"
+    );
+    assert!(handle.get_member(&a).await.unwrap().is_some());
+}
+
 #[tokio::test]
 async fn test_visible_mob_operator_tools_emit_identity_native_member_payloads() {
     let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
@@ -22210,14 +23070,7 @@ async fn fork_member_then_run_bounded_keeps_bare_fork_provisioning_only_and_resu
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_return_exact_run_result(true);
     let source_identity = AgentIdentity::from("bounded-fork-source");
-    let source = handle
-        .spawn(
-            ProfileName::from("worker"),
-            source_identity.clone(),
-            Some(ContentInput::Text("source context".to_string())),
-        )
-        .await
-        .expect("spawn bounded fork source");
+    let source = spawn_settled_fork_source(&handle, &source_identity).await;
     let source_session = source
         .bridge_session_id()
         .expect("source bridge session")
@@ -22262,6 +23115,297 @@ async fn fork_member_then_run_bounded_keeps_bare_fork_provisioning_only_and_resu
             .is_some(),
         "explicit fork-then-run retains its provisioned child"
     );
+}
+
+async fn spawn_bounded_fork_source(handle: &MobHandle, source_identity: &AgentIdentity) {
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            source_identity.clone(),
+            Some(ContentInput::Text("source context".to_string())),
+        )
+        .await
+        .expect("spawn bounded fork source");
+}
+
+/// Spawn a source for an external (`Quiescent`) fork, and return once its
+/// initial turn is answered.
+///
+/// A `Quiescent` fork refuses a source that still owes a turn, so the source
+/// must be settled before it is forked. It runs turn-driven: this
+/// mock models an autonomous member's kickoff as a keep-alive host loop that
+/// never ends on its own, which is a source that owes its turn forever.
+async fn spawn_settled_fork_source(
+    handle: &MobHandle,
+    source_identity: &AgentIdentity,
+) -> MemberRef {
+    let source = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            source_identity.clone(),
+            Some(ContentInput::Text("source context".to_string())),
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn bounded fork source");
+    let source_session = source
+        .bridge_session_id()
+        .expect("source bridge session")
+        .clone();
+    wait_for_fork_source_settled(handle, &source_session).await;
+    source
+}
+
+/// Wait until the source runtime holds no admitted input.
+#[cfg(feature = "runtime-adapter")]
+async fn wait_for_fork_source_settled(handle: &MobHandle, source_session: &SessionId) {
+    use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+    let Some(runtime) = handle.runtime_adapter.clone() else {
+        return;
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !runtime
+        .list_active_inputs(source_session)
+        .await
+        .is_ok_and(|active| active.is_empty())
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the fork source never answered its initial turn"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(not(feature = "runtime-adapter"))]
+async fn wait_for_fork_source_settled(_handle: &MobHandle, _source_session: &SessionId) {}
+
+fn bounded_fork_child_spec(child_identity: &AgentIdentity) -> SpawnMemberSpec {
+    let mut child = SpawnMemberSpec::new(ProfileName::from("worker"), child_identity.clone());
+    child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    child.initial_message = Some(ContentInput::Text("exact child task".to_string()));
+    child
+}
+
+/// Regression (HomeCore fork_off): a fork child whose exact turn fails was
+/// left seated and running with no one observing it. The failed run now
+/// retires the child before the error reaches the caller.
+#[tokio::test]
+async fn fork_member_then_run_bounded_retires_child_when_its_turn_fails() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_identity = AgentIdentity::from("bounded-fork-failing-source");
+    spawn_settled_fork_source(&handle, &source_identity).await;
+    service.set_fail_start_turn(true);
+
+    let child_identity = AgentIdentity::from("bounded-fork-failing-child");
+    let error = handle
+        .fork_member_then_run_bounded(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+        )
+        .await
+        .expect_err("the child's exact turn must fail");
+
+    assert!(
+        !matches!(error, BoundedMemberRunError::CleanupDebt { .. }),
+        "retiring the failed child must succeed: {error}"
+    );
+    assert!(
+        handle.get_member(&child_identity).await.unwrap().is_none(),
+        "a fork child whose exact turn failed must be retired, not left seated"
+    );
+    assert!(
+        handle.get_member(&source_identity).await.unwrap().is_some(),
+        "cleaning up the child must not touch the source"
+    );
+}
+
+/// Regression (HomeCore fork_off, calls a and i): the agent loop's default
+/// tool deadline ended the forker's wait and left the child in limbo. A
+/// detached fork returns once the child's turn is admitted, and nothing the
+/// caller does with the run handle affects the child: there is no implicit
+/// deadline, and the forker owns the child.
+#[tokio::test]
+async fn fork_member_then_run_detached_returns_promptly_and_child_outlives_the_caller() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_identity = AgentIdentity::from("detached-fork-source");
+    spawn_settled_fork_source(&handle, &source_identity).await;
+    service.set_start_turn_delay_ms(600_000);
+
+    let child_identity = AgentIdentity::from("detached-fork-child");
+    let (fork, run) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        handle.fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            None,
+        ),
+    )
+    .await
+    .expect("a detached fork must not wait for the child's turn")
+    .expect("detached fork admits the child's turn");
+    assert_eq!(fork.agent_identity, child_identity);
+
+    drop(run);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        handle.get_member(&child_identity).await.unwrap().is_some(),
+        "the caller dropping its run handle must not retire the forker's child"
+    );
+}
+
+/// Opt-in autokill: with `max_run`, the runtime cancels the child's run and
+/// retires the child when the limit elapses, independent of any caller.
+#[tokio::test]
+async fn fork_member_then_run_detached_autokill_cancels_and_retires_the_child() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_identity = AgentIdentity::from("autokill-fork-source");
+    spawn_settled_fork_source(&handle, &source_identity).await;
+    service.set_start_turn_delay_ms(600_000);
+
+    let child_identity = AgentIdentity::from("autokill-fork-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            Some(std::time::Duration::from_millis(200)),
+            None,
+        )
+        .await
+        .expect("detached fork admits the child's turn");
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), run.outcome())
+        .await
+        .expect("autokill must resolve the run")
+        .expect("the supervisor reports an outcome");
+    assert!(
+        matches!(
+            outcome,
+            ForkChildRunOutcome::MaxRunElapsed {
+                retirement_error: None,
+                ..
+            }
+        ),
+        "max_run must end the run by autokill: {outcome:?}"
+    );
+    assert!(
+        handle.get_member(&child_identity).await.unwrap().is_none(),
+        "an autokilled child must be retired"
+    );
+}
+
+/// A detached fork reports the child's exact result and keeps the child, and
+/// a fork requested from the source's own turn records the source as the
+/// child's spawner.
+#[tokio::test]
+async fn fork_member_then_run_detached_reports_completion_and_records_the_spawner() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let source_identity = AgentIdentity::from("completing-fork-source");
+    spawn_bounded_fork_source(&handle, &source_identity).await;
+
+    let child_identity = AgentIdentity::from("completing-fork-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            None,
+        )
+        .await
+        .expect("detached fork admits the child's turn");
+
+    match tokio::time::timeout(std::time::Duration::from_secs(10), run.outcome())
+        .await
+        .expect("the child's turn completes")
+    {
+        Some(ForkChildRunOutcome::Completed(turn)) => {
+            assert_eq!(turn.result().result().text(), "exact child task");
+        }
+        other => panic!("expected a completed child turn, got {other:?}"),
+    }
+    let child = handle
+        .get_member(&child_identity)
+        .await
+        .unwrap()
+        .expect("a completed fork child stays seated");
+    assert_eq!(
+        child.spawned_by,
+        Some(source_identity),
+        "a caller-turn fork records its source as the child's owner"
+    );
+}
+
+/// Same deadline hazard for `delegate`: a helper whose caller stops waiting
+/// mid-turn is retired instead of staying seated and unobserved.
+#[tokio::test]
+async fn spawn_helper_retires_helper_when_caller_stops_waiting() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_start_turn_delay_ms(600_000);
+    let helper_id = AgentIdentity::from("abandoned-helper");
+    let run = {
+        let handle = handle.clone();
+        let helper_id = helper_id.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn_helper(
+                    helper_id,
+                    "summarize this",
+                    HelperOptions {
+                        role_name: Some(ProfileName::from("worker")),
+                        runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                        ..HelperOptions::default()
+                    },
+                    "abandoned-helper-result",
+                    256,
+                )
+                .await
+        })
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while handle.get_member(&helper_id).await.unwrap().is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the helper must be seated while its turn runs");
+    // Let the composition reach its exact-turn wait before abandoning it.
+    wait_for_start_turn_call_count(
+        service.as_ref(),
+        1,
+        "the helper's exact turn should reach the provider call",
+    )
+    .await;
+
+    run.abort();
+    assert!(run.await.expect_err("aborted").is_cancelled());
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while handle.get_member(&helper_id).await.unwrap().is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("an abandoned helper must be retired, not left running unobserved");
 }
 
 /// Ask 6 spawn-site threading: an explicit `tool_access_policy` on the spawn
@@ -37413,6 +38557,67 @@ async fn cleanup_without_exact_actor_witness_fails_closed_with_retry_anchors() {
         runtime_sessions.read().await.get(&session_id).is_none(),
         "session should be removed from the runtime_sessions map after cleanup"
     );
+}
+
+/// Regression (#1190, Scenario 96): after a detached fork_off completion
+/// wake finds nothing pending, the runtime retires the idle member's
+/// executor on its own. The member's next turn revives it, and the revival
+/// used to fail with "already has a different operation-registry binding
+/// incarnation" because the ops adapter still held the retired
+/// registration's binding. Revival now releases that superseded binding by
+/// exact compare before binding the new registration.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn member_turn_revives_after_the_runtime_retired_its_idle_executor() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    service.set_return_exact_run_result(true);
+    let member = AgentIdentity::from("revived-after-runtime-teardown");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn member");
+    let session_id = handle
+        .resolve_bridge_session_id(&member)
+        .await
+        .expect("member session");
+    assert!(adapter.contains_session(&session_id).await);
+
+    // The runtime's own idle teardown: its executor and live session go
+    // away without the mob retiring the member.
+    super::session_service::MobSessionService::discard_live_session(service.as_ref(), &session_id)
+        .await
+        .expect("discard the idle live session");
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("runtime unregisters the idle executor");
+    assert!(!adapter.contains_session(&session_id).await);
+
+    let spec = BoundedResultSpec::new("revived-turn", 256).expect("bounded spec");
+    let turn = handle
+        .start_work_for_identity_bounded(
+            member.clone(),
+            WorkSpec::new(
+                ContentInput::Text("next turn".to_string()),
+                WorkOrigin::Internal,
+            ),
+            HandlingMode::Queue,
+            spec.clone(),
+        )
+        .await
+        .expect("the member's next turn revives it instead of failing on a stale ops binding");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), turn.wait_bounded(spec))
+        .await
+        .expect("revived turn completes")
+        .expect("revived turn succeeds");
+    assert_eq!(result.result().result().text(), "next turn");
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -55746,12 +56951,14 @@ async fn test_busy_member_execution_snapshot_cannot_block_mob_lifecycle_commands
         .expect("member status should return an observation");
     assert!(
         status_started_at.elapsed() < Duration::from_secs(1),
-        "member status must degrade to unknown instead of awaiting the busy session turn"
+        "member status must not await the busy session turn"
     );
+    // The busy session cannot answer, so the run state comes from the
+    // runtime machine, which still has the worker's kickoff run open.
     assert_eq!(
         snapshot.progress.map(|progress| progress.run_state),
-        Some(crate::runtime::handle::MemberRunState::Unknown),
-        "a timed-out execution observation must be represented truthfully as unknown"
+        Some(crate::runtime::handle::MemberRunState::RunOpen),
+        "a timed-out execution observation reports the runtime machine's run state"
     );
 }
 
@@ -56098,6 +57305,7 @@ async fn test_member_status_completion_cancels_while_mailbox_is_full() {
             tokens_used: 0,
             genuinely_absent: false,
             execution_snapshot: None,
+            runtime_run_state: None,
             observed_at_ms: 1,
         },
         observation_permit,
@@ -67674,6 +68882,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::ForkMemberProvisionFailed { .. } => "fork_member_provision_failed".to_string(),
         MobError::InvalidBoundedHelperResult { .. } => "invalid_bounded_helper_result".to_string(),
+        MobError::ForkJobOwnerNotSource { .. } => "fork_job_owner_not_source".to_string(),
         MobError::BoundedHelperResultUnavailable { .. } => {
             "bounded_helper_result_unavailable".to_string()
         }

@@ -10616,6 +10616,18 @@ impl MobProvisioner for SessionBackend {
         // mob binding is emitted later by the routed
         // RequestRuntimeBinding -> PrepareBindings path, after MobMachine has
         // committed the member-owned AgentRuntimeId and fence.
+        // A missing-live revival replaces a runtime incarnation that is gone;
+        // observe its ops binding now so the stale one can be released by
+        // exact compare before the new registration is bound.
+        let superseded_ops_binding = if missing_live_revival {
+            admitted_bridge_session_id.as_ref().and_then(|session_id| {
+                backend
+                    .ops_adapter
+                    .capture_session_binding_witness(session_id)
+            })
+        } else {
+            None
+        };
         let mut prepared_ops_binding: Option<(SessionId, Arc<dyn OpsLifecycleRegistry>)> = None;
         let mut prepared_materialization: Option<PreparedSessionMaterialization> = None;
         let mut attached_actor_recovery: Option<(
@@ -11004,6 +11016,12 @@ impl MobProvisioner for SessionBackend {
                     bridge_session_id = %created_bridge_session_id,
                     "SessionBackend::provision_member binding owner session registry"
                 );
+                if missing_live_revival {
+                    backend.ops_adapter.release_superseded_session_binding_for_revival(
+                        &created_bridge_session_id,
+                        superseded_ops_binding.as_ref(),
+                    )?;
+                }
                 backend.ops_adapter.bind_session_registry(
                     created_bridge_session_id.clone(),
                     owner_bridge_session_id,
@@ -11032,6 +11050,12 @@ impl MobProvisioner for SessionBackend {
                     bridge_session_id = %created_bridge_session_id,
                     "SessionBackend::provision_member binding generated owner session registry"
                 );
+                if missing_live_revival {
+                    backend.ops_adapter.release_superseded_session_binding_for_revival(
+                        &created_bridge_session_id,
+                        superseded_ops_binding.as_ref(),
+                    )?;
+                }
                 backend.ops_adapter.bind_session_registry(
                     created_bridge_session_id.clone(),
                     generated_owner_session_id,

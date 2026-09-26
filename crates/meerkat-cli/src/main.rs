@@ -10361,6 +10361,72 @@ impl SessionService for RunMobSessionService {
     async fn archive(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
         self.inner.archive(id).await
     }
+
+    // Forward every defaulted live-session method to the inner service. The
+    // trait defaults answer Unsupported, which broke `delegate` from `rkat
+    // run`: helper turn admission and retirement both call
+    // has_live_session, so the helper failed and was orphaned.
+    async fn has_live_session(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, meerkat_core::service::SessionError> {
+        self.inner.has_live_session(id).await
+    }
+
+    async fn hot_swap_session_llm_identity(
+        &self,
+        id: &SessionId,
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: meerkat_core::SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .hot_swap_session_llm_identity(id, client, identity, request_policy)
+            .await
+    }
+
+    async fn set_session_client(
+        &self,
+        id: &SessionId,
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner.set_session_client(id, client).await
+    }
+
+    async fn set_session_tool_filter(
+        &self,
+        id: &SessionId,
+        filter: meerkat_core::ToolFilter,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner.set_session_tool_filter(id, filter).await
+    }
+
+    async fn set_session_tool_visibility_state(
+        &self,
+        id: &SessionId,
+        state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .set_session_tool_visibility_state(id, state)
+            .await
+    }
+
+    async fn subscribe_session_events(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::EventStream, meerkat_core::StreamError> {
+        self.inner.subscribe_session_events(id).await
+    }
+
+    async fn update_session_mob_authority_context(
+        &self,
+        id: &SessionId,
+        authority_context: Option<meerkat_core::service::MobToolAuthorityContext>,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .update_session_mob_authority_context(id, authority_context)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -10856,6 +10922,151 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         _mob_id: &meerkat_mob::MobId,
     ) -> bool {
         false
+    }
+
+    // Forwarded explicitly: the trait defaults answer Unsupported or no-op,
+    // which silently disabled durable forks (fork_off) and other mob paths
+    // on the CLI.
+
+    async fn authorize_revivable_retired_session(
+        &self,
+        session_id: &SessionId,
+        authority: meerkat_runtime::PreparedArchivedResumeCommitLease,
+    ) -> Result<
+        meerkat_runtime::AuthorizedArchivedResumeCommitLease,
+        meerkat_core::service::SessionError,
+    > {
+        meerkat_mob::MobSessionService::authorize_revivable_retired_session(
+            self.inner.as_ref(),
+            session_id,
+            authority,
+        )
+        .await
+    }
+
+    async fn await_event_projection_drain(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::await_event_projection_drain(
+            self.inner.as_ref(),
+            session_id,
+        )
+        .await
+    }
+
+    async fn cancel_all_checkpointers(&self) {
+        meerkat_mob::MobSessionService::cancel_all_checkpointers(self.inner.as_ref()).await;
+    }
+
+    #[cfg(feature = "openai-live")]
+    async fn capture_live_bridge_execution_snapshot(
+        &self,
+        session_id: &SessionId,
+        agent_identity: &str,
+    ) -> Result<meerkat_mob::LiveBridgeExecutionSnapshot, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::capture_live_bridge_execution_snapshot(
+            self.inner.as_ref(),
+            session_id,
+            agent_identity,
+        )
+        .await
+    }
+
+    async fn create_session_with_machine_archived_resume_authority(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        authorization: meerkat_runtime::ArchivedSessionActorMaterializationAuthorization,
+    ) -> Result<meerkat_core::RunResult, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::create_session_with_machine_archived_resume_authority(
+            self.inner.as_ref(),
+            req,
+            authorization,
+        )
+        .await
+    }
+
+    async fn create_session_with_machine_archived_resume_authority_under_runtime_turn_boundary(
+        &self,
+        req: meerkat_core::service::CreateSessionRequest,
+        authorization: meerkat_runtime::ArchivedSessionActorMaterializationAuthorization,
+    ) -> Result<meerkat_core::RunResult, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::create_session_with_machine_archived_resume_authority_under_runtime_turn_boundary(
+            self.inner.as_ref(),
+            req,
+            authorization,
+        )
+        .await
+    }
+
+    async fn discard_live_session_actor_after_durability_reload_required(
+        &self,
+        witness: &meerkat::LiveSessionActorWitness,
+    ) -> Result<bool, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::discard_live_session_actor_after_durability_reload_required(
+            self.inner.as_ref(),
+            witness,
+        )
+        .await
+    }
+
+    async fn fork_persisted_session(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+    ) -> Result<meerkat_core::SessionForkResult, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::fork_persisted_session(
+            self.inner.as_ref(),
+            source_session_id,
+            message_count,
+            tool_access_policy,
+            target,
+        )
+        .await
+    }
+
+    async fn load_revivable_retired_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::load_revivable_retired_session(
+            self.inner.as_ref(),
+            session_id,
+        )
+        .await
+    }
+
+    async fn publish_interaction_terminals_for_actor(
+        &self,
+        actor_witness: &meerkat::LiveSessionActorWitness,
+        events: &[meerkat_core::AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        meerkat_core::service::SessionError,
+    > {
+        meerkat_mob::MobSessionService::publish_interaction_terminals_for_actor(
+            self.inner.as_ref(),
+            actor_witness,
+            events,
+        )
+        .await
+    }
+
+    async fn rearm_all_checkpointers(&self) {
+        meerkat_mob::MobSessionService::rearm_all_checkpointers(self.inner.as_ref()).await;
+    }
+
+    async fn session_known_to_archive_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::session_known_to_archive_authority(
+            self.inner.as_ref(),
+            session_id,
+        )
+        .await
     }
 }
 
@@ -11496,7 +11707,13 @@ async fn run_agent(
                 persistence.clone(),
             )
             .await?;
-            Some(prepare_run_mob_tools_from_surface(storage_scope, mob_surface).await?)
+            let ctx = prepare_run_mob_tools_from_surface(storage_scope, mob_surface).await?;
+            if keep_alive {
+                ctx.state.set_detached_completion_delivery(
+                    meerkat_mob_mcp::DetachedCompletionDelivery::Available,
+                );
+            }
+            Some(ctx)
         } else {
             None
         };
@@ -12219,7 +12436,13 @@ async fn resume_session_with_llm_override(
             let mob_persistent = remember_mob_persistent_service(scope, Arc::clone(&service))?;
             let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
                 Arc::new(MobCliSessionService::new(mob_persistent));
-            Some(prepare_run_mob_tools(scope, run_mob_service).await?)
+            let ctx = prepare_run_mob_tools(scope, run_mob_service).await?;
+            if keep_alive {
+                ctx.state.set_detached_completion_delivery(
+                    meerkat_mob_mcp::DetachedCompletionDelivery::Available,
+                );
+            }
+            Some(ctx)
         } else {
             None
         };
@@ -13485,6 +13708,72 @@ impl SessionService for MobCliSessionService {
     async fn archive(&self, id: &SessionId) -> Result<(), meerkat_core::service::SessionError> {
         self.inner.archive(id).await
     }
+
+    // Forward every defaulted live-session method to the inner service. The
+    // trait defaults answer Unsupported, which broke `delegate` from `rkat
+    // run`: helper turn admission and retirement both call
+    // has_live_session, so the helper failed and was orphaned.
+    async fn has_live_session(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, meerkat_core::service::SessionError> {
+        self.inner.has_live_session(id).await
+    }
+
+    async fn hot_swap_session_llm_identity(
+        &self,
+        id: &SessionId,
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: meerkat_core::SessionLlmIdentity,
+        request_policy: meerkat_core::SessionLlmRequestPolicy,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .hot_swap_session_llm_identity(id, client, identity, request_policy)
+            .await
+    }
+
+    async fn set_session_client(
+        &self,
+        id: &SessionId,
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner.set_session_client(id, client).await
+    }
+
+    async fn set_session_tool_filter(
+        &self,
+        id: &SessionId,
+        filter: meerkat_core::ToolFilter,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner.set_session_tool_filter(id, filter).await
+    }
+
+    async fn set_session_tool_visibility_state(
+        &self,
+        id: &SessionId,
+        state: Option<meerkat_core::SessionToolVisibilityState>,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .set_session_tool_visibility_state(id, state)
+            .await
+    }
+
+    async fn subscribe_session_events(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::EventStream, meerkat_core::StreamError> {
+        self.inner.subscribe_session_events(id).await
+    }
+
+    async fn update_session_mob_authority_context(
+        &self,
+        id: &SessionId,
+        authority_context: Option<meerkat_core::service::MobToolAuthorityContext>,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .update_session_mob_authority_context(id, authority_context)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -13536,6 +13825,16 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
+    /// The wrapped persistent service owns the durable session bodies, so it
+    /// is the source runtime for forked council participants.
+    fn forked_participant_source_runtime(
+        self: Arc<Self>,
+    ) -> Option<Arc<dyn meerkat_mob::ForkedParticipantSourceRuntime>> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::forked_participant_source_runtime(
+            Arc::clone(&self.inner),
+        )
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &meerkat_core::SessionId,
@@ -14094,6 +14393,76 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
             mob_id,
         )
         .await
+    }
+
+    // Forwarded explicitly: the trait defaults answer Unsupported or no-op,
+    // which silently disabled durable forks (fork_off) and other mob paths
+    // on the CLI.
+
+    async fn cancel_all_checkpointers(&self) {
+        meerkat_mob::MobSessionService::cancel_all_checkpointers(self.inner.as_ref()).await;
+    }
+
+    #[cfg(feature = "openai-live")]
+    async fn capture_live_bridge_execution_snapshot(
+        &self,
+        session_id: &SessionId,
+        agent_identity: &str,
+    ) -> Result<meerkat_mob::LiveBridgeExecutionSnapshot, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::capture_live_bridge_execution_snapshot(
+            self.inner.as_ref(),
+            session_id,
+            agent_identity,
+        )
+        .await
+    }
+
+    async fn discard_live_session_actor_after_durability_reload_required(
+        &self,
+        witness: &meerkat::LiveSessionActorWitness,
+    ) -> Result<bool, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::discard_live_session_actor_after_durability_reload_required(
+            self.inner.as_ref(),
+            witness,
+        )
+        .await
+    }
+
+    async fn fork_persisted_session(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+    ) -> Result<meerkat_core::SessionForkResult, meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::fork_persisted_session(
+            self.inner.as_ref(),
+            source_session_id,
+            message_count,
+            tool_access_policy,
+            target,
+        )
+        .await
+    }
+
+    async fn publish_interaction_terminals_for_actor(
+        &self,
+        actor_witness: &meerkat::LiveSessionActorWitness,
+        events: &[meerkat_core::AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        meerkat_core::service::SessionError,
+    > {
+        meerkat_mob::MobSessionService::publish_interaction_terminals_for_actor(
+            self.inner.as_ref(),
+            actor_witness,
+            events,
+        )
+        .await
+    }
+
+    async fn rearm_all_checkpointers(&self) {
+        meerkat_mob::MobSessionService::rearm_all_checkpointers(self.inner.as_ref()).await;
     }
 }
 
@@ -15345,7 +15714,11 @@ async fn hydrate_mob_state(
     .with_persistent_storage_root(Some(mob_persistent_runtime_root(scope)))
     .with_workgraph_service(Some(workgraph_service))
     .with_default_llm_client_provider(default_llm_client_provider)
-    .with_external_tools_provider(external_tools_provider.clone());
+    .with_external_tools_provider(external_tools_provider.clone())
+    // The CLI is one-shot unless a surface declares otherwise: a detached
+    // fork_off or council completion would be lost when the process exits.
+    // Long-lived surfaces (keep-alive runs, the RPC surface) re-declare it.
+    .with_detached_completion_delivery(meerkat_mob_mcp::DetachedCompletionDelivery::Unavailable);
     if let Some(acceptor) = controlling_acceptor {
         state = state.with_controlling_acceptor(acceptor);
     }
@@ -18500,6 +18873,9 @@ where
         seeded_handles,
     )
     .await?;
+    // The RPC surface is a long-lived host.
+    mob_state
+        .set_detached_completion_delivery(meerkat_mob_mcp::DetachedCompletionDelivery::Available);
 
     // Set mob tools factory using the SAME hydrated state the router will use.
     // This ensures agent-created mobs (via delegate/mob_create) live in the
@@ -26407,6 +26783,60 @@ default_model = "gpt-5.4"
         );
     }
 
+    /// Regression (0.8.42): `delegate` from plain `rkat run` failed with
+    /// `Unsupported("has_live_session")` and orphaned its helper, because the
+    /// implicit mob's session wrapper did not forward the live-session query
+    /// and fell back to the trait default. Helper turn admission and
+    /// retirement both depend on it.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn run_mob_session_service_forwards_has_live_session() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .shell(false);
+        let service = Arc::new(build_cli_service(factory, Config::default(), None));
+        let wrapper = RunMobSessionService::new(Arc::clone(&service));
+        let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        ));
+        let created = wrapper
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-5.4".to_string(),
+                prompt: "seed".to_string().into(),
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
+                max_tokens: Some(32),
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        llm_override,
+                    )),
+                    ..SessionBuildOptions::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred run mob session should be created");
+
+        assert!(
+            wrapper
+                .has_live_session(&created.session_id)
+                .await
+                .expect("the implicit mob's wrapper must answer has_live_session"),
+            "a live session must report live through the wrapper"
+        );
+        assert!(
+            !wrapper
+                .has_live_session(&SessionId::new())
+                .await
+                .expect("an unknown session is not live, not unsupported"),
+        );
+    }
+
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn test_run_mob_session_service_forwards_runtime_apply() {
@@ -26505,6 +26935,39 @@ default_model = "gpt-5.4"
             )) => assert_eq!(run_result.text, "ok"),
             other => panic!("expected terminal run result, got {other:?}"),
         }
+    }
+
+    /// Council participants are forked from durable bodies, which the
+    /// wrapped persistent service owns: the CLI wrapper must expose it as the
+    /// forked-participant source runtime, or no council ever seats.
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    #[tokio::test]
+    async fn test_mob_cli_session_service_forwards_forked_participant_source_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let session_store = sqlite_session_store(&temp);
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&session_store),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        );
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(session_store)
+            .builtins(false)
+            .shell(false);
+        let (service, _runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            temp.path().join("config_state.json"),
+            None,
+            None,
+        );
+        let wrapper = Arc::new(MobCliSessionService::new(service));
+        assert!(
+            <MobCliSessionService as meerkat_mob::MobSessionService>::forked_participant_source_runtime(wrapper)
+                .is_some(),
+            "MobCliSessionService must expose its persistent inner service as the council source runtime"
+        );
     }
 
     #[cfg(all(feature = "mob", feature = "session-store"))]

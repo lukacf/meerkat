@@ -37,6 +37,174 @@ them.
 
 ### Breaking
 
+- Behavior-only: `fork_off` is detached (`meerkat-mob-mcp`
+  `AgentMobToolSurface`) on hosts that declare
+  `DetachedCompletionDelivery::Available` and have a runtime adapter (the
+  default for a `MobMcpState` built with one, so the JSON-RPC, REST and MCP
+  servers and MobKit; also `rkat run --keep-alive` and `rkat mob deploy
+  --surface rpc`). There the tool returns once the child is seated and its
+  turn admitted, with `status: "running"`, `mob_id`, `source_member_id`,
+  `agent_identity`, `member_ref`, `fork_session_id`, `cache_inheritance`,
+  `job_id`, a plain-language `note`, and `max_run_secs` when set. It no longer
+  waits for the child and no longer carries `bounded_result`, `usage`, `turns`
+  or `tool_calls`. When the child's turn ends, its outcome is recorded once in
+  the forker's transcript as a durable `BackgroundJob` system notice
+  whose body is the header "Background fork_off job <job_id> finished
+  (<status>):" and whose typed block, `SystemNoticeBlock::BackgroundJob` with
+  `persisted: true`, carries the outcome JSON as `detail` (stored once; the
+  model sees header then detail). The notice status is `completed`,
+  `terminated` for a `max_run_secs` autokill (live or re-linked after a
+  restart), or `failed`. The notice is delivered to the forker's session as a
+  runtime prompt input with steer handling and the idempotency key
+  `fork_off:<job_id>`: a forker in the middle of a turn sees it at that
+  turn's next model call as a durable in-turn append (saved once, committed
+  with the turn, no second turn; exactly one follow-up turn only if the turn
+  ends before another model call), an idle forker runs exactly one wake turn
+  that sees it, and a forker that is not live is revived through its mob
+  first. The outcome names
+  the child and has a `status`: `completed` (with `bounded_result`, `usage`,
+  `turns`, `tool_calls`), `failed` (with `error`), `max_run_elapsed` (with
+  `max_run_secs` and any `retirement_error`), `supervisor_stopped`, or
+  `restart_interrupted` (see Changed for restart re-linking). The `rkat` CLI
+  declares `Unavailable` unless it stays alive, so `rkat run` without
+  `--keep-alive` and one-shot `rkat mob` commands keep a blocking `fork_off`
+  that returns the completed result directly, with `blocked_because`
+  (`host_declared_unavailable`, or `no_runtime_adapter` for a host that
+  declares delivery without a runtime); a child that does not complete is a
+  tool error carrying the outcome. Neither form has a default deadline and the
+  agent loop's default tool deadline no longer cuts a blocking call (an
+  explicit `tools.tool_timeouts.fork_off` entry still does); the new optional
+  `max_run_secs` argument is an opt-in autokill, honored in both forms, that
+  cancels the child's run and retires it. Prompts and hosts that read
+  `bounded_result` from a detached tool result must read the recorded notice
+  instead.
+- Behavior-only: `fork_off` rejects arguments it does not define. Its arguments
+  deserialize with `deny_unknown_fields` and its schema advertises
+  `additionalProperties: false`, so an unknown field is an `invalid_arguments`
+  error instead of being ignored. A host wrapper that adds its own fields must
+  strip them before dispatch (MobKit strips `idle_retire_secs`).
+- Behavior-only: `council` is detached on the same hosts. The tool returns
+  `{"status": "running", "council_id", "job_id", "note"}`; the sealed outcome
+  (`result`, `cleanup`, `replayed`) is recorded and delivered the same way, as
+  a "Background council job <job_id> finished" notice with the idempotency key
+  `council:<job_id>`; a convener that is a mob member and is no longer live is
+  revived through its mob first. A refusal the council decides after the call returned (a
+  bound, a `council_id` conflict, `capability_unavailable`) is recorded as
+  `{"error": ...}` with status `failed` instead of being a tool error. A
+  sealed council whose exit reason is a failure (`participant_seating_failed`,
+  `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`) is also
+  recorded as `failed`, with the full outcome. One-shot hosts keep the
+  blocking contract, and the blocking result carries `blocked_because`. So
+  does a convener that is a plain session on a host without a
+  `DetachedOwnerHost` (a top-level REST, MCP-server or keep-alive CLI
+  session), with `blocked_because: "no_owner_revival_host"`: its council runs
+  in the call and no detached job is owed. The
+  council's `timeout_seconds` bounds it; the agent loop's default tool deadline
+  no longer cuts the call.
+- Behavior-only: `TemporaryCouncilId::new` accepts only ASCII alphanumerics,
+  `-` and `_`; it accepted `.` and `:` before. The id is embedded in the
+  temporary mob id and every participant's comms name, which refuse those
+  characters, so such a council could never seat a member. Stored records
+  whose ids contain `.` or `:` still deserialize.
+- Behavior-only: an external durable fork of a mob member
+  (`MobHandle::fork_member` and every other `Quiescent` fork, including
+  council participant seating) is refused at once with
+  `ForkSourceUnavailable { Running }` while the source owes a turn, where it
+  used to wait behind an admitted-but-not-started input and then fork. A
+  Quiescent fork whose committed end is still an unanswered input or tool
+  result is refused as busy. Callers that relied on the wait must retry after
+  the source's turn. `ForkSourceUnavailableCause::Running` now means work the
+  source owes. Details under Fixed.
+- Behavior-only: forks start with zero usage (`meerkat-core`). `Session::fork`,
+  `Session::fork_at`, `Session::fork_replacing`, and
+  `Session::fork_at_complete_boundary` (with its `_with_identity` form) return
+  a session whose `total_usage()` is `Usage::default()`; they copied the
+  source's lifetime usage before. The source's own usage is unchanged.
+- Behavior-only: `MobHandle::fork_member_then_run_bounded` retires the child
+  (and any member the child spawned) when the child's turn fails, and reports a
+  failed retirement as `BoundedMemberRunError::CleanupDebt`. It left the failed
+  child seated before. A child whose turn completes stays seated, as before.
+- Behavior-only: `MobHandle::spawn_helper` and `MobHandle::fork_helper`, and
+  through them `delegate`, RPC `mob/spawn_helper` / `mob/fork_helper`, and the
+  REST helper routes, retire a seated helper when the caller's future is
+  dropped before an outcome (a cancelled turn, a tool deadline, an abandoned
+  request). The helper kept running unobserved before.
+- Behavior-only: without manage scope over the mob, `mob_check_member`,
+  `mob_retire_member`, and the member operator tools `member_status`,
+  `retire_member`, and `force_cancel_member` admit a caller that owns the
+  target member instead of returning `access_denied`, and `mob_list_members` /
+  `list_members` return only the members the caller owns instead of
+  `access_denied`. Ownership is transitive and never flows upward: a member
+  owns the children it forked with `fork_off`, their forks, and so on.
+- Behavior-only: every retirement cascades to spawned descendants.
+  `MobHandle::retire` (the core `MobMachineCommand::Retire`), and so RPC
+  `mob/retire`, MCP `meerkat_mob_retire`, the web runtime's `mob_retire`, the
+  agent tool `mob_retire_member`, the member operator tool `retire_member`,
+  the `fork_off` `max_run_secs` autokill, failed-child cleanup and every
+  MobKit retire path (its idle sweep included), retires every member the
+  target transitively spawned (durable `spawned_by` provenance), deepest
+  first, then the target, each through the same exact-incarnation retire.
+  Descendants are re-collected until none remain, so a child forked while its
+  subtree is retiring is retired with it. Every retirement is attempted and
+  the first failure is returned; a retry converges.
+  `MobHandle::retire_with_descendants` is an alias. Only members created from
+  a spawner's own turn (`fork_off`) carry that provenance.
+- Behavior-only: a background-job completion for a detached operation without a
+  process-local enrichment record (for example `mob_wait_ready`) carries the
+  operation's terminal outcome (the result content, or the error or reason) as
+  its `detail`, and so as `AgentEvent::BackgroundJobCompleted`'s `detail`. It
+  was an empty string before.
+- `SystemNoticeBlock::BackgroundJob` (`meerkat-core`) gains the field
+  `persisted: bool` (serde default `false`; exhaustive struct patterns and
+  struct literals must name it or use `..`). `true` marks the one durable
+  completion record of a detached job; behavior-only:
+  `SystemNoticeMessage::is_synthetic_refresh_projection` now returns `false`
+  for a `BackgroundJob` notice with a persisted block, so such a notice stays
+  in the transcript instead of being replaced at the next model call. New
+  methods `SystemNoticeMessage::persisted_background_job` (builds the record:
+  the body is a header naming the job and status, and the outcome is stored
+  once as the block's `detail`) and
+  `SystemNoticeMessage::persisted_background_job_id` (recognizes it). The
+  flag is part of the wire schema: the generated SDK types gain an optional
+  `persisted` on `SystemNoticeBlockBackgroundJob` (TypeScript) and its Python
+  twin, omitted when `false`.
+- `meerkat_mob::store::TemporaryCouncilRecord` gains the public field
+  `detached_job: Option<TemporaryCouncilJobBinding>` (struct literals must
+  name it): the convener's detached job, so a restarted host can deliver the
+  council's outcome. It is a serde-default sidecar outside the request
+  fingerprint and the lifecycle machine; records written before this release
+  decode it as absent.
+- `meerkat_mob::MobError` gains the variant `ForkJobOwnerNotSource {
+  source_member_id, source_session_id, owner_session_id }`; exhaustive matches
+  must handle it. `MobHandle::fork_member_then_run_detached` returns it for a
+  `DurableForkSourceAdmission::CallerTurn` fork whose `ForkJobBinding` owner
+  session is not the admitted source member's bridge session (see Changed).
+- **Generated `MobMachine` vocabulary (`meerkat-machine-schema`,
+  `meerkat-machine-kernels`, `meerkat-mob`):** the machine gains the input
+  `ResolveOwnedMemberAdmission { can_manage_mob, caller_owns_member }`, the
+  effect `OwnedMemberAdmissionResolved { admission }`, and the per-phase
+  transitions `ResolveOwnedMemberAdmissionAllowedRunning`,
+  `ResolveOwnedMemberAdmissionAllowedStopped`,
+  `ResolveOwnedMemberAdmissionAllowedCompleted`,
+  `ResolveOwnedMemberAdmissionAllowedDestroyed`,
+  `ResolveOwnedMemberAdmissionDeniedRunning`,
+  `ResolveOwnedMemberAdmissionDeniedStopped`,
+  `ResolveOwnedMemberAdmissionDeniedCompleted`, and
+  `ResolveOwnedMemberAdmissionDeniedDestroyed`. The schema enums
+  `MobMachineInput` and `MobMachineInputVariant` gain
+  `ResolveOwnedMemberAdmission`; `MobMachineEffect` and
+  `MobMachineEffectVariant` gain `OwnedMemberAdmissionResolved`. The kernel
+  `Input` and `InputKind` gain `ResolveOwnedMemberAdmission`; the kernel
+  `Effect` and `EffectKind` gain `OwnedMemberAdmissionResolved`; the kernel
+  `TransitionId` gains the eight transitions above; `MobMachineCatalogInput`
+  gains `ResolveOwnedMemberAdmission`. Exhaustive matches must add the arms.
+  The new variants are inserted in schema order, so the implicit discriminants
+  and `PartialOrd` positions of every later variant of `MobMachineInput::*`,
+  `MobMachineInputVariant::*`, `MobMachineEffect::*`,
+  `MobMachineEffectVariant::*`, `Input::*`, `InputKind::*`, `Effect::*`,
+  `EffectKind::*`, `TransitionId::*`, and `MobMachineCatalogInput::*` move.
+  Discriminants of generated machine enums are never a stable contract; match
+  by name. Mob journals written by 0.8.42 load unchanged.
 - `meerkat_tools::builtin::ToolOutput` gains the variant
   `JsonRenderedAsText { value, text }`; exhaustive matches must handle it.
   `meerkat_tools::builtin::shell::ShellConfig` and `meerkat_core::ShellDefaults`
@@ -167,8 +335,10 @@ them.
     `live_boundary_delivery`.
   - Behaviour-only: a Steer prompt carrying typed conversation appends whose
     roles are all `system_notice`, `user` or `injected_context`, none of which
-    is a synthetic refresh-projection notice (`background_job`,
-    `auth_reauth_required`, or `mcp_pending` without `persisted` blocks), and
+    is a synthetic refresh-projection notice (`background_job` or
+    `mcp_pending` without `persisted` blocks, or `auth_reauth_required`; a
+    persisted `background_job` notice, the detached completion record, is
+    durable and eligible), and
     whose turn metadata carries only the handling mode, execution kind and
     transcript identity, is now written into the RUNNING turn's transcript at
     the next cooperative model boundary and committed with that run, instead
@@ -198,6 +368,113 @@ them.
 
 ### Added
 
+- `meerkat-core`: the provided method `BlobStore::attest_address(&self, blob_id,
+  payload)` (the default attests nothing), `BlobAddressAttestation`
+  (`StoreAddress`, `Unattested`), `StoredImageBlobVerification`
+  (`ContentAddressed`, `StoreAttested`), and
+  `verify_stored_image_blob_accepting_store_address`. A store whose earlier
+  writes used an address recipe it owns can recompute that recipe over the
+  payload and attest the match, so meerkat's image integrity gates accept those
+  historical references. Implementations must recompute the address from the
+  payload; answering from a lookup or attesting unconditionally defeats the
+  gate.
+- `meerkat-mob`: `MobHandle::fork_member_then_run_detached` (fork, seat and
+  admit the child's turn, then return a `ForkChildRun` without waiting;
+  optional `max_run`; dropping the future before it returns retires the seated
+  child), `ForkChildRun`, `ForkChildRunOutcome` (`Completed`,
+  `Failed`, `MaxRunElapsed`), `MobHandle::resolve_owned_member_admission`,
+  `MobHandle::retire_with_descendants`, `MobHandle::descendants_deepest_first`,
+  and the durable ownership provenance `RosterEntry::spawned_by` and
+  `MemberSpawnedEvent::spawned_by`. Journals written before this release
+  decode the field as absent, which grants nothing.
+- `meerkat-mob`: the durable fork job record `ForkJobRecord` (`job_id`,
+  `owner_session_id`, `started_at_ms`, `max_run_ms`, `prefix_message_count`,
+  `result_label`, `max_text_bytes`) on the new fields `RosterEntry::fork_job`
+  and `MemberSpawnedEvent::fork_job` (absent in older journals),
+  `ForkJobBinding` (`job_id`, `owner_session_id`), which
+  `MobHandle::fork_member_then_run_detached` takes as its `job` argument, and
+  `TemporaryCouncilExitReason::is_failure`.
+- `meerkat-mob-mcp`: the `fork_relink` module (`relink_restored_fork_children`,
+  `relink_mob_fork_children(service, delivery, mob_id, handle,
+  restored_before_ms)`, `relink_child(service, &RelinkDelivery, mob_id,
+  handle, child, job)`, `ForkRelinkReport`, `ForkRelinkAction`
+  (`#[non_exhaustive]`) with `Delivered`, `AlreadyDelivered`, `OwnerGone`,
+  `AwaitingOwner { mob_id, reason }` (the owner's mob and its
+  `OwnerRevivalDeferral`), `Failed`), and `MobMcpState::relink_restored_fork_children`,
+  the explicit entry point for the post-restore re-link pass.
+  `RelinkDelivery` (`runtime`, `owner_host`, `owner_mobs`,
+  `managed_mobs: Option<ManagedMobs>`, `waiting_owners`; built with
+  `Default` and its public fields) says how a re-link reaches a job's owner:
+  the runtime that admits completions, the `DetachedOwnerHost` for a
+  plain-session owner, a fixed set of other mobs whose members may own a job,
+  and the host's managed mobs as a live view. `ManagedMobs` is that live view
+  of a `MobMcpState`'s mob map, read afresh at each owner lookup so a mob
+  inserted later is found; only the state builds it, so an embedder calling
+  `relink_child` directly passes its other mobs in `owner_mobs`. The
+  doc-hidden `MobMcpState::fork_relink_waiting_owners()` counts the deferred
+  outcomes waiting on their owner's mob right now, as a host and test
+  observation.
+- `meerkat-core`: `CoreDispatchDeadline` (`Applies`, `ToolOwned`;
+  `#[non_exhaustive]`), `ToolExecutionContract::with_tool_owned_deadline`,
+  `ToolExecutionContract::core_deadline`, and
+  `ResolvedToolExecutionPlan::effective_timeout`. A tool that owns its lifetime
+  bound declares it so the agent loop's default tool deadline does not cut it.
+- `meerkat-mob-mcp`: `DetachedCompletionDelivery` (`Available`,
+  `Unavailable`; `#[non_exhaustive]`) and
+  `MobMcpState::with_detached_completion_delivery`,
+  `MobMcpState::set_detached_completion_delivery`, and
+  `MobMcpState::detached_completion_delivery`. A host declares whether it
+  outlives a tool call long enough to deliver detached completions; the
+  default follows the presence of a runtime adapter (see Changed). One-shot
+  hosts declare `Unavailable`, and `fork_off` and `council` block for their
+  result there.
+- `meerkat-mob-mcp`: the `detached_delivery` module
+  (`deliver_detached_completion`, `deliver_detached_completion_to_member`,
+  `detached_completion_notice`, `DetachedCompletionDelivered`,
+  `DetachedCompletionError` (`Encode`, `Rejected`, `Runtime`, `OwnerGone` for
+  an owner that no longer exists, and `OwnerRevivalDeferred { tool, mob_id,
+  reason }` for one that cannot be revived yet), `OwnerRevivalDeferral`
+  (`MobNotRunning { phase }`, `LifecycleOperationPending { intent }`),
+  `DetachedDeliveryUnavailable` with `HostDeclaredUnavailable`,
+  `NoRuntimeAdapter` and `NoOwnerRevivalHost`),
+  `MobMcpState::detached_delivery_blocked_because` and
+  `MobMcpState::detached_delivery_blocked_because_for` (the route for a given
+  caller), the `council_relink` module
+  (`relink_detached_councils`, `relink_council`, `CouncilRelinkReport`), and
+  `MobMcpState::relink_detached_councils`, `CouncilRelinkAction`
+  (`Delivered`, `AlreadyDelivered`, `AwaitingSeal { claim_lease_expires_at }`,
+  `OwnerGone`, `AwaitingConvener { mob_id, reason }`, `Failed`), `TemporaryCouncilCoordinator::run_detached`,
+  `TemporaryCouncilCoordinator::sweep_unfinished`,
+  `TemporaryCouncilRecoverySweep` (`recovered`, `held`), and
+  `TemporaryCouncilHeldRecord` (`council_id`, `current_claim_epoch`,
+  `claim_lease_expires_at`).
+- `meerkat-mob`: `MobHandle::ensure_member_live` (revive a member's live
+  materialization without running a turn), `ForkChildRun::retire_child_if_abandoned`
+  (arm a run handle to retire its child, and the child's descendants, if the
+  handle is dropped before the outcome arrives; an unarmed handle only stops
+  listening), `ForkJobRecord::durable_terminal_result`,
+  and `TemporaryCouncilJobBinding` (`job_id`, `owner_session_id`,
+  `settled_at`).
+- `meerkat-mob-mcp`: the optional owner hook `DetachedOwnerHost`
+  (`ensure_owner_live`), `DetachedOwnerError` (`OwnerGone`, `Failed`;
+  `#[non_exhaustive]`), `deliver_detached_completion_to_session` (asks the
+  hook to make a plain-session owner live on a runtime refusal and retries
+  once), `deliver_detached_completion_to_member_when_revivable` (waits out a
+  deferred member revival, bounded), and
+  `MobMcpState::with_detached_owner_host`, `set_detached_owner_host` and
+  `detached_owner_host`. `meerkat-rpc`:
+  `detached_owner::RpcDetachedOwnerHost`, which `compose_rpc_mob_state`
+  installs, so the RPC host revives a top-level session owner through the
+  same path its own next turn takes.
+- `meerkat-runtime`: `PromptInput::detached_job_completed`, the prompt input
+  that carries one durable completion notice with steer handling.
+- `meerkat-core`: `ToolDeadlineSource` (`OwnerDefault`, `PerToolOverride`;
+  `#[non_exhaustive]`), `ToolDeadlineContributor::per_tool_override`, and
+  `ToolDeadlineContributor::source`. `meerkat-session`:
+  `PersistentSessionService::QUIESCENT_FORK_BOUNDARY_BOUND`.
+- `fork_off` accepts `max_run_secs`: an optional autokill that cancels the
+  child's run and retires the child once it has run that long. Omitted means no
+  limit.
 - Cumulative usage reports cached input, cache writes and reasoning. The run
   result's `usage` (what `rkat run --output json` prints), `run_completed.usage`,
   the RPC and REST run results and mob run accounting now carry
@@ -268,6 +545,132 @@ them.
 
 ### Changed
 
+- The agent loop bounds a tool call by
+  `ResolvedToolExecutionPlan::effective_timeout`, which ignores the core
+  dispatch DEFAULT deadline when the tool's `ToolExecutionContract` declares
+  `CoreDispatchDeadline::ToolOwned`. An explicit per-tool override
+  (`tools.tool_timeouts.<tool>`, recorded as `ToolDeadlineSource::PerToolOverride`)
+  and every other contributor still bound the call, and the deadline
+  diagnostic names per-tool overrides. The resolved `ToolDeadlineChain` is
+  unchanged. `fork_off` and `council` declare `ToolOwned` in their catalog
+  entries; every other tool keeps the default `Applies` and the same deadline
+  as before.
+- `MobMcpState` declares detached completion delivery by default only when it
+  has a runtime adapter. Declaring `Available` without one logs an error, and
+  `fork_off` and `council` then block and report `no_runtime_adapter`.
+- `fork_off` records the forking member as the child's owner. The provenance is
+  durable on `MemberSpawnedEvent` and `RosterEntry`, restored on resume, and
+  carried across respawn, including `MobHandle::respawn_with_successor_spec`
+  (a successor spec keeps the spawner of the incarnation it replaces). It is
+  never taken from tool arguments.
+- A `fork_off` call that is cancelled or dropped never strands its child. The
+  transcript fork is cancellable; seating the child, admitting its turn and
+  starting its supervisor run on a task the call cannot cancel, and the run
+  comes back armed to retire the child until the caller holds it. A detached
+  call dropped once the child is seated still delivers the child's completion
+  to the forker; a call dropped while the child is being seated, or a blocking
+  call dropped before the outcome arrives, retires the child and its
+  descendants.
+- A detached `fork_off` child survives a host restart with its outcome
+  delivery intact. After a host restores its mobs (or inserts a restored mob
+  handle, as MobKit does), a one-time re-link pass settles every child whose
+  job began in a previous process: a child whose reply to the job is already
+  in its durable transcript has that reply delivered, however late the restart
+  landed; a still-running child is observed until its turn ends, with
+  `max_run_secs` measured from the original start;
+  otherwise `restart_interrupted` is delivered and the child stays seated.
+  A limit that has already elapsed is decided at once, so an idle over-limit
+  child always gets `max_run_elapsed`, on its first pass and on later ones.
+  When the limit wins, the child's run is force-cancelled, `max_run_elapsed`
+  is delivered, and the child with its descendants is retired only once that
+  delivery settles (delivered, already delivered, or owner gone). A delivery
+  that must wait or fails keeps the cancelled child and its job record, and a
+  later pass retries it; a child left seated after its `max_run_elapsed`
+  record was committed (a crash or a failed retire) is retired by the next
+  pass with no second record. The re-link's `max_run_elapsed` outcome carries
+  no `retirement_error`, since retirement follows delivery; the live path's
+  outcome still does.
+  Delivery uses the same durable notice and idempotency key, so an outcome
+  recorded before the restart is not recorded twice, and an idle forker is
+  woken to see it. A job whose completion was already admitted is finished
+  and never re-linked, so a child kept seated for later work is not
+  cancelled against the old job's limit; a respawn does not carry the job to
+  the successor (ownership still follows the identity). The owner is resolved
+  from the job's `owner_session_id` before anything can retire the child,
+  never from the child's roster entry: a member of the child's mob, or of
+  another mob the host manages, is revived through its mob, and any other
+  owner is a plain session revived through the host's `DetachedOwnerHost`.
+  A child forked in its forker's own turn (`CallerTurn`, the forker recorded
+  as its spawner) is owned by a member of its own mob, so when that session
+  is no longer seated there (the forker was respawned or retired) the job is
+  reported `OwnerGone`, and past its limit the child and its descendants are
+  retired. The child's reply is
+  read from the job's own part of its transcript, so a completion record of a
+  fork the child made itself never stands in for it. A status read that does
+  not observe the child (the mob's single status lane held by another reader,
+  a slow actor, a failed read) is not taken as "not running": the pass checks
+  the durable transcript for a finished reply and reads again (reads are
+  classified as running, settled or unobserved, and an unobserved read, such
+  as a busy `LifecycleOperationAdmissionPending`, is never terminal). A run
+  state of `MemberRunState::Unknown` (the member was busy and the status
+  projection's bounded runtime read did not answer) is never taken as
+  settled: the pass reads the child's runtime state directly. An owner that
+  cannot be revived yet, because its mob is not running (MobKit restores a
+  cleanly stopped mob Stopped) or a lifecycle operation is still reviving it,
+  is reported as `AwaitingOwner { mob_id, reason }`, naming the owner's own
+  mob. Each deferred job waits on that mob with its own budget (at most 16
+  waits, stopping when the mob can no longer run) and is retried when the mob
+  starts running or after a bounded backoff; a wake retries only that job,
+  keyed by the child's identity plus its job id (job ids need not be unique
+  across children), so one owner's wakes never spend another job's budget or
+  hand one child another's outcome. Councils wait the same way. Reviving a
+  member of a mob that is not running
+  is refused typed as `InvalidTransition { from: <phase>, to: Running }`.
+- `MobHandle::fork_member_then_run_detached` binds a `CallerTurn` fork's job
+  to its source: the `ForkJobBinding` owner session must be the source
+  member's bridge session, checked inside the fork's admission against the
+  exact source session it admits (so a source respawned meanwhile is checked
+  as its successor), and otherwise the call is refused with
+  `MobError::ForkJobOwnerNotSource` before anything is forked or seated.
+  `Quiescent` bindings stay free, and `fork_off` always binds to its caller.
+- A detached council's convener hears back across a restart. The council's
+  custody record carries the convener's job; after the post-restore recovery
+  sweep, every council from an earlier process whose job is not settled has
+  its outcome delivered once: its sealed result, or `coordinator_interrupted`
+  once the dead coordinator's claim lease is observed expired. Councils are
+  never re-executed. This runs from the council recovery sweep, so it needs
+  a `MobMcpState` built with `into_shared()` (see Fixed). A job whose owner no
+  longer exists (a convener session that was deleted or archived, or a forker
+  no longer seated) is reported as owner gone and settled, so later restarts
+  do not retry it.
+- The `fork_off` and `council` tool schemas advertise the bounds the tools
+  enforce: `fork_off` `max_run_secs` minimum 1 and `max_text_bytes` at least
+  the truncation-marker length; `council` `max_rounds` 1 to 16,
+  `max_exchanges` 1 to 64, `max_result_bytes` 256 to 65536, and
+  `timeout_seconds` 1 to 86400 (the forked-participant TTL ceiling).
+- Live delivery of a detached completion reaches owners that are not live.
+  The live custodian waits out a deferred owner revival (the owner's mob is
+  not running, or a lifecycle operation is still reviving it) and then
+  delivers once, bounded like the re-link. A detached council whose convener
+  is a plain session rather than a mob member asks the host's
+  `DetachedOwnerHost` to make it live; the JSON-RPC host installs one, so a
+  top-level RPC session that convened a council gets one record and one wake
+  turn even after its idle executor was retired. The restart re-link does the
+  same for fork_off and council jobs owned by a plain session. An embedder
+  must install the hook (`with_detached_owner_host` /
+  `set_detached_owner_host`) before inserting restored mob handles, because
+  `mob_insert_handle` reads it at insert; `compose_rpc_mob_state` does this.
+- Member status never waits for the member's running turn.
+  `MobHandle::member_status` (and so RPC `mob/member_status`,
+  `mob_check_member`, and the operator tool `member_status`) still tries the
+  bounded execution snapshot; when the session is busy, `progress.run_state`
+  now comes from the runtime machine (`run_open` mid-turn) and the output
+  preview and token count from the committed transcript as of the last
+  commit, instead of reporting progress as unavailable. `mob_check_member`
+  adds a plain `note` while the member's turn is running.
+- A completed `fork_off` child stays seated until its forker retires it.
+  Meerkat adds no retention limit of its own; MobKit applies its
+  `idle_retire_secs` policy to fork children.
 - Foreground `shell` results reach the model as compact text instead of JSON:
   a status line (`exit code N (Xs)`, or the timeout), stdout as is, and stderr
   under `[stderr]` only when non-empty. The JSON envelope escaped every stream
@@ -353,6 +756,124 @@ them.
 
 ### Fixed
 
+- The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
+  and 033 (the office demo) pass again and run in pull-request CI. A new
+  "Example web suites" lane builds the `sdks/web` wasm runtime once with the
+  pinned wasm-pack 0.13.1 and runs all three in Playwright Chromium. It runs on
+  every push to main and on pull requests that touch `sdks/web/`,
+  `crates/meerkat-web-runtime/`, `crates/meerkat-contracts/` or those examples.
+  031 and 032 compared the runtime version with a stale 0.8.40 and now read the
+  workspace version. The 033 harness waited forever for a `Page.close` reply
+  that is lost when the page's socket closes first, and it now closes the page
+  through the browser connection. Its offline lane now names the missing
+  runtime and page build instead of failing later with "Page failed to start".
+  `MEERKAT_WEB_WASM_OPT=0` skips the wasm-opt pass in `sdks/web` builds.
+- The release semver gate identifies crates by package name across the baseline
+  and candidate trees. After the move into `crates/` it resolved every crate by
+  its old directory, classified all of them as identical or first publications,
+  and measured none (the 0.8.42 pre-check checked 0 crates). The classifier now
+  reads each revision's workspace, compares a crate's baseline directory with its
+  current one (a pure move is not a change), ignores the local `path` of member
+  dependencies, and treats a name missing from the baseline workspace as a first
+  publication only when crates.io has never published it. Against v0.8.41 the
+  gate now measures 16 crates.
+- Tag releases publish the Python and TypeScript SDK packages without the
+  manual packages recovery lane. The crates.io check is split: a readback step
+  (every crate public, checksummed, not yanked) gates the SDK packages, and the
+  30 minute publication SLO is enforced after they publish, measured from the
+  start of crate publication instead of the tag push, which full-fresh
+  validation precedes by about an hour. The tag-to-public latency is still
+  reported. `scripts/verify-rust-release-public.py` gains `--readback-only`,
+  `--observations-out`, `--observations-in` and `--window-started-at`.
+- A `fork_off` child whose run outlasted the agent loop's default 600 s tool
+  deadline was cut off from its forker. The tool held the forker's call until
+  the child's turn ended, so the deadline cut the call and left the child
+  running with nobody listening for its result. `fork_off` now returns promptly
+  and records the outcome in the forker's transcript as a durable notice (see
+  Breaking).
+- A `council` whose `timeout_seconds` exceeded the default 600 s tool deadline
+  had the convener's call cut while the council kept running and sealed a
+  result nobody received. The council now runs detached where the host can
+  deliver its completion.
+- Forking a transcript whose image blocks were written by MobKit before 0.8.41
+  failed with "blob identity mismatch": those references carry MobKit's
+  raw-bytes address and meerkat recomputes its content address on read-back.
+  The durable fork preflight now asks the blob store to attest the reference
+  (`BlobStore::attest_address`) and re-homes an attested reference to meerkat's
+  content address in the child's copy only; realtime hydration accepts attested
+  references whose stored media type matches the block's and whose payload is
+  a valid image. Unattested references still fail closed. Existing MobKit
+  references are accepted once MobKit's blob adapter implements
+  `attest_address`.
+- An external durable fork of a mob member (`MobHandle::fork_member` and every
+  other `Quiescent` fork) was accepted while the source had admitted an input
+  that had not started yet, then blocked until the source's turn ended and
+  could branch a torn transcript. It is now refused at once with
+  `ForkSourceUnavailable { Running }` while the source owes a turn: a provider
+  call in flight, or an admitted input that is queued, steered, or waiting
+  while the runtime materializes or revives the member. The refusal never
+  queues behind the turn: the durable fork owner waits at most
+  `PersistentSessionService::QUIESCENT_FORK_BOUNDARY_BOUND` (1 s) for the
+  source's turn boundary and recovery gate and otherwise answers busy. A
+  Quiescent fork whose committed end would be an unanswered input or tool
+  result is refused as busy too, so a child can no longer inherit a torn
+  transcript. `ForkSourceUnavailableCause::Running` therefore now means work
+  the source owes (a turn in flight, an admitted input not started yet, or a
+  committed end that is still unanswered), not only a running provider call;
+  its display text is unchanged. `fork_off` from the member's own turn and
+  `fork_member_at_turn_boundary` are unchanged.
+- Temporary councils interrupted by a restart were never recovered on a host
+  that supplies a durable council store without a persistent root (MobKit),
+  and on any host a restart inside the previous process's 120 s claim lease
+  made the one-shot post-restore sweep skip the record silently, with no
+  retry. The sweep now runs whenever the council store is durable (from
+  restore and from `mob_insert_handle`), retries after the earliest observed
+  lease expiry within a bounded number of passes, and reports held records
+  (`TemporaryCouncilCoordinator::sweep_unfinished`); `recover_unfinished`
+  keeps its shape. The host must build its `MobMcpState` with
+  `MobMcpState::into_shared()`: the sweep runs on its own task through the
+  state's weak self-reference, which only `into_shared` sets. A state wrapped
+  with a plain `Arc::new` never runs it. MobKit 0.8.43 builds the state with
+  `into_shared`; MobKit 0.8.42 and earlier use `Arc::new`, so the fix does not
+  apply there.
+- The runtime loop injected a completion wake into an idle owner even when the
+  owner's own turn had already applied that completion. The wake found no
+  pending boundary, so each such completion cost a spurious wake, an executor
+  teardown and a revival. Completions at or below the agent-applied cursor are
+  now treated as delivered; an unapplied completion still wakes the owner.
+- A mob member could not run again after the runtime retired its idle executor.
+  When a detached operation's completion wake found no pending boundary (the
+  member's own turn had already seen the completion), the runtime retired the
+  idle executor as designed, and the member's next turn failed with
+  `MemberRestoreFailed` ("already has a different operation-registry binding
+  incarnation") because the mob still held the retired registration's ops
+  binding. Warm revival now releases that superseded binding by exact compare
+  before binding the new registration; a binding that changed meanwhile still
+  fails closed. A detached `fork_off` made this the common case.
+- A `council` never seated its participants on the JSON-RPC host or the
+  persistent mob CLI host: their `MobSessionService` wrappers
+  (`RpcMobSessionService`, `MobCliSessionService`) did not forward
+  `forked_participant_source_runtime` to the wrapped persistent service, so
+  every participant was rejected as having no source runtime. Every wrapper
+  forwards it now.
+- A `council` called without `council_id` failed to seat any participant: the
+  derived id was `agent:<uuid>`, and the `:` is illegal in the temporary mob's
+  comms names. The derived id is now `agent-<uuid>`.
+- `fork_off` failed outright in mobs whose role profile defaults to the
+  `autonomous_host` runtime mode: the child was seated with that default and
+  its one tracked turn was refused ("tracked turn completion is not supported
+  by autonomous inbox delivery"). The child now runs turn-driven regardless of
+  the role default, like `delegate` helpers.
+- A fork's first turn reported the source's whole lifetime usage as its own
+  (HomeCore saw 1.76e9 input tokens on a one-word reply).
+- A member without manage scope could not check, list or retire the children
+  it forked ("not allowed by policy" on `member_status` and `list_members`).
+- `delegate` from plain `rkat run` with the implicit mob failed with
+  `Unsupported("has_live_session")` and orphaned its helper (reported on
+  0.8.42). The CLI's session-service wrappers for `rkat run` and `rkat mob` now
+  forward `has_live_session`, `fork_persisted_session` and the other
+  live-session, checkpointer and fork methods of `SessionService` and
+  `MobSessionService` instead of falling back to the trait defaults.
 - The `shell` schema no longer advertises values the tool rejects:
   `timeout_secs` declares a minimum of 1, and `background` is offered only when
   durable background jobs are available, instead of failing with "requested
@@ -392,37 +913,6 @@ them.
   extraction and, on a resumed session, includes earlier runs. In keep-alive
   mode, whose later runs return no result, each run's total is folded from its
   per-request lines.
-
-- The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
-  and 033 (the office demo) pass again and run in pull-request CI. A new
-  "Example web suites" lane builds the `sdks/web` wasm runtime once with the
-  pinned wasm-pack 0.13.1 and runs all three in Playwright Chromium. It runs on
-  every push to main and on pull requests that touch `sdks/web/`,
-  `crates/meerkat-web-runtime/`, `crates/meerkat-contracts/` or those examples.
-  031 and 032 compared the runtime version with a stale 0.8.40 and now read the
-  workspace version. The 033 harness waited forever for a `Page.close` reply
-  that is lost when the page's socket closes first, and it now closes the page
-  through the browser connection. Its offline lane now names the missing
-  runtime and page build instead of failing later with "Page failed to start".
-  `MEERKAT_WEB_WASM_OPT=0` skips the wasm-opt pass in `sdks/web` builds.
-
-- The release semver gate identifies crates by package name across the baseline
-  and candidate trees. After the move into `crates/` it resolved every crate by
-  its old directory, classified all of them as identical or first publications,
-  and measured none (the 0.8.42 pre-check checked 0 crates). The classifier now
-  reads each revision's workspace, compares a crate's baseline directory with its
-  current one (a pure move is not a change), ignores the local `path` of member
-  dependencies, and treats a name missing from the baseline workspace as a first
-  publication only when crates.io has never published it. Against v0.8.41 the
-  gate now measures 16 crates.
-- Tag releases publish the Python and TypeScript SDK packages without the
-  manual packages recovery lane. The crates.io check is split: a readback step
-  (every crate public, checksummed, not yanked) gates the SDK packages, and the
-  30 minute publication SLO is enforced after they publish, measured from the
-  start of crate publication instead of the tag push, which full-fresh
-  validation precedes by about an hour. The tag-to-public latency is still
-  reported. `scripts/verify-rust-release-public.py` gains `--readback-only`,
-  `--observations-out`, `--observations-in` and `--window-started-at`.
 - The OpenAI prompt-cache docs describe the default `prompt_cache_key`
   correctly. It is one key per model (`meerkat:profile:openai:<model>`),
   shared across sessions so identical system and tool prefixes can reuse
@@ -460,6 +950,28 @@ them.
   `pattern`, supported formats, `minItems` 0 or 1) are sent as before, and a
   schema without rejected keywords is sent byte-identical. OpenAI,
   OpenAI-compatible and Gemini requests are unchanged.
+- `meerkat-runtime` test scaffolding: the durable-steer crash-recovery test
+  (`persistent_crash_after_the_join_recovers_the_input_for_exactly_one_follow_up`)
+  waited for the joined input to leave `Staged` before allowing the scripted
+  finish, which a recovered runtime that restages the input for its
+  follow-up run never allows. It now waits for the input to be no longer bound
+  to the crashed run.
+
+### Known limitations
+
+- A `council` convener that is a plain session gets the detached route only
+  on a host that installs a `DetachedOwnerHost` (the JSON-RPC host does). On a
+  host without one (a top-level REST, MCP-server or `rkat run --keep-alive`
+  session) the council still works, but runs in the call and returns with
+  `blocked_because: "no_owner_revival_host"`; no detached job is owed. Mob
+  members get the detached route on every runtime-backed host.
+- A host that had a `DetachedOwnerHost` and restarts without one cannot make
+  a plain-session owner live: its owed job stays owed, the re-link reports it
+  as `Failed`, and a later re-link delivers it once the owner is live or a
+  hook is installed.
+- One-shot `rkat run` (without `--keep-alive`) keeps blocking `fork_off` and
+  `council`, with `blocked_because: "host_declared_unavailable"` in the
+  result.
 
 ## [0.8.42] - 2026-09-24
 

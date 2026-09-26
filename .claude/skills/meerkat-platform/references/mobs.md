@@ -566,11 +566,11 @@ With generated authority, `AgentMobToolSurface`
 | `mob_create` | Create a mob from a definition |
 | `mob_destroy` | Destroy a mob and archive all members |
 | `mob_spawn_member` | Spawn a member into an authorized mob |
-| `fork_off` | Fork the current durable member's committed transcript prefix through the resume path, run the task, return bounded final text, and retain the child member |
-| `council` | Fork existing specialist members into a temporary discussion mob, run bounded rounds/merge, and clean up |
-| `mob_retire_member` | Archive a member and its session |
-| `mob_check_member` | Check a member's execution status and output |
-| `mob_list_members` | List members of a mob |
+| `fork_off` | Fork the current durable member's committed transcript prefix through the resume path into a child the caller owns, and run the task in the background; the outcome is recorded in the forker's transcript as a durable `BackgroundJob` notice (blocking on one-shot hosts) |
+| `council` | Fork existing specialist members into a temporary discussion mob, run bounded rounds/merge, and clean up; the sealed outcome is recorded in the convener's transcript as a durable `BackgroundJob` notice (blocking on one-shot hosts) |
+| `mob_retire_member` | Archive a member and its session (manage scope, or the caller owns the member) |
+| `mob_check_member` | Check a member's execution status and output (manage scope, or the caller owns the member) |
+| `mob_list_members` | List members of a mob (without manage scope: only the caller's own descendants) |
 | `mob_list` | List all mobs |
 | `mob_wire` | Wire a member to a local or external peer (creates comms trust) |
 | `mob_unwire` | Remove a wiring relationship between a member and a peer |
@@ -579,16 +579,94 @@ With generated authority, `AgentMobToolSurface`
 lead principal. `fork_off` requires the caller to be a durable mob member with
 spawn authority; supply `member_id` and `task`, optionally `message_count`,
 `expected_output` (prompt guidance, not a validated schema), `result_label`,
-and `max_text_bytes`. This durable transcript fork is distinct from
-`MemberLaunchMode::Fork` / `fork_helper`, which seed a fresh session's prompt
-with rendered history; low-level `Session::fork()` / `fork_at()` are separate
-structural primitives.
+`max_text_bytes`, and `max_run_secs`. Unknown arguments are rejected. The
+child runs turn-driven whatever its role's default runtime mode. This
+durable transcript fork is distinct from `MemberLaunchMode::Fork` /
+`fork_helper`, which seed a fresh session's prompt with rendered history;
+low-level `Session::fork()` / `fork_at()` / `fork_replacing()` are separate
+structural primitives. Every fork starts with zero usage: the source's
+lifetime token counters are not copied into the child.
+
+`fork_off` is detached where the host can deliver a later completion: it
+declares `DetachedCompletionDelivery::Available` and has a runtime adapter
+(the default for hosts built with one: the JSON-RPC, REST and MCP servers,
+MobKit; also `rkat run --keep-alive` and `rkat mob deploy --surface rpc`). It
+returns once the child is seated and its turn admitted: `status: "running"`,
+`agent_identity`, `member_ref`, `fork_session_id`, `cache_inheritance`, a
+`job_id`, and a `note`. When the child's turn ends, its outcome is recorded
+once in the forker's transcript as a durable `BackgroundJob` system notice
+(header "Background fork_off job <id> finished (<status>):" with status
+`completed`, `terminated` for an autokill, or `failed`; the outcome JSON is the
+typed block's `detail`, with `persisted: true`), delivered as a runtime input with
+steer handling and idempotency key `fork_off:<job_id>`: a forker mid-turn sees
+it at that turn's next model call (a durable in-turn append, saved once, no
+second turn; one follow-up turn only if the turn ends first), an idle forker
+runs one wake turn that sees it, and a non-live forker is revived through its
+mob first. It is
+readable in later turns and through session history even after the child is
+retired. The outcome status is `completed` (with `bounded_result`, `usage`,
+`turns`, `tool_calls`), `failed` (child retired), `max_run_elapsed` (run
+cancelled, child retired), `supervisor_stopped`, or `restart_interrupted`. The
+child's durable `ForkJobRecord` lets a restarted host re-link it: a one-time
+pass after restore (or when MobKit inserts a restored handle) delivers a reply
+already in the child's durable transcript, observes a still-running child with
+`max_run` measured from the original start, or delivers `restart_interrupted`,
+under the same idempotency key, and wakes an idle forker; a job whose
+completion was already admitted is never re-linked, and a respawned child
+carries no job. The re-link routes by the job's `owner_session_id` (never the
+child's roster entry); a limit already elapsed delivers `max_run_elapsed` at
+once and retires the child only after delivery settles (no
+`retirement_error` on the re-linked outcome); a respawned forker is
+`OwnerGone`; a deferred owner is `AwaitingOwner { mob_id, reason }` and each
+such job waits on its own owner's mob with its own budget. The `rkat` CLI
+declares `Unavailable` unless it stays alive, so `rkat run` without
+`--keep-alive` and one-shot `rkat mob` commands block and return the child's
+result directly, with `blocked_because` (`host_declared_unavailable` or
+`no_runtime_adapter`). Neither form has a default deadline, and the agent
+loop's default tool deadline does not cut it (an explicit
+`tools.tool_timeouts.fork_off` still does); `max_run_secs` is an opt-in
+autokill, honored in both forms, that cancels the run and retires the child.
+
+The forker owns its child, and transitively every member that child forks
+(ownership never flows upward). Ownership is durable spawn provenance
+(`RosterEntry::spawned_by`, kept across resume, respawn and successor-spec
+respawn) checked against the caller's own session binding, never against
+arguments. Without manage scope the forker can still observe its descendants
+with `mob_check_member`, retire them with `mob_retire_member`, and see them,
+and only them, in `mob_list_members`; the member operator tools
+`member_status`, `retire_member`, `force_cancel_member`, and `list_members`
+apply the same rule. Retirement cascades to descendants, deepest first, in
+the core retire (`MobHandle::retire`; `retire_with_descendants` is an alias):
+the retire tools, autokill, failed-child cleanup, host `mob/retire` /
+`meerkat_mob_retire`, and MobKit's retire paths all take it, and a child
+forked mid-cascade is retired too. A child whose own turn fails is
+retired automatically; a child whose turn completes stays seated until its
+forker retires it. Meerkat adds no retention limit; MobKit applies its
+`idle_retire_secs` policy.
 
 `council` requires creation authority and scope over each source mob. Supply a
 `topic` and participants with `mob_id`, `member_id`, and discussion `role`;
 optional controls include `council_id`, `max_rounds`, `max_exchanges`,
 `max_result_bytes`, `timeout_seconds`, and `merge`. Source profiles are
-resolved by the tool; participants are forks, not the original members.
+resolved by the tool; participants are forks, not the original members. Like
+`fork_off`, a council is detached where the host can deliver a later
+completion: the call returns `status: "running"`, the `council_id`, and a
+`job_id`, and the sealed outcome (`result`, `cleanup`, `replayed`, or `error`
+when it fails after the call returned) is recorded and delivered the same way
+as a "Background council job ... finished" notice; a failure exit reason gives
+it status `failed`. A detached council also re-links after a restart: its
+custody record carries the convener's job, and the outcome (or
+`coordinator_interrupted` once the dead coordinator's lease expires) is
+delivered once. The council recovery sweep that does this runs only on a
+`MobMcpState` built with `into_shared()` (MobKit 0.8.43 does; a plain
+`Arc::new` never runs it). `council_id` may contain only ASCII alphanumerics,
+`-` and `_` (the derived default is `agent-<uuid>`). On a
+one-shot host, or for a plain-session convener on a host without a
+`DetachedOwnerHost` (a top-level REST, MCP-server or keep-alive CLI session;
+`blocked_because: "no_owner_revival_host"`), the call blocks and returns the
+sealed outcome, so no detached job is owed.
+`timeout_seconds` bounds it; the agent loop's default tool deadline does not.
+
 Visibility alone satisfies none of these per-call prerequisites.
 
 A realm profile store adds five profile-management tools for reusable,

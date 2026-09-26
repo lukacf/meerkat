@@ -2476,6 +2476,15 @@ pub enum DurableForkSourceAdmission {
     /// This is the external-caller contract: an RPC or console fork of a
     /// member whose turn is in flight is refused rather than observing a
     /// transcript that the running turn is about to extend.
+    ///
+    /// The refusal answers; it never queues behind the source's work. The
+    /// owner waits only a short bound for the source's turn-finalization
+    /// boundary and recovery gate (non-turn holders such as the tail of a
+    /// finished lap) and refuses when they stay held. A committed end that is
+    /// still a pending input boundary (a user input or tool results the
+    /// source has not answered) is refused too when the fork would take that
+    /// end, because the child would inherit an unanswered input as its last
+    /// message.
     #[default]
     Quiescent,
     /// The request originates from the source session's own active turn, for

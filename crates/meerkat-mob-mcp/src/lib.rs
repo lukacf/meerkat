@@ -6,6 +6,9 @@
 )]
 
 mod agent_tools;
+pub mod council_relink;
+pub mod detached_delivery;
+pub mod fork_relink;
 #[cfg(all(feature = "openai-live", not(target_arch = "wasm32")))]
 pub mod live_delegation;
 mod public_definition;
@@ -19,6 +22,12 @@ mod workgraph_flow;
 pub use agent_tools::{
     AgentMobToolSurface, AgentMobToolSurfaceFactory, archive_session_with_mob_cleanup,
 };
+pub use detached_delivery::{
+    DetachedCompletionDelivered, DetachedCompletionError, DetachedDeliveryUnavailable,
+    DetachedOwnerError, DetachedOwnerHost, deliver_detached_completion,
+    deliver_detached_completion_to_member, deliver_detached_completion_to_member_when_revivable,
+    deliver_detached_completion_to_session, detached_completion_notice,
+};
 pub use public_definition::decode_public_mob_definition;
 pub use public_mcp::{
     handle_public_tools_call, public_tool_names, public_tools_list,
@@ -30,8 +39,9 @@ pub use surface::wire_mob_tools;
 pub use temporary_council::{
     MergeBackPolicy, TEMPORARY_COUNCIL_CLAIM_LEASE, TEMPORARY_COUNCIL_CLEANUP_BUDGET,
     TemporaryCouncilBounds, TemporaryCouncilCoordinator, TemporaryCouncilDeadline,
-    TemporaryCouncilError, TemporaryCouncilOutcome, TemporaryCouncilParticipantSpec,
-    TemporaryCouncilRecoveryReport, TemporaryCouncilRequest, TemporaryCouncilStructuredContract,
+    TemporaryCouncilError, TemporaryCouncilHeldRecord, TemporaryCouncilOutcome,
+    TemporaryCouncilParticipantSpec, TemporaryCouncilRecoveryReport, TemporaryCouncilRecoverySweep,
+    TemporaryCouncilRequest, TemporaryCouncilStructuredContract,
 };
 pub use workgraph_flow::{
     AbandonUncertainWorkGraphFlowRequest, LaunchWorkGraphFlowRequest, WorkGraphFlowAbandonResult,
@@ -382,6 +392,19 @@ impl TemporaryCouncilStoreSelection {
 }
 
 /// In-memory MCP state for multiple mobs.
+/// Whether a host can deliver a detached tool completion after the call
+/// returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DetachedCompletionDelivery {
+    /// The host outlives the call: detached tools return a handle and their
+    /// completion is delivered to the owner session later.
+    Available,
+    /// The host may exit when the turn ends: detached-capable tools block for
+    /// their result instead.
+    Unavailable,
+}
+
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
@@ -394,7 +417,7 @@ pub struct MobMcpState {
     /// every managed-mob operation fails closed rather than using ephemeral
     /// capability custody under a caller-requested durable root.
     persistent_storage_setup_error: Option<String>,
-    mobs: RwLock<BTreeMap<MobId, ManagedMob>>,
+    mobs: Arc<RwLock<BTreeMap<MobId, ManagedMob>>>,
     /// Bumped whenever the managed-mob handle set gains or loses an entry.
     /// Interval-free observers (e.g. mobkit's agent-event stream reconcilers)
     /// await this instead of polling `mob_handles_snapshot` on a timer. The
@@ -438,9 +461,29 @@ pub struct MobMcpState {
     /// makes. Zero in production; the only way to move it is the explicit
     /// test-clock seam below, which no surface exposes.
     temporary_council_clock_offset_ms: std::sync::atomic::AtomicI64,
+    /// Signals every change of the offset above, so a sweep waiting for a
+    /// claim lease re-reads the clock instead of sleeping past a moved one.
+    temporary_council_clock_changes: tokio::sync::watch::Sender<i64>,
     /// Set once the automatic post-restore recovery sweep has been scheduled.
     /// Also what keeps the sweep from re-entering `ensure_restored`.
     temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool,
+    /// Whether this host can deliver a detached tool completion to its
+    /// owner session after the tool call returns. Declared by the host;
+    /// never inferred.
+    detached_completion_delivery: std::sync::atomic::AtomicBool,
+    /// The host hook that makes a plain-session owner of a detached job live
+    /// again (see [`DetachedOwnerHost`]). `None` when the host supplies none.
+    detached_owner_host: std::sync::RwLock<Option<Arc<dyn DetachedOwnerHost>>>,
+    /// When this state was built (Unix ms). Fork children whose job started
+    /// earlier belonged to a previous process and are re-linked on restore.
+    created_at_ms: u64,
+    fork_relink_scheduled: std::sync::atomic::AtomicBool,
+    /// Mobs whose fork children were already re-linked by this state.
+    fork_relinked_mobs: std::sync::Mutex<std::collections::BTreeSet<MobId>>,
+    /// Deferred fork_off outcomes whose re-link is waiting on the owner's
+    /// mob right now (observability; see
+    /// [`Self::fork_relink_waiting_owners`]).
+    fork_relink_waiting_owners: Arc<std::sync::atomic::AtomicUsize>,
     /// Set once the realm-local capability expiry/cleanup driver is running.
     local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool,
     /// Driver cadence, configurable only through the explicit test seam.
@@ -492,6 +535,7 @@ impl MobMcpState {
         runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
         console_principal: MobControlPrincipal,
     ) -> Self {
+        let can_deliver_detached = runtime_adapter.is_some();
         Self {
             console_principal,
             session_service,
@@ -502,7 +546,7 @@ impl MobMcpState {
             external_tools_provider: None,
             persistent_storage_root: None,
             persistent_storage_setup_error: None,
-            mobs: RwLock::new(BTreeMap::new()),
+            mobs: Arc::new(RwLock::new(BTreeMap::new())),
             mob_set_epoch: tokio::sync::watch::Sender::new(0),
             implicit_mob_locks: Mutex::new(HashMap::new()),
             workgraph_flow_custodies: Mutex::new(HashMap::new()),
@@ -522,11 +566,27 @@ impl MobMcpState {
             self_weak: std::sync::OnceLock::new(),
             coordinator_id: uuid::Uuid::new_v4().simple().to_string(),
             temporary_council_clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
+            temporary_council_clock_changes: tokio::sync::watch::channel(0).0,
             temporary_council_cleanup_budget_ms: std::sync::atomic::AtomicU64::new(
                 u64::try_from(temporary_council::TEMPORARY_COUNCIL_CLEANUP_BUDGET.as_millis())
                     .unwrap_or(30_000),
             ),
             temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool::new(false),
+            // Detached delivery needs a runtime to admit completions, so the
+            // default follows the runtime's presence: a host built without one
+            // is declared unable to deliver, never silently mismatched.
+            detached_completion_delivery: std::sync::atomic::AtomicBool::new(can_deliver_detached),
+            detached_owner_host: std::sync::RwLock::new(None),
+            created_at_ms: u64::try_from(
+                SystemTime::now()
+                    .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX),
+            fork_relink_scheduled: std::sync::atomic::AtomicBool::new(false),
+            fork_relinked_mobs: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            fork_relink_waiting_owners: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool::new(false),
             local_forked_participant_sweep_interval_ms: std::sync::atomic::AtomicU64::new(
                 u64::try_from(LOCAL_FORKED_PARTICIPANT_SWEEP_INTERVAL.as_millis())
@@ -596,6 +656,146 @@ impl MobMcpState {
     }
 
     /// Inject the single realm-scoped temporary-council custody store.
+    /// Declare whether this host outlives a tool call long enough to deliver
+    /// detached completions (a long-lived server or a keep-alive session).
+    /// One-shot hosts declare [`DetachedCompletionDelivery::Unavailable`], so
+    /// `fork_off` and `council` block for their result instead of returning a
+    /// handle whose completion would be lost when the process exits.
+    #[must_use]
+    pub fn with_detached_completion_delivery(self, delivery: DetachedCompletionDelivery) -> Self {
+        self.set_detached_completion_delivery(delivery);
+        self
+    }
+
+    /// Re-declare the capability on a shared state, e.g. once a one-shot CLI
+    /// run learns it will stay alive.
+    pub fn set_detached_completion_delivery(&self, delivery: DetachedCompletionDelivery) {
+        if delivery == DetachedCompletionDelivery::Available && self.runtime_adapter.is_none() {
+            tracing::error!(
+                "detached completion delivery declared Available on a host with no runtime \
+                 adapter; fork_off and council will block and report no_runtime_adapter"
+            );
+        }
+        self.detached_completion_delivery.store(
+            matches!(delivery, DetachedCompletionDelivery::Available),
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    /// Supply the host hook that makes a plain-session owner of a detached
+    /// job (a top-level session that called `council`) live again when the
+    /// runtime has retired its executor. Mob member owners are revived
+    /// through their mob and need no hook.
+    #[must_use]
+    pub fn with_detached_owner_host(self, host: Arc<dyn DetachedOwnerHost>) -> Self {
+        self.set_detached_owner_host(Some(host));
+        self
+    }
+
+    /// Replace the plain-session owner hook on a shared state.
+    pub fn set_detached_owner_host(&self, host: Option<Arc<dyn DetachedOwnerHost>>) {
+        *self
+            .detached_owner_host
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = host;
+    }
+
+    /// The plain-session owner hook, if the host supplied one. Delivery
+    /// paths (the live custodian and the restart re-link) use it for owners
+    /// that are not mob members.
+    pub fn detached_owner_host(&self) -> Option<Arc<dyn DetachedOwnerHost>> {
+        self.detached_owner_host
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The runtime that admits detached completions for this host, or why
+    /// detached delivery is unavailable. A host that declares delivery but
+    /// has no runtime is reported, never silently treated as able to deliver.
+    pub(crate) fn detached_delivery_route(
+        &self,
+    ) -> crate::detached_delivery::DetachedDeliveryRoute {
+        if self.detached_completion_delivery() == DetachedCompletionDelivery::Unavailable {
+            return Err(
+                crate::detached_delivery::DetachedDeliveryUnavailable::HostDeclaredUnavailable,
+            );
+        }
+        self.runtime_adapter
+            .clone()
+            .ok_or(crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter)
+    }
+
+    /// [`Self::detached_delivery_route`] for a call whose result belongs to
+    /// `owner_session_id`, with the owner the result goes to. One membership
+    /// read decides both: a member of a mob this state manages is revived
+    /// through its mob; any other owner is a plain session, revived through
+    /// the host's [`DetachedOwnerHost`]. Without that hook the route is
+    /// unavailable (`NoOwnerRevivalHost`): the result could not reach the
+    /// owner later. An owner whose membership cannot be read is not known to
+    /// be a member, so it is treated as a plain session.
+    pub(crate) async fn detached_delivery_route_for_owner(
+        &self,
+        owner_session_id: &SessionId,
+    ) -> Result<
+        (
+            Arc<meerkat_runtime::MeerkatMachine>,
+            crate::detached_delivery::DetachedCompletionOwner,
+        ),
+        crate::detached_delivery::DetachedDeliveryUnavailable,
+    > {
+        let runtime = self.detached_delivery_route()?;
+        let owner = match self
+            .member_handle_for_bridge_session(owner_session_id)
+            .await
+        {
+            Ok(Some((_, handle, identity))) => {
+                crate::detached_delivery::DetachedCompletionOwner::Member(handle, identity)
+            }
+            Ok(None) | Err(_) => match self.detached_owner_host() {
+                Some(host) => crate::detached_delivery::DetachedCompletionOwner::Session(host),
+                None => {
+                    return Err(
+                        crate::detached_delivery::DetachedDeliveryUnavailable::NoOwnerRevivalHost,
+                    );
+                }
+            },
+        };
+        Ok((runtime, owner))
+    }
+
+    /// Why fork_off and council would block on this host, or `None` when
+    /// they deliver detached.
+    pub fn detached_delivery_blocked_because(
+        &self,
+    ) -> Option<crate::detached_delivery::DetachedDeliveryUnavailable> {
+        self.detached_delivery_route().err()
+    }
+
+    /// [`Self::detached_delivery_blocked_because`] for a call made by
+    /// `owner_session_id`, which also blocks when the result could not reach
+    /// that owner later
+    /// ([`crate::detached_delivery::DetachedDeliveryUnavailable::NoOwnerRevivalHost`]).
+    pub async fn detached_delivery_blocked_because_for(
+        &self,
+        owner_session_id: &SessionId,
+    ) -> Option<crate::detached_delivery::DetachedDeliveryUnavailable> {
+        self.detached_delivery_route_for_owner(owner_session_id)
+            .await
+            .err()
+    }
+
+    pub fn detached_completion_delivery(&self) -> DetachedCompletionDelivery {
+        if self
+            .detached_completion_delivery
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            DetachedCompletionDelivery::Available
+        } else {
+            DetachedCompletionDelivery::Unavailable
+        }
+    }
+
     pub fn with_temporary_council_store(mut self, store: Arc<dyn TemporaryCouncilStore>) -> Self {
         self.temporary_council_store_selection =
             TemporaryCouncilStoreSelection::CallerSupplied(store);
@@ -674,6 +874,13 @@ impl MobMcpState {
             offset.num_milliseconds(),
             std::sync::atomic::Ordering::SeqCst,
         );
+        self.temporary_council_clock_changes
+            .send_replace(offset.num_milliseconds());
+    }
+
+    /// Wakes when the coordinator's clock offset changes.
+    pub(crate) fn temporary_council_clock_changes(&self) -> tokio::sync::watch::Receiver<i64> {
+        self.temporary_council_clock_changes.subscribe()
     }
 
     /// Adjust the bounded cleanup budget on a live state.
@@ -701,13 +908,21 @@ impl MobMcpState {
         TemporaryCouncilCoordinator::new(self.clone())
     }
 
-    /// Schedule the automatic post-restore council recovery sweep.
+    /// Schedule the automatic post-restore council sweep: recovery, the
+    /// detached-council re-link, and a retry after the lease of every record
+    /// a previous process's claim still held (see [`crate::council_relink`]).
     ///
     /// Runs at most once per state and always on its OWN task, so it can call
     /// back into `ensure_restored`/`handle_for` without re-entering the
-    /// restore lock that is held while restoration completes.
+    /// restore lock that is held while restoration completes. Only a durable
+    /// council store has anything from a previous process to converge.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn schedule_temporary_council_recovery(&self) {
+        if self.temporary_council_store().durability()
+            != meerkat_mob::temporary_council::TemporaryCouncilStoreDurability::Durable
+        {
+            return;
+        }
         use std::sync::atomic::Ordering;
         if self
             .temporary_council_recovery_scheduled
@@ -723,26 +938,7 @@ impl MobMcpState {
                 .store(false, Ordering::SeqCst);
             return;
         };
-        tokio::spawn(async move {
-            let Some(state) = weak.upgrade() else {
-                return;
-            };
-            match state.temporary_council().recover_unfinished().await {
-                Ok(reports) if !reports.is_empty() => {
-                    tracing::info!(
-                        recovered = reports.len(),
-                        "temporary council recovery sweep converged unfinished records"
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "temporary council recovery sweep failed; records remain unfinished"
-                    );
-                }
-            }
-        });
+        tokio::spawn(crate::council_relink::restore_sweep(weak));
     }
 
     /// Override the local capability sweep cadence for deterministic tests.
@@ -1366,6 +1562,10 @@ impl MobMcpState {
 
     async fn ensure_restored(&self) -> Result<(), MobError> {
         if self.persistent_storage_root.is_none() {
+            // A host may still supply a durable council store without a
+            // persistent root (MobKit does): its councils need the same
+            // post-restart convergence.
+            self.schedule_temporary_council_recovery();
             self.schedule_local_forked_participant_sweeper();
             return Ok(());
         }
@@ -1385,8 +1585,38 @@ impl MobMcpState {
         // on its own task, so recovery can use the ordinary mob verbs (which
         // call back into `ensure_restored`) without recursion or deadlock.
         self.schedule_temporary_council_recovery();
+        self.schedule_fork_relink();
         self.schedule_local_forked_participant_sweeper();
         Ok(())
+    }
+
+    /// Schedule the one-time post-restore fork_off re-link pass (see
+    /// [`crate::fork_relink`]). Runs on its own task, like council recovery.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn schedule_fork_relink(&self) {
+        use std::sync::atomic::Ordering;
+        if self.fork_relink_scheduled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(weak) = self.self_weak.get().cloned() else {
+            self.fork_relink_scheduled.store(false, Ordering::SeqCst);
+            return;
+        };
+        let restored_before_ms = self.created_at_ms;
+        tokio::spawn(async move {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            let reports =
+                crate::fork_relink::relink_restored_fork_children(&state, restored_before_ms, true)
+                    .await;
+            if !reports.is_empty() {
+                tracing::info!(
+                    children = reports.len(),
+                    "fork_off re-link pass handled children from a previous process"
+                );
+            }
+        });
     }
 
     async fn ensure_restored_best_effort(&self, action: &str) -> bool {
@@ -1546,13 +1776,107 @@ impl MobMcpState {
     /// building the handle.
     pub async fn mob_insert_handle(&self, mob_id: MobId, handle: MobHandle) {
         self.mobs.write().await.insert(
-            mob_id,
+            mob_id.clone(),
             ManagedMob {
-                handle,
+                handle: handle.clone(),
                 storage_path: None,
             },
         );
         self.note_mob_set_changed();
+        // A host that restores mobs by inserting their handles (MobKit) gets
+        // the council sweep (when its council store is durable) and the
+        // fork_off re-link for each restored mob here.
+        self.schedule_temporary_council_recovery();
+        if self.claim_fork_relink(&mob_id) {
+            let service = self.session_service.clone();
+            let delivery = crate::fork_relink::RelinkDelivery::from_state(self);
+            let restored_before_ms = self.created_at_ms;
+            tokio::spawn(async move {
+                let reports = crate::fork_relink::relink_mob_fork_children(
+                    Arc::clone(&service),
+                    delivery.clone(),
+                    &mob_id,
+                    &handle,
+                    restored_before_ms,
+                )
+                .await;
+                // A handle inserted before its mob runs (MobKit restores a
+                // stopped mob and activates it later) cannot revive a
+                // forker yet: those outcomes are delivered once it can.
+                let reports = crate::fork_relink::redeliver_when_owners_revivable(
+                    service,
+                    delivery,
+                    &mob_id,
+                    &handle,
+                    restored_before_ms,
+                    reports,
+                )
+                .await;
+                if !reports.is_empty() {
+                    tracing::info!(
+                        mob_id = %mob_id,
+                        children = reports.len(),
+                        "fork_off re-link handled children from a previous process"
+                    );
+                }
+            });
+        }
+    }
+
+    /// How many deferred fork_off outcomes the automatic re-link is waiting
+    /// on right now, each on its owner's mob. Observability for hosts and
+    /// tests.
+    #[doc(hidden)]
+    pub fn fork_relink_waiting_owners(&self) -> usize {
+        self.fork_relink_waiting_owners
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn fork_relink_waiting_owners_gauge(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.fork_relink_waiting_owners)
+    }
+
+    /// The mobs this state manages, as a live view the re-link reads afresh
+    /// each time it looks up a job's owner (a mob inserted later is found).
+    pub(crate) fn managed_mobs(&self) -> crate::fork_relink::ManagedMobs {
+        crate::fork_relink::ManagedMobs::new(Arc::clone(&self.mobs), self.console_principal.clone())
+    }
+
+    pub(crate) fn runtime_adapter_for_relink(
+        &self,
+    ) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
+        self.runtime_adapter.clone()
+    }
+
+    /// Claim the one-time fork_off re-link of `mob_id` for this state.
+    pub(crate) fn claim_fork_relink(&self, mob_id: &MobId) -> bool {
+        self.fork_relinked_mobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(mob_id.clone())
+    }
+
+    /// Run the fork_off re-link for every managed mob now and report what it
+    /// did. Hosts normally get this automatically after restore; this is the
+    /// explicit entry point (and the test seam).
+    pub async fn relink_restored_fork_children(
+        self: &Arc<Self>,
+    ) -> Vec<crate::fork_relink::ForkRelinkReport> {
+        // Explicit runs ignore the automatic pass's claims; delivery is
+        // idempotent per job, so running twice never records twice.
+        crate::fork_relink::relink_restored_fork_children(self, self.created_at_ms, false).await
+    }
+
+    /// Deliver the outcome of every detached council from an earlier process
+    /// whose convener is still owed it, and report what was done. Persistent
+    /// restoration runs this automatically after the council recovery sweep;
+    /// a host that shares its state with `Arc::new` and recovers councils by
+    /// calling [`TemporaryCouncilCoordinator::recover_unfinished`] calls this
+    /// after it. Delivery is idempotent per job.
+    pub async fn relink_detached_councils(
+        self: &Arc<Self>,
+    ) -> Vec<crate::council_relink::CouncilRelinkReport> {
+        crate::council_relink::relink_detached_councils(self, self.created_at_ms).await
     }
 
     /// Change signal over the managed-mob handle set: the receiver wakes when
@@ -1824,9 +2148,11 @@ impl MobMcpState {
         mob_id: &MobId,
         identity: AgentIdentity,
     ) -> Result<(), MobError> {
+        // Retirement follows process-tree semantics: members this one
+        // spawned (e.g. its fork_off children) are retired with it.
         self.admitted_handle_for(mob_id, ControlScope::Retire)
             .await?
-            .retire(identity)
+            .retire_with_descendants(identity)
             .await
     }
 
@@ -2429,12 +2755,34 @@ impl MobMcpState {
         &self,
         bridge_session_id: &SessionId,
     ) -> Result<Option<(MobId, meerkat_mob::AgentIdentity)>, MobError> {
+        Ok(self
+            .member_handle_for_bridge_session(bridge_session_id)
+            .await?
+            .map(|(mob_id, _, identity)| (mob_id, identity)))
+    }
+
+    /// The member seated on `bridge_session_id` in a mob this state manages,
+    /// with that mob's handle. A mob removed while the read runs (a
+    /// concurrent destroy) is skipped, not an error.
+    pub(crate) async fn member_handle_for_bridge_session(
+        &self,
+        bridge_session_id: &SessionId,
+    ) -> Result<Option<(MobId, MobHandle, meerkat_mob::AgentIdentity)>, MobError> {
         self.ensure_restored().await?;
         let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
         for mob_id in mob_ids {
-            let roster = self.handle_for(&mob_id).await?.roster().await;
-            if let Some(entry) = roster.find_by_bridge_session_id(bridge_session_id) {
-                return Ok(Some((mob_id, entry.agent_identity.clone())));
+            let handle = match self.handle_for(&mob_id).await {
+                Ok(handle) => handle,
+                Err(MobError::MobNotFound(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            if let Some(entry) = handle
+                .roster()
+                .await
+                .find_by_bridge_session_id(bridge_session_id)
+            {
+                let identity = entry.agent_identity.clone();
+                return Ok(Some((mob_id, handle, identity)));
             }
         }
         Ok(None)

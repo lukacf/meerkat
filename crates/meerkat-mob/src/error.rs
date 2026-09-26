@@ -1037,6 +1037,18 @@ pub enum MobError {
         missing: Vec<String>,
     },
 
+    /// A fork admitted in its source member's own turn (`CallerTurn`) owes
+    /// its job to that member: the job's owner session must be the source
+    /// member's bridge session. Refused before anything is forked or seated.
+    #[error(
+        "a fork in the turn of '{source_member_id}' binds its job to that member's session {source_session_id}, not {owner_session_id}"
+    )]
+    ForkJobOwnerNotSource {
+        source_member_id: AgentIdentity,
+        source_session_id: meerkat_core::SessionId,
+        owner_session_id: meerkat_core::SessionId,
+    },
+
     /// A fork source member's session history is unavailable (W-G retype:
     /// typed from birth, never an `Internal` masquerade).
     #[error("fork source '{source_member_id}' is unavailable: {cause}")]
@@ -1198,8 +1210,9 @@ pub enum ForkSourceUnavailableCause {
     /// The source member has no session (peer-only external source —
     /// unchanged semantics, now typed).
     NoSession,
-    /// The source owns an active runtime turn or live actor admission. The
-    /// persistent fork owner refuses to observe and copy it concurrently.
+    /// The source owes work: a turn in flight, an admitted input that has
+    /// not started, or a committed turn not yet answered. The persistent
+    /// fork owner refuses to observe and copy it concurrently.
     Running,
     /// The source is placed on a member host; the proxied fork-context
     /// history read lands in phase 6 (§19.L2). Typed from birth so the

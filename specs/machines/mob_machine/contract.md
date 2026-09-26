@@ -367,6 +367,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
 - `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_contains: Bool, privileged_resume_bridge_session_present: Bool, privileged_resume_session_present: Bool, privileged_backend_present: Bool, privileged_runtime_mode_present: Bool, privileged_launch_mode_present: Bool, privileged_tool_access_policy_present: Bool, privileged_tooling_present: Bool, privileged_auth_binding_present: Bool)
 - `ResolveCurrentMobAdmission`(can_manage_mob: Bool)
+- `ResolveOwnedMemberAdmission`(can_manage_mob: Bool, caller_owns_member: Bool)
 - `ResolveSpawnToolAdmission`(can_manage_mob: Bool, spawn_profile_scope_present: Bool)
 - `ResolveCreateMobAdmission`(can_create_mobs: Bool)
 - `ResolveProfileMutationAdmission`(can_mutate_profiles: Bool)
@@ -654,6 +655,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RemoteMemberRuntimeTerminalityClassified`(observed_state: MobRemoteMemberRuntimeObservedState, terminality: MobRemoteMemberRuntimeTerminality)
 - `SpawnMemberAdmissionResolved`(admission: MobSpawnMemberAdmissionKind)
 - `CurrentMobAdmissionResolved`(admission: MobCurrentMobAdmissionKind)
+- `OwnedMemberAdmissionResolved`(admission: MobCurrentMobAdmissionKind)
 - `SpawnToolAdmissionResolved`(admission: MobSpawnToolAdmissionKind)
 - `CreateMobAdmissionResolved`(admission: MobCreateMobAdmissionKind)
 - `ProfileMutationAdmissionResolved`(admission: MobProfileMutationAdmissionKind)
@@ -1758,6 +1760,70 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `no_manage_scope_denies`
 - Emits: `CurrentMobAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveOwnedMemberAdmissionAllowedRunning`
+- From: `Running`
+- On: `ResolveOwnedMemberAdmission`(can_manage_mob, caller_owns_member)
+- Guards:
+  - `manage_scope_or_ownership_allows`
+- Emits: `OwnedMemberAdmissionResolved`
+- To: `Running`
+
+### `ResolveOwnedMemberAdmissionAllowedStopped`
+- From: `Stopped`
+- On: `ResolveOwnedMemberAdmission`(can_manage_mob, caller_owns_member)
+- Guards:
+  - `manage_scope_or_ownership_allows`
+- Emits: `OwnedMemberAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveOwnedMemberAdmissionAllowedCompleted`
+- From: `Completed`
+- On: `ResolveOwnedMemberAdmission`(can_manage_mob, caller_owns_member)
+- Guards:
+  - `manage_scope_or_ownership_allows`
+- Emits: `OwnedMemberAdmissionResolved`
+- To: `Completed`
+
+### `ResolveOwnedMemberAdmissionAllowedDestroyed`
+- From: `Destroyed`
+- On: `ResolveOwnedMemberAdmission`(can_manage_mob, caller_owns_member)
+- Guards:
+  - `manage_scope_or_ownership_allows`
+- Emits: `OwnedMemberAdmissionResolved`
+- To: `Destroyed`
+
+### `ResolveOwnedMemberAdmissionDeniedRunning`
+- From: `Running`
+- On: `ResolveOwnedMemberAdmission`(can_manage_mob, caller_owns_member)
+- Guards:
+  - `neither_manage_scope_nor_ownership_denies`
+- Emits: `OwnedMemberAdmissionResolved`
+- To: `Running`
+
+### `ResolveOwnedMemberAdmissionDeniedStopped`
+- From: `Stopped`
+- On: `ResolveOwnedMemberAdmission`(can_manage_mob, caller_owns_member)
+- Guards:
+  - `neither_manage_scope_nor_ownership_denies`
+- Emits: `OwnedMemberAdmissionResolved`
+- To: `Stopped`
+
+### `ResolveOwnedMemberAdmissionDeniedCompleted`
+- From: `Completed`
+- On: `ResolveOwnedMemberAdmission`(can_manage_mob, caller_owns_member)
+- Guards:
+  - `neither_manage_scope_nor_ownership_denies`
+- Emits: `OwnedMemberAdmissionResolved`
+- To: `Completed`
+
+### `ResolveOwnedMemberAdmissionDeniedDestroyed`
+- From: `Destroyed`
+- On: `ResolveOwnedMemberAdmission`(can_manage_mob, caller_owns_member)
+- Guards:
+  - `neither_manage_scope_nor_ownership_denies`
+- Emits: `OwnedMemberAdmissionResolved`
 - To: `Destroyed`
 
 ### `ResolveSpawnToolAdmissionAllowedRunning`

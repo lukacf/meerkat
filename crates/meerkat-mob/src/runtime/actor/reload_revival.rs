@@ -614,6 +614,14 @@ impl MobActor {
             .member_revival_pending
             .contains(&identity);
         if !continuing {
+            // Revival is admitted only while the mob runs (every
+            // classification transition guards on the Running phase). Say so
+            // typed, as command admission does, so a caller can tell a mob
+            // that is not running yet from a failed revival and retry once
+            // it runs.
+            if self.state() != MobState::Running {
+                return Err(self.invalid_transition_to(MobState::Running));
+            }
             let transition = self.apply_dsl_signal_collect_transition(
                 mob_dsl::MobMachineSignal::ClassifyMemberLiveMaterialization {
                     agent_identity: identity.clone(),

@@ -259,6 +259,17 @@ pub fn role_in_request(request: &LlmRequest) -> Option<String> {
 // Real session service + MobMcpState
 // ===========================================================================
 
+/// How a fixture's mob state gets its runtime adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixtureRuntime {
+    /// Whatever `MobMcpState::new` derives from the session service.
+    DerivedFromService,
+    /// The runtime-backed composition product surfaces use.
+    RuntimeBacked,
+    /// No runtime adapter at all.
+    Absent,
+}
+
 pub struct CouncilFixture {
     /// Per-fixture identity scope.
     ///
@@ -270,16 +281,23 @@ pub struct CouncilFixture {
     pub state: Arc<MobMcpState>,
     pub service: Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
     pub runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    /// Present for runtime-backed fixtures ([`CouncilFixture::new_runtime_backed`]).
+    pub runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub calls: Arc<AtomicUsize>,
     pub root: std::path::PathBuf,
     pub temp: tempfile::TempDir,
 }
 
-fn persistent_service(
+/// The factory builder and durable session store every fixture service
+/// composes over (scripted provider, JSONL session store).
+fn fixture_builder(
     root: &std::path::Path,
-    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
     client: Arc<dyn LlmClient>,
-) -> Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>> {
+) -> (
+    meerkat::FactoryAgentBuilder,
+    Arc<meerkat_store::JsonlStore>,
+    std::path::PathBuf,
+) {
     let project_root = root.join("project-root");
     let context_root = root.join("context-root");
     for dir in [&project_root, &context_root] {
@@ -301,26 +319,64 @@ fn persistent_service(
     builder.default_llm_client = Some(client);
     let store = Arc::new(meerkat_store::JsonlStore::new(root.join("sessions-jsonl")));
     builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(store.clone())));
+    (builder, store, project_root)
+}
+
+fn event_projection(
+    service: meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>,
+    project_root: &std::path::Path,
+) -> meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder> {
+    service.with_event_projection(
+        Arc::new(meerkat_session::event_store::FileEventStore::new(
+            project_root.join(".rkat").join("events"),
+        )),
+        Arc::new(meerkat_session::projector::SessionProjector::new(
+            project_root.join(".rkat"),
+        )),
+    )
+}
+
+fn persistent_service(
+    root: &std::path::Path,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    client: Arc<dyn LlmClient>,
+) -> Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>> {
+    let (builder, store, project_root) = fixture_builder(root, client);
     let store_dyn: Arc<dyn meerkat::SessionStore> = store;
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::default());
-    Arc::new(
+    Arc::new(event_projection(
         meerkat_session::PersistentSessionService::new(
             builder,
             32,
             store_dyn,
             runtime_store,
             blob_store,
-        )
-        .with_event_projection(
-            Arc::new(meerkat_session::event_store::FileEventStore::new(
-                project_root.join(".rkat").join("events"),
-            )),
-            Arc::new(meerkat_session::projector::SessionProjector::new(
-                project_root.join(".rkat"),
-            )),
         ),
-    )
+        &project_root,
+    ))
+}
+
+/// The runtime-backed composition product surfaces use: members run through
+/// a `MeerkatMachine`, which is also what admits detached completions.
+fn runtime_backed_service(
+    root: &std::path::Path,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    client: Arc<dyn LlmClient>,
+) -> (
+    Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
+    Arc<meerkat_runtime::MeerkatMachine>,
+) {
+    let (builder, store, project_root) = fixture_builder(root, client);
+    let store_dyn: Arc<dyn meerkat::SessionStore> = store;
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::default());
+    let (service, runtime) = meerkat::surface::build_runtime_backed_service(
+        builder,
+        32,
+        meerkat::PersistenceBundle::new(store_dyn, runtime_store, blob_store),
+    );
+    (Arc::new(event_projection(service, &project_root)), runtime)
 }
 
 impl CouncilFixture {
@@ -336,6 +392,31 @@ impl CouncilFixture {
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
         customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
     ) -> Self {
+        Self::build(script, customize, FixtureRuntime::DerivedFromService)
+    }
+
+    /// A fixture over the runtime-backed composition product surfaces use
+    /// (RPC, REST, keep-alive CLI): members run through a `MeerkatMachine`,
+    /// which is what admits detached `fork_off` / `council` completions.
+    pub fn new_runtime_backed(
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+    ) -> Self {
+        Self::build(script, |state, _root| state, FixtureRuntime::RuntimeBacked)
+    }
+
+    /// A fixture whose mob state has NO runtime adapter: the host shape that
+    /// cannot admit a detached completion, whatever it declares.
+    pub fn new_without_runtime_adapter(
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+    ) -> Self {
+        Self::build(script, |state, _root| state, FixtureRuntime::Absent)
+    }
+
+    fn build(
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+        customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
+        runtime: FixtureRuntime,
+    ) -> Self {
         let temp = tempfile::tempdir().expect("council temp dir");
         let root = temp.path().to_path_buf();
         let scope = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
@@ -343,12 +424,22 @@ impl CouncilFixture {
         let calls = client.calls();
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-        let service = persistent_service(&root, runtime_store.clone(), client);
+        let (service, runtime_adapter) = if runtime == FixtureRuntime::RuntimeBacked {
+            let (service, runtime) = runtime_backed_service(&root, runtime_store.clone(), client);
+            (service, Some(runtime))
+        } else {
+            (
+                persistent_service(&root, runtime_store.clone(), client),
+                None,
+            )
+        };
         let state_root = root.join("state");
-        let state = customize(
-            MobMcpState::new(service.clone(), MobControlPrincipal::Owner),
-            &state_root,
-        );
+        let state = if runtime == FixtureRuntime::Absent {
+            MobMcpState::new_with_runtime_adapter(service.clone(), None, MobControlPrincipal::Owner)
+        } else {
+            Self::state_over(&service, runtime_adapter.as_ref())
+        };
+        let state = customize(state, &state_root);
         let state = state
             .try_with_persistent_storage_root(Some(state_root))
             .expect("open rooted council + capability custody")
@@ -358,9 +449,27 @@ impl CouncilFixture {
             state,
             service,
             runtime_store,
+            runtime_adapter,
             calls,
             root,
             temp,
+        }
+    }
+
+    /// The mob state over `service`: the explicit runtime adapter of a
+    /// runtime-backed fixture, or whatever `MobMcpState::new` derives from
+    /// the service otherwise.
+    fn state_over(
+        service: &Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
+        runtime_adapter: Option<&Arc<meerkat_runtime::MeerkatMachine>>,
+    ) -> MobMcpState {
+        match runtime_adapter {
+            Some(runtime) => MobMcpState::new_with_runtime_adapter(
+                service.clone(),
+                Some(Arc::clone(runtime)),
+                MobControlPrincipal::Owner,
+            ),
+            None => MobMcpState::new(service.clone(), MobControlPrincipal::Owner),
         }
     }
 
@@ -433,10 +542,26 @@ impl CouncilFixture {
     /// process would. The session service and runtime store are retained
     /// because replacing them would model data loss, not a cold restart.
     pub fn restart_state(&self) -> Arc<MobMcpState> {
-        MobMcpState::new(self.service.clone(), MobControlPrincipal::Owner)
+        Self::state_over(&self.service, self.runtime_adapter.as_ref())
             .try_with_persistent_storage_root(Some(self.root.join("state")))
             .expect("reopen rooted council + capability custody")
             .into_shared()
+    }
+
+    /// A second session service over the SAME durable stores, with no live
+    /// sessions of its own. A read through it sees only what was persisted,
+    /// which is how a test distinguishes durable state from a live actor's
+    /// memory.
+    pub fn reopen_session_service(
+        &self,
+    ) -> Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>> {
+        persistent_service(
+            &self.root,
+            self.runtime_store.clone(),
+            Arc::new(ScriptedCouncilClient::new(|_| {
+                ScriptedTurn::Fail("a reopened read-only service never runs turns".to_string())
+            })),
+        )
     }
 
     /// Age the persisted coordinator lease of `council_id` past its deadline.
@@ -889,5 +1014,71 @@ impl meerkat_mob::store::TemporaryCouncilStore for PanicOnceCouncilStore {
     ) -> Result<Vec<meerkat_mob::store::TemporaryCouncilRecord>, meerkat_mob::store::MobStoreError>
     {
         self.inner.list_all().await
+    }
+}
+
+/// Rendered provider requests, to count the turns that saw a completion
+/// record.
+#[derive(Clone, Default)]
+pub struct SeenRequests(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl SeenRequests {
+    pub fn record(&self, request: &LlmRequest) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{:?}", request.messages));
+    }
+
+    /// Provider requests whose context held `marker`: with no later turn of
+    /// the owner, the turns the completion record woke.
+    pub fn turns_that_saw(&self, marker: &str) -> usize {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|rendered| rendered.contains(marker))
+            .count()
+    }
+}
+
+/// A host owner hook for these tests. A real host attaches the session's
+/// executor the way its own next turn does (the RPC host uses
+/// `SessionRuntime::ensure_runtime_executor`); this one stands in for that
+/// by reviving the session through the mob that seats it, and counts the
+/// calls.
+pub struct MobBackedOwnerHost {
+    handle: meerkat_mob::MobHandle,
+    identity: AgentIdentity,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl MobBackedOwnerHost {
+    pub fn new(handle: meerkat_mob::MobHandle, identity: &str) -> Arc<Self> {
+        Arc::new(Self {
+            handle,
+            identity: AgentIdentity::from(identity),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_mob_mcp::DetachedOwnerHost for MobBackedOwnerHost {
+    async fn ensure_owner_live(
+        &self,
+        _session_id: &meerkat_core::SessionId,
+    ) -> Result<(), meerkat_mob_mcp::DetachedOwnerError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.handle
+            .ensure_member_live(&self.identity)
+            .await
+            .map_err(|error| meerkat_mob_mcp::DetachedOwnerError::Failed {
+                detail: error.to_string(),
+            })
     }
 }

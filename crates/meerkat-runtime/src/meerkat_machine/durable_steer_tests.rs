@@ -1110,10 +1110,17 @@ async fn persistent_crash_after_the_join_recovers_the_input_for_exactly_one_foll
     .await;
     // Cold recovery returns both contributors of the interrupted run to their
     // lanes; the durable steer is delivered by exactly one follow-up turn.
+    // Wait for the fact the rest of the test needs: the joined input is no
+    // longer bound to the crashed run. Recovery requeues it, and the
+    // recovered runtime may restage it for its follow-up run at once, so
+    // "not Staged" is not a phase every legal path passes through where a
+    // poll can see it; a restaged input waits for the Finish step below and
+    // would never leave Staged here.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(phase) = recovered.phase(&steer_id).await
-                && phase != InputLifecycleState::Staged
+            if let Some(stored) = recovered.stored(&steer_id).await
+                && (stored.seed.phase != InputLifecycleState::Staged
+                    || stored.seed.last_run_id.as_ref() != Some(&crashed_run))
             {
                 return;
             }
@@ -1121,7 +1128,7 @@ async fn persistent_crash_after_the_join_recovers_the_input_for_exactly_one_foll
         }
     })
     .await
-    .expect("recovery settles the joined input");
+    .expect("recovery releases the joined input from the crashed run");
     for expected_calls in 1..=2 {
         if recovered.phase(&steer_id).await == Some(InputLifecycleState::Consumed)
             && recovered.phase(&batch).await == Some(InputLifecycleState::Consumed)

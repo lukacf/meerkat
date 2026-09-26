@@ -344,6 +344,48 @@ impl PromptInput {
         }
     }
 
+    /// Deliver one detached job's durable completion record to its owner.
+    ///
+    /// The record (a `BackgroundJob` system notice with `persisted: true`) is
+    /// the turn's only content, carried as a typed runtime append with no user
+    /// text. An idle owner therefore runs one real turn that sees it. A
+    /// running owner takes it as a durable steer: it joins the running turn
+    /// and the turn's next model call sees it; only if the turn ends before
+    /// another model call does the owner get one follow-up turn with it. The
+    /// append is committed to the transcript with the run, like any turn
+    /// content. `idempotency_key` names the job, so
+    /// the record is admitted and written exactly once however often delivery
+    /// is retried, and the durable input survives a restart once admitted.
+    pub fn detached_job_completed(
+        idempotency_key: impl Into<String>,
+        notice: meerkat_core::types::SystemNoticeMessage,
+    ) -> Self {
+        Self {
+            header: InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: Some(IdempotencyKey::new(idempotency_key)),
+                supersession_key: None,
+                correlation_id: None,
+            },
+            content: ContentInput::Text(String::new()),
+            typed_turn_appends: vec![ConversationAppend {
+                role: ConversationAppendRole::SystemNotice,
+                content: CoreRenderable::SystemNotice {
+                    kind: notice.kind,
+                    body: notice.body,
+                    blocks: notice.blocks,
+                },
+                identity: None,
+            }],
+            injected_context: Vec::new(),
+            turn_metadata: Some(crate::runtime_loop::for_detached_job_completed()),
+        }
+    }
+
     /// Create a prompt from `ContentInput` (text or multimodal blocks).
     pub fn from_content_input(
         input: ContentInput,
@@ -2194,6 +2236,36 @@ mod tests {
         assert_eq!(
             projection_conversation_appends(&projection, semantics).len(),
             2
+        );
+    }
+
+    /// A detached job's completion record joins a running owner's turn: the
+    /// persisted notice is not a refresh projection and the completion's
+    /// turn metadata is trivial, so admission plans a durable in-turn append.
+    #[test]
+    fn detached_job_completion_joins_a_running_turn() {
+        use crate::meerkat_machine::dsl::AdmissionTurnAppendShape;
+        let notice = meerkat_core::types::SystemNoticeMessage::persisted_background_job(
+            "fork_off",
+            "job-7",
+            meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+            r#"{"text":"done"}"#.to_string(),
+        );
+        let input = Input::Prompt(PromptInput::detached_job_completed(
+            "fork_off:job-7",
+            notice,
+        ));
+        assert_eq!(
+            admission_turn_append_shape(&input),
+            AdmissionTurnAppendShape::InTurnEligible
+        );
+        let semantics = crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+            &input, false,
+        )
+        .expect("running steer admission");
+        assert_eq!(
+            semantics.live_boundary_delivery(),
+            Some(crate::ingress_types::LiveBoundaryDeliveryClass::DurableAppend)
         );
     }
 

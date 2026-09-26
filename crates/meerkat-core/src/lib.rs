@@ -139,9 +139,10 @@ pub use auth::{
     can_observe_visibility, metadata_grants_no_visibility,
 };
 pub use blob::{
-    BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, ImageBlobIntegrityError,
-    VerifiedImageBlob, content_blob_id, ensure_stored_image_blob, validate_image_blob_payload,
-    verify_stored_image_blob,
+    BlobAddressAttestation, BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError,
+    ImageBlobIntegrityError, StoredImageBlobVerification, VerifiedImageBlob, content_blob_id,
+    ensure_stored_image_blob, validate_image_blob_payload, verify_stored_image_blob,
+    verify_stored_image_blob_accepting_store_address,
 };
 pub use budget::{
     Budget, BudgetDimension, BudgetExceeded, BudgetLimits, BudgetObservation, BudgetPool,
@@ -488,14 +489,15 @@ pub use tool_consequence_policy::{
     ToolConsequencePolicySnapshot, ToolConsequenceRequest, ToolConsequenceVerdict,
 };
 pub use tool_execution::{
-    DeadlineChainError, DeadlineChainExtensionError, DetachedToolExecutionPolicy,
-    EphemeralToolBindingFingerprint, IdempotencyScope, ResolvedExecutionKind,
-    ResolvedToolExecutionPlan, RestartClass, RunnerIdentity, StreamingToolExecutionPolicy,
-    ToolCredentialContextRef, ToolDeadlineChain, ToolDeadlineContributor, ToolDeadlineOwner,
-    ToolExecutionApplicability, ToolExecutionContract, ToolExecutionContractError,
-    ToolExecutionDeclarationError, ToolExecutionMode, ToolExecutionOwnerWitness,
-    ToolExecutionResolutionContext, ToolExecutionResolutionError, ToolOutputPolicy,
-    ToolProgressPolicy, ephemeral_tool_catalog_binding_fingerprint,
+    CoreDispatchDeadline, DeadlineChainError, DeadlineChainExtensionError,
+    DetachedToolExecutionPolicy, EphemeralToolBindingFingerprint, IdempotencyScope,
+    ResolvedExecutionKind, ResolvedToolExecutionPlan, RestartClass, RunnerIdentity,
+    StreamingToolExecutionPolicy, ToolCredentialContextRef, ToolDeadlineChain,
+    ToolDeadlineContributor, ToolDeadlineOwner, ToolDeadlineSource, ToolExecutionApplicability,
+    ToolExecutionContract, ToolExecutionContractError, ToolExecutionDeclarationError,
+    ToolExecutionMode, ToolExecutionOwnerWitness, ToolExecutionResolutionContext,
+    ToolExecutionResolutionError, ToolOutputPolicy, ToolProgressPolicy,
+    ephemeral_tool_catalog_binding_fingerprint,
 };
 pub use tool_execution_policy::{
     ExecutionPolicyGatedDispatcher, ToolDispatchAdmission, ToolExecutionPolicy,

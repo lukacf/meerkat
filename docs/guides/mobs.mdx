@@ -86,7 +86,21 @@ that should report back.
 rkat run --tools full "Ask one helper to inspect the test failure, then summarize what it found."
 ```
 
+A delegate helper is ephemeral: it is retired after its one task, and also when
+the calling turn stops waiting for it first.
+
 For recurring teams, use explicit mobs instead of a chain of ad hoc delegates.
+
+A mob member can also fork itself with `fork_off`. The child starts from the
+member's exact committed transcript, runs one task in the background, and
+belongs to the forker, which can check, list, and retire it (and whatever it
+forks in turn) without manage scope over the mob. The result is recorded in the
+forker's transcript as a durable `BackgroundJob` system notice: a forker still
+in its turn sees it at the next model call, and an idle forker gets one wake
+turn; on a one-shot `rkat run` without `--keep-alive` the
+call blocks for it instead. There is no default deadline; `max_run_secs` is an
+opt-in autokill. See [Mob tools](/reference/builtin-tools#fork_off-and-council-delivery)
+for the result shapes and the ownership rules.
 
 ## Define A Mob
 
@@ -980,6 +994,14 @@ command. `rkat run --export-atif` writes a trajectory for a single-session run.
 
 The event log is append-only. For UI and service loops, prefer event cursors or
 SDK subscriptions over repeated full snapshots.
+
+Retiring a member also retires every member it spawned with `fork_off`,
+transitively and deepest first: `mob/retire` over JSON-RPC, `meerkat_mob_retire`
+over MCP, the browser runtime's `mob_retire`, and `MobHandle::retire` in
+embedded Rust all cascade (`MobHandle::retire_with_descendants` is an alias).
+Each retirement runs through the ordinary retire path and every one is
+attempted; the first failure is reported, and a retry converges. Members
+spawned by other means are not affected.
 
 `rkat mob force-cancel <MOB_ID> <AGENT_IDENTITY>` (RPC `mob/force_cancel`)
 cooperatively cancels a member's in-flight turn without retiring it — the

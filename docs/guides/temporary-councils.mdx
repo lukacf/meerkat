@@ -84,8 +84,9 @@ never creates a mob, a capability, or a turn.
 
 ## Merge-Back Modes
 
-Exactly one policy per council. **No mode merges a transcript, and no mode
-writes into the calling session** — the outcome is returned to you.
+Exactly one policy per council. **No mode merges a transcript into the calling
+session**: the only thing that reaches the caller is the sealed outcome itself
+(see [Agent Tool](#agent-tool)).
 
 | Policy | What it produces |
 |--------|------------------|
@@ -97,8 +98,8 @@ writes into the calling session** — the outcome is returned to you.
 
 <Warning>
 There is no implicit transcript merge. If you want content back, ask for it
-with one of the explicit policies above; a council never appends anything to
-the caller's session.
+with one of the explicit policies above. Beyond its sealed outcome, a council
+appends nothing to the caller's session.
 </Warning>
 
 ## Durability And Crash Cleanup
@@ -114,7 +115,14 @@ Durability is an explicit declaration, never an inference.
 
 A coordinator that dies mid-council leaves a record with no result. The next
 council operation — or an explicit recovery sweep — seals it as a typed
-`coordinator_interrupted` terminal and runs cleanup. Recovery never re-executes
+`coordinator_interrupted` terminal and runs cleanup. After a restart, every host
+whose council store is durable runs that sweep on its own, including a host
+that supplies a durable store without a persistent root, provided the host
+built its `MobMcpState` with `MobMcpState::into_shared()`. The sweep runs on
+its own task through the state's weak self-reference, which only `into_shared`
+sets; a state wrapped in a plain `Arc::new` never runs it. A record whose
+previous claim lease has not expired yet is reported as held and retried once
+the lease expires, rather than skipped. Recovery never re-executes
 a council, because a re-run would duplicate model work and result delivery.
 
 Cleanup is reported **separately** from the result, and the two are never
@@ -174,9 +182,58 @@ decision-support action, not a human-operated lifecycle surface.
 
 The caller names existing source members and the question to decide. The tool
 resolves each member's current profile and placement, synthesizes the explicit
-temporary `MobDefinition`, derives stable branch identities, runs the council,
-and returns the sealed result through the ordinary structured tool-result
-channel.
+temporary `MobDefinition`, derives stable branch identities, and starts the
+council. How the sealed result reaches the caller depends on the host:
+
+- **Detached (hosts that outlive the call).** A host with a runtime adapter
+  (the JSON-RPC, REST, and MCP servers, MobKit), `rkat run --keep-alive`, and
+  `rkat mob deploy --surface rpc` can deliver a completion after the call
+  returns, provided the convener can be made live again to receive it: it is
+  a mob member, or the host installs a `DetachedOwnerHost` (the JSON-RPC host
+  does). There the call returns at once with
+  `{"status": "running", "council_id": ..., "job_id": ..., "note": ...}`. When
+  the council ends, its sealed outcome (`result`, `cleanup`, `replayed`) is
+  recorded once in the convener's transcript as a durable `BackgroundJob`
+  system notice (the header "Background council job `<job_id>` finished
+  (`completed` or `failed`):", with the outcome as the typed block's `detail`
+  and `persisted: true`). It is delivered as a runtime input with the
+  idempotency key `council:<job_id>`: a convener in the middle of a turn sees
+  it at that turn's next model call, saved once and with no second turn (one
+  follow-up turn only if the turn ends before another model call), and an
+  idle convener runs one wake turn that sees it. A
+  convener that is no longer live (the runtime retired its idle executor) is
+  revived first: through its mob when it is a mob member, or through the
+  host's `DetachedOwnerHost` when it is a plain session. The status is
+  **`failed`** when the exit reason is a failure (`participant_seating_failed`,
+  `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`); the
+  record still carries the full sealed outcome, and bound-limited ends
+  (`max_exchanges_reached`, `deadline_exceeded`) complete normally with their
+  partial result. The notice survives later model calls, turns, and reloads
+  and is readable through the convener's session history.
+- **Blocking.** The call waits for the council and returns the sealed outcome
+  as its ordinary tool result, with `blocked_because`:
+  `host_declared_unavailable` on a host that may exit when the turn ends (the
+  `rkat` CLI unless it stays alive, such as `rkat run` without
+  `--keep-alive`); `no_runtime_adapter` for a host that declares delivery
+  without a runtime; or `no_owner_revival_host` for a convener that is a plain
+  session on a host without a `DetachedOwnerHost` (a top-level REST,
+  MCP-server, or `rkat run --keep-alive` session). No detached job is owed,
+  so no result can be lost.
+
+In both forms the council's own `timeout_seconds` bounds it. The agent loop's
+default tool deadline does not cut the call, so a council longer than that
+deadline still delivers its result; an operator's explicit
+`tools.tool_timeouts.council` entry still applies.
+
+A detached council's convener also hears back across a restart. The council's
+custody record carries the convener's job. After the post-restore recovery
+sweep, every council from an earlier process whose job is not yet settled has
+its outcome delivered: its sealed result when it finished before the restart,
+or the typed `coordinator_interrupted` outcome once the dead coordinator's
+claim lease is observed expired. Councils are never re-executed, and delivery
+uses the same idempotency key, so the outcome is recorded once. A council whose
+convener session no longer exists (deleted or archived) is reported as owner
+gone and settled, so later restarts do not retry it.
 
 ### Example Tool Call
 
@@ -208,21 +265,37 @@ channel.
 }
 ```
 
-`council_id` is optional. Omit it for an id derived from the tool call; provide
-one when the agent needs an explicit idempotency key across retries. The default
+`council_id` is optional. Omit it for an id derived from the tool call
+(`agent-<uuid>`); provide one when the agent needs an explicit idempotency key
+across retries. A council id may contain only ASCII letters, digits, `-`, and
+`_`, because it is embedded in the temporary mob id and in every participant's
+comms name; any other character is refused before the council starts. Stored
+council records whose ids contain `.` or `:` still load. The default
 merge is a bounded summary by the last participant. Other policies are
 `structured`, `selected_exchanges`, `artifact_reference`, and `no_merge`.
+
+The tool schema advertises the bounds the tool enforces: `max_rounds` 1 to 16,
+`max_exchanges` 1 to 64 (default: participants times rounds),
+`max_result_bytes` 256 to 65536, and `timeout_seconds` 1 to 86400 (default
+300), the ceiling set by the forked-participant capability TTL.
 
 The tool is available only when the calling agent's generated mob authority can
 create a temporary mob and manage every source mob in the participant list.
 
 ## Errors
 
-Malformed input and missing mob authority are ordinary tool errors. Once a
-council is admitted, its structured result separates the discussion terminal
+Malformed input, missing mob authority, and an unknown source member are
+ordinary tool errors returned by the call itself, before anything starts. Once
+a council is admitted, its structured result separates the discussion terminal
 from cleanup status. A repeated explicit `council_id` with the same arguments
 joins or replays the original run; the same id with different arguments is a
 conflict.
+
+On a detached host, a refusal that the council itself decides after the call
+returned (an over-budget bound, a `council_id` conflict, `capability_unavailable`
+for a durable request on a process-bound store) is recorded with
+`{"error": ...}` as its outcome with status **`failed`**. On a
+blocking host the same refusals are tool errors.
 
 Seating failures, wiring gaps, exhausted budgets, and elapsed deadlines are
 **not** errors: they are typed `exit_reason` values on a sealed result, so you

@@ -7128,6 +7128,7 @@ class SystemNoticeBlockBackgroundJob(TypedDict, total=False):
     detail: NotRequired[Optional[str]]
     display_name: NotRequired[Optional[str]]
     job_id: Required[str]
+    persisted: NotRequired[bool]
     status: Required[BackgroundJobTerminalStatus]
     type: Required[Literal['background_job']]
 

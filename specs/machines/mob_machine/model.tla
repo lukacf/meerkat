@@ -1922,6 +1922,70 @@ ResolveCurrentMobAdmissionDeniedDestroyed(can_manage_mob) ==
     /\ UnchangedFrame_39df5aab33b261e3
 
 
+ResolveOwnedMemberAdmissionAllowedRunning(can_manage_mob, caller_owns_member) ==
+    /\ phase = "Running"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_owns_member = TRUE))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_39df5aab33b261e3
+
+
+ResolveOwnedMemberAdmissionAllowedStopped(can_manage_mob, caller_owns_member) ==
+    /\ phase = "Stopped"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_owns_member = TRUE))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_39df5aab33b261e3
+
+
+ResolveOwnedMemberAdmissionAllowedCompleted(can_manage_mob, caller_owns_member) ==
+    /\ phase = "Completed"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_owns_member = TRUE))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_39df5aab33b261e3
+
+
+ResolveOwnedMemberAdmissionAllowedDestroyed(can_manage_mob, caller_owns_member) ==
+    /\ phase = "Destroyed"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_owns_member = TRUE))
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_39df5aab33b261e3
+
+
+ResolveOwnedMemberAdmissionDeniedRunning(can_manage_mob, caller_owns_member) ==
+    /\ phase = "Running"
+    /\ ((can_manage_mob = FALSE) /\ (caller_owns_member = FALSE))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_39df5aab33b261e3
+
+
+ResolveOwnedMemberAdmissionDeniedStopped(can_manage_mob, caller_owns_member) ==
+    /\ phase = "Stopped"
+    /\ ((can_manage_mob = FALSE) /\ (caller_owns_member = FALSE))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_39df5aab33b261e3
+
+
+ResolveOwnedMemberAdmissionDeniedCompleted(can_manage_mob, caller_owns_member) ==
+    /\ phase = "Completed"
+    /\ ((can_manage_mob = FALSE) /\ (caller_owns_member = FALSE))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_39df5aab33b261e3
+
+
+ResolveOwnedMemberAdmissionDeniedDestroyed(can_manage_mob, caller_owns_member) ==
+    /\ phase = "Destroyed"
+    /\ ((can_manage_mob = FALSE) /\ (caller_owns_member = FALSE))
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_39df5aab33b261e3
+
+
 ResolveSpawnToolAdmissionAllowedRunning(can_manage_mob, spawn_profile_scope_present) ==
     /\ phase = "Running"
     /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (spawn_profile_scope_present = TRUE))
@@ -17156,6 +17220,14 @@ Next ==
     \/ ResolveCurrentMobAdmissionDeniedStopped(FALSE)
     \/ ResolveCurrentMobAdmissionDeniedCompleted(FALSE)
     \/ ResolveCurrentMobAdmissionDeniedDestroyed(FALSE)
+    \/ \E can_manage_mob \in BOOLEAN : \E caller_owns_member \in BOOLEAN : ResolveOwnedMemberAdmissionAllowedRunning(can_manage_mob, caller_owns_member)
+    \/ \E can_manage_mob \in BOOLEAN : \E caller_owns_member \in BOOLEAN : ResolveOwnedMemberAdmissionAllowedStopped(can_manage_mob, caller_owns_member)
+    \/ \E can_manage_mob \in BOOLEAN : \E caller_owns_member \in BOOLEAN : ResolveOwnedMemberAdmissionAllowedCompleted(can_manage_mob, caller_owns_member)
+    \/ \E can_manage_mob \in BOOLEAN : \E caller_owns_member \in BOOLEAN : ResolveOwnedMemberAdmissionAllowedDestroyed(can_manage_mob, caller_owns_member)
+    \/ ResolveOwnedMemberAdmissionDeniedRunning(FALSE, FALSE)
+    \/ ResolveOwnedMemberAdmissionDeniedStopped(FALSE, FALSE)
+    \/ ResolveOwnedMemberAdmissionDeniedCompleted(FALSE, FALSE)
+    \/ ResolveOwnedMemberAdmissionDeniedDestroyed(FALSE, FALSE)
     \/ \E can_manage_mob \in BOOLEAN : \E spawn_profile_scope_present \in BOOLEAN : ResolveSpawnToolAdmissionAllowedRunning(can_manage_mob, spawn_profile_scope_present)
     \/ \E can_manage_mob \in BOOLEAN : \E spawn_profile_scope_present \in BOOLEAN : ResolveSpawnToolAdmissionAllowedStopped(can_manage_mob, spawn_profile_scope_present)
     \/ \E can_manage_mob \in BOOLEAN : \E spawn_profile_scope_present \in BOOLEAN : ResolveSpawnToolAdmissionAllowedCompleted(can_manage_mob, spawn_profile_scope_present)

@@ -523,6 +523,50 @@ impl MobOpsAdapter {
         Ok(())
     }
 
+    /// Release the binding of a superseded runtime incarnation before a
+    /// missing-live revival binds the new one.
+    ///
+    /// The runtime may retire an idle member's executor on its own (for
+    /// example after a detached-completion wake finds nothing pending), which
+    /// leaves this adapter holding a binding to the retired registration's
+    /// registry. A revival is authorized only after the member was observed
+    /// not live, so that binding is stale; it is removed only if it is still
+    /// exactly the one observed before the revival began (same incarnation,
+    /// same registry, no provision claim). Anything else fails closed.
+    pub(crate) fn release_superseded_session_binding_for_revival(
+        &self,
+        child_session_id: &SessionId,
+        observed: Option<&SessionOpsBindingWitness>,
+    ) -> Result<(), MobError> {
+        let member_key = MemberOpsKey::Session(child_session_id.clone());
+        let mut bindings = self
+            .member_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(current) = bindings.get(&member_key) else {
+            return Ok(());
+        };
+        let Some(observed) = observed else {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' appeared during missing-live revival"
+            )));
+        };
+        if current.binding_id != observed.binding_id
+            || !Arc::ptr_eq(&current.registry, &observed.registry)
+        {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' changed during missing-live revival"
+            )));
+        }
+        if current.provision_claim.is_some() {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' still has an exact provision claim during missing-live revival"
+            )));
+        }
+        bindings.remove(&member_key);
+        Ok(())
+    }
+
     pub(crate) fn bind_member_registry(
         &self,
         member_ref: &MemberRef,

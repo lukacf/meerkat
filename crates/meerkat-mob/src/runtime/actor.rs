@@ -4956,6 +4956,9 @@ pub(super) struct PendingSpawn {
     pub(super) effective_profile_override: Option<crate::profile::Profile>,
     /// Field-scoped model override reapplied over the current role profile.
     pub(super) effective_model_override: Option<String>,
+    /// Durable spawner provenance for the roster entry and spawn event.
+    pub(super) spawned_by: Option<AgentIdentity>,
+    pub(super) fork_job: Option<crate::runtime::ForkJobRecord>,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -5464,6 +5467,9 @@ struct RespawnSnapshot {
     /// Used on respawn to avoid re-resolving from the definition.
     effective_profile_override: Option<crate::profile::Profile>,
     effective_model_override: Option<String>,
+    /// Spawner provenance carried to the replacement incarnation.
+    spawned_by: Option<AgentIdentity>,
+    fork_job: Option<crate::runtime::ForkJobRecord>,
     /// The old member is already in a partial-retire state and respawn should
     /// retry cleanup instead of re-admitting the original Respawn transition.
     cleanup_retry: bool,
@@ -5511,6 +5517,8 @@ struct SpawnFinalizeCtx {
     restore_wiring: Option<RestoreWiringPlan>,
     effective_profile_override: Option<crate::profile::Profile>,
     effective_model_override: Option<String>,
+    spawned_by: Option<AgentIdentity>,
+    fork_job: Option<crate::runtime::ForkJobRecord>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -5565,6 +5573,8 @@ struct SpawnActivateState {
     restore_wiring: Option<RestoreWiringPlan>,
     effective_profile_override: Option<crate::profile::Profile>,
     effective_model_override: Option<String>,
+    spawned_by: Option<AgentIdentity>,
+    fork_job: Option<crate::runtime::ForkJobRecord>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     remote: Option<Box<RemoteSpawnFinalize>>,
@@ -5606,6 +5616,8 @@ impl SpawnActivateState {
             restore_wiring,
             effective_profile_override,
             effective_model_override,
+            spawned_by,
+            fork_job,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -5653,6 +5665,8 @@ impl SpawnActivateState {
             restore_wiring,
             effective_profile_override,
             effective_model_override,
+            spawned_by,
+            fork_job,
             objective_id,
             per_spawn_external_tools,
             remote,
@@ -7074,6 +7088,40 @@ struct ExactRemoteTurnResidency<'a> {
     member_session_id: &'a mob_dsl::SessionId,
     generation: u64,
     fence_token: u64,
+}
+
+/// Read the member's run phase from the runtime machine. This is a
+/// machine-owned read that does not go through the session actor, so it
+/// answers while the member's turn is running.
+#[cfg(feature = "runtime-adapter")]
+async fn observe_member_runtime_run_state(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    session_id: &SessionId,
+) -> Option<super::handle::MemberRunState> {
+    use meerkat_runtime::SessionServiceRuntimeExt as _;
+
+    let state = tokio::time::timeout(
+        MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
+        runtime.runtime_state(session_id),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    match state {
+        meerkat_runtime::RuntimeState::Running => Some(super::handle::MemberRunState::RunOpen),
+        meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached => {
+            Some(super::handle::MemberRunState::Idle)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "runtime-adapter"))]
+async fn observe_member_runtime_run_state(
+    _runtime: &meerkat_runtime::MeerkatMachine,
+    _session_id: &SessionId,
+) -> Option<super::handle::MemberRunState> {
+    None
 }
 
 pub(super) fn unavailable_member_progress(
@@ -12423,12 +12471,73 @@ impl MobActor {
 
     pub(super) async fn observe_member_status_session(
         session_service: Arc<dyn MobSessionService>,
+        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
         agent_identity: AgentIdentity,
         bridge_session_id: Option<SessionId>,
         include_local_session_details: bool,
         observed_at_ms: u64,
     ) -> super::state::MemberStatusSessionObservation {
+        // Status reads never queue behind the member's running turn (steer,
+        // not queue). The bounded execution snapshot answers only while the
+        // session actor is free. When it times out the member is busy: its
+        // run state comes from the runtime machine, and its preview and token
+        // count from the durable committed transcript instead of the session
+        // actor's command lane. The run state is then the typed "mid-turn"
+        // marker and the other fields are as of the last commit.
+        let (execution_snapshot, snapshot_timed_out) =
+            match (include_local_session_details, bridge_session_id.as_ref()) {
+                (true, Some(session_id)) => match tokio::time::timeout(
+                    MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
+                    session_service.execution_snapshot(session_id),
+                )
+                .await
+                {
+                    Ok(Ok(snapshot)) => (snapshot, false),
+                    Ok(Err(_)) => (None, false),
+                    Err(_) => (None, true),
+                },
+                (false, _) | (true, None) => (None, false),
+            };
+        // The runtime machine the mob's members run on says whether the busy
+        // member has a run open; that read never queues behind the turn.
+        let busy = snapshot_timed_out;
+        let runtime_run_state = match (bridge_session_id.as_ref(), runtime_adapter.as_deref()) {
+            (Some(session_id), Some(runtime)) if busy => {
+                observe_member_runtime_run_state(runtime, session_id).await
+            }
+            _ => None,
+        };
         let (output_preview, tokens_used, genuinely_absent) = match bridge_session_id.as_ref() {
+            Some(bridge_session_id) if include_local_session_details && busy => {
+                if session_service.supports_persistent_sessions() {
+                    match session_service
+                        .load_persisted_session(bridge_session_id)
+                        .await
+                    {
+                        Ok(Some(session)) => (
+                            session
+                                .messages()
+                                .iter()
+                                .rev()
+                                .find_map(|message| match message {
+                                    meerkat_core::types::Message::BlockAssistant(assistant) => {
+                                        let text = assistant.to_string();
+                                        (!text.is_empty()).then_some(text)
+                                    }
+                                    _ => None,
+                                }),
+                            session.total_tokens(),
+                            false,
+                        ),
+                        Ok(None) | Err(_) => (None, 0, false),
+                    }
+                } else {
+                    // An in-memory session is readable only through its
+                    // actor, which is busy with the turn: report the run
+                    // state without waiting for it.
+                    (None, 0, false)
+                }
+            }
             Some(bridge_session_id) if include_local_session_details => {
                 match session_service.read(bridge_session_id).await {
                     Ok(view) => (
@@ -12463,23 +12572,12 @@ impl MobActor {
             }
             Some(_) | None => (None, 0, false),
         };
-        let execution_snapshot = match (include_local_session_details, bridge_session_id.as_ref()) {
-            (true, Some(session_id)) => match tokio::time::timeout(
-                MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
-                session_service.execution_snapshot(session_id),
-            )
-            .await
-            {
-                Ok(Ok(snapshot)) => snapshot,
-                Ok(Err(_)) | Err(_) => None,
-            },
-            (false, _) | (true, None) => None,
-        };
         super::state::MemberStatusSessionObservation {
             output_preview,
             tokens_used,
             genuinely_absent,
             execution_snapshot,
+            runtime_run_state,
             observed_at_ms,
         }
     }
@@ -12543,6 +12641,10 @@ impl MobActor {
             }
         };
         let session_service = Arc::clone(&self.session_service);
+        #[cfg(feature = "runtime-adapter")]
+        let runtime_adapter = self.runtime_adapter.clone();
+        #[cfg(not(feature = "runtime-adapter"))]
+        let runtime_adapter = None;
         let command_tx = self.command_tx.clone();
         self.actor_io_tasks.spawn(async move {
             let observation = tokio::select! {
@@ -12550,6 +12652,7 @@ impl MobActor {
                 () = reply_tx.closed() => return,
                 observation = Self::observe_member_status_session(
                     session_service,
+                    runtime_adapter,
                     agent_identity.clone(),
                     expected_target.bridge_session_id.clone(),
                     expected_target.include_local_session_details,
@@ -12712,7 +12815,30 @@ impl MobActor {
                     health,
                 })
             }
-            None => unavailable_member_progress(include_local_session_details),
+            None => match observation.runtime_run_state {
+                // Busy member: the run state is current, the progress
+                // fields are as of the last snapshot the member answered,
+                // and health cannot be reclassified without a new one.
+                Some(run_state) if include_local_session_details => {
+                    let state = self.dsl_authority.state();
+                    Some(super::handle::MemberProgressSnapshot {
+                        run_state,
+                        in_flight_work: state
+                            .member_in_flight_work
+                            .get(&dsl_identity)
+                            .copied()
+                            .unwrap_or(0),
+                        last_progress_at_ms: state
+                            .member_last_progress_at_ms
+                            .get(&dsl_identity)
+                            .copied()
+                            .unwrap_or(0),
+                        last_progress_event: super::handle::MemberProgressEvent::Unchanged,
+                        health: super::handle::MemberHealthClass::Unknown,
+                    })
+                }
+                Some(_) | None => unavailable_member_progress(include_local_session_details),
+            },
         };
 
         Ok(MobMemberLifecycleProjection::materialize(
@@ -17544,6 +17670,8 @@ impl ExplicitResumePreparationContext {
             restore_spec.labels = Some(entry.labels.clone());
             restore_spec.override_profile = entry.effective_profile_override.clone();
             restore_spec.model_override = entry.effective_model_override.clone();
+            restore_spec.spawned_by = entry.spawned_by.clone();
+            restore_spec.fork_job = entry.fork_job.clone();
             if let Some(customizer) = self.spawn_member_customizer.as_ref() {
                 customizer.customize_spawn(
                     &super::handle::SpawnCustomizationContext {
@@ -27687,6 +27815,8 @@ impl MobActor {
             respawn_origin: None,
             effective_profile_override: entry.effective_profile_override,
             effective_model_override: entry.effective_model_override,
+            spawned_by: entry.spawned_by,
+            fork_job: entry.fork_job,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -27954,6 +28084,8 @@ impl MobActor {
             // capability carries an association, and that spawn always takes
             // the placed lane above.
             forked_participant_attachment: _,
+            spawned_by,
+            fork_job,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
@@ -28647,6 +28779,8 @@ impl MobActor {
                 restore_wiring,
                 effective_profile_override,
                 effective_model_override,
+                spawned_by: spawned_by.clone(),
+                fork_job: fork_job.clone(),
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -28838,6 +28972,8 @@ impl MobActor {
             respawn_origin,
             effective_profile_override,
             effective_model_override,
+            spawned_by,
+            fork_job,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -29766,6 +29902,10 @@ impl MobActor {
             continuity_intent,
             placement,
             forked_participant_attachment,
+            // Spawner provenance is only set by the caller-turn fork, which
+            // refuses placement; a placed spawn never carries one.
+            spawned_by: _,
+            fork_job: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -30532,6 +30672,8 @@ impl MobActor {
             respawn_origin,
             effective_profile_override,
             effective_model_override,
+            spawned_by: None,
+            fork_job: None,
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -30807,6 +30949,8 @@ impl MobActor {
                 respawn_origin,
                 effective_profile_override,
                 effective_model_override,
+                spawned_by,
+                fork_job,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -30987,6 +31131,8 @@ impl MobActor {
                                 restore_wiring,
                                 effective_profile_override,
                                 effective_model_override,
+                                spawned_by: spawned_by.clone(),
+                                fork_job: fork_job.clone(),
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -31057,6 +31203,8 @@ impl MobActor {
                                 restore_wiring,
                                 effective_profile_override,
                                 effective_model_override,
+                                spawned_by: spawned_by.clone(),
+                                fork_job: fork_job.clone(),
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -31179,6 +31327,8 @@ impl MobActor {
             continuity_intent,
             placement: _,
             forked_participant_attachment: _,
+            spawned_by: _,
+            fork_job: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -31367,6 +31517,8 @@ impl MobActor {
             respawn_origin: None,
             effective_profile_override: override_profile.clone(),
             effective_model_override: model_override.clone(),
+            spawned_by: None,
+            fork_job: None,
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -32107,6 +32259,8 @@ impl MobActor {
             spawned.continuity_intent = continuity_intent.clone();
             spawned.effective_profile_override = ctx.effective_profile_override.clone();
             spawned.effective_model_override = ctx.effective_model_override.clone();
+            spawned.spawned_by = ctx.spawned_by.clone();
+            spawned.fork_job = ctx.fork_job.clone();
             self.append_committed_placed_event_exact(MobEventKind::MemberSpawned(spawned))
                 .await?;
             self.restore_diagnostics
@@ -32260,6 +32414,8 @@ impl MobActor {
         // tooling without a customizer.
         spawned_event.effective_profile_override = ctx.effective_profile_override.clone();
         spawned_event.effective_model_override = ctx.effective_model_override.clone();
+        spawned_event.spawned_by = ctx.spawned_by.clone();
+        spawned_event.fork_job = ctx.fork_job.clone();
         spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = self
             .append_member_spawned_with_identity_fence(
@@ -41305,6 +41461,8 @@ impl MobActor {
                 binding,
                 effective_profile_override: entry.effective_profile_override,
                 effective_model_override: entry.effective_model_override,
+                spawned_by: entry.spawned_by,
+                fork_job: entry.fork_job,
                 cleanup_retry,
             }
         };
@@ -41335,9 +41493,20 @@ impl MobActor {
                         spec.labels = Some(snapshot.labels.clone());
                         spec.override_profile = snapshot.effective_profile_override.clone();
                         spec.model_override = snapshot.effective_model_override.clone();
+                        spec.spawned_by = snapshot.spawned_by.clone();
                         spec
                     }
                 };
+                // Ownership belongs to the identity, not the incarnation: a
+                // successor spec (which callers cannot author) keeps the
+                // spawner of the incarnation it replaces.
+                if replacement_spec.spawned_by.is_none() {
+                    replacement_spec.spawned_by = snapshot.spawned_by.clone();
+                }
+                // A fork job belongs to the incarnation whose turn it admitted.
+                // A successor starts fresh and carries none, so a later
+                // re-link can never apply the old job's limit to it.
+                replacement_spec.fork_job = None;
         self.customize_spawn_spec(
             super::handle::SpawnSource::Respawn,
             None,

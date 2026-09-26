@@ -3391,6 +3391,123 @@ mod tests {
             .expect("build request")
     }
 
+    /// The conversation a detached fork_off leaves behind: the forker's
+    /// finished turn, the job's durable completion record (a persisted
+    /// `BackgroundJob` notice), the wake turn it caused, then `later` user
+    /// turns separated by assistant replies.
+    fn detached_completion_transcript(
+        later: usize,
+    ) -> Result<Vec<Message>, Box<dyn std::error::Error>> {
+        let assistant_text = |text: &str| {
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::Text {
+                    text: text.to_string(),
+                    meta: None,
+                }],
+                meerkat_core::StopReason::EndTurn,
+            ))
+        };
+        let mut messages = vec![
+            Message::System(meerkat_core::SystemMessage::new("You are the forker.")),
+            Message::User(meerkat_core::UserMessage::text(
+                "fork a child for the token",
+            )),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::ToolUse {
+                    id: "toolu_fork_off".to_string(),
+                    name: "fork_off".to_string(),
+                    args: serde_json::value::RawValue::from_string(
+                        r#"{"member_id":"child","task":"reply with the token"}"#.to_string(),
+                    )?,
+                    meta: None,
+                }],
+                meerkat_core::StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![meerkat_core::ToolResult::new(
+                "toolu_fork_off".to_string(),
+                r#"{"status":"running","job_id":"job-7"}"#.to_string(),
+                false,
+            )]),
+            assistant_text("FORK_DONE"),
+            Message::SystemNotice(meerkat_core::SystemNoticeMessage::persisted_background_job(
+                "fork_off",
+                "job-7",
+                meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+                r#"{"text":"CHILD-TOKEN-4K"}"#.to_string(),
+            )),
+            assistant_text("WAKE-ACK"),
+        ];
+        for turn in 1..=later {
+            if turn > 1 {
+                messages.push(assistant_text(&format!("ACK-{}", turn - 1)));
+            }
+            messages.push(Message::User(meerkat_core::UserMessage::text(format!(
+                "LATER-TURN-{turn}"
+            ))));
+        }
+        Ok(messages)
+    }
+
+    /// A detached job's durable completion record sits mid-conversation.
+    /// The request builder accepts it on each of the next two turns, as a
+    /// user-channel entry between the turn it followed and the wake turn,
+    /// for every model listed.
+    #[test]
+    fn persisted_background_job_notice_is_accepted_mid_conversation_on_later_turns()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = OpenAiClient::new("test-key".to_string());
+        for model in ["gpt-5.5", "gpt-5.4"] {
+            for later in 1..=2 {
+                let messages = detached_completion_transcript(later)?;
+                let request = LlmRequest::new(model, client.project_replay_messages(&messages)?);
+                let body = client.build_request_body(&request)?;
+                let wire = body["input"]
+                    .as_array()
+                    .ok_or_else(|| format!("{model}: no {} in {body}", "input"))?;
+                let rendered: Vec<String> = wire.iter().map(Value::to_string).collect();
+                let position = |needle: &str| {
+                    rendered
+                        .iter()
+                        .position(|entry| entry.contains(needle))
+                        .ok_or_else(|| {
+                            format!("{model} turn {later}: {needle} missing from {body}")
+                        })
+                };
+                let notice_at = position("Background fork_off job job-7 finished (completed)")?;
+                assert_eq!(
+                    wire[notice_at]["role"], "user",
+                    "{model}: {}",
+                    rendered[notice_at]
+                );
+                assert_eq!(
+                    rendered[notice_at].matches("CHILD-TOKEN-4K").count(),
+                    1,
+                    "{model}: the record carries the outcome once: {}",
+                    rendered[notice_at]
+                );
+                assert!(
+                    position("FORK_DONE")? < notice_at && notice_at < position("WAKE-ACK")?,
+                    "{model} turn {later}: the record keeps its place: {body}"
+                );
+                assert_eq!(
+                    rendered
+                        .iter()
+                        .filter(|entry| entry.contains("job-7 finished"))
+                        .count(),
+                    1,
+                    "{model} turn {later}: the record is sent once: {body}"
+                );
+                assert!(
+                    rendered
+                        .last()
+                        .is_some_and(|entry| entry.contains(&format!("LATER-TURN-{later}"))),
+                    "{model} turn {later}: the new turn comes last: {body}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn text_followup_keeps_unmeasured_voice_provenance_in_provider_request() {
         let client = OpenAiClient::new("test-key".to_string());

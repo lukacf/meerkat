@@ -608,6 +608,9 @@ pub(super) struct MemberStatusSessionObservation {
     pub(super) tokens_used: u64,
     pub(super) genuinely_absent: bool,
     pub(super) execution_snapshot: Option<meerkat_core::agent::AgentExecutionSnapshot>,
+    /// The runtime machine's own run phase, read when the session actor is
+    /// busy and cannot answer the execution snapshot.
+    pub(super) runtime_run_state: Option<super::handle::MemberRunState>,
     pub(super) observed_at_ms: u64,
 }
 

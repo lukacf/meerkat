@@ -2229,6 +2229,15 @@ pub enum SystemNoticeBlock {
         status: crate::event::BackgroundJobTerminalStatus,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// Durable completion record rather than a refresh projection.
+        ///
+        /// `false` (the default): a progress/completion notice the agent
+        /// refreshes at each model call and never stores. `true`: the one
+        /// durable record of a detached job's outcome (fork_off, council),
+        /// kept in the transcript like other history. This flag is the typed
+        /// marker hosts use to recognise completion entries.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        persisted: bool,
     },
     Auth {
         state: String,
@@ -2311,6 +2320,8 @@ enum SystemNoticeBlockKnown {
         status: crate::event::BackgroundJobTerminalStatus,
         #[serde(default)]
         detail: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        persisted: bool,
     },
     Auth {
         state: String,
@@ -2405,11 +2416,13 @@ impl From<SystemNoticeBlockKnown> for SystemNoticeBlock {
                 display_name,
                 status,
                 detail,
+                persisted,
             } => Self::BackgroundJob {
                 job_id,
                 display_name,
                 status,
                 detail,
+                persisted,
             },
             SystemNoticeBlockKnown::Auth {
                 state,
@@ -2708,9 +2721,65 @@ impl SystemNoticeMessage {
                     }
                 )
             }),
-            SystemNoticeKind::BackgroundJob | SystemNoticeKind::AuthReauthRequired => true,
+            // A persisted completion record is durable history; only
+            // non-persisted background-job notices are refresh projections.
+            SystemNoticeKind::BackgroundJob => self.blocks.iter().all(|block| {
+                !matches!(
+                    block,
+                    SystemNoticeBlock::BackgroundJob {
+                        persisted: true,
+                        ..
+                    }
+                )
+            }),
+            SystemNoticeKind::AuthReauthRequired => true,
             _ => false,
         }
+    }
+
+    /// Build the durable completion record of a detached job: a
+    /// `BackgroundJob` notice whose block is `persisted`, the record
+    /// [`Self::persisted_background_job_id`] recognizes. The outcome `detail`
+    /// is stored once, in the block; the body is the header that names the
+    /// job, and the model sees the header followed by the detail.
+    #[must_use]
+    pub fn persisted_background_job(
+        display_name: &str,
+        job_id: &str,
+        status: crate::event::BackgroundJobTerminalStatus,
+        detail: String,
+    ) -> Self {
+        Self::with_blocks(
+            SystemNoticeKind::BackgroundJob,
+            Some(format!(
+                "Background {display_name} job {job_id} finished ({}):",
+                status.as_str()
+            )),
+            vec![SystemNoticeBlock::BackgroundJob {
+                job_id: job_id.to_string(),
+                display_name: Some(display_name.to_string()),
+                status,
+                detail: Some(detail),
+                persisted: true,
+            }],
+        )
+    }
+
+    /// The durable completion record of a detached job, if this is one:
+    /// a `BackgroundJob` notice whose block is `persisted`.
+    #[must_use]
+    pub fn persisted_background_job_id(&self) -> Option<&str> {
+        if self.kind != SystemNoticeKind::BackgroundJob {
+            return None;
+        }
+        self.blocks.iter().find_map(|block| match block {
+            SystemNoticeBlock::BackgroundJob {
+                job_id,
+                persisted: true,
+                ..
+            } => Some(job_id.as_str()),
+            _ => None,
+        })
     }
 
     /// Internal model-facing projection for typed runtime facts.

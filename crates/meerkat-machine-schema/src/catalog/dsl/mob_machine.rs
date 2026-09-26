@@ -1033,6 +1033,13 @@ macro_rules! mob_catalog_machine_dsl {
             // the tool shell — decides the Allow/Deny admission verdict, which
             // the shell mirrors (Deny -> access_denied).
             ResolveCurrentMobAdmission { can_manage_mob: bool },
+            // Admission for observing or retiring ONE member. The tool shell
+            // extracts two pure observations: manage scope over the current
+            // mob, and whether the member's durable spawner provenance names
+            // the calling member (a member created from its own turn, e.g. by
+            // fork_off). MobMachine composes the disjunction and decides the
+            // verdict; the shell mirrors it (Deny -> access_denied).
+            ResolveOwnedMemberAdmission { can_manage_mob: bool, caller_owns_member: bool },
             // Coarse spawn-tool admission for the spawn-member tool surfaces
             // (`spawn_member` / `spawn_many_members`). The tool shell extracts
             // TWO raw, atomic observations — whether the operator can manage the
@@ -1881,6 +1888,7 @@ macro_rules! mob_catalog_machine_dsl {
             // tools. The tool shell mirrors this (Denied -> access_denied;
             // Allowed -> proceed) instead of composing the admission itself.
             CurrentMobAdmissionResolved { admission: Enum<MobCurrentMobAdmissionKind> },
+            OwnedMemberAdmissionResolved { admission: Enum<MobCurrentMobAdmissionKind> },
             // Machine-owned coarse spawn-tool admission verdict for the
             // spawn-member tool surfaces. The tool shell mirrors this (Denied ->
             // access_denied; Allowed -> proceed) instead of composing the
@@ -2680,6 +2688,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition RemoteMemberRuntimeTerminalityClassified => local seam SurfaceResultAlignment,
         disposition SpawnMemberAdmissionResolved => local seam SurfaceResultAlignment,
         disposition CurrentMobAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition OwnedMemberAdmissionResolved => local seam SurfaceResultAlignment,
         disposition SpawnToolAdmissionResolved => local seam SurfaceResultAlignment,
         disposition CreateMobAdmissionResolved => local seam SurfaceResultAlignment,
         disposition ProfileMutationAdmissionResolved => local seam SurfaceResultAlignment,
@@ -4438,6 +4447,34 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit CurrentMobAdmissionResolved { admission: MobCurrentMobAdmissionKind::Denied }
+        }
+
+        // --- Owned-member admission ---
+        //
+        // Observe/retire one member: manage scope over the mob, or durable
+        // spawner provenance naming the caller. Pure classification across
+        // all phases, like current-mob admission.
+
+        transition ResolveOwnedMemberAdmissionAllowed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveOwnedMemberAdmission { can_manage_mob, caller_owns_member }
+            guard "manage_scope_or_ownership_allows" {
+                can_manage_mob == true || caller_owns_member == true
+            }
+            update {}
+            to Running
+            emit OwnedMemberAdmissionResolved { admission: MobCurrentMobAdmissionKind::Allowed }
+        }
+
+        transition ResolveOwnedMemberAdmissionDenied {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveOwnedMemberAdmission { can_manage_mob, caller_owns_member }
+            guard "neither_manage_scope_nor_ownership_denies" {
+                can_manage_mob == false && caller_owns_member == false
+            }
+            update {}
+            to Running
+            emit OwnedMemberAdmissionResolved { admission: MobCurrentMobAdmissionKind::Denied }
         }
 
         // --- Coarse spawn-tool admission ---

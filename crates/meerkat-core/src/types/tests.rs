@@ -25,6 +25,56 @@ fn schema_for<T: schemars::JsonSchema>() -> Value {
 }
 
 #[test]
+fn persisted_background_job_record_is_durable_and_sent_once() {
+    let record = SystemNoticeMessage::persisted_background_job(
+        "fork_off",
+        "job-7",
+        crate::event::BackgroundJobTerminalStatus::Completed,
+        r#"{"text":"CHILD-TOKEN-4K"}"#.to_string(),
+    );
+    assert_eq!(record.persisted_background_job_id(), Some("job-7"));
+    assert!(!record.is_synthetic_refresh_projection());
+    // The outcome is stored once, in the block; the body is the header.
+    assert_eq!(
+        record.body.as_deref(),
+        Some("Background fork_off job job-7 finished (completed):")
+    );
+    assert_eq!(
+        serde_json::to_string(&record)
+            .unwrap()
+            .matches("CHILD-TOKEN-4K")
+            .count(),
+        1
+    );
+    // The model sees the header, then the outcome, once.
+    let projected = record.model_projection_text();
+    assert!(
+        projected.starts_with("Background fork_off job job-7 finished (completed):\n"),
+        "{projected}"
+    );
+    assert_eq!(
+        projected.matches("CHILD-TOKEN-4K").count(),
+        1,
+        "{projected}"
+    );
+
+    // A refresh notice for the same job is not the durable record.
+    let refresh = SystemNoticeMessage::with_block(
+        SystemNoticeKind::BackgroundJob,
+        None,
+        SystemNoticeBlock::BackgroundJob {
+            job_id: "job-7".to_string(),
+            display_name: Some("fork_off".to_string()),
+            status: crate::event::BackgroundJobTerminalStatus::Completed,
+            detail: Some("done".to_string()),
+            persisted: false,
+        },
+    );
+    assert_eq!(refresh.persisted_background_job_id(), None);
+    assert!(refresh.is_synthetic_refresh_projection());
+}
+
+#[test]
 fn test_session_id_encoding() {
     // UUID v7 format test
     let id = SessionId::new();

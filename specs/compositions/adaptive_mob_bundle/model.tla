@@ -3901,6 +3901,174 @@ control_mob_ResolveCurrentMobAdmissionDeniedDestroyed(arg_can_manage_mob) ==
        /\ model_step_count' = model_step_count + 1
 
 
+control_mob_ResolveOwnedMemberAdmissionAllowedRunning(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE))
+       /\ control_mob_phase' = "Running"
+       /\ UnchangedFrame_237737877c8f4372
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionAllowedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveOwnedMemberAdmissionAllowedRunning", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveOwnedMemberAdmissionAllowedStopped(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Stopped"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE))
+       /\ control_mob_phase' = "Stopped"
+       /\ UnchangedFrame_237737877c8f4372
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionAllowedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveOwnedMemberAdmissionAllowedStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveOwnedMemberAdmissionAllowedCompleted(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Completed"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE))
+       /\ control_mob_phase' = "Completed"
+       /\ UnchangedFrame_237737877c8f4372
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionAllowedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveOwnedMemberAdmissionAllowedCompleted", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveOwnedMemberAdmissionAllowedDestroyed(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE))
+       /\ control_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_237737877c8f4372
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionAllowedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveOwnedMemberAdmissionAllowedDestroyed", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveOwnedMemberAdmissionDeniedRunning(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE))
+       /\ control_mob_phase' = "Running"
+       /\ UnchangedFrame_237737877c8f4372
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionDeniedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveOwnedMemberAdmissionDeniedRunning", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveOwnedMemberAdmissionDeniedStopped(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Stopped"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE))
+       /\ control_mob_phase' = "Stopped"
+       /\ UnchangedFrame_237737877c8f4372
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionDeniedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveOwnedMemberAdmissionDeniedStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveOwnedMemberAdmissionDeniedCompleted(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Completed"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE))
+       /\ control_mob_phase' = "Completed"
+       /\ UnchangedFrame_237737877c8f4372
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionDeniedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveOwnedMemberAdmissionDeniedCompleted", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveOwnedMemberAdmissionDeniedDestroyed(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Destroyed"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE))
+       /\ control_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_237737877c8f4372
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionDeniedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveOwnedMemberAdmissionDeniedDestroyed", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
 control_mob_ResolveSpawnToolAdmissionAllowedRunning(arg_can_manage_mob, arg_spawn_profile_scope_present) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
@@ -39148,6 +39316,174 @@ layer_mob_ResolveCurrentMobAdmissionDeniedDestroyed(arg_can_manage_mob) ==
        /\ model_step_count' = model_step_count + 1
 
 
+layer_mob_ResolveOwnedMemberAdmissionAllowedRunning(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE))
+       /\ layer_mob_phase' = "Running"
+       /\ UnchangedFrame_a5491fedd8313eaa
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionAllowedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveOwnedMemberAdmissionAllowedRunning", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveOwnedMemberAdmissionAllowedStopped(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Stopped"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE))
+       /\ layer_mob_phase' = "Stopped"
+       /\ UnchangedFrame_a5491fedd8313eaa
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionAllowedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveOwnedMemberAdmissionAllowedStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveOwnedMemberAdmissionAllowedCompleted(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Completed"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE))
+       /\ layer_mob_phase' = "Completed"
+       /\ UnchangedFrame_a5491fedd8313eaa
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionAllowedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveOwnedMemberAdmissionAllowedCompleted", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveOwnedMemberAdmissionAllowedDestroyed(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE))
+       /\ layer_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_a5491fedd8313eaa
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionAllowedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveOwnedMemberAdmissionAllowedDestroyed", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveOwnedMemberAdmissionDeniedRunning(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE))
+       /\ layer_mob_phase' = "Running"
+       /\ UnchangedFrame_a5491fedd8313eaa
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionDeniedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveOwnedMemberAdmissionDeniedRunning", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveOwnedMemberAdmissionDeniedStopped(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Stopped"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE))
+       /\ layer_mob_phase' = "Stopped"
+       /\ UnchangedFrame_a5491fedd8313eaa
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionDeniedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveOwnedMemberAdmissionDeniedStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveOwnedMemberAdmissionDeniedCompleted(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Completed"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE))
+       /\ layer_mob_phase' = "Completed"
+       /\ UnchangedFrame_a5491fedd8313eaa
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionDeniedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveOwnedMemberAdmissionDeniedCompleted", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveOwnedMemberAdmissionDeniedDestroyed(arg_can_manage_mob, arg_caller_owns_member) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveOwnedMemberAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_owns_member = arg_caller_owns_member
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Destroyed"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE))
+       /\ layer_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_a5491fedd8313eaa
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "OwnedMemberAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveOwnedMemberAdmissionDeniedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveOwnedMemberAdmissionDeniedDestroyed", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
 layer_mob_ResolveSpawnToolAdmissionAllowedRunning(arg_can_manage_mob, arg_spawn_profile_scope_present) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
@@ -72171,6 +72507,14 @@ EntryPacketAdmissible_control_mob(packet) ==
     \/ /\ (packet.variant = "ResolveCurrentMobAdmission") /\ (control_mob_phase = "Stopped") /\ ((packet.payload.can_manage_mob = FALSE))
     \/ /\ (packet.variant = "ResolveCurrentMobAdmission") /\ (control_mob_phase = "Completed") /\ ((packet.payload.can_manage_mob = FALSE))
     \/ /\ (packet.variant = "ResolveCurrentMobAdmission") /\ (control_mob_phase = "Destroyed") /\ ((packet.payload.can_manage_mob = FALSE))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (control_mob_phase = "Running") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (control_mob_phase = "Completed") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (control_mob_phase = "Destroyed") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE)))
     \/ /\ (packet.variant = "ResolveSpawnToolAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.spawn_profile_scope_present = TRUE)))
     \/ /\ (packet.variant = "ResolveSpawnToolAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.spawn_profile_scope_present = TRUE)))
     \/ /\ (packet.variant = "ResolveSpawnToolAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.spawn_profile_scope_present = TRUE)))
@@ -73762,6 +74106,14 @@ EntryPacketAdmissible_layer_mob(packet) ==
     \/ /\ (packet.variant = "ResolveCurrentMobAdmission") /\ (layer_mob_phase = "Stopped") /\ ((packet.payload.can_manage_mob = FALSE))
     \/ /\ (packet.variant = "ResolveCurrentMobAdmission") /\ (layer_mob_phase = "Completed") /\ ((packet.payload.can_manage_mob = FALSE))
     \/ /\ (packet.variant = "ResolveCurrentMobAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((packet.payload.can_manage_mob = FALSE))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_owns_member = TRUE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (layer_mob_phase = "Running") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (layer_mob_phase = "Completed") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE)))
+    \/ /\ (packet.variant = "ResolveOwnedMemberAdmission") /\ (layer_mob_phase = "Destroyed") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_owns_member = FALSE)))
     \/ /\ (packet.variant = "ResolveSpawnToolAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.spawn_profile_scope_present = TRUE)))
     \/ /\ (packet.variant = "ResolveSpawnToolAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.spawn_profile_scope_present = TRUE)))
     \/ /\ (packet.variant = "ResolveSpawnToolAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.spawn_profile_scope_present = TRUE)))
@@ -75131,6 +75483,14 @@ CoreNext ==
     \/ control_mob_ResolveCurrentMobAdmissionDeniedStopped(FALSE)
     \/ control_mob_ResolveCurrentMobAdmissionDeniedCompleted(FALSE)
     \/ control_mob_ResolveCurrentMobAdmissionDeniedDestroyed(FALSE)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_owns_member \in BOOLEAN : control_mob_ResolveOwnedMemberAdmissionAllowedRunning(arg_can_manage_mob, arg_caller_owns_member)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_owns_member \in BOOLEAN : control_mob_ResolveOwnedMemberAdmissionAllowedStopped(arg_can_manage_mob, arg_caller_owns_member)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_owns_member \in BOOLEAN : control_mob_ResolveOwnedMemberAdmissionAllowedCompleted(arg_can_manage_mob, arg_caller_owns_member)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_owns_member \in BOOLEAN : control_mob_ResolveOwnedMemberAdmissionAllowedDestroyed(arg_can_manage_mob, arg_caller_owns_member)
+    \/ control_mob_ResolveOwnedMemberAdmissionDeniedRunning(FALSE, FALSE)
+    \/ control_mob_ResolveOwnedMemberAdmissionDeniedStopped(FALSE, FALSE)
+    \/ control_mob_ResolveOwnedMemberAdmissionDeniedCompleted(FALSE, FALSE)
+    \/ control_mob_ResolveOwnedMemberAdmissionDeniedDestroyed(FALSE, FALSE)
     \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_spawn_profile_scope_present \in BOOLEAN : control_mob_ResolveSpawnToolAdmissionAllowedRunning(arg_can_manage_mob, arg_spawn_profile_scope_present)
     \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_spawn_profile_scope_present \in BOOLEAN : control_mob_ResolveSpawnToolAdmissionAllowedStopped(arg_can_manage_mob, arg_spawn_profile_scope_present)
     \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_spawn_profile_scope_present \in BOOLEAN : control_mob_ResolveSpawnToolAdmissionAllowedCompleted(arg_can_manage_mob, arg_spawn_profile_scope_present)
@@ -76430,6 +76790,14 @@ CoreNext ==
     \/ layer_mob_ResolveCurrentMobAdmissionDeniedStopped(FALSE)
     \/ layer_mob_ResolveCurrentMobAdmissionDeniedCompleted(FALSE)
     \/ layer_mob_ResolveCurrentMobAdmissionDeniedDestroyed(FALSE)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_owns_member \in BOOLEAN : layer_mob_ResolveOwnedMemberAdmissionAllowedRunning(arg_can_manage_mob, arg_caller_owns_member)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_owns_member \in BOOLEAN : layer_mob_ResolveOwnedMemberAdmissionAllowedStopped(arg_can_manage_mob, arg_caller_owns_member)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_owns_member \in BOOLEAN : layer_mob_ResolveOwnedMemberAdmissionAllowedCompleted(arg_can_manage_mob, arg_caller_owns_member)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_owns_member \in BOOLEAN : layer_mob_ResolveOwnedMemberAdmissionAllowedDestroyed(arg_can_manage_mob, arg_caller_owns_member)
+    \/ layer_mob_ResolveOwnedMemberAdmissionDeniedRunning(FALSE, FALSE)
+    \/ layer_mob_ResolveOwnedMemberAdmissionDeniedStopped(FALSE, FALSE)
+    \/ layer_mob_ResolveOwnedMemberAdmissionDeniedCompleted(FALSE, FALSE)
+    \/ layer_mob_ResolveOwnedMemberAdmissionDeniedDestroyed(FALSE, FALSE)
     \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_spawn_profile_scope_present \in BOOLEAN : layer_mob_ResolveSpawnToolAdmissionAllowedRunning(arg_can_manage_mob, arg_spawn_profile_scope_present)
     \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_spawn_profile_scope_present \in BOOLEAN : layer_mob_ResolveSpawnToolAdmissionAllowedStopped(arg_can_manage_mob, arg_spawn_profile_scope_present)
     \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_spawn_profile_scope_present \in BOOLEAN : layer_mob_ResolveSpawnToolAdmissionAllowedCompleted(arg_can_manage_mob, arg_spawn_profile_scope_present)

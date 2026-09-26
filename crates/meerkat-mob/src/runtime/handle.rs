@@ -1931,6 +1931,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         // would invent a modeled spawn cause that MobMachine never observed.
         MobError::ForkMemberProvisionFailed { .. }
         | MobError::InvalidBoundedHelperResult { .. }
+        | MobError::ForkJobOwnerNotSource { .. }
         | MobError::BoundedHelperResultUnavailable { .. }
         | MobError::BoundedHelperRetirementFailed { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
@@ -3517,6 +3518,107 @@ impl<R> std::fmt::Display for BoundedTurnWaitError<R> {
 
 impl<R: std::fmt::Debug> std::error::Error for BoundedTurnWaitError<R> {}
 
+/// Retires a `delegate` helper when the future that owns its bounded run is
+/// dropped before the run reached an outcome.
+///
+/// A helper is ephemeral by contract: it runs one exact turn for its caller
+/// and is retired afterwards, and nothing else can see or retire it. If the
+/// caller stops waiting (a cancelled turn, a tool deadline), the helper
+/// composition future is dropped mid-await and no code after the await runs.
+/// Without this guard the helper would keep running unobserved and never be
+/// retired. Dropping an armed guard hands retirement to a detached task on
+/// the current runtime; the success and error paths disarm it and settle the
+/// helper themselves.
+///
+/// Fork children are deliberately NOT guarded: they belong to their forker,
+/// which can observe and retire them, and they end only on their own
+/// failure or an opt-in `max_run` (see [`MobHandle::fork_member_then_run_detached`]).
+#[cfg(test)]
+type ForkAdmissionPause = (oneshot::Sender<()>, oneshot::Receiver<()>);
+
+#[cfg(test)]
+static FORK_ADMISSION_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<AgentIdentity, ForkAdmissionPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Pause the next fork admission of `source` before it resolves the source
+/// session: returns (entered, release).
+#[cfg(test)]
+pub(in crate::runtime) fn pause_fork_admission_for_test(
+    source: AgentIdentity,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    FORK_ADMISSION_PAUSES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(source, (entered_tx, release_rx));
+    (entered_rx, release_tx)
+}
+
+#[cfg(test)]
+async fn pause_fork_admission_if_requested(source: &AgentIdentity) {
+    let pause = FORK_ADMISSION_PAUSES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(source);
+    if let Some((entered, release)) = pause {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
+}
+
+struct ProvisionedChildRetireOnDrop {
+    handle: Option<MobHandle>,
+    identity: AgentIdentity,
+}
+
+impl ProvisionedChildRetireOnDrop {
+    fn arm(handle: MobHandle, identity: AgentIdentity) -> Self {
+        Self {
+            handle: Some(handle),
+            identity,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.handle = None;
+    }
+}
+
+impl Drop for ProvisionedChildRetireOnDrop {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let identity = self.identity.clone();
+        let retire = async move {
+            if let Err(error) = handle.retire(identity.clone()).await {
+                tracing::warn!(
+                    member = %identity,
+                    error = %error,
+                    "abandoned bounded child retirement failed; the member remains until retired"
+                );
+            }
+        };
+        // The browser runtime has one local executor and no runtime handle.
+        #[cfg(target_arch = "wasm32")]
+        {
+            tokio::spawn(retire);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(retire);
+            }
+            Err(_) => tracing::warn!(
+                member = %self.identity,
+                "abandoned bounded child could not be retired: no async runtime at drop"
+            ),
+        }
+    }
+}
+
 /// Failure from a spawn/fork -> exact turn composition.
 ///
 /// Admission/provisioning failures and post-admission turn failures remain
@@ -4258,6 +4360,221 @@ pub struct ForkMemberBoundedRunOutcome {
     pub turn: WorkBoundedTurnResult,
 }
 
+/// Who is waiting for a detached fork child's outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkJobBinding {
+    /// Background job id the forker was given.
+    pub job_id: String,
+    /// The forker's session, which receives the durable completion entry.
+    pub owner_session_id: meerkat_core::SessionId,
+}
+
+/// Durable record of the fork_off job a member was created to run.
+///
+/// Stored on the child's spawn event and roster entry so a restarted host
+/// can re-deliver the outcome (or re-arm the opt-in limit) after the
+/// process-local supervisor that owned the run is gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkJobRecord {
+    pub job_id: String,
+    pub owner_session_id: meerkat_core::SessionId,
+    /// When the child's turn was admitted (Unix epoch milliseconds).
+    pub started_at_ms: u64,
+    /// The opt-in max_run limit, if any, measured from `started_at_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_run_ms: Option<u64>,
+    /// Transcript length the child was forked with; the child's own
+    /// exchange starts after it.
+    pub prefix_message_count: usize,
+    pub result_label: String,
+    pub max_text_bytes: usize,
+}
+
+impl ForkJobRecord {
+    /// The job's result, read from the fork child's DURABLE transcript
+    /// `session`, without consulting its runtime.
+    ///
+    /// `Some` when the child committed a terminal reply to this job after the
+    /// fork prefix: its own assistant message that neither requests tools nor
+    /// was cancelled, followed by nothing but context (System instructions
+    /// and the durable completion records of detached jobs). A completion
+    /// record that arrived after that reply starts a later turn, the child's
+    /// reaction to a job of its own (a nested fork), and nothing from there
+    /// on is this job's. That reply is the job's real outcome whatever the
+    /// runtime is doing now, which is what a restarted host needs before it
+    /// decides a limit elapsed. `None` when the transcript holds no such
+    /// reply (the turn is still running or did not survive).
+    pub fn durable_terminal_result(
+        &self,
+        session: &meerkat_core::Session,
+    ) -> Result<Option<BoundedHelperResult>, MobError> {
+        let own_exchange = session
+            .messages()
+            .get(self.prefix_message_count..)
+            .unwrap_or_default();
+        let Some(reply) = Self::job_exchange(own_exchange)
+            .iter()
+            .rev()
+            .find(|message| !Self::is_reply_context(message))
+        else {
+            return Ok(None);
+        };
+        let meerkat_core::Message::BlockAssistant(reply) = reply else {
+            return Ok(None);
+        };
+        if Self::requests_tools(reply)
+            || reply.stop_reason == Some(meerkat_core::types::StopReason::Cancelled)
+        {
+            return Ok(None);
+        }
+        let text: String = reply
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                meerkat_core::types::AssistantBlock::Text { text, .. }
+                | meerkat_core::types::AssistantBlock::Transcript { text, .. } => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        BoundedHelperResult::try_from_legacy_terminal_text(
+            self.result_label.clone(),
+            text,
+            self.max_text_bytes,
+            false,
+        )
+        .map(Some)
+    }
+
+    /// The part of the child's own exchange that belongs to this job: all of
+    /// it, up to the first detached-job completion record admitted after the
+    /// child had replied. Such a record is a later turn's input. A record
+    /// admitted while the child was still working (between its tool calls)
+    /// is context of this job's turn, which goes on to its reply.
+    fn job_exchange(own_exchange: &[meerkat_core::Message]) -> &[meerkat_core::Message] {
+        let mut replied = false;
+        for (index, message) in own_exchange.iter().enumerate() {
+            match message {
+                meerkat_core::Message::System(_) => {}
+                meerkat_core::Message::SystemNotice(notice)
+                    if notice.persisted_background_job_id().is_some() =>
+                {
+                    if replied {
+                        return own_exchange.get(..index).unwrap_or_default();
+                    }
+                }
+                meerkat_core::Message::BlockAssistant(reply) => {
+                    replied = !Self::requests_tools(reply);
+                }
+                _ => replied = false,
+            }
+        }
+        own_exchange
+    }
+
+    /// Context a reply can be followed by and still be the job's reply:
+    /// System instructions, and the durable completion record of a detached
+    /// job (`BackgroundJob`, persisted).
+    fn is_reply_context(message: &meerkat_core::Message) -> bool {
+        match message {
+            meerkat_core::Message::System(_) => true,
+            meerkat_core::Message::SystemNotice(notice) => {
+                notice.persisted_background_job_id().is_some()
+            }
+            _ => false,
+        }
+    }
+
+    fn requests_tools(reply: &meerkat_core::types::BlockAssistantMessage) -> bool {
+        reply.stop_reason == Some(meerkat_core::types::StopReason::ToolUse)
+            || reply
+                .blocks
+                .iter()
+                .any(|block| matches!(block, meerkat_core::types::AssistantBlock::ToolUse { .. }))
+    }
+}
+
+/// The in-flight exact turn of a detached fork child.
+///
+/// Resolves once the child's turn reaches an outcome. Dropping it stops the
+/// caller listening and nothing else: the child keeps running and remains
+/// its forker's to observe and retire. A caller that is the child's only
+/// observer can opt into [`Self::retire_child_if_abandoned`] instead.
+pub struct ForkChildRun {
+    outcome: tokio::sync::oneshot::Receiver<ForkChildRunOutcome>,
+    child: AgentIdentity,
+    cleanup: MobHandle,
+    abandon_guard: Option<ProvisionedChildRetireOnDrop>,
+}
+
+impl std::fmt::Debug for ForkChildRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForkChildRun")
+            .field("child", &self.child)
+            .field("retire_if_abandoned", &self.abandon_guard.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ForkChildRun {
+    /// Wait for the child's turn outcome.
+    ///
+    /// `None` means the runtime supervising the child stopped (mob shutdown)
+    /// before the turn reached an outcome.
+    pub async fn outcome(mut self) -> Option<ForkChildRunOutcome> {
+        let outcome = (&mut self.outcome).await.ok();
+        // The outcome arrived: the child's fate is settled (a completed child
+        // stays seated; a failed or timed-out one was already retired).
+        if let Some(guard) = self.abandon_guard.take() {
+            guard.disarm();
+        }
+        outcome
+    }
+
+    /// Retire the child (with its descendants) if this handle is dropped
+    /// before its outcome arrives. For a caller that is the child's only
+    /// observer, such as a blocking fork call whose tool call may be
+    /// cancelled: nobody else would ever receive the outcome.
+    #[must_use]
+    pub fn retire_child_if_abandoned(mut self) -> Self {
+        self.abandon_guard = Some(ProvisionedChildRetireOnDrop::arm(
+            self.cleanup.clone(),
+            self.child.clone(),
+        ));
+        self
+    }
+
+    /// The handle reached its holder: from here dropping it only stops
+    /// listening.
+    fn handed_to_holder(mut self) -> Self {
+        if let Some(guard) = self.abandon_guard.take() {
+            guard.disarm();
+        }
+        self
+    }
+}
+
+/// How a detached fork child's exact turn ended.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ForkChildRunOutcome {
+    /// The turn completed. The child stays seated.
+    Completed(Box<WorkBoundedTurnResult>),
+    /// The turn failed. The child was retired; a failed retirement is
+    /// reported as [`BoundedMemberRunError::CleanupDebt`].
+    Failed(Box<BoundedMemberRunError>),
+    /// The opt-in `max_run` limit elapsed first. The run was cancelled and
+    /// the child retired; `retirement_error` reports a failed retirement.
+    MaxRunElapsed {
+        max_run: Duration,
+        retirement_error: Option<String>,
+    },
+}
+
 /// Target for a wire operation from a local mob member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -4850,6 +5167,15 @@ pub struct SpawnMemberSpec {
     /// second copy of that lifecycle truth.
     pub(crate) forked_participant_attachment:
         Option<crate::forked_participant::ForkedParticipantAttachmentAssociation>,
+    /// The member whose own turn created this one, when that is provable.
+    ///
+    /// Set only by compositions that run inside the spawner's turn (the
+    /// `fork_off` tool, which forks the caller). It becomes durable roster
+    /// provenance that lets the spawner observe and retire its own children
+    /// without holding manage scope over the whole mob. Never taken from
+    /// caller-supplied arguments.
+    pub(crate) spawned_by: Option<AgentIdentity>,
+    pub(crate) fork_job: Option<crate::runtime::ForkJobRecord>,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -4930,6 +5256,8 @@ impl SpawnMemberSpec {
             continuity_intent: SpawnContinuityIntent::Ephemeral,
             placement: None,
             forked_participant_attachment: None,
+            spawned_by: None,
+            fork_job: None,
         }
     }
 
@@ -6018,7 +6346,7 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::ListMembers(members))
             }
             MobMachineCommand::Retire { agent_identity } => {
-                self.retire_exact_incarnation(agent_identity).await?;
+                self.retire_member_tree(agent_identity).await?;
                 Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::Respawn {
@@ -9532,7 +9860,15 @@ impl MobHandle {
             .await
     }
 
-    /// Retire a member, archiving its session and removing trust.
+    /// Retire a member, archiving its session and removing trust, together
+    /// with every member it transitively spawned (its `spawned_by`
+    /// descendants, such as fork_off children), deepest first.
+    ///
+    /// Retirement follows process-tree semantics on every path: a member's
+    /// descendants never outlive it unowned. Each member goes through the
+    /// same exact-incarnation retire. Every retirement is attempted, and the
+    /// first failure is returned after the rest ran; retrying converges,
+    /// because a later retire still finds the remaining descendants.
     ///
     /// A successful return is the terminal lifecycle barrier for work owned by
     /// this mob incarnation. New member work has been fenced, any Mob-owned
@@ -12568,7 +12904,13 @@ impl MobHandle {
     /// [`meerkat_core::DurableForkSourceAdmission::Quiescent`]: a source whose
     /// turn is running is refused with
     /// `MobError::ForkSourceUnavailable { cause: Running }`. This is the
-    /// external (RPC, console, operator) fork contract.
+    /// external (RPC, console, operator) fork contract. "Running" covers all
+    /// work the source owes, not only a provider call in flight: an admitted
+    /// input that has not reached a terminal state (queued, steered, staged,
+    /// or waiting while the runtime materializes or revives the member's
+    /// session) and a committed end that is still an unanswered input
+    /// boundary are refused the same way. The refusal answers at once; it
+    /// never queues behind the source's turn.
     pub async fn fork_member(
         &self,
         source_identity: &AgentIdentity,
@@ -12699,6 +13041,9 @@ impl MobHandle {
     ) -> Result<ForkMemberResult, MobError> {
         let child_identity = member.identity.clone();
         let fork_session_id = fork.session_id.clone();
+        if let Some(job) = member.fork_job.as_mut() {
+            job.prefix_message_count = fork.message_count;
+        }
         member.launch_mode = crate::launch::MemberLaunchMode::Resume {
             bridge_session_id: fork_session_id.clone(),
             resume_from_role: None,
@@ -12741,6 +13086,75 @@ impl MobHandle {
         })
     }
 
+    /// Refuse an external fork of a source whose runtime still owes a turn.
+    ///
+    /// The durable fork owner only sees a turn once it holds a live actor
+    /// admission, but a runtime admits work well before that: an input is
+    /// accepted and queued, then the runtime loop dequeues it, stages it,
+    /// materializes or revives the member's session and only then starts the
+    /// turn. Throughout that window the source is busy, and a fork of it
+    /// would either queue behind the turn or branch a transcript the turn is
+    /// about to extend. So the source runtime's typed state is read first:
+    /// a bound run (`RuntimeState::Running`) or any admitted input that has
+    /// not reached a terminal state refuses the fork as
+    /// `ForkSourceUnavailable { Running }` at once.
+    ///
+    /// Both reads are out of band: they observe the MeerkatMachine's session
+    /// registry and input ledger and never enter the source's command queue
+    /// or turn boundary. A source with no runtime registration (the runtime
+    /// retired its idle executor) owes no runtime-held work; the durable fork
+    /// owner still applies its own boundary and transcript checks.
+    #[cfg(feature = "runtime-adapter")]
+    async fn refuse_fork_source_with_admitted_work(
+        &self,
+        source_identity: &AgentIdentity,
+        source_session_id: &meerkat_core::SessionId,
+    ) -> Result<(), MobError> {
+        use meerkat_runtime::RuntimeDriverError;
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+        let Some(runtime) = self.runtime_adapter.as_ref() else {
+            return Ok(());
+        };
+        let busy = || MobError::ForkSourceUnavailable {
+            source_member_id: source_identity.to_string(),
+            cause: crate::error::ForkSourceUnavailableCause::Running,
+        };
+        let unreadable = |read: &str, error: RuntimeDriverError| {
+            MobError::Internal(format!(
+                "fork source '{source_identity}' runtime {read} could not be read: {error}"
+            ))
+        };
+        match runtime.runtime_state(source_session_id).await {
+            Ok(meerkat_runtime::RuntimeState::Running) => return Err(busy()),
+            Ok(_) => {}
+            Err(
+                RuntimeDriverError::NotFound { .. }
+                | RuntimeDriverError::Destroyed
+                | RuntimeDriverError::NotReady { .. },
+            ) => return Ok(()),
+            Err(error) => return Err(unreadable("state", error)),
+        }
+        match runtime.list_active_inputs(source_session_id).await {
+            Ok(active) if active.is_empty() => Ok(()),
+            Ok(_) => Err(busy()),
+            Err(
+                RuntimeDriverError::NotFound { .. }
+                | RuntimeDriverError::Destroyed
+                | RuntimeDriverError::NotReady { .. },
+            ) => Ok(()),
+            Err(error) => Err(unreadable("input ledger", error)),
+        }
+    }
+
+    #[cfg(not(feature = "runtime-adapter"))]
+    async fn refuse_fork_source_with_admitted_work(
+        &self,
+        _source_identity: &AgentIdentity,
+        _source_session_id: &meerkat_core::SessionId,
+    ) -> Result<(), MobError> {
+        Ok(())
+    }
+
     async fn fork_member_with_source_admission(
         &self,
         source_identity: &AgentIdentity,
@@ -12748,11 +13162,51 @@ impl MobHandle {
         message_count: Option<usize>,
         source_admission: meerkat_core::DurableForkSourceAdmission,
     ) -> Result<ForkMemberResult, MobError> {
-        let (source_session_id, fork_target) = self
-            .admit_fork_member(source_identity, &member, source_admission)
-            .await?;
         let fork = self
-            .session_service
+            .fork_source_session(
+                source_identity,
+                &member,
+                message_count,
+                source_admission,
+                None,
+            )
+            .await?;
+        self.seat_forked_member(member, fork).await
+    }
+
+    /// Admit a fork of `source_identity` for `member` and persist the forked
+    /// transcript. Nothing is seated yet. `caller_turn_job_owner` is the
+    /// owner session of a job forked in the source's own turn: it must be the
+    /// source session this admission resolves (the one the transcript is
+    /// forked from), or the fork is refused with
+    /// [`MobError::ForkJobOwnerNotSource`] before anything is forked.
+    async fn fork_source_session(
+        &self,
+        source_identity: &AgentIdentity,
+        member: &SpawnMemberSpec,
+        message_count: Option<usize>,
+        source_admission: meerkat_core::DurableForkSourceAdmission,
+        caller_turn_job_owner: Option<&meerkat_core::SessionId>,
+    ) -> Result<meerkat_core::SessionForkResult, MobError> {
+        #[cfg(test)]
+        pause_fork_admission_if_requested(source_identity).await;
+        let (source_session_id, fork_target) = self
+            .admit_fork_member(source_identity, member, source_admission)
+            .await?;
+        if let Some(owner_session_id) = caller_turn_job_owner
+            && owner_session_id != &source_session_id
+        {
+            return Err(MobError::ForkJobOwnerNotSource {
+                source_member_id: source_identity.clone(),
+                source_session_id,
+                owner_session_id: owner_session_id.clone(),
+            });
+        }
+        if source_admission == meerkat_core::DurableForkSourceAdmission::Quiescent {
+            self.refuse_fork_source_with_admitted_work(source_identity, &source_session_id)
+                .await?;
+        }
+        self.session_service
             .fork_persisted_session(
                 &source_session_id,
                 message_count,
@@ -12766,8 +13220,7 @@ impl MobHandle {
                     cause: crate::error::ForkSourceUnavailableCause::Running,
                 },
                 error => MobError::from(error),
-            })?;
-        self.seat_forked_member(member, fork).await
+            })
     }
 
     /// Persist a real transcript fork, provision its child member, and run the
@@ -12803,6 +13256,12 @@ impl MobHandle {
             }
         })?;
         let objective_id = member.objective_id;
+        if matches!(
+            source_admission,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn
+        ) {
+            member.spawned_by = Some(source_identity.clone());
+        }
         let fork = self
             .fork_member_with_source_admission(
                 source_identity,
@@ -12811,21 +13270,287 @@ impl MobHandle {
                 source_admission,
             )
             .await?;
-        let mut work = WorkSpec::new(task, WorkOrigin::Internal);
-        if let Some(objective_id) = objective_id {
-            work = work.with_objective_id(objective_id);
-        }
         let turn = self
             .start_work_for_identity_bounded(
                 fork.agent_identity.clone(),
-                work,
+                Self::fork_child_work(task, objective_id),
                 HandlingMode::Queue,
                 result_spec.clone(),
             )
-            .await?
-            .wait_bounded(result_spec)
+            .await;
+        let run = match turn {
+            Ok(turn) => turn
+                .wait_bounded(result_spec)
+                .await
+                .map_err(BoundedMemberRunError::from),
+            Err(error) => Err(BoundedMemberRunError::from(error)),
+        };
+        match run {
+            Ok(turn) => Ok(ForkMemberBoundedRunOutcome { fork, turn }),
+            // A child whose own run failed has nothing left to do for its
+            // forker; retire it rather than leave a dead member seated.
+            Err(operation) => Err(self
+                .retire_failed_fork_child(&fork.agent_identity, operation)
+                .await),
+        }
+    }
+
+    /// Fork `source_identity`, seat the child, admit its one exact turn and
+    /// return without waiting for that turn.
+    ///
+    /// The child belongs to its forker. Nothing here bounds the run by a
+    /// default deadline: the returned [`ForkChildRun`] resolves when the turn
+    /// reaches an outcome, however long that takes, and dropping it does not
+    /// affect the child. The only automatic end is opt-in: with
+    /// `max_run = Some(limit)`, a runtime-owned supervisor cancels the run and
+    /// retires the child once `limit` has elapsed since the turn was admitted.
+    /// A child whose own turn fails is retired. A child whose turn completes
+    /// stays seated, exactly like [`Self::fork_member_then_run_bounded`].
+    ///
+    /// Validation, fork, seat and turn admission all happen before this
+    /// returns, so every admission failure is reported synchronously and a
+    /// child whose turn could not be admitted is retired first. A call
+    /// dropped before it returns leaves no child behind: once the child's
+    /// spawn is under way, seating and turn admission finish on a task of
+    /// their own and the child, which nobody holds, is retired.
+    ///
+    /// With [`meerkat_core::DurableForkSourceAdmission::CallerTurn`] the fork
+    /// is its source's, so a `job` must be bound to the source member's own
+    /// session; any other owner is refused with
+    /// [`MobError::ForkJobOwnerNotSource`] before anything is forked.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fork_member_then_run_detached(
+        &self,
+        source_identity: &AgentIdentity,
+        mut member: SpawnMemberSpec,
+        message_count: Option<usize>,
+        result_label: impl Into<String>,
+        max_text_bytes: usize,
+        source_admission: meerkat_core::DurableForkSourceAdmission,
+        max_run: Option<Duration>,
+        job: Option<ForkJobBinding>,
+    ) -> Result<(ForkMemberResult, ForkChildRun), BoundedMemberRunError> {
+        let result_label: String = result_label.into();
+        // A fork in its source's own turn is its source's: the re-link after
+        // a restart relies on that owner (a job bound elsewhere would be
+        // taken for an owner that is gone). The admission checks it against
+        // the source session it admits, before anything is forked.
+        let caller_turn_job_owner = job
+            .as_ref()
+            .filter(|_| source_admission == meerkat_core::DurableForkSourceAdmission::CallerTurn)
+            .map(|job| job.owner_session_id.clone());
+        if let Some(job) = job {
+            member.fork_job = Some(ForkJobRecord {
+                job_id: job.job_id,
+                owner_session_id: job.owner_session_id,
+                started_at_ms: u64::try_from(
+                    meerkat_core::time_compat::SystemTime::now()
+                        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX),
+                max_run_ms: max_run
+                    .map(|limit| u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)),
+                // Filled from the committed fork when the child is seated.
+                prefix_message_count: 0,
+                result_label: result_label.clone(),
+                max_text_bytes,
+            });
+        }
+        let result_spec = BoundedResultSpec::new(result_label, max_text_bytes)?;
+        if max_run.is_some_and(|limit| limit.is_zero()) {
+            return Err(MobError::InvalidBoundedHelperResult {
+                reason: "fork max_run must be greater than zero when set".to_string(),
+            }
+            .into());
+        }
+        let task = member.initial_message.take().ok_or_else(|| {
+            MobError::InvalidBoundedHelperResult {
+                reason: "fork_member_then_run_detached requires member.initial_message so the exact turn has one caller-authored input"
+                    .to_string(),
+            }
+        })?;
+        let objective_id = member.objective_id;
+        if matches!(
+            source_admission,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn
+        ) {
+            // The caller's own turn asked for this fork, so the source is
+            // provably the spawner and owns the child.
+            member.spawned_by = Some(source_identity.clone());
+        }
+        let session_fork = self
+            .fork_source_session(
+                source_identity,
+                &member,
+                message_count,
+                source_admission,
+                caller_turn_job_owner.as_ref(),
+            )
             .await?;
-        Ok(ForkMemberBoundedRunOutcome { fork, turn })
+        // From the child's spawn command on, the actor seats the child whether
+        // or not this call is still polled, and a caller on a relieved task is
+        // aborted at its next await. So seating, turn admission and the
+        // supervisor's start run on a task of their own, which a dropped call
+        // cannot cancel. Until this call holds the run handle the child is
+        // nobody's: the run travels armed to retire it, so a dropped call, or
+        // a handoff dropped in transit, retires the child.
+        let (handoff_tx, handoff_rx) = tokio::sync::oneshot::channel();
+        let seat = self.clone();
+        tokio::spawn(async move {
+            let handoff = seat
+                .seat_and_start_detached_fork_child(
+                    member,
+                    session_fork,
+                    task,
+                    objective_id,
+                    result_spec,
+                    max_run,
+                )
+                .await;
+            // The receiver of a dropped call is gone: the unsent handoff
+            // drops here, and its armed run retires the child.
+            let _ = handoff_tx.send(handoff);
+        });
+        let handoff = handoff_rx.await.map_err(|_| {
+            MobError::Internal("the fork handoff task ended without a result".to_string())
+        })?;
+        let (fork, run) = handoff?;
+        // The caller holds the run now: dropping it only stops listening.
+        Ok((fork, run.handed_to_holder()))
+    }
+
+    /// Seat a detached fork child from its persisted fork, admit its one
+    /// exact turn and start the supervisor that owns the run. The returned
+    /// run is armed to retire the child if it is dropped before its holder
+    /// takes it (see [`Self::fork_member_then_run_detached`]). A child whose
+    /// turn could not be admitted is retired.
+    async fn seat_and_start_detached_fork_child(
+        &self,
+        member: SpawnMemberSpec,
+        session_fork: meerkat_core::SessionForkResult,
+        task: ContentInput,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+        result_spec: BoundedResultSpec,
+        max_run: Option<Duration>,
+    ) -> Result<(ForkMemberResult, ForkChildRun), BoundedMemberRunError> {
+        let fork = self.seat_forked_member(member, session_fork).await?;
+        let turn = match self
+            .start_work_for_identity_bounded(
+                fork.agent_identity.clone(),
+                Self::fork_child_work(task, objective_id),
+                HandlingMode::Queue,
+                result_spec.clone(),
+            )
+            .await
+        {
+            Ok(turn) => turn,
+            Err(error) => {
+                return Err(self
+                    .retire_failed_fork_child(
+                        &fork.agent_identity,
+                        BoundedMemberRunError::from(error),
+                    )
+                    .await);
+            }
+        };
+
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        let supervisor = self.clone();
+        let child = fork.agent_identity.clone();
+        tokio::spawn(async move {
+            let wait = turn.wait_bounded(result_spec);
+            let outcome = match max_run {
+                None => match wait.await {
+                    Ok(turn) => ForkChildRunOutcome::Completed(Box::new(turn)),
+                    Err(error) => ForkChildRunOutcome::Failed(Box::new(
+                        supervisor
+                            .retire_failed_fork_child(&child, BoundedMemberRunError::from(error))
+                            .await,
+                    )),
+                },
+                Some(limit) => match tokio::time::timeout(limit, wait).await {
+                    Ok(Ok(turn)) => ForkChildRunOutcome::Completed(Box::new(turn)),
+                    Ok(Err(error)) => ForkChildRunOutcome::Failed(Box::new(
+                        supervisor
+                            .retire_failed_fork_child(&child, BoundedMemberRunError::from(error))
+                            .await,
+                    )),
+                    Err(_elapsed) => {
+                        let retirement_error = supervisor.autokill_fork_child(&child).await;
+                        ForkChildRunOutcome::MaxRunElapsed {
+                            max_run: limit,
+                            retirement_error,
+                        }
+                    }
+                },
+            };
+            // The forker may have stopped listening; the child's fate above
+            // does not depend on it.
+            let _ = outcome_tx.send(outcome);
+        });
+        // The supervisor now owns the run; the handle goes to the caller,
+        // armed until the caller takes it.
+        let run = ForkChildRun {
+            outcome: outcome_rx,
+            child: fork.agent_identity.clone(),
+            cleanup: self.fork_child_cleanup_authority(),
+            abandon_guard: None,
+        }
+        .retire_child_if_abandoned();
+        Ok((fork, run))
+    }
+
+    fn fork_child_work(
+        task: ContentInput,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+    ) -> WorkSpec {
+        let work = WorkSpec::new(task, WorkOrigin::Internal);
+        match objective_id {
+            Some(objective_id) => work.with_objective_id(objective_id),
+            None => work,
+        }
+    }
+
+    fn fork_child_cleanup_authority(&self) -> MobHandle {
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(
+                crate::control_policy::MobControlPrincipal::Owner,
+            ))
+    }
+
+    async fn retire_failed_fork_child(
+        &self,
+        child: &AgentIdentity,
+        operation: BoundedMemberRunError,
+    ) -> BoundedMemberRunError {
+        match self
+            .fork_child_cleanup_authority()
+            .retire_with_descendants(child.clone())
+            .await
+        {
+            Ok(()) => operation,
+            Err(retirement_error) => operation.with_cleanup_debt(retirement_error),
+        }
+    }
+
+    /// Opt-in autokill: cancel the child's in-flight run, then retire it.
+    /// Returns the retirement error, if any, for the outcome report.
+    async fn autokill_fork_child(&self, child: &AgentIdentity) -> Option<String> {
+        let authority = self.fork_child_cleanup_authority();
+        if let Err(error) = authority.force_cancel_member(child.clone()).await {
+            tracing::debug!(
+                member = %child,
+                error = %error,
+                "fork autokill: cancelling the in-flight run failed; retiring anyway"
+            );
+        }
+        authority
+            .retire_with_descendants(child.clone())
+            .await
+            .err()
+            .map(|error| error.to_string())
     }
 
     /// Read one completed worker result from canonical session authority and
@@ -13017,6 +13742,9 @@ impl MobHandle {
                 crate::control_policy::MobControlPrincipal::Owner,
             ),
         );
+        // The helper is already seated. If the caller stops waiting before an
+        // outcome, retire it instead of leaving it running unobserved.
+        let retire_on_drop = ProvisionedChildRetireOnDrop::arm(admitted.clone(), identity.clone());
         let (runtime_id, fence_token) = match admitted
             .resolve_submit_work_runtime_binding(
                 &identity,
@@ -13027,6 +13755,7 @@ impl MobHandle {
         {
             Ok(binding) => binding,
             Err(error) => {
+                retire_on_drop.disarm();
                 let operation = BoundedMemberRunError::from(error);
                 return Err(match admitted.retire(identity.clone()).await {
                     Ok(()) => operation,
@@ -13051,6 +13780,7 @@ impl MobHandle {
         {
             Ok(turn) => turn,
             Err(error) => {
+                retire_on_drop.disarm();
                 let operation = BoundedMemberRunError::from(error);
                 return Err(match admitted.retire(identity.clone()).await {
                     Ok(()) => operation,
@@ -13061,6 +13791,7 @@ impl MobHandle {
         let turn = match turn_handle.wait_bounded(result_spec).await {
             Ok(turn) => turn,
             Err(error) => {
+                retire_on_drop.disarm();
                 let operation = BoundedMemberRunError::from(error);
                 return Err(match admitted.retire(identity.clone()).await {
                     Ok(()) => operation,
@@ -13069,6 +13800,7 @@ impl MobHandle {
             }
         };
 
+        retire_on_drop.disarm();
         // Capture every exact result fact before cleanup begins. Retirement is
         // best-effort physical cleanup and cannot revoke a committed result.
         let receipt = turn.receipt();
@@ -13969,6 +14701,202 @@ impl MobHandle {
             .ok_or_else(|| {
                 MobError::Internal(
                     "MobMachine accepted current-mob admission observation but emitted no verdict"
+                        .into(),
+                )
+            })?;
+        Ok(match admission {
+            mob_dsl::MobCurrentMobAdmissionKind::Allowed => CurrentMobAdmission::Allowed,
+            mob_dsl::MobCurrentMobAdmissionKind::Denied => CurrentMobAdmission::Denied,
+        })
+    }
+
+    /// Make sure `identity`'s live session materialization exists, reviving
+    /// it through MobMachine authority when the runtime retired it (for
+    /// example an idle executor torn down, or a restart). Runs no turn.
+    pub async fn ensure_member_live(&self, identity: &AgentIdentity) -> Result<(), MobError> {
+        let session_id = self
+            .resolve_bridge_session_id(identity)
+            .await
+            .ok_or_else(|| MobError::MemberNotFound(identity.clone()))?;
+        match self
+            .session_service
+            .live_session_actor_registered(&session_id)
+            .await
+        {
+            Ok(true) => return Ok(()),
+            Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(MobError::SessionError(error)),
+        }
+        let agent_identity = identity.clone();
+        self.send_actor_command(
+            move |reply_tx| MobCommand::ReviveMemberLiveMaterialization {
+                agent_identity,
+                bridge_session_id: session_id,
+                scope: super::actor::MemberLiveRevivalScope::default(),
+                reply_tx,
+            },
+        )
+        .await?
+        .map(|_| ())
+    }
+
+    /// Members transitively spawned by `identity` (via durable spawned_by
+    /// provenance), deepest first.
+    pub async fn descendants_deepest_first(&self, identity: &AgentIdentity) -> Vec<AgentIdentity> {
+        let roster = self.roster().await;
+        let mut children: std::collections::BTreeMap<AgentIdentity, Vec<AgentIdentity>> =
+            std::collections::BTreeMap::new();
+        for entry in roster.list() {
+            if let Some(spawner) = entry.spawned_by.as_ref() {
+                children
+                    .entry(spawner.clone())
+                    .or_default()
+                    .push(entry.agent_identity.clone());
+            }
+        }
+        let mut ordered = Vec::new();
+        let mut visited = std::collections::BTreeSet::from([identity.clone()]);
+        fn visit(
+            node: &AgentIdentity,
+            children: &std::collections::BTreeMap<AgentIdentity, Vec<AgentIdentity>>,
+            visited: &mut std::collections::BTreeSet<AgentIdentity>,
+            ordered: &mut Vec<AgentIdentity>,
+        ) {
+            for child in children.get(node).into_iter().flatten() {
+                if visited.insert(child.clone()) {
+                    visit(child, children, visited, ordered);
+                    ordered.push(child.clone());
+                }
+            }
+        }
+        visit(identity, &children, &mut visited, &mut ordered);
+        ordered
+    }
+
+    /// Retire a member and every member it transitively spawned. Identical
+    /// to [`Self::retire`], which cascades on every path; kept for callers
+    /// that name the cascade explicitly.
+    pub async fn retire_with_descendants(&self, identity: AgentIdentity) -> Result<(), MobError> {
+        self.retire(identity).await
+    }
+
+    /// The core of every retire: the member's descendants deepest first, then
+    /// the member, each through the exact-incarnation retire.
+    ///
+    /// A member still running while its subtree is retired can spawn a child
+    /// no earlier collection saw, so descendants are re-collected until none
+    /// remain, before and again after the member's own retirement fences it.
+    async fn retire_member_tree(&self, identity: AgentIdentity) -> Result<(), MobError> {
+        let mut first_error = None;
+        let mut attempted = std::collections::BTreeSet::new();
+        self.retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
+            .await;
+        let own = self.retire_exact_incarnation(identity.clone()).await;
+        if own.is_ok() {
+            self.retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
+                .await;
+        }
+        match (own, first_error) {
+            (Err(error), _) | (Ok(()), Some(error)) => Err(error),
+            (Ok(()), None) => Ok(()),
+        }
+    }
+
+    async fn retire_descendants_until_stable(
+        &self,
+        ancestor: &AgentIdentity,
+        attempted: &mut std::collections::BTreeSet<AgentIdentity>,
+        first_error: &mut Option<MobError>,
+    ) {
+        // Bounded: each pass retires every descendant seen so far, and only
+        // members alive during a pass can add more.
+        const MAX_CASCADE_PASSES: usize = 8;
+        for _ in 0..MAX_CASCADE_PASSES {
+            let pending: Vec<AgentIdentity> = self
+                .descendants_deepest_first(ancestor)
+                .await
+                .into_iter()
+                .filter(|descendant| !attempted.contains(descendant))
+                .collect();
+            if pending.is_empty() {
+                return;
+            }
+            for descendant in pending {
+                attempted.insert(descendant.clone());
+                if let Err(error) = self.retire_exact_incarnation(descendant.clone()).await {
+                    tracing::warn!(
+                        member = %descendant,
+                        ancestor = %ancestor,
+                        error = %error,
+                        "cascading retirement of a descendant failed"
+                    );
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        tracing::warn!(
+            ancestor = %ancestor,
+            passes = MAX_CASCADE_PASSES,
+            "cascading retirement stopped re-collecting descendants"
+        );
+    }
+
+    /// Resolve admission for observing or retiring one member.
+    ///
+    /// The caller supplies manage scope and the member it acts as (resolved
+    /// from its own session binding, never from tool arguments). Ownership
+    /// is read from the target's durable spawner provenance in the roster;
+    /// MobMachine composes the verdict.
+    pub async fn resolve_owned_member_admission(
+        &self,
+        can_manage_mob: bool,
+        caller: Option<&AgentIdentity>,
+        target: &AgentIdentity,
+    ) -> Result<CurrentMobAdmission, MobError> {
+        // Ownership is transitive, like a process tree: the caller owns every
+        // member reachable by following spawned_by upward from the target.
+        let caller_owns_member = match caller {
+            Some(caller) => {
+                let roster = self.roster().await;
+                let mut hops = roster.len();
+                let mut current = roster
+                    .get_by_identity(target)
+                    .and_then(|entry| entry.spawned_by.clone());
+                let mut owned = false;
+                while let Some(spawner) = current {
+                    if &spawner == caller {
+                        owned = true;
+                        break;
+                    }
+                    if hops == 0 {
+                        break;
+                    }
+                    hops -= 1;
+                    current = roster
+                        .get_by_identity(&spawner)
+                        .and_then(|entry| entry.spawned_by.clone());
+                }
+                owned
+            }
+            None => false,
+        };
+        let effects = self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveOwnedMemberAdmission {
+                can_manage_mob,
+                caller_owns_member,
+            })
+            .await?;
+        let admission = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::OwnedMemberAdmissionResolved { admission } => {
+                    Some(admission)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted owned-member admission observations but emitted no verdict"
                         .into(),
                 )
             })?;
@@ -15327,6 +16255,8 @@ mod tests {
             external_peer_specs: BTreeMap::new(),
             effective_profile_override: None,
             effective_model_override: None,
+            spawned_by: None,
+            fork_job: None,
             direct_member_fence: None,
         }
     }

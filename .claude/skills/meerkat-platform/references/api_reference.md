@@ -912,10 +912,14 @@ the full canonical key; selecting an unrelated source does not rewrite it.
   (including prompt-context `fork_helper`) creates a fresh member/session
   seeded with rendered source-history context, not an O(1) copy-on-write
   transcript clone. Low-level `Session::fork()` / `fork_at()` are separate
-  structural primitives; the agent tool `fork_off` persists a durable child
-  from an exact committed prefix and resumes it. `spawn_helper()` /
+  structural primitives (every fork starts with zero usage); the agent tool
+  `fork_off` persists a durable child from an exact committed prefix, resumes
+  it, and runs its task detached; the forker owns the child and its own
+  forks. `spawn_helper()` /
   `fork_helper()` require `result_label` and `max_text_bytes` and return a
-  `BoundedHelperRunOutcome` carrying the certified bounded result.
+  `BoundedHelperRunOutcome` carrying the certified bounded result. A helper is
+  retired after its turn, and also when its caller stops waiting first (a
+  cancelled turn or an abandoned RPC/REST request).
 
 ---
 
@@ -997,11 +1001,11 @@ objective/durable-fork prerequisites:
 | `mob_create` | Create a mob from a definition |
 | `mob_destroy` | Destroy a mob and archive all members |
 | `mob_spawn_member` | Spawn a member into an authorized mob |
-| `fork_off` | Take `member_id` + `task`, fork an exact committed transcript prefix through the durable resume path, and retain the child; optional `expected_output` is guidance, not a schema |
-| `council` | Take a `topic` and existing `{mob_id, member_id, role}` participants; fork them into a bounded temporary discussion mob and clean up |
-| `mob_retire_member` | Archive a member and its session |
-| `mob_check_member` | Check a member's execution status and output |
-| `mob_list_members` | List members of a mob |
+| `fork_off` | Take `member_id` + `task`, fork an exact committed transcript prefix through the durable resume path into a child the caller owns, and run the task; returns `status: "running"` + `job_id`; the outcome is recorded once in the forker's transcript as a durable `BackgroundJob` system notice (`persisted: true`) that joins a running forker's turn at its next model call or wakes an idle forker (blocks on one-shot hosts such as `rkat run` without `--keep-alive`); optional `expected_output` is guidance, not a schema; optional `max_run_secs` is an opt-in autokill; unknown arguments are rejected |
+| `council` | Take a `topic` and existing `{mob_id, member_id, role}` participants; fork them into a bounded temporary discussion mob and clean up; the sealed outcome is recorded once in the convener's transcript as a durable `BackgroundJob` system notice (blocks on one-shot hosts) |
+| `mob_retire_member` | Archive a member and its session; manage scope, or the caller owns the member (retiring a fork child also retires its own forks) |
+| `mob_check_member` | Check a member's execution status and output; manage scope, or the caller owns the member |
+| `mob_list_members` | List members of a mob; without manage scope, only the caller's own descendants |
 | `mob_list` | List all mobs |
 | `mob_wire` | Wire a local mob member to a local or typed external peer |
 | `mob_unwire` | Remove a mob wiring relationship |

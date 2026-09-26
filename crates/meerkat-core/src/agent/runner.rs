@@ -1178,7 +1178,7 @@ where
                 ToolError::from(error),
             ));
         }
-        let effective_timeout = plan.deadlines().effective_timeout();
+        let effective_timeout = plan.effective_timeout();
         tracing::debug!(
             tool = %call.name,
             execution_mode = ?plan.mode(),

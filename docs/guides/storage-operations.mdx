@@ -347,7 +347,7 @@ so references written before the rule keep hydrating.
 | Payload hashed | the exact base64 string handed to `BlobStore::put_image` | the decoded raw bytes handed to `BinaryBlobStore::put_bytes` |
 | Recipe | `sha256(canonical_media_type \|\| 0x00 \|\| base64_text)` | `sha256(media_type \|\| 0x00 \|\| raw_bytes)` |
 | Minted by | every meerkat `BlobStore` (the required addressing for external backends), inline image externalization in the runtime input path, transcript-identity digests; in MobKit, `Base64BlobStoreAdapter::put_image` and console image uploads via `put_meerkat_image_bytes` | `ObjectStoreBlobStore::put_bytes` for non-image `mobkit/blob/*` objects and the HTTP `/blobs/{id}` serving path; image blobs written before MobKit adopted meerkat's address |
-| Verified by | `verify_stored_image_blob` and image hydration recompute `content_blob_id` from the returned payload and refuse a mismatch (`BlobIdentityMismatch`) | `is_valid_blob_id` checks only the `sha256:` shape; the object path is the hex under a two-character prefix directory |
+| Verified by | `verify_stored_image_blob` and image hydration recompute `content_blob_id` from the returned payload and refuse a mismatch (`BlobIdentityMismatch`); the durable fork preflight and realtime hydration also accept a reference the store attests as its own address (see below) | `is_valid_blob_id` checks only the `sha256:` shape; the object path is the hex under a two-character prefix directory |
 
 Why the same image differs: base64 text of a byte string is not that byte
 string, so the two SHA-256 inputs differ for every non-empty image. Meerkat
@@ -377,6 +377,32 @@ code; call the owning function.
 Unification of the two schemes onto one recipe is planned as its own release,
 with a digest migration for existing manifests and repair tooling that
 re-anchors stored ids. Until then the two schemes coexist as documented here.
+
+### Store-attested legacy references
+
+A transcript can still hold an image reference in the MobKit raw-bytes form,
+written by a MobKit build that predates meerkat addressing. Meerkat's
+recomputation cannot match such a reference, so a store may vouch for it:
+`BlobStore::attest_address(blob_id, payload)` returns
+`BlobAddressAttestation::StoreAddress` when the store recomputes its own
+address recipe over exactly the returned payload and gets `blob_id`. The
+default implementation returns `Unattested`, which keeps every gate
+fail-closed. An implementation must recompute from the payload; answering from
+a lookup, or attesting unconditionally, defeats the check.
+
+Two paths consult the attestation:
+
+- The durable fork preflight (which `fork_off` and council participant forks
+  go through) verifies through
+  `verify_stored_image_blob_accepting_store_address` and re-homes an attested
+  reference: it stores the payload under meerkat's `content_blob_id` and
+  rewrites the reference in the child's copy of the transcript only. The
+  source transcript and its legacy object are left as they are.
+- Realtime image hydration accepts an attested reference.
+
+An unattested mismatch still fails with `BlobIdentityMismatch`. A MobKit store
+attests its legacy references once its blob adapter implements
+`attest_address`.
 
 ## Operational Runbook
 

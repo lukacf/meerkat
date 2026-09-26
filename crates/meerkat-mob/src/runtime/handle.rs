@@ -3533,6 +3533,41 @@ impl<R: std::fmt::Debug> std::error::Error for BoundedTurnWaitError<R> {}
 /// Fork children are deliberately NOT guarded: they belong to their forker,
 /// which can observe and retire them, and they end only on their own
 /// failure or an opt-in `max_run` (see [`MobHandle::fork_member_then_run_detached`]).
+#[cfg(test)]
+type ForkAdmissionPause = (oneshot::Sender<()>, oneshot::Receiver<()>);
+
+#[cfg(test)]
+static FORK_ADMISSION_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<AgentIdentity, ForkAdmissionPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Pause the next fork admission of `source` before it resolves the source
+/// session: returns (entered, release).
+#[cfg(test)]
+pub(in crate::runtime) fn pause_fork_admission_for_test(
+    source: AgentIdentity,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    FORK_ADMISSION_PAUSES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(source, (entered_tx, release_rx));
+    (entered_rx, release_tx)
+}
+
+#[cfg(test)]
+async fn pause_fork_admission_if_requested(source: &AgentIdentity) {
+    let pause = FORK_ADMISSION_PAUSES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(source);
+    if let Some((entered, release)) = pause {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
+}
+
 struct ProvisionedChildRetireOnDrop {
     handle: Option<MobHandle>,
     identity: AgentIdentity,
@@ -13128,23 +13163,45 @@ impl MobHandle {
         source_admission: meerkat_core::DurableForkSourceAdmission,
     ) -> Result<ForkMemberResult, MobError> {
         let fork = self
-            .fork_source_session(source_identity, &member, message_count, source_admission)
+            .fork_source_session(
+                source_identity,
+                &member,
+                message_count,
+                source_admission,
+                None,
+            )
             .await?;
         self.seat_forked_member(member, fork).await
     }
 
     /// Admit a fork of `source_identity` for `member` and persist the forked
-    /// transcript. Nothing is seated yet.
+    /// transcript. Nothing is seated yet. `caller_turn_job_owner` is the
+    /// owner session of a job forked in the source's own turn: it must be the
+    /// source session this admission resolves (the one the transcript is
+    /// forked from), or the fork is refused with
+    /// [`MobError::ForkJobOwnerNotSource`] before anything is forked.
     async fn fork_source_session(
         &self,
         source_identity: &AgentIdentity,
         member: &SpawnMemberSpec,
         message_count: Option<usize>,
         source_admission: meerkat_core::DurableForkSourceAdmission,
+        caller_turn_job_owner: Option<&meerkat_core::SessionId>,
     ) -> Result<meerkat_core::SessionForkResult, MobError> {
+        #[cfg(test)]
+        pause_fork_admission_if_requested(source_identity).await;
         let (source_session_id, fork_target) = self
             .admit_fork_member(source_identity, member, source_admission)
             .await?;
+        if let Some(owner_session_id) = caller_turn_job_owner
+            && owner_session_id != &source_session_id
+        {
+            return Err(MobError::ForkJobOwnerNotSource {
+                source_member_id: source_identity.clone(),
+                source_session_id,
+                owner_session_id: owner_session_id.clone(),
+            });
+        }
         if source_admission == meerkat_core::DurableForkSourceAdmission::Quiescent {
             self.refuse_fork_source_with_admitted_work(source_identity, &source_session_id)
                 .await?;
@@ -13276,19 +13333,12 @@ impl MobHandle {
         let result_label: String = result_label.into();
         // A fork in its source's own turn is its source's: the re-link after
         // a restart relies on that owner (a job bound elsewhere would be
-        // taken for an owner that is gone). Refused before any fork or seat.
-        if source_admission == meerkat_core::DurableForkSourceAdmission::CallerTurn
-            && let Some(job) = job.as_ref()
-            && let Some(source_session_id) = self.resolve_bridge_session_id(source_identity).await
-            && source_session_id != job.owner_session_id
-        {
-            return Err(MobError::ForkJobOwnerNotSource {
-                source_member_id: source_identity.clone(),
-                source_session_id,
-                owner_session_id: job.owner_session_id.clone(),
-            }
-            .into());
-        }
+        // taken for an owner that is gone). The admission checks it against
+        // the source session it admits, before anything is forked.
+        let caller_turn_job_owner = job
+            .as_ref()
+            .filter(|_| source_admission == meerkat_core::DurableForkSourceAdmission::CallerTurn)
+            .map(|job| job.owner_session_id.clone());
         if let Some(job) = job {
             member.fork_job = Some(ForkJobRecord {
                 job_id: job.job_id,
@@ -13331,7 +13381,13 @@ impl MobHandle {
             member.spawned_by = Some(source_identity.clone());
         }
         let session_fork = self
-            .fork_source_session(source_identity, &member, message_count, source_admission)
+            .fork_source_session(
+                source_identity,
+                &member,
+                message_count,
+                source_admission,
+                caller_turn_job_owner.as_ref(),
+            )
             .await?;
         // From the child's spawn command on, the actor seats the child whether
         // or not this call is still polled, and a caller on a relieved task is

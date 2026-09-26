@@ -22011,6 +22011,75 @@ async fn a_caller_turn_fork_refuses_a_job_bound_to_another_session() {
     let _ = run.outcome().await;
 }
 
+/// The CallerTurn owner check uses the source session the fork's admission
+/// resolves, the one the transcript is forked from: a source rebound between
+/// the call and its admission (a respawn) is checked against its new
+/// session, so a job bound to the old one is refused and nothing is forked
+/// (lifecycle review: a separate earlier read validated the old session
+/// while the fork used the successor's).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_turn_fork_checks_the_job_owner_against_the_admitted_source_session() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("admitted-owner-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let child = AgentIdentity::from("admitted-owner-child");
+    let old_session = handle
+        .resolve_bridge_session_id(&a)
+        .await
+        .expect("source session");
+    let (entered, release) = super::handle::pause_fork_admission_for_test(a.clone());
+    let fork = tokio::spawn({
+        let (handle, a, child, old_session) = (
+            handle.clone(),
+            a.clone(),
+            child.clone(),
+            old_session.clone(),
+        );
+        async move {
+            handle
+                .fork_member_then_run_detached(
+                    &a,
+                    bounded_fork_child_spec(&child),
+                    None,
+                    "fork_child_result",
+                    256,
+                    meerkat_core::DurableForkSourceAdmission::CallerTurn,
+                    None,
+                    Some(ForkJobBinding {
+                        job_id: "job-bound-before-the-respawn".to_string(),
+                        owner_session_id: old_session,
+                    }),
+                )
+                .await
+                .map(|(fork, _run)| fork.agent_identity)
+        }
+    });
+    entered.await.expect("the fork reached its admission");
+    handle
+        .respawn(a.clone(), None)
+        .await
+        .expect("respawn the source");
+    let new_session = handle
+        .resolve_bridge_session_id(&a)
+        .await
+        .expect("successor session");
+    assert_ne!(new_session, old_session, "the respawn rebinds the source");
+    let _ = release.send(());
+    match fork.await.expect("fork task") {
+        Err(BoundedMemberRunError::Admission(MobError::ForkJobOwnerNotSource {
+            source_session_id,
+            owner_session_id,
+            ..
+        })) => {
+            assert_eq!(source_session_id, new_session, "checked at admission");
+            assert_eq!(owner_session_id, old_session);
+        }
+        other => panic!("expected ForkJobOwnerNotSource, got {other:?}"),
+    }
+    assert!(handle.get_member(&child).await.unwrap().is_none());
+}
+
 /// A detached fork call dropped while its child's spawn is in flight leaves
 /// no child behind (lifecycle review: a relieved fork_off task is aborted at
 /// its next await, and the actor seats the child anyway). The seat finishes

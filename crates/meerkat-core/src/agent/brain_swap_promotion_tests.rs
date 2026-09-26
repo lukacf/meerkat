@@ -495,8 +495,9 @@ async fn a_run_that_stages_nothing_commits_nothing() {
     );
 }
 
-/// An agent with no staging slot wired cannot commit anything, which is the
-/// standalone/WASM shape: the tool is never registered there either.
+/// An agent with no staging slot wired cannot commit anything. Explicit
+/// standalone builders and the browser profile omit the durable handoff host
+/// and therefore do not register its staging tool.
 #[tokio::test]
 async fn an_agent_without_a_staging_slot_commits_nothing() {
     let calls = Arc::new(std::sync::Mutex::new(Vec::new()));

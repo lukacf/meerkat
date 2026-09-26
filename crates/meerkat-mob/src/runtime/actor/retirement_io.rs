@@ -2784,14 +2784,19 @@ impl MobActor {
             .await;
             return;
         }
-        let exact_local_target = continuation.preserve_topology
-            && matches!(continuation.entry.member_ref, MemberRef::Session { .. })
+        let exact_local_target = continuation.entry.member_ref.bridge_session_id().is_some()
+            && self
+                .dsl_authority
+                .state()
+                .identity_to_runtime
+                .get(&identity)
+                == Some(&runtime)
             && self
                 .dsl_authority
                 .state()
                 .member_session_bindings
                 .get(&identity)
-                == session.as_ref()
+                .is_none_or(|bound| Some(bound) == session.as_ref())
             && self
                 .dsl_authority
                 .state()

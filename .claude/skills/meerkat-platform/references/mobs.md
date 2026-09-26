@@ -382,7 +382,7 @@ signature verification still runs and warns that the signer is unknown.
 
 ### WASM browser surface
 
-The web build produces a real meerkat surface — same agent loop, providers, and streaming as CLI/RPC/REST.
+The web build is a surface over the shared `MeerkatMachine`. Direct sessions and mob members use `SessionOwned` bindings for the same admission, keep-alive, cancellation, terminality, and streaming semantics as other runtime-backed surfaces.
 
 **How it works:**
 - `meerkat-core` + `meerkat-client` compile to wasm32 via `tokio_with_wasm` (drop-in tokio replacement)
@@ -390,9 +390,13 @@ The web build produces a real meerkat surface — same agent loop, providers, an
 - `web-time` replaces `std::time` types (SystemTime, Instant) for browser compatibility
 - Anthropic CORS header added automatically on wasm32 targets
 
-**Available in browser:** agent loop, all LLM providers, sessions, JSON schema validation, budget enforcement, events, skills types, MCP config types, tool/compactor/memory traits.
-
-**Not available in browser:** filesystem config loading (programmatic config instead), stdio MCP servers (no processes), MCP protocol client (rmcp depends on tokio/mio — types work but connections blocked), shell tool, file-based persistence.
+The shared `BrowserRuntimeProfile` controls availability. In-memory sessions,
+foreground execution, keep-alive, in-process comms, transient turn context, and
+embedded skills are supported. Excluded capabilities include durable storage,
+background execution after page teardown, host processes, configured hooks,
+runtime skill discovery, MCP clients, TCP/UDS comms, and remote placement.
+Requests for exclusions return `CAPABILITY_UNAVAILABLE` with typed clearing
+actions; inspect the profile for the complete current capability set.
 
 **WASM API:**
 See the meerkat-wasm skill (`references/api_surface.md`) for the authoritative export list. Key mob-related exports:

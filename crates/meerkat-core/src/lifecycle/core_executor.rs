@@ -1800,11 +1800,12 @@ pub trait CoreExecutor: Send + Sync {
     /// Optional endpoint for realizing committed cross-run handoffs before the
     /// next input is dequeued.
     ///
-    /// Returning `None` is the correct answer for every executor that cannot
-    /// own durable cross-run state — standalone, ephemeral, and WASM surfaces
-    /// included. It is an ownership declaration, not a stub: such an executor
-    /// also never advertises the tool that stages the handoff, so there is
-    /// nothing committed for it to miss.
+    /// Returning `None` declares that this executor has no durable cross-run
+    /// handoff host. This includes explicit standalone executors and the
+    /// canonical browser runtime's in-memory executor. Such an executor also
+    /// never advertises the tool that stages the handoff, so there is nothing
+    /// committed for it to miss. Runtime bindings alone do not supply durable
+    /// handoff realization.
     fn pre_dequeue_handle(&self) -> Option<Arc<dyn CoreExecutorPreDequeueHandle>> {
         None
     }

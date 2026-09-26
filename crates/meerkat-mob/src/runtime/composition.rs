@@ -436,6 +436,10 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
         &self.instance_id
     }
 
+    fn transport_is_closed(&self) -> Option<bool> {
+        Some(self.command_tx.is_closed())
+    }
+
     async fn receive_signal(
         &self,
         variant: SignalVariantId,

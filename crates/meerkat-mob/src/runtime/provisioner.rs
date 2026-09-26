@@ -1731,6 +1731,14 @@ pub trait MobProvisioner: Send + Sync {
         ops_registry: Arc<dyn OpsLifecycleRegistry>,
     ) -> Result<(), MobError>;
 
+    /// Process delivery endpoint owned by this provisioner's mob actor.
+    #[cfg(feature = "runtime-adapter")]
+    fn composition_signal_dispatcher(
+        &self,
+    ) -> Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher> {
+        None
+    }
+
     /// Settle the adapter-local operation binding of the session an explicit
     /// resume just repointed a member away from (its snapshot was lost and a
     /// persisted successor session was selected).
@@ -10536,6 +10544,11 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for SessionBackend {
+    fn composition_signal_dispatcher(
+        &self,
+    ) -> Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher> {
+        self.composition_signal_dispatcher.clone()
+    }
     async fn record_reload_publication(
         &self,
         member_ref: &MemberRef,
@@ -14068,6 +14081,11 @@ impl MultiBackendProvisioner {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for MultiBackendProvisioner {
+    fn composition_signal_dispatcher(
+        &self,
+    ) -> Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher> {
+        self.session.composition_signal_dispatcher.clone()
+    }
     async fn record_reload_publication(
         &self,
         member_ref: &MemberRef,

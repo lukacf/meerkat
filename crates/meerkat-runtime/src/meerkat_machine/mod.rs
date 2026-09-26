@@ -3573,8 +3573,91 @@ impl PreparedSessionMaterialization {
         if let Some(error) = entry.dsl_mutation_blocked_by_unregister(self.session_id()) {
             return Err(error);
         }
+        if entry
+            .composition_signal_dispatcher
+            .as_ref()
+            .is_some_and(|current| {
+                !Arc::ptr_eq(current, &dispatcher) && current.transport_is_closed() != Some(true)
+            })
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "prepared composition cannot replace an open or unknown delivery owner"
+                    .into(),
+            });
+        }
         entry.composition_signal_dispatcher = Some(dispatcher);
         entry.composition_materialization_claim_id = Some(self.claim_id);
+        Ok(())
+    }
+
+    /// Consume an exact preparation claim for an unbound recovery endpoint.
+    /// Generated binding absence is checked in the same critical section as
+    /// installation, so a concurrent placement cannot change the target.
+    pub async fn commit_unbound_composition_endpoint(
+        &mut self,
+        dispatcher: composition::MeerkatCompositionSignalDispatcher,
+    ) -> Result<(), RuntimeDriverError> {
+        let _guard = self
+            .machine
+            .lock_current_durability_ready_session_mutation_gate(self.session_id())
+            .await?;
+        let authority = crate::validated_session_runtime_bindings_authority(&self.bindings)
+            .map_err(|error| RuntimeDriverError::StaleAuthority {
+                reason: error.to_string(),
+            })?;
+        let mut sessions = self.machine.sessions.write().await;
+        let entry = sessions.get_mut(self.session_id()).ok_or_else(|| {
+            RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery registration disappeared".into(),
+            }
+        })?;
+        if let Some(error) = entry.dsl_mutation_blocked_by_unregister(self.session_id()) {
+            return Err(error);
+        }
+        // Synchronous actor materialization also takes DSL before claim.
+        let dsl = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut claim = entry
+            .materialization_claim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = dsl.state();
+        if !self.armed
+            || entry.epoch_id != *self.bindings.epoch_id()
+            || !Arc::ptr_eq(&entry.materialization_claim_state, &self.claim_state)
+            || !Arc::ptr_eq(&entry.dsl_authority, &authority.dsl_authority)
+            || !Arc::ptr_eq(&entry.handle_teardown_gate, &authority.teardown_gate)
+            || entry.physical_attachment_is_live()
+            || entry.provisional_materialization_claim_id.is_some()
+            || state.active_runtime_id.is_some()
+            || state.active_fence_token.is_some()
+            || state.active_runtime_generation.is_some()
+            || dispatcher.transport_is_closed() != Some(false)
+            || entry
+                .composition_signal_dispatcher
+                .as_ref()
+                .is_some_and(|current| {
+                    !Arc::ptr_eq(current, &dispatcher)
+                        && current.transport_is_closed() != Some(true)
+                })
+            || !claim.exact_claim_is(
+                self.claim_id,
+                &[crate::RuntimeActorMaterializationClaimPhase::Prepared],
+            )
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery requires its exact unbound prepared claim and delivery custody".into(),
+            });
+        }
+        entry.composition_signal_dispatcher = Some(dispatcher);
+        entry.composition_materialization_claim_id = None;
+        claim.current = None;
+        claim.phase = crate::RuntimeActorMaterializationClaimPhase::Vacant;
+        claim.rollback_registration_available = false;
+        claim.changed.notify_waiters();
+        self.armed = false;
         Ok(())
     }
 
@@ -9671,6 +9754,114 @@ impl MeerkatMachine {
             .await
     }
 
+    /// Transfer delivery custody for an exact recovered member binding after
+    /// its old composition actor has permanently closed. A cold unbound entry
+    /// returns false and still requires an exclusive Prepared claim.
+    pub async fn recover_composition_signal_dispatcher(
+        &self,
+        registration: &RuntimeSessionRegistrationWitness,
+        runtime_id: dsl::AgentRuntimeId,
+        fence: dsl::FenceToken,
+        generation: Option<dsl::Generation>,
+        dispatcher: composition::MeerkatCompositionSignalDispatcher,
+    ) -> Result<bool, RuntimeDriverError> {
+        let session_id = registration.session_id();
+        let _guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let mut sessions = self.sessions.write().await;
+        let entry =
+            sessions
+                .get_mut(session_id)
+                .ok_or_else(|| RuntimeDriverError::StaleAuthority {
+                    reason: "composition recovery registration disappeared".into(),
+                })?;
+        if !registration.belongs_to(self)
+            || !registration.matches_entry(entry)
+            || registration.epoch_id() != &entry.epoch_id
+            || dispatcher.transport_is_closed() != Some(false)
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery requires its current registration and open receiver"
+                    .into(),
+            });
+        }
+        if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
+            return Err(error);
+        }
+        // Actor materialization takes the generated authority before its
+        // process claim even outside M. Keep the same order here.
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let claim = entry
+            .materialization_claim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(
+            claim.phase,
+            crate::RuntimeActorMaterializationClaimPhase::Vacant
+                | crate::RuntimeActorMaterializationClaimPhase::RetainedActor
+        ) {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery cannot take an unfinished materialization claim"
+                    .into(),
+            });
+        }
+        let state = authority.state();
+        if state.active_runtime_id.is_none()
+            && state.active_fence_token.is_none()
+            && state.active_runtime_generation.is_none()
+        {
+            if entry.physical_attachment_is_live()
+                || entry.provisional_materialization_claim_id.is_some()
+                || entry
+                    .composition_signal_dispatcher
+                    .as_ref()
+                    .is_some_and(|endpoint| {
+                        !Arc::ptr_eq(endpoint, &dispatcher)
+                            && endpoint.transport_is_closed() != Some(true)
+                    })
+            {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: "unbound composition recovery has existing physical custody".into(),
+                });
+            }
+            return Ok(false);
+        }
+        if state.active_runtime_id.as_ref() != Some(&runtime_id)
+            || state.active_fence_token != Some(fence)
+            || state.active_runtime_generation != generation
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery does not match the generated member binding".into(),
+            });
+        }
+        if entry
+            .composition_signal_dispatcher
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &dispatcher))
+        {
+            return Ok(true);
+        }
+        if entry
+            .composition_signal_dispatcher
+            .as_ref()
+            .is_none_or(|current| current.transport_is_closed() != Some(true))
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery requires proof the previous receiver is closed"
+                    .into(),
+            });
+        }
+        drop(authority);
+        drop(claim);
+        entry.composition_signal_dispatcher = Some(dispatcher);
+        entry.composition_materialization_claim_id = None;
+        Ok(true)
+    }
+
     pub(crate) async fn apply_routed_meerkat_input_with_signal_dispatcher(
         &self,
         session_id: &SessionId,
@@ -9682,8 +9873,11 @@ impl MeerkatMachine {
             .await
             .ok_or_else(|| {
                 dsl_authority::DslTransitionRefusal::other(
-                    "session_authority_unavailable",
-                    format!("session `{session_id}` has no runtime registration"),
+                    "routed_session_not_durability_ready",
+                    format!(
+                        "session `{session_id}` cannot accept routed input until its persistent runtime is cold reloaded: {}",
+                        RuntimeDriverError::NotReady { state: RuntimeState::Destroyed }
+                    ),
                 )
             })?;
         let _gate_guard = self

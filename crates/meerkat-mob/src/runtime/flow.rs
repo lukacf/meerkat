@@ -2538,10 +2538,18 @@ async fn validate_schema_ref(
                 }
             })?;
             #[cfg(target_arch = "wasm32")]
-            return Err(MobError::SchemaValidation {
-                step_id: step_id.clone(),
-                message: format!("file-based schema ref '{name}' is not supported on wasm32"),
-            });
+            {
+                let _ = name;
+                return meerkat_contracts::capability::BrowserRuntimeProfile
+                    .require(
+                        meerkat_contracts::capability::RuntimeProfileCapability::FileSchemaResolution,
+                    )
+                    .map_err(|refusal| {
+                        MobError::SessionError(meerkat_core::SessionError::CapabilityUnavailable(
+                            refusal,
+                        ))
+                    });
+            }
             #[cfg(not(target_arch = "wasm32"))]
             {
                 serde_json::from_str(&raw).map_err(|error| MobError::SchemaValidation {

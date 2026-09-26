@@ -283,6 +283,9 @@ Excluded requests fail with `CAPABILITY_UNAVAILABLE`. The error's `data`
 contains the profile, capability, and a typed `clearing_action`, such as
 `use_host_process_runtime` or `use_local_member_placement`. These decisions
 come from the shared capability profile and apply to direct and mob builds.
+File-backed mob skills use the `runtime_skills` refusal. Flow schemas that name
+a file use `file_schema_resolution` with `use_inline_schema`; provide a JSON
+schema object encoded in `expected_schema_ref` to run that flow in the browser.
 
 ## Next step
 

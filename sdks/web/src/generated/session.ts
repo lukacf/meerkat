@@ -33,9 +33,9 @@ export type QuarantinedSkillIdentity = {
   source_uuid: SourceUuid;
 };
 
-export type RuntimeProfileCapability = "in_memory_persistence" | "durable_persistence" | "foreground_execution" | "background_execution" | "keep_alive" | "comms" | "transient_turn_context" | "shell" | "process_spawn" | "mcp_stdio" | "remote_member_placement" | "hooks" | "runtime_skills" | "embedded_skills" | "schedule" | "work_graph" | "semantic_memory" | "image_generation" | "fallback_web_search" | "mcp_client" | "tcp_comms" | "uds_comms";
+export type RuntimeProfileCapability = "in_memory_persistence" | "durable_persistence" | "foreground_execution" | "background_execution" | "keep_alive" | "comms" | "transient_turn_context" | "shell" | "process_spawn" | "mcp_stdio" | "remote_member_placement" | "hooks" | "runtime_skills" | "file_schema_resolution" | "embedded_skills" | "schedule" | "work_graph" | "semantic_memory" | "image_generation" | "fallback_web_search" | "mcp_client" | "tcp_comms" | "uds_comms";
 
-export type RuntimeProfileClearingAction = "use_persistent_runtime" | "use_background_runtime" | "use_host_process_runtime" | "use_local_member_placement" | "use_hook_runtime" | "use_skill_runtime" | "use_schedule_runtime" | "use_work_graph_runtime" | "use_semantic_memory_runtime" | "use_image_generation_runtime" | "use_web_search_runtime" | "use_mcp_runtime" | "use_in_process_comms";
+export type RuntimeProfileClearingAction = "use_persistent_runtime" | "use_background_runtime" | "use_host_process_runtime" | "use_local_member_placement" | "use_hook_runtime" | "use_skill_runtime" | "use_inline_schema" | "use_schedule_runtime" | "use_work_graph_runtime" | "use_semantic_memory_runtime" | "use_image_generation_runtime" | "use_web_search_runtime" | "use_mcp_runtime" | "use_in_process_comms";
 
 export type RuntimeProfileId = "browser";
 

@@ -2146,9 +2146,9 @@ pub trait SessionAgent: Send {
     /// observes canonical session-truth advancement as a typed effect
     /// instead of polling a watch channel.
     ///
-    /// Standalone agents (WASM, ephemeral tests) return `None`; the task
-    /// then skips the emit and the typed effect simply never fires —
-    /// which is correct, there is nothing to refresh on those paths.
+    /// Explicit standalone agents and tests without runtime bindings return
+    /// `None`; the task has no runtime context observer to notify. Browser
+    /// agents use `SessionOwned` bindings and expose the canonical handle.
     fn session_context_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::handles::SessionContextHandle>> {

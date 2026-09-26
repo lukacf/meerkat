@@ -1322,10 +1322,15 @@ mod tests {
     #[derive(Default)]
     struct RecordingSignalSurface {
         log: tokio::sync::Mutex<Vec<(SignalVariantId, Vec<(FieldId, OwnedFieldValue)>)>>,
+        closed: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait]
     impl SignalConsumerSurface for RecordingSignalSurface {
+        fn transport_is_closed(&self) -> Option<bool> {
+            Some(self.closed.load(std::sync::atomic::Ordering::Acquire))
+        }
+
         fn instance_id(&self) -> &MachineInstanceId {
             static ID: OnceLock<MachineInstanceId> = OnceLock::new();
             ID.get_or_init(|| MachineInstanceId::parse("mob").expect("canonical instance id"))
@@ -1385,6 +1390,282 @@ mod tests {
         )
         .await
         .expect("composed runtime binding");
+    }
+
+    #[tokio::test]
+    async fn composition_recovery_requires_exact_binding_and_closed_prior_receiver() {
+        use std::sync::atomic::Ordering;
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session = SessionId::new();
+        let old = Arc::new(RecordingSignalSurface::default());
+        let old_dispatcher = recording_dispatcher(old.clone());
+        machine
+            .register_session(session.clone())
+            .await
+            .expect("cold registration");
+        let mut prepared = machine
+            .prepare_local_session_materialization(session.clone())
+            .await
+            .expect("exact recovery claim");
+        prepared
+            .commit_unbound_composition_endpoint(old_dispatcher.clone())
+            .await
+            .expect("commit delivery custody");
+        bind_composed_session(&machine, &session, &old_dispatcher, "recovered-runtime").await;
+        let witness = machine
+            .current_session_registration_witness(&session)
+            .await
+            .expect("exact registration");
+        let new = Arc::new(RecordingSignalSurface::default());
+        let new_dispatcher = recording_dispatcher(new.clone());
+        let recover = |dispatcher: MeerkatCompositionSignalDispatcher, runtime: &str| {
+            let runtime = mm_dsl::AgentRuntimeId::from(runtime);
+            machine.recover_composition_signal_dispatcher(
+                &witness,
+                runtime,
+                mm_dsl::FenceToken::from(19),
+                Some(mm_dsl::Generation::from(0)),
+                dispatcher,
+            )
+        };
+        assert!(
+            recover(new_dispatcher.clone(), "recovered-runtime")
+                .await
+                .is_err(),
+            "live old actor keeps custody"
+        );
+        old.closed.store(true, Ordering::Release);
+        assert!(
+            recover(new_dispatcher.clone(), "foreign-runtime")
+                .await
+                .is_err(),
+            "tuple remains authoritative"
+        );
+        let cancelled = Arc::new(RecordingSignalSurface::default());
+        cancelled.closed.store(true, Ordering::Release);
+        assert!(
+            recover(recording_dispatcher(cancelled), "recovered-runtime")
+                .await
+                .is_err(),
+            "cancelled incoming actor cannot claim"
+        );
+        assert!(
+            recover(new_dispatcher.clone(), "recovered-runtime")
+                .await
+                .expect("closed actor recovery")
+        );
+        assert!(
+            recover(old_dispatcher.clone(), "recovered-runtime")
+                .await
+                .is_err(),
+            "old actor cannot reclaim successor"
+        );
+        let old_consumer =
+            MeerkatConsumerSurface::pinned(machine.clone(), session.clone(), old_dispatcher);
+        let retire_fields = vec![(fld("session_id"), OwnedFieldValue::Str(session.to_string()))];
+        let refusal = old_consumer
+            .apply_routed_input(iv("Retire"), retire_fields.clone())
+            .await
+            .expect_err("old endpoint cannot retire recovered binding");
+        assert_eq!(refusal.error_code(), "composition_endpoint_conflict");
+        let refusal = old_consumer
+            .apply_routed_input(
+                iv("PrepareBindings"),
+                composed_binding_fields(&session, "recovered-runtime"),
+            )
+            .await
+            .expect_err("old endpoint cannot prepare recovered binding");
+        assert_eq!(refusal.error_code(), "composition_endpoint_conflict");
+        assert!(
+            recover(new_dispatcher.clone(), "foreign-runtime")
+                .await
+                .is_err(),
+            "same endpoint still requires exact generated tuple"
+        );
+        let new_consumer =
+            MeerkatConsumerSurface::pinned(machine.clone(), session.clone(), new_dispatcher);
+        new_consumer
+            .apply_routed_input(iv("Retire"), retire_fields)
+            .await
+            .expect("recovered retire");
+        assert_eq!(
+            new.log.lock().await.len(),
+            1,
+            "retired signal reaches recovered actor"
+        );
+    }
+
+    #[tokio::test]
+    async fn unbound_composition_recovery_keeps_exclusive_prepared_custody() {
+        use std::sync::atomic::Ordering;
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session = SessionId::new();
+        machine
+            .register_session(session.clone())
+            .await
+            .expect("cold registration");
+        let witness = machine
+            .current_session_registration_witness(&session)
+            .await
+            .expect("registration");
+        let first = Arc::new(RecordingSignalSurface::default());
+        let first_dispatcher = recording_dispatcher(first.clone());
+        assert!(
+            !machine
+                .recover_composition_signal_dispatcher(
+                    &witness,
+                    mm_dsl::AgentRuntimeId::from("unbound"),
+                    mm_dsl::FenceToken::from(1),
+                    Some(mm_dsl::Generation::from(0)),
+                    first_dispatcher.clone(),
+                )
+                .await
+                .expect("unbound requires prepared claim")
+        );
+        let mut prepared = machine
+            .prepare_local_session_materialization_for_registration(witness.clone())
+            .await
+            .expect("exact prepare");
+        prepared
+            .commit_unbound_composition_endpoint(first_dispatcher)
+            .await
+            .expect("commit endpoint");
+        let second = recording_dispatcher(Arc::new(RecordingSignalSurface::default()));
+        let mut competing = machine
+            .prepare_local_session_materialization_for_registration(witness.clone())
+            .await
+            .expect("unserved claim");
+        assert!(
+            competing
+                .commit_unbound_composition_endpoint(second.clone())
+                .await
+                .is_err(),
+            "open recovery endpoint cannot be stolen"
+        );
+        competing
+            .rollback_now()
+            .await
+            .expect("release failed competing claim");
+        first.closed.store(true, Ordering::Release);
+        let mut retry = machine
+            .prepare_local_session_materialization_for_registration(witness.clone())
+            .await
+            .expect("cancelled actor retry");
+        retry
+            .commit_unbound_composition_endpoint(second)
+            .await
+            .expect("commit retried endpoint");
+        machine
+            .unregister_session_registration_until_terminal_if_current(&witness)
+            .await
+            .expect("remove exact registration");
+        machine
+            .register_session(session)
+            .await
+            .expect("replacement registration");
+        assert!(
+            machine
+                .prepare_local_session_materialization_for_registration(witness)
+                .await
+                .is_err(),
+            "old recovery witness cannot touch replacement"
+        );
+    }
+
+    #[tokio::test]
+    async fn unbound_composition_recovery_rechecks_tuple_before_endpoint_installation() {
+        use std::sync::atomic::Ordering;
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session = SessionId::new();
+        machine
+            .register_session(session.clone())
+            .await
+            .expect("cold registration");
+        let bindings = machine
+            .prepare_local_session_bindings(session.clone())
+            .await
+            .expect("bindings");
+        let witness = machine
+            .session_registration_witness_for_bindings(&bindings)
+            .await
+            .expect("exact bindings witness");
+        let old_dispatcher = recording_dispatcher(Arc::new(RecordingSignalSurface::default()));
+        assert!(
+            !machine
+                .recover_composition_signal_dispatcher(
+                    &witness,
+                    mm_dsl::AgentRuntimeId::from("old-runtime"),
+                    mm_dsl::FenceToken::from(19),
+                    Some(mm_dsl::Generation::from(0)),
+                    old_dispatcher.clone(),
+                )
+                .await
+                .expect("initially unbound")
+        );
+
+        let replacement = Arc::new(RecordingSignalSurface::default());
+        let replacement_dispatcher = recording_dispatcher(replacement.clone());
+        let mut competing = machine
+            .prepare_local_session_materialization_for_registration(witness.clone())
+            .await
+            .expect("competing preparation");
+        competing
+            .commit_unbound_composition_endpoint(replacement_dispatcher.clone())
+            .await
+            .expect("competing endpoint");
+        bind_composed_session(
+            &machine,
+            &session,
+            &replacement_dispatcher,
+            "replacement-runtime",
+        )
+        .await;
+        replacement.closed.store(true, Ordering::Release);
+
+        let mut stale = machine
+            .prepare_local_session_materialization_for_registration(witness)
+            .await
+            .expect("same registration claim");
+        stale
+            .commit_unbound_composition_endpoint(old_dispatcher.clone())
+            .await
+            .expect_err("changed tuple refuses before endpoint mutation");
+        stale.rollback_now().await.expect("release stale claim");
+        let refusal =
+            MeerkatConsumerSurface::pinned(machine.clone(), session.clone(), old_dispatcher)
+                .apply_routed_input(
+                    iv("Retire"),
+                    vec![(fld("session_id"), OwnedFieldValue::Str(session.to_string()))],
+                )
+                .await
+                .expect_err("stale recovery has no custody");
+        assert_eq!(refusal.error_code(), "composition_endpoint_conflict");
+        assert_eq!(
+            machine
+                .session_dsl_state(&session)
+                .await
+                .expect("state")
+                .active_runtime_id,
+            Some(mm_dsl::AgentRuntimeId::from("replacement-runtime"))
+        );
+        // A failure must preserve the predecessor endpoint, including its
+        // ability to authorize a later exact closed-receiver handoff.
+        let current = machine
+            .current_session_registration_witness(&session)
+            .await
+            .expect("current witness");
+        assert!(
+            machine
+                .recover_composition_signal_dispatcher(
+                    &current,
+                    mm_dsl::AgentRuntimeId::from("replacement-runtime"),
+                    mm_dsl::FenceToken::from(19),
+                    Some(mm_dsl::Generation::from(0)),
+                    recording_dispatcher(Arc::new(RecordingSignalSurface::default())),
+                )
+                .await
+                .expect("preserved predecessor proves later handoff")
+        );
     }
 
     fn composed_binding_fields(

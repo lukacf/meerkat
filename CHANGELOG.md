@@ -96,7 +96,9 @@ them.
 
 - Browser direct and mob sessions share runtime admission, keepalive, comms
   drain, terminal publication, cancellation, and teardown. Browser exclusions
-  are enforced by the shared capability profile before resource allocation.
+  are enforced by the shared capability profile before the requested work
+  executes. File-backed mob skills and flow schemas return typed refusals;
+  schema callers can provide inline JSON instead.
 
 ### Fixed
 

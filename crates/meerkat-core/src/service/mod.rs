@@ -892,10 +892,11 @@ pub struct SessionBuildOptions {
     /// Runtime build mode — determines how the factory resolves the ops lifecycle
     /// registry and completion feed.
     ///
-    /// - `SessionOwned(bindings)`: runtime-backed build with epoch-owned
-    ///   bindings. Factory validates `bindings.session_id == session.id()`.
-    /// - `StandaloneEphemeral`: factory creates local-only ephemeral bindings.
-    ///   Suitable for WASM, tests, embedded, and standalone surfaces.
+    /// - `SessionOwned(bindings)`: runtime-backed build, including Web/WASM,
+    ///   with epoch-owned bindings. Factory validates
+    ///   `bindings.session_id == session.id()`.
+    /// - `StandaloneEphemeral`: factory creates local-only ephemeral bindings
+    ///   for tests and explicit standalone Rust embeddings.
     pub runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode,
     /// Runtime-stamped metadata for an eager first turn.
     ///

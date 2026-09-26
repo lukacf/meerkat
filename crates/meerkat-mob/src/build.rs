@@ -992,9 +992,14 @@ async fn assemble_system_prompt(
                         sections.push(content);
                     }
                     #[cfg(target_arch = "wasm32")]
-                    return Err(MobError::Internal(format!(
-                        "file-based skill path '{path}' is not supported on wasm32"
-                    )));
+                    {
+                        let _ = path;
+                        meerkat_contracts::capability::BrowserRuntimeProfile
+                            .require(
+                                meerkat_contracts::capability::RuntimeProfileCapability::RuntimeSkills,
+                            )
+                            .map_err(meerkat_core::SessionError::CapabilityUnavailable)?;
+                    }
                 }
             }
         }

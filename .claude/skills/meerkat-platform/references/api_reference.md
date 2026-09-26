@@ -851,7 +851,11 @@ See the complete `with_mob_tools` handoff in `mobs.md`.
 
 ### Runtime build mode
 
-All runtime-backed surfaces (CLI, RPC, REST, MCP) must use `SessionOwned` bindings. Standalone/test/WASM surfaces use `StandaloneEphemeral`.
+All runtime-backed surfaces (CLI, RPC, REST, MCP, and Web/WASM) use
+`SessionOwned` bindings. Explicit standalone Rust embeddings and tests may use
+`StandaloneEphemeral`. Browser direct sessions and mob members share the
+cached `MeerkatMachine` adapter with in-memory storage; persistence is a profile
+capability, not a choice of session authority.
 
 ```rust
 use meerkat::{RuntimeBuildMode, SessionRuntimeBindings};
@@ -866,14 +870,20 @@ let build = SessionBuildOptions {
     ..Default::default()
 };
 
-// Standalone/test/WASM: explicit opt-in (also the Default)
+// Standalone Rust embedding or test: explicit choice (also the Default)
 let build = SessionBuildOptions {
     runtime_build_mode: RuntimeBuildMode::StandaloneEphemeral,
     ..Default::default()
 };
 ```
 
-`prepare_bindings()` is the single canonical helper: it registers the session, mints the epoch, and returns `SessionRuntimeBindings { session_id, epoch_id, ops_lifecycle, cursor_state }`. The factory validates `bindings.session_id == session.id()` on `SessionOwned` builds.
+`prepare_bindings()` returns the canonical epoch-owned `SessionRuntimeBindings`;
+the factory validates `bindings.session_id == session.id()` on `SessionOwned`
+builds. For browser direct creation, use the shared
+`meerkat::surface::materialize_ephemeral_runtime_session` path. Its exact
+prepared-materialization transaction supplies the bindings, attaches the actor,
+and retains cancellation cleanup authority until creation completes. Do not
+replace that transaction with surface-local registration or cleanup.
 
 Skill introspection (requires facade feature `skills`; standalone, no session required):
 

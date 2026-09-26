@@ -39,6 +39,7 @@ const PROFILE_EXCLUSIONS = [
   ["remote_member_placement", "use_local_member_placement"],
   ["hooks", "use_hook_runtime"],
   ["runtime_skills", "use_skill_runtime"],
+  ["file_schema_resolution", "use_inline_schema"],
   ["mcp_client", "use_mcp_runtime"],
   ["tcp_comms", "use_in_process_comms"],
   ["uds_comms", "use_in_process_comms"],
@@ -750,6 +751,51 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
         });
         assert.deepEqual(result.members, []);
       }
+      assert.equal(requests.length, 0);
+    });
+
+    await scenario("mob file skills refuse through the shared capability profile", async ({ page, requests }) => {
+      const result = await page.evaluate(async () => {
+        const mob = await window.runtime.createMob({
+          id: "browser-file-skill-profile",
+          skills: { external: { source: "path", path: "/unavailable/SKILL.md" } },
+          profiles: { worker: { model: window.model, skills: ["external"], tools: { comms: true } } },
+        });
+        const rows = window.parse(await window.wasm.mob_spawn(mob.mobId, JSON.stringify([{
+          profile: "worker", agent_identity: "file-skill-worker",
+        }])));
+        return { rows, members: await mob.listMembers() };
+      });
+      assert.equal(result.rows.length, 1);
+      assert.equal(result.rows[0].status, "failed", JSON.stringify(result));
+      assert.equal(result.rows[0].result.code, "CAPABILITY_UNAVAILABLE", JSON.stringify(result));
+      assert.deepEqual(result.rows[0].result.structured_data, {
+        profile: "browser", capability: "runtime_skills", clearing_action: "use_skill_runtime",
+      });
+      assert.deepEqual(result.members, []);
+      assert.equal(requests.length, 0);
+    });
+
+    await scenario("file schema flows refuse with a typed inline schema clearing action", async ({ page, requests }) => {
+      const result = await page.evaluate(async () => {
+        const mob = await window.runtime.createMob({
+          id: "browser-file-schema-profile",
+          profiles: { worker: { model: window.model, tools: { comms: true } } },
+          flows: { file_schema: { steps: { check: {
+            role: "worker", message: "FILE_SCHEMA_MUST_NOT_RUN", expected_schema_ref: "/unavailable/schema.json",
+          } } } },
+        });
+        await mob.spawn([{ profile: "worker", agent_identity: "schema-worker", runtime_mode: "turn_driven" }]);
+        let failure;
+        try { await window.wasm.mob_run_flow(mob.mobId, "file_schema", "{}"); }
+        catch (error) { failure = window.errorEnvelope(error); }
+        return { failure, members: await mob.listMembers() };
+      });
+      assert.equal(result.failure?.code, "CAPABILITY_UNAVAILABLE", JSON.stringify(result));
+      assert.deepEqual(result.failure.data, {
+        profile: "browser", capability: "file_schema_resolution", clearing_action: "use_inline_schema",
+      });
+      assert.equal(result.members.length, 1);
       assert.equal(requests.length, 0);
     });
 

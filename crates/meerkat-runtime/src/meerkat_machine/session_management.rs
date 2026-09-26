@@ -4975,6 +4975,33 @@ impl MeerkatMachine {
         ))
     }
 
+    /// Recover the exact current registration named by already issued
+    /// bindings. A later same-session entry cannot inherit this witness.
+    pub async fn session_registration_witness_for_bindings(
+        &self,
+        bindings: &meerkat_core::SessionRuntimeBindings,
+    ) -> Option<RuntimeSessionRegistrationWitness> {
+        let authority = crate::validated_session_runtime_bindings_authority(bindings).ok()?;
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(bindings.session_id())?;
+        if entry.epoch_id != *bindings.epoch_id()
+            || !Arc::ptr_eq(&entry.dsl_authority, &authority.dsl_authority)
+            || !Arc::ptr_eq(&entry.handle_teardown_gate, &authority.teardown_gate)
+            || !Arc::ptr_eq(
+                &entry.materialization_claim_state,
+                &authority.materialization_claim_state,
+            )
+        {
+            return None;
+        }
+        Some(RuntimeSessionRegistrationWitness::new(
+            Arc::downgrade(&self.shared),
+            bindings.session_id().clone(),
+            entry.epoch_id.clone(),
+            Arc::downgrade(&entry.mutation_gate),
+        ))
+    }
+
     /// Return the operation registry owned by one exact current registration.
     /// A session-id-only lookup is insufficient during cold replacement
     /// because it could transfer an adapter binding to a later incarnation.

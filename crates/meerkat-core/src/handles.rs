@@ -2591,9 +2591,9 @@ pub trait PeerInteractionHandle: Send + Sync {
     /// transition emits `PeerInteractionCleanup`, closing the loop
     /// "terminal transition → effect → shell projection cleanup".
     ///
-    /// Implementations with no observer simply drop any emitted cleanup
-    /// notifications on the floor. Standalone / WASM paths leave this
-    /// unset.
+    /// Implementations without a projection consumer leave this observer
+    /// unset. Runtime-backed comms, including browser comms, install it to
+    /// release subscriber and stream projections after terminal transitions.
     fn install_cleanup_observer(&self, observer: Arc<dyn PeerInteractionCleanupObserver>);
 }
 
@@ -2650,8 +2650,8 @@ pub trait SessionContextHandle: Send + Sync {
     fn current_watermark_ms(&self) -> u64;
 
     /// Install a typed observer for `SessionContextAdvanced` effect
-    /// emission. Implementations without an installed observer drop the
-    /// effect on the floor (standalone / WASM paths).
+    /// emission. An absent realtime projection consumer leaves this observer
+    /// unset; that does not change canonical session-context advancement.
     fn install_observer(&self, observer: Arc<dyn SessionContextAdvancedObserver>);
 
     /// Atomically install a typed observer and return the current watermark

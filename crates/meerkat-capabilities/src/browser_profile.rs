@@ -50,6 +50,10 @@ impl BrowserRuntimeProfile {
                 Action::UseSkillRuntime,
                 "the browser profile excludes runtime skill discovery; use a skill-capable runtime",
             ),
+            Capability::FileSchemaResolution => (
+                Action::UseInlineSchema,
+                "the browser profile excludes file-based schema resolution; provide an inline JSON schema",
+            ),
             Capability::Schedule => (
                 Action::UseScheduleRuntime,
                 "the browser profile has no scheduler service; use a scheduler-capable runtime",
@@ -206,6 +210,7 @@ mod tests {
             (Capability::McpStdio, Action::UseHostProcessRuntime),
             (Capability::Hooks, Action::UseHookRuntime),
             (Capability::RuntimeSkills, Action::UseSkillRuntime),
+            (Capability::FileSchemaResolution, Action::UseInlineSchema),
             (Capability::Schedule, Action::UseScheduleRuntime),
             (Capability::WorkGraph, Action::UseWorkGraphRuntime),
             (Capability::SemanticMemory, Action::UseSemanticMemoryRuntime),

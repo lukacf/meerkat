@@ -6559,6 +6559,7 @@ enum RestoredOperationBindingSeam {
 struct ResumeOperationBindingIo {
     adapter: Arc<meerkat_runtime::MeerkatMachine>,
     provisioner: Arc<dyn MobProvisioner>,
+    session_service: Arc<dyn MobSessionService>,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     mob_id: MobId,
 }
@@ -27521,6 +27522,7 @@ impl MobActor {
             .map(|adapter| ResumeOperationBindingIo {
                 adapter: Arc::clone(adapter),
                 provisioner: Arc::clone(&self.provisioner),
+                session_service: Arc::clone(&self.session_service),
                 runtime_metadata: Arc::clone(&self.runtime_metadata),
                 mob_id: self.definition.id.clone(),
             })
@@ -27537,6 +27539,29 @@ impl MobActor {
             owner_session_id: generated_owner_session_id,
             placed_operation,
         } = plan;
+        let local_member_owner = placed_operation.is_none()
+            && entry.member_ref.bridge_session_id() == Some(&generated_owner_session_id);
+        // Operation restoration must not resurrect an absent local session.
+        // Broken cleanup and completed archive publication retain their exact
+        // MobMachine journal authority without a fabricated runtime residue.
+        if local_member_owner
+            && !io
+                .session_service
+                .has_live_session(&generated_owner_session_id)
+                .await?
+            && io
+                .session_service
+                .load_persisted_session(&generated_owner_session_id)
+                .await?
+                .is_none()
+            && !io
+                .adapter
+                .archive_runtime_residue_present(&generated_owner_session_id)
+                .await
+                .map_err(|error| MobError::Internal(error.to_string()))?
+        {
+            return Ok(());
+        }
         if let Some((operation_id, _, _)) = placed_operation.as_ref() {
             let carrier = io
                 .runtime_metadata
@@ -27583,6 +27608,49 @@ impl MobActor {
                 "restore operation owner binding lacked MeerkatMachine authority for member '{}'",
                 entry.agent_identity
             )));
+        }
+        if local_member_owner
+            && let Some(dispatcher) = io.provisioner.composition_signal_dispatcher()
+        {
+            let registration = io
+                .adapter
+                .session_registration_witness_for_bindings(&bindings)
+                .await
+                .ok_or_else(|| {
+                    MobError::Internal("restore composition registration disappeared".into())
+                })?;
+            let recovered = io
+                .adapter
+                .recover_composition_signal_dispatcher(
+                    &registration,
+                    meerkat_runtime::meerkat_machine::dsl::AgentRuntimeId::from(
+                        entry.agent_runtime_id.to_string(),
+                    ),
+                    meerkat_runtime::meerkat_machine::dsl::FenceToken::from(
+                        entry.fence_token.get(),
+                    ),
+                    Some(meerkat_runtime::meerkat_machine::dsl::Generation::from(
+                        entry.generation.get(),
+                    )),
+                    dispatcher.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    MobError::Internal(format!("restore composition custody: {error}"))
+                })?;
+            if !recovered {
+                let mut prepared = io
+                    .adapter
+                    .prepare_local_session_materialization_for_registration(registration)
+                    .await
+                    .map_err(|error| {
+                        MobError::Internal(format!("prepare exact composition recovery: {error}"))
+                    })?;
+                prepared
+                    .commit_unbound_composition_endpoint(dispatcher)
+                    .await
+                    .map_err(|error| MobError::Internal(error.to_string()))?;
+            }
         }
         if let Some((operation_id, display_name, recovery_expectation)) = placed_operation {
             io.provisioner

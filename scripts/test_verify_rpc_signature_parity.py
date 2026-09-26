@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import re
 import sys
 import tempfile
 import unittest
@@ -179,6 +181,107 @@ class GeneratedTransportTests(unittest.TestCase):
         for _, variant in variants:
             self.assertIn("session_id", variant["properties"])
             self.assertIn("session_id", variant["required"])
+
+
+class GeneratedEventReferenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = {
+            "$defs": {
+                "Payload": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "detail": {"type": "string"},
+                    },
+                    "required": ["session_id"],
+                }
+            }
+        }
+        self.variant = {
+            "$ref": "#/$defs/Payload",
+            "type": "object",
+            "properties": {"type": {"const": "payload_ready"}},
+            "required": ["type"],
+        }
+
+    def test_plain_event_reference_keeps_the_named_type(self) -> None:
+        for ref in (
+            {"$ref": "#/$defs/Payload"},
+            {"$ref": "#/$defs/Payload", "description": "Named payload"},
+        ):
+            with self.subTest(ref=ref):
+                self.assertEqual(
+                    sdk_codegen._web_events_ts_type(self.root, ref), "Payload"
+                )
+
+    def test_tagged_event_reference_keeps_payload_and_discriminator(self) -> None:
+        rendered = sdk_codegen._web_events_ts_type(self.root, self.variant)
+        self.assertEqual(
+            rendered,
+            '{\n  session_id: string;\n  detail?: string;\n'
+            '  type: "payload_ready";\n}',
+        )
+        self.assertNotIn("type", self.root["$defs"]["Payload"]["properties"])
+        self.assertEqual(self.variant["required"], ["type"])
+
+    def test_web_event_interface_merges_tagged_reference_requirements(self) -> None:
+        schemas = {
+            "events": {"AgentEvent": {**self.root, "oneOf": [self.variant]}}
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            sdk_codegen.generate_web_event_types(schemas, output)
+            rendered = (output / "events.ts").read_text()
+        self.assertIn(
+            'export interface PayloadReadyEvent {\n  session_id: string;\n'
+            '  detail?: string;\n  type: "payload_ready";\n}',
+            rendered,
+        )
+        self.assertIn("export type AgentEvent =\n  PayloadReadyEvent;", rendered)
+
+    def test_canonical_discard_event_keeps_public_payload_in_both_sdks(self) -> None:
+        schema_path = GENERATOR.parents[2] / "artifacts/schemas/events.json"
+        schemas = {"events": json.loads(schema_path.read_text())}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            sdk_codegen.generate_web_event_types(schemas, output)
+            web = (output / "events.ts").read_text()
+            # Supply the prior emitter's declarations without touching SDK files.
+            (output / "types.ts").write_text("")
+            sdk_codegen.generate_typescript_event_types(schemas, output)
+            typescript = (output / "event_types.ts").read_text()
+        web_event = re.search(
+            r"export interface BoundaryAppendsDiscardedEvent \{([^}]+)\}", web
+        )
+        self.assertIsNotNone(web_event)
+        assert web_event is not None
+        expected_fields = {
+            "input_ids: InputId[];",
+            "run_id: RunId;",
+            "session_id: SessionId;",
+            'type: "boundary_appends_discarded";',
+        }
+        self.assertEqual(
+            {line.strip() for line in web_event[1].splitlines() if line.strip()},
+            expected_fields,
+        )
+        agent_event = re.search(
+            r"export type AgentEvent = (.*?)(?=\nexport |\Z)",
+            typescript,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(agent_event)
+        assert agent_event is not None
+        tagged_arm = re.search(
+            r'\{([^{}]*type: "boundary_appends_discarded";[^{}]*)\}',
+            agent_event[1],
+        )
+        self.assertIsNotNone(tagged_arm)
+        assert tagged_arm is not None
+        self.assertEqual(
+            {line.strip() for line in tagged_arm[1].splitlines() if line.strip()},
+            expected_fields,
+        )
 
 
 if __name__ == "__main__":

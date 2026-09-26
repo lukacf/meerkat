@@ -1431,7 +1431,12 @@ export type AgentEvent = {
   run_id: RunId;
   transcript_start?: number | null;
   type: "boundary_append_applied";
-} | BoundaryAppendsDiscarded;
+} | {
+  input_ids: InputId[];
+  run_id: RunId;
+  session_id: SessionId;
+  type: "boundary_appends_discarded";
+};
 
 /**
  * Scope attribution frame for multi-agent streaming.

@@ -451,7 +451,17 @@ export type Provider = "anthropic" | "openai" | "gemini" | "self_hosted" | "othe
 
 export type ProviderImageMetadata = {
   provider: "not_emitted";
-} | OpenAiImageMetadata | GeminiImageMetadata;
+} | {
+  image_generation_call_id?: string | null;
+  response_id?: string | null;
+  target_model: string;
+  provider: "openai";
+} | {
+  continuity_ref?: string | null;
+  response_id?: string | null;
+  target_model: string;
+  provider: "gemini";
+};
 
 export type ProviderParamsOverride = {
   max_output_tokens?: number | null;
@@ -1211,6 +1221,9 @@ export interface BoundaryAppendAppliedEvent {
 }
 
 export interface BoundaryAppendsDiscardedEvent {
+  input_ids: InputId[];
+  run_id: RunId;
+  session_id: SessionId;
   type: "boundary_appends_discarded";
 }
 

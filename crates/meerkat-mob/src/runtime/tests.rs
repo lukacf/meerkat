@@ -40842,6 +40842,7 @@ async fn receipt_backed_resume_cleanup_retries_draining_and_removed_sidecar() {
         receipt.operation_id,
         receipt.session_origin,
         receipt.rollback_authority,
+        super::provisioner::RollbackOrigin::SpawnRollback,
     );
     let retained = guard
         .rollback_retaining_custody()
@@ -40862,7 +40863,13 @@ async fn receipt_backed_resume_cleanup_retries_draining_and_removed_sidecar() {
             .expect("live observation")
     );
     backend
-        .restore_resumed_member(&member_ref, &operation_id, origin, &authority)
+        .restore_resumed_member(
+            &member_ref,
+            &operation_id,
+            origin,
+            &authority,
+            super::provisioner::RollbackOrigin::SpawnRollback,
+        )
         .await
         .expect("completed predecessor receipt remains retryable after sidecar removal");
     assert!(service.persisted_session_clone(&session_id).await.is_some());
@@ -40896,7 +40903,13 @@ async fn retained_resume_revalidates_after_boundary_wait_and_preserves_successor
     let operation_id = receipt.operation_id.clone();
     let origin = receipt.session_origin;
     backend
-        .restore_resumed_member(&member_ref, &operation_id, origin, &authority)
+        .restore_resumed_member(
+            &member_ref,
+            &operation_id,
+            origin,
+            &authority,
+            super::provisioner::RollbackOrigin::SpawnRollback,
+        )
         .await
         .expect("retire predecessor");
     let _boundary = service.install_non_reentrant_turn_finalization_gate();
@@ -40917,7 +40930,13 @@ async fn retained_resume_revalidates_after_boundary_wait_and_preserves_successor
         let backend = Arc::clone(&backend);
         async move {
             backend
-                .restore_resumed_member(&member_ref, &operation_id, origin, &authority)
+                .restore_resumed_member(
+                    &member_ref,
+                    &operation_id,
+                    origin,
+                    &authority,
+                    super::provisioner::RollbackOrigin::SpawnRollback,
+                )
                 .await
         }
     });
@@ -40989,6 +41008,7 @@ async fn retained_resume_revalidates_after_boundary_wait_and_preserves_successor
             &successor.operation_id,
             successor.session_origin,
             successor_authority,
+            super::provisioner::RollbackOrigin::SpawnRollback,
         ),
     )
     .await
@@ -49034,6 +49054,7 @@ async fn resumed_provision_rollback_keeps_parent_owned_binding_for_the_next_revi
                 &revived.operation_id,
                 revived.session_origin,
                 &authority,
+                super::provisioner::RollbackOrigin::RevivalOrRebuild,
             )
             .await
             .unwrap_or_else(|error| panic!("attempt {attempt}: rollback settles: {error:?}"));
@@ -49053,6 +49074,443 @@ async fn resumed_provision_rollback_keeps_parent_owned_binding_for_the_next_revi
             "attempt {attempt}: the coordinator's operation stays the one live operation"
         );
     }
+}
+
+/// Mob-child operations of `coordinator_registry` whose child is
+/// `session_id`, as `(id, owner, status, terminal)`.
+#[cfg(feature = "runtime-adapter")]
+fn coordinator_child_operations(
+    coordinator_registry: &Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+    session_id: &SessionId,
+) -> Vec<(
+    meerkat_core::ops_lifecycle::OperationId,
+    SessionId,
+    meerkat_core::ops_lifecycle::OperationStatus,
+    bool,
+)> {
+    use meerkat_core::ops_lifecycle::{OperationKind, OperationSource};
+    coordinator_registry
+        .list_operations()
+        .expect("list coordinator operations")
+        .into_iter()
+        .filter(|operation| {
+            operation.kind == OperationKind::MobMemberChild
+                && operation.operation_source
+                    == Some(OperationSource::session_child(session_id.clone()))
+        })
+        .map(|operation| {
+            (
+                operation.id,
+                operation.owner_session_id,
+                operation.status,
+                operation.terminal,
+            )
+        })
+        .collect()
+}
+
+/// A failed resumed SPAWN under a coordinator's owner context is rolled back.
+/// Unlike a revival rollback, the spawn rollback removes the member from the
+/// roster, so it must not keep the coordinator-owned binding: the
+/// coordinator's operation for the session is retired through its registry
+/// and the binding is cleared, so a later spawn of the same session under
+/// another owner binds strictly.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn resumed_spawn_rollback_clears_parent_owned_binding_and_settles_coordinator_operation() {
+    use meerkat_core::ops_lifecycle::OperationStatus;
+
+    let service = Arc::new(MockSessionService::new());
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+    service.set_runtime_adapter(Arc::clone(&adapter));
+    let backend = Arc::new(super::provisioner::SessionBackend::new(
+        service.clone(),
+        Some(Arc::clone(&adapter)),
+        None,
+    ));
+    let session = Session::new();
+    let session_id = session.id().clone();
+    service.replace_live_session(session).await;
+    service
+        .discard_live_session(&session_id)
+        .await
+        .expect("discard fixture actor");
+    let coordinator = SessionId::new();
+    let coordinator_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
+        Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+    let mut spawn = retained_resume_request(&service, &session_id).await;
+    spawn.owner_bridge_session_id = Some(coordinator.clone());
+    spawn.ops_registry = Some(Arc::clone(&coordinator_registry));
+    spawn.generated_self_owned_operation_owner = None;
+    let spawned = backend
+        .provision_member(spawn)
+        .await
+        .expect("provision the resumed spawn under the coordinator's owner context");
+    assert_eq!(
+        coordinator_child_operations(&coordinator_registry, &session_id),
+        vec![(
+            spawned.operation_id.clone(),
+            coordinator.clone(),
+            OperationStatus::Running,
+            false
+        )]
+    );
+    let authority = spawned
+        .rollback_authority
+        .clone()
+        .expect("resumed provision carries rollback authority");
+
+    backend
+        .restore_resumed_member(
+            &spawned.member_ref,
+            &spawned.operation_id,
+            spawned.session_origin,
+            &authority,
+            super::provisioner::RollbackOrigin::SpawnRollback,
+        )
+        .await
+        .expect("the failed spawn rolls back");
+    assert!(
+        !backend.ops_binding_present_for_test(&session_id),
+        "a member that left the roster keeps no coordinator-owned binding"
+    );
+    assert_eq!(
+        coordinator_child_operations(&coordinator_registry, &session_id),
+        vec![(
+            spawned.operation_id.clone(),
+            coordinator.clone(),
+            OperationStatus::Retired,
+            true
+        )],
+        "the coordinator's operation for the rolled-back spawn is terminal"
+    );
+
+    // A later spawn of the same durable session under another owner (the
+    // mob's generated self-owned arm) binds strictly.
+    let _ = service.discard_live_session(&session_id).await;
+    let _ = adapter.unregister_session(&session_id).await;
+    let respawned = backend
+        .provision_member(retained_resume_request(&service, &session_id).await)
+        .await
+        .expect("a later spawn of the session under another owner binds");
+    assert!(
+        backend
+            .ops_binding_registry_for_test(&session_id)
+            .is_some_and(|registry| !Arc::ptr_eq(&registry, &coordinator_registry)),
+        "the later spawn is bound to its own registry"
+    );
+    assert_eq!(
+        coordinator_child_operations(&coordinator_registry, &session_id).len(),
+        1,
+        "the coordinator's registry gains nothing from the later spawn"
+    );
+    let authority = respawned
+        .rollback_authority
+        .clone()
+        .expect("resumed provision carries rollback authority");
+    backend
+        .restore_resumed_member(
+            &respawned.member_ref,
+            &respawned.operation_id,
+            respawned.session_origin,
+            &authority,
+            super::provisioner::RollbackOrigin::SpawnRollback,
+        )
+        .await
+        .expect("clean up the later spawn");
+}
+
+/// End to end through the mob actor: a coordinator's resumed spawn fails
+/// after provisioning (its `MemberSpawned` journal append fails), so the
+/// actor rolls the spawn back and the member never joins the roster. The
+/// coordinator's operation must be terminal and its binding released, so a
+/// later spawn of the same session under another owner succeeds.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn coordinator_resumed_spawn_failure_releases_session_for_a_later_spawn() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
+    let _adapter = service.enable_runtime_adapter();
+    let identity = AgentIdentity::from("w-resume-rollback");
+    let seeded = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: Some(4096),
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(
+                    super::actor::render_member_comms_name(
+                        sample_definition().id.as_str(),
+                        "worker",
+                        identity.as_str(),
+                    )
+                    .expect("comms name"),
+                ),
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("seed the durable worker session");
+    let session_id = seeded.session_id.clone();
+    MobSessionService::discard_live_session(service.as_ref(), &session_id)
+        .await
+        .expect("keep only the durable snapshot");
+    let coordinator = handle
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("coordinator owner context");
+    let coordinator_registry = Arc::clone(&coordinator.ops_registry);
+
+    events.fail_appends_for("MemberSpawned").await;
+    let error = tokio::time::timeout(
+        WHOLE_CREW_LIFECYCLE_TIMEOUT,
+        handle.spawn_spec_receipt_with_owner_context(
+            SpawnMemberSpec::new("worker", identity.as_str())
+                .with_resume_bridge_session_id(session_id.clone()),
+            coordinator,
+        ),
+    )
+    .await
+    .expect("failed resumed spawn settles")
+    .expect_err("the resumed spawn fails after provisioning");
+    assert!(
+        handle
+            .get_member(&identity)
+            .await
+            .expect("roster lookup")
+            .is_none(),
+        "the failed spawn left the roster: {error:?}"
+    );
+    let parent = coordinator_child_operations(&coordinator_registry, &session_id);
+    assert!(
+        !parent.is_empty() && parent.iter().all(|(_, _, _, terminal)| *terminal),
+        "the coordinator's operation for the rolled-back spawn is terminal: {parent:?}"
+    );
+
+    events.allow_appends_for("MemberSpawned").await;
+    let respawned = tokio::time::timeout(
+        WHOLE_CREW_LIFECYCLE_TIMEOUT,
+        handle.spawn_spec(
+            SpawnMemberSpec::new("worker", identity.as_str())
+                .with_resume_bridge_session_id(session_id.clone()),
+        ),
+    )
+    .await
+    .expect("later spawn settles")
+    .expect("a later spawn of the session under another owner succeeds");
+    assert_eq!(
+        handle
+            .resolve_bridge_session_id(&respawned.agent_identity)
+            .await
+            .as_ref(),
+        Some(&session_id)
+    );
+    assert_eq!(
+        coordinator_child_operations(&coordinator_registry, &session_id),
+        parent,
+        "the later self-owned spawn adds nothing to the coordinator's registry"
+    );
+    tokio::time::timeout(WHOLE_CREW_LIFECYCLE_TIMEOUT, handle.retire(identity))
+        .await
+        .expect("retire timed out")
+        .expect("retire the later spawn");
+}
+
+/// Downstream regression: while the whole crew is stopped, a parent-owned
+/// worker loses its session snapshot and explicit resume repoints it to a
+/// persisted successor session. With the coordinator's owner context live,
+/// the worker continues under the coordinator on the successor: the
+/// coordinator's operation for the superseded session is retired (not left
+/// running) and a new coordinator-owned operation carries the successor.
+/// With the owner context ended, the successor is self-owned and the
+/// coordinator's verdict is preserved.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn whole_crew_resume_repoint_moves_parent_owned_worker_to_successor_session() {
+    use meerkat_core::ops_lifecycle::{OperationKind, OperationSource, OperationStatus};
+
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    spawn_self_owned_crew_lead(&handle, &adapter).await;
+    let coordinator = handle
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("external coordinator owner context");
+    let live_owner = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-repoint-live",
+        crate::MobRuntimeMode::TurnDriven,
+        coordinator.clone(),
+    )
+    .await;
+    let ended_owner = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-repoint-ended",
+        crate::MobRuntimeMode::TurnDriven,
+        coordinator,
+    )
+    .await;
+
+    whole_crew_stop(&handle, "stop crew").await;
+    ended_owner
+        .owner_registry
+        .request_retire(&ended_owner.operation_id)
+        .expect("coordinator requests retirement");
+    ended_owner
+        .owner_registry
+        .mark_retired(&ended_owner.operation_id)
+        .expect("coordinator ends its context for this worker");
+    let mut successors = Vec::new();
+    for worker in [&live_owner, &ended_owner] {
+        MobSessionService::discard_live_session(service.as_ref(), &worker.session_id)
+            .await
+            .expect("discard the worker's actor");
+        service.delete_persisted_session(&worker.session_id).await;
+        let successor = service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "successor".to_string().into(),
+                system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                build: Some(meerkat_core::service::SessionBuildOptions {
+                    comms_name: Some(
+                        super::actor::render_member_comms_name(
+                            sample_definition().id.as_str(),
+                            "worker",
+                            worker.identity.as_str(),
+                        )
+                        .expect("comms name"),
+                    ),
+                    mob_member_binding: None,
+                    ..Default::default()
+                }),
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                labels: None,
+            })
+            .await
+            .expect("persist a successor session for the worker");
+        // The successor stays listed (the mock lists live sessions); explicit
+        // resume retires its foreign attachment and materializes it.
+        service
+            .session_comms_names
+            .write()
+            .await
+            .remove(&successor.session_id);
+        successors.push(successor.session_id);
+    }
+    whole_crew_resume(&handle, "resume repoints the lost worker sessions").await;
+
+    let own_child_operations = |session_id: SessionId| {
+        let adapter = Arc::clone(&adapter);
+        async move {
+            let source = OperationSource::session_child(session_id.clone());
+            adapter
+                .prepare_local_session_bindings(session_id)
+                .await
+                .expect("successor runtime bindings")
+                .ops_lifecycle()
+                .list_operations()
+                .expect("list successor operations")
+                .into_iter()
+                .filter(|operation| {
+                    operation.kind == OperationKind::MobMemberChild
+                        && operation.operation_source.as_ref() == Some(&source)
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    for (worker, successor) in [&live_owner, &ended_owner].into_iter().zip(&successors) {
+        let status = handle
+            .member_status(&worker.identity)
+            .await
+            .expect("repointed worker status");
+        assert_eq!(
+            status.current_session_id.as_ref(),
+            Some(successor),
+            "'{}' is repointed to its successor",
+            worker.identity
+        );
+        assert_eq!(
+            status.status,
+            crate::runtime::handle::MobMemberStatus::Active,
+            "'{}' is rebuilt on its successor: {status:?}",
+            worker.identity
+        );
+        assert_eq!(
+            coordinator_child_operations(&worker.owner_registry, &worker.session_id),
+            vec![(
+                worker.operation_id.clone(),
+                worker.owner_session_id.clone(),
+                OperationStatus::Retired,
+                true
+            )],
+            "the coordinator's operation for superseded '{}' is settled, not left running",
+            worker.identity
+        );
+    }
+
+    // Live owner context: the successor continues under the coordinator.
+    let live_successor = &successors[0];
+    let carried = coordinator_child_operations(&live_owner.owner_registry, live_successor);
+    assert!(
+        matches!(
+            carried.as_slice(),
+            [(_, owner, OperationStatus::Running, false)] if owner == &live_owner.owner_session_id
+        ),
+        "the coordinator owns exactly one live operation for the successor: {carried:?}"
+    );
+    let carried_operation = carried[0].0.clone();
+    assert!(
+        own_child_operations(live_successor.clone())
+            .await
+            .is_empty(),
+        "ownership of the successor must not flip to the worker itself"
+    );
+
+    // Ended owner context: the successor is self-owned.
+    let ended_successor = &successors[1];
+    assert!(
+        coordinator_child_operations(&ended_owner.owner_registry, ended_successor).is_empty(),
+        "an ended owner context gains no operation for the successor"
+    );
+    let own = own_child_operations(ended_successor.clone()).await;
+    assert!(
+        matches!(
+            own.as_slice(),
+            [operation] if !operation.terminal && operation.owner_session_id == *ended_successor
+        ),
+        "the successor of an ended owner context is self-owned: {own:?}"
+    );
+
+    for worker in [&live_owner, &ended_owner] {
+        tokio::time::timeout(
+            WHOLE_CREW_LIFECYCLE_TIMEOUT,
+            handle.retire(worker.identity.clone()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("retire '{}' timed out", worker.identity))
+        .unwrap_or_else(|error| panic!("retire '{}' failed: {error:?}", worker.identity));
+    }
+    assert_eq!(
+        live_owner
+            .owner_registry
+            .snapshot(&carried_operation)
+            .expect("read carried operation")
+            .map(|snapshot| snapshot.status),
+        Some(OperationStatus::Retired),
+        "retiring the repointed worker retires the coordinator's carried operation"
+    );
 }
 
 #[tokio::test]

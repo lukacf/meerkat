@@ -420,6 +420,25 @@ pub enum ProvisionSessionOrigin {
     RevivedRetired,
 }
 
+/// Why a resumed provision is being rolled back.
+///
+/// The same rollback mechanics serve two callers with opposite roster
+/// outcomes, so the caller states which one it is instead of the rollback
+/// inferring it from the session origin (both are resumed origins):
+///
+/// - a failed spawn removes the member from the roster, so nothing will ever
+///   rebind or retire its operation binding again;
+/// - a failed revival or explicit-resume rebuild keeps the member seated, and
+///   its next revival rebinds under the preserved owner context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RollbackOrigin {
+    /// Rollback of a spawn attempt; the member leaves the roster.
+    SpawnRollback,
+    /// Rollback of a revival or explicit-resume rebuild; the member stays
+    /// seated.
+    RevivalOrRebuild,
+}
+
 /// Typed cold-boot intent recovered from the provision request before any
 /// actor or runtime attachment is prepared.
 ///
@@ -1366,13 +1385,19 @@ pub trait MobProvisioner: Send + Sync {
     /// effect is settled. `Err` returns the same custody unchanged plus the
     /// newest error, so the caller keeps ownership and stays cancelling.
     ///
+    /// `rollback_origin` states whether the failed attempt was a spawn (the
+    /// member leaves the roster) or a revival/rebuild (the member stays
+    /// seated); see [`RollbackOrigin`].
+    ///
     /// The default implementation refuses explicitly: a provisioner that did
     /// not issue this custody cannot compensate it, and a default `Ok` would
     /// be a fabricated settlement.
     async fn retry_retained_provision_cleanup(
         &self,
         retained: RetainedProvisionEffects,
+        rollback_origin: RollbackOrigin,
     ) -> Result<(), RetainedProvisionCleanupFailure> {
+        let _ = rollback_origin;
         Err(RetainedProvisionCleanupFailure::unsupported(
             retained,
             "this provisioner does not own the local materialization seam that issued the retained custody",
@@ -1395,12 +1420,18 @@ pub trait MobProvisioner: Send + Sync {
     /// Release a failed resume provision without archiving its durable
     /// session. The runtime is returned to durable idle and detached from the
     /// failed member incarnation.
+    ///
+    /// `rollback_origin` states whether the failed attempt was a spawn (the
+    /// member leaves the roster, so its operation binding is released and a
+    /// coordinator's operation settled) or a revival/rebuild (the member stays
+    /// seated and keeps a coordinator-owned binding for its next revival).
     async fn restore_resumed_member(
         &self,
         member_ref: &MemberRef,
         operation_id: &OperationId,
         original_origin: ProvisionSessionOrigin,
         rollback_authority: &ResumedMemberRollbackAuthority,
+        rollback_origin: RollbackOrigin,
     ) -> Result<(), MobError>;
     /// Retire the member and report the typed disposal the provisioner
     /// observed (§19.L4): `Archived` when the mob's archive authority owns
@@ -1699,6 +1730,25 @@ pub trait MobProvisioner: Send + Sync {
         owner_bridge_session_id: SessionId,
         ops_registry: Arc<dyn OpsLifecycleRegistry>,
     ) -> Result<(), MobError>;
+
+    /// Settle the adapter-local operation binding of the session an explicit
+    /// resume just repointed a member away from (its snapshot was lost and a
+    /// persisted successor session was selected).
+    ///
+    /// A parent-owned member moves to the successor under the same
+    /// coordinator owner while that owner context is live, otherwise it is
+    /// left to its generated self-owned bind; either way the coordinator's
+    /// operation for the superseded session is settled and the superseded
+    /// binding dropped. Provisioners that keep no adapter-local session
+    /// operation bindings have nothing to settle.
+    async fn settle_session_ops_binding_for_explicit_resume_repoint(
+        &self,
+        superseded_session_id: &SessionId,
+        successor_session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        let _ = (superseded_session_id, successor_session_id);
+        Ok(())
+    }
 
     /// Re-establish the generated owner binding MobMachine authorized for a
     /// committed member after an explicit same-handle resume commit.
@@ -3997,6 +4047,50 @@ impl SessionBackend {
         }
         drop(retirements);
         result
+    }
+
+    /// Release the member's session binding at the end of a resumed-provision
+    /// rollback, as the caller's typed rollback origin requires: a seated
+    /// member (revival or rebuild) keeps a coordinator-owned binding for its
+    /// next revival, while a member a failed spawn removed from the roster
+    /// leaves no binding behind and its coordinator's operation is settled.
+    fn release_session_binding_for_resumed_rollback(
+        &self,
+        session_id: &SessionId,
+        observed: Option<super::ops_adapter::SessionOpsBindingWitness>,
+        rollback_origin: RollbackOrigin,
+        operation_id: Option<&OperationId>,
+    ) -> Result<(), MobError> {
+        match rollback_origin {
+            RollbackOrigin::RevivalOrRebuild => {
+                Self::log_explicit_resume_binding_release(
+                    session_id,
+                    &self
+                        .ops_adapter
+                        .release_session_binding_for_explicit_resume(session_id, observed)?,
+                );
+            }
+            RollbackOrigin::SpawnRollback => {
+                let released = self.ops_adapter.clear_session_binding_for_spawn_rollback(
+                    session_id,
+                    observed,
+                    operation_id,
+                )?;
+                if let super::ops_adapter::SpawnRollbackSessionBindingRelease::ClearedParentOwner {
+                    owner_bridge_session_id,
+                    settlement,
+                } = &released
+                {
+                    tracing::info!(
+                        member_session_id = %session_id,
+                        owner_bridge_session_id = %owner_bridge_session_id,
+                        settlement = ?settlement,
+                        "resumed spawn rollback released the coordinator-owned operation binding of a member that left the roster"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     fn log_explicit_resume_binding_release(
@@ -11271,6 +11365,7 @@ impl MobProvisioner for SessionBackend {
     async fn retry_retained_provision_cleanup(
         &self,
         retained: RetainedProvisionEffects,
+        rollback_origin: RollbackOrigin,
     ) -> Result<(), RetainedProvisionCleanupFailure> {
         let plan = plan_retained_cleanup(&retained);
         if let RetainedCleanupPlan::Refuse(reason) = &plan {
@@ -11334,13 +11429,19 @@ impl MobProvisioner for SessionBackend {
                     "retained cleanup refusal reached execution: {reason}"
                 ))),
             }?;
-            Self::log_explicit_resume_binding_release(
+            let attempt_operation = match &plan {
+                RetainedCleanupPlan::RestoreResumedWithOperation(operation_id) => {
+                    Some(operation_id)
+                }
+                RetainedCleanupPlan::RestoreResumedWithoutOperation
+                | RetainedCleanupPlan::Refuse(_) => None,
+            };
+            self.release_session_binding_for_resumed_rollback(
                 &session_id,
-                &self
-                    .ops_adapter
-                    .release_session_binding_for_explicit_resume(&session_id, ops_binding)?,
-            );
-            Ok(())
+                ops_binding,
+                rollback_origin,
+                attempt_operation,
+            )
         }
         .await;
         match outcome {
@@ -11440,6 +11541,7 @@ impl MobProvisioner for SessionBackend {
         operation_id: &OperationId,
         original_origin: ProvisionSessionOrigin,
         rollback_authority: &ResumedMemberRollbackAuthority,
+        rollback_origin: RollbackOrigin,
     ) -> Result<(), MobError> {
         let session_id = Self::require_session(member_ref, "restore failed resume for")?;
         let expected_state = rollback_authority.state().ok_or_else(|| {
@@ -11476,13 +11578,12 @@ impl MobProvisioner for SessionBackend {
                 )
                 .await?;
         }
-        Self::log_explicit_resume_binding_release(
+        self.release_session_binding_for_resumed_rollback(
             &session_id,
-            &self
-                .ops_adapter
-                .release_session_binding_for_explicit_resume(&session_id, ops_binding)?,
-        );
-        Ok(())
+            ops_binding,
+            rollback_origin,
+            Some(operation_id),
+        )
     }
 
     async fn retire_member(
@@ -12285,6 +12386,32 @@ impl MobProvisioner for SessionBackend {
             owner_bridge_session_id,
             ops_registry,
         )?;
+        Ok(())
+    }
+
+    async fn settle_session_ops_binding_for_explicit_resume_repoint(
+        &self,
+        superseded_session_id: &SessionId,
+        successor_session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        let repointed = self
+            .ops_adapter
+            .repoint_parent_owned_session_binding(superseded_session_id, successor_session_id)?;
+        match &repointed {
+            super::ops_adapter::SessionRepointOpsBinding::NoRetainedBinding
+            | super::ops_adapter::SessionRepointOpsBinding::NotParentOwned => tracing::debug!(
+                superseded_session_id = %superseded_session_id,
+                successor_session_id = %successor_session_id,
+                repointed = ?repointed,
+                "explicit-resume repoint left no parent-owned operation binding to move"
+            ),
+            _ => tracing::info!(
+                superseded_session_id = %superseded_session_id,
+                successor_session_id = %successor_session_id,
+                repointed = ?repointed,
+                "explicit-resume repoint settled the parent-owned operation binding of the superseded session"
+            ),
+        }
         Ok(())
     }
 
@@ -13952,11 +14079,12 @@ impl MobProvisioner for MultiBackendProvisioner {
     async fn retry_retained_provision_cleanup(
         &self,
         retained: RetainedProvisionEffects,
+        rollback_origin: RollbackOrigin,
     ) -> Result<(), RetainedProvisionCleanupFailure> {
         match retained.member_ref() {
             MemberRef::Session { .. } => {
                 self.session
-                    .retry_retained_provision_cleanup(retained)
+                    .retry_retained_provision_cleanup(retained, rollback_origin)
                     .await
             }
             MemberRef::BackendPeer { .. } => Err(RetainedProvisionCleanupFailure::unsupported(
@@ -14417,6 +14545,7 @@ impl MobProvisioner for MultiBackendProvisioner {
         operation_id: &OperationId,
         original_origin: ProvisionSessionOrigin,
         rollback_authority: &ResumedMemberRollbackAuthority,
+        rollback_origin: RollbackOrigin,
     ) -> Result<(), MobError> {
         match member_ref {
             MemberRef::BackendPeer {
@@ -14431,6 +14560,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                         operation_id,
                         original_origin,
                         rollback_authority,
+                        rollback_origin,
                     )
                     .await
             }
@@ -15822,6 +15952,19 @@ impl MobProvisioner for MultiBackendProvisioner {
                     .await
             }
         }
+    }
+
+    async fn settle_session_ops_binding_for_explicit_resume_repoint(
+        &self,
+        superseded_session_id: &SessionId,
+        successor_session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        self.session
+            .settle_session_ops_binding_for_explicit_resume_repoint(
+                superseded_session_id,
+                successor_session_id,
+            )
+            .await
     }
 
     async fn restore_member_owner_context_for_explicit_resume(

@@ -542,6 +542,12 @@ them.
   from the generated `ci.cfg` on every run. The canonical TLC lane
   (`make machine-verify`, the machine-codegen-verify pre-push hook and the
   nightly machine-verify job) runs it at 16 steps.
+- `meerkat-core`: `OpsOwnerAdmission` (`Open`, `Sealed`, `Retired`) and the
+  provided method `OpsLifecycleRegistry::owner_admission`, which reports
+  whether a registry is still its owner's live lifecycle authority (the
+  default refuses with `Unsupported`). `RuntimeOpsLifecycleRegistry`
+  implements it, and with the `test-support` feature exposes
+  `seal_owner_for_reload_required_discard_for_test`.
 
 ### Changed
 
@@ -770,8 +776,17 @@ them.
   left the coordinator's child operation running with nothing behind it. The
   rebuilt or revived worker now continues the coordinator's same operation.
   If the coordinator's context has ended (its child operation is terminal or
-  left mid-retirement, or its session is gone), the worker is rebound as
-  self-owned and the coordinator's operation is finished, not left open.
+  left mid-retirement, its session is gone, or its registry was sealed by a
+  ReloadRequired discard), the worker is rebound as self-owned and the
+  coordinator's operation is finished, not left open. When resume moves such
+  a worker to a successor session because its own snapshot was lost, the
+  coordinator's operation for the old session is retired and the worker
+  continues under the coordinator on the successor (or is self-owned there if
+  the coordinator's context has ended). A resumed spawn under a coordinator's
+  owner context that fails after provisioning no longer keeps the
+  coordinator-owned binding of a member that never joined the roster: its
+  rollback retires the coordinator's operation and releases the binding, so a
+  later spawn of the same session under another owner is no longer rejected.
 - The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
   and 033 (the office demo) pass again and run in pull-request CI. A new
   "Example web suites" lane builds the `sdks/web` wasm runtime once with the
@@ -988,6 +1003,9 @@ them.
 - One-shot `rkat run` (without `--keep-alive`) keeps blocking `fork_off` and
   `council`, with `blocked_because: "host_declared_unavailable"` in the
   result.
+- A coordinator-owned worker rebuilt by a reconstructed (cold) resume from a
+  fresh handle still comes back self-owned, because the coordinator owner is
+  not recorded in mob machine state.
 
 ## [0.8.42] - 2026-09-24
 

@@ -17,7 +17,9 @@
 //! and retry the exact owner cleanup instead of terminalizing on an
 //! unproven compensation.
 
-use super::provisioner::{MobProvisioner, ProvisionSessionOrigin, ResumedMemberRollbackAuthority};
+use super::provisioner::{
+    MobProvisioner, ProvisionSessionOrigin, ResumedMemberRollbackAuthority, RollbackOrigin,
+};
 use crate::error::MobError;
 use crate::event::MemberRef;
 use crate::ids::AgentIdentity;
@@ -36,6 +38,9 @@ pub(super) struct PendingProvision {
     operation_id: meerkat_core::ops::OperationId,
     session_origin: ProvisionSessionOrigin,
     rollback_authority: Option<ResumedMemberRollbackAuthority>,
+    /// Whether this provision is a spawn (a rollback removes the member from
+    /// the roster) or a revival/rebuild (the member stays seated).
+    rollback_origin: RollbackOrigin,
     committed: bool,
     rollback_attempted: bool,
     /// Set when a caller explicitly took over or abandoned the retained
@@ -52,6 +57,7 @@ impl PendingProvision {
         operation_id: meerkat_core::ops::OperationId,
         session_origin: ProvisionSessionOrigin,
         rollback_authority: Option<ResumedMemberRollbackAuthority>,
+        rollback_origin: RollbackOrigin,
     ) -> Self {
         Self {
             member_ref: Some(member_ref),
@@ -60,6 +66,7 @@ impl PendingProvision {
             operation_id,
             session_origin,
             rollback_authority,
+            rollback_origin,
             committed: false,
             rollback_attempted: false,
             custody_settled: false,
@@ -134,6 +141,7 @@ impl PendingProvision {
                                 &self.operation_id,
                                 self.session_origin,
                                 rollback_authority,
+                                self.rollback_origin,
                             )
                             .await
                     }
@@ -449,6 +457,7 @@ mod tests {
             _operation_id: &OperationId,
             _original_origin: ProvisionSessionOrigin,
             _rollback_authority: &ResumedMemberRollbackAuthority,
+            _rollback_origin: RollbackOrigin,
         ) -> Result<(), MobError> {
             self.restore_attempts.fetch_add(1, Ordering::AcqRel);
             self.enter_barriered_cleanup().await;
@@ -687,6 +696,7 @@ mod tests {
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
             None,
+            RollbackOrigin::SpawnRollback,
         );
         let committed_ref = guard.commit().unwrap();
         assert_eq!(committed_ref, member_ref);
@@ -706,6 +716,7 @@ mod tests {
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
             None,
+            RollbackOrigin::SpawnRollback,
         );
         guard.rollback().await.unwrap();
         assert!(provisioner.retired.load(Ordering::Acquire));
@@ -721,6 +732,7 @@ mod tests {
             OperationId::new(),
             ProvisionSessionOrigin::ResumedDurable,
             Some(ResumedMemberRollbackAuthority::for_test()),
+            RollbackOrigin::SpawnRollback,
         );
 
         guard.rollback().await.unwrap();
@@ -742,6 +754,7 @@ mod tests {
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
             None,
+            RollbackOrigin::SpawnRollback,
         );
         let error = guard
             .rollback()
@@ -765,6 +778,7 @@ mod tests {
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
             None,
+            RollbackOrigin::SpawnRollback,
         );
         assert_eq!(
             guard.member_ref().expect("live provision member ref"),
@@ -786,6 +800,7 @@ mod tests {
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
             None,
+            RollbackOrigin::SpawnRollback,
         );
         assert_eq!(guard.member_identity(), &member_identity);
         let _ = guard.commit(); // consume
@@ -806,6 +821,7 @@ mod tests {
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
             None,
+            RollbackOrigin::SpawnRollback,
         );
         // dropped without commit or rollback
     }
@@ -823,6 +839,7 @@ mod tests {
             OperationId::new(),
             ProvisionSessionOrigin::Fresh,
             None,
+            RollbackOrigin::SpawnRollback,
         );
 
         let custody = guard
@@ -857,6 +874,7 @@ mod tests {
             OperationId::new(),
             ProvisionSessionOrigin::ResumedDurable,
             Some(ResumedMemberRollbackAuthority::for_test()),
+            RollbackOrigin::SpawnRollback,
         );
 
         let custody = guard
@@ -893,6 +911,7 @@ mod tests {
             OperationId::new(),
             ProvisionSessionOrigin::ResumedDurable,
             Some(ResumedMemberRollbackAuthority::for_test()),
+            RollbackOrigin::SpawnRollback,
         );
 
         let custody = guard
@@ -926,6 +945,7 @@ mod tests {
             OperationId::new(),
             ProvisionSessionOrigin::ResumedDurable,
             None,
+            RollbackOrigin::SpawnRollback,
         );
 
         let custody = guard
@@ -966,6 +986,7 @@ mod tests {
                     OperationId::new(),
                     ProvisionSessionOrigin::Fresh,
                     None,
+                    RollbackOrigin::SpawnRollback,
                 );
                 match guard.rollback_retaining_custody().await {
                     Ok(()) => settled.store(true, Ordering::Release),
@@ -1074,7 +1095,10 @@ mod tests {
         let operation_id = OperationId::new();
 
         let failure = provisioner
-            .retry_retained_provision_cleanup(custody(&session_id, &operation_id))
+            .retry_retained_provision_cleanup(
+                custody(&session_id, &operation_id),
+                RollbackOrigin::SpawnRollback,
+            )
             .await
             .expect_err("a provisioner that did not issue the custody must refuse");
 

@@ -19,12 +19,16 @@
 //!    real result when it finished before the restart;
 //! 3. if a record was skipped because the previous process's claim lease had
 //!    not been observed expired (a restart inside the lease is the common
-//!    case), waits until that lease expires and runs another pass.
+//!    case), waits until that lease expires and runs another pass;
+//! 4. if a convener could not be revived yet, because its mob is not running
+//!    (a host that restores a stopped mob and activates it later) or the
+//!    mob's resume of it is still in progress, waits until that clears and
+//!    runs another pass.
 //!
 //! The waiting is bounded: a record whose lease keeps being renewed belongs
-//! to a live coordinator and stops being waited for, and the sweep stops
-//! after a fixed number of passes. It holds the state weakly, so a dropped
-//! state ends it.
+//! to a live coordinator and stops being waited for, a mob that ends for good
+//! stops being waited for, and the sweep stops after a fixed number of
+//! passes. It holds the state weakly, so a dropped state ends it.
 //!
 //! Delivery is the same durable completion record the live custodian admits
 //! ([`crate::detached_delivery`]), under the same per-job idempotency key, so
@@ -44,8 +48,8 @@ use meerkat_mob::temporary_council::TemporaryCouncilId;
 use crate::MobMcpState;
 use crate::agent_tools::{TOOL_COUNCIL, council_outcome_json};
 use crate::detached_delivery::{
-    DetachedCompletionDelivered, DetachedCompletionError, deliver_detached_completion,
-    deliver_detached_completion_to_member,
+    DetachedCompletionDelivered, DetachedCompletionError, OwnerRevivalDeferral,
+    deliver_detached_completion, deliver_detached_completion_to_member,
 };
 use crate::temporary_council::replay_outcome;
 #[cfg(target_arch = "wasm32")]
@@ -79,6 +83,13 @@ pub enum CouncilRelinkAction {
     /// The convener is gone (retired, or its session archived or deleted):
     /// the outcome can never be delivered, so the job is settled.
     OwnerGone,
+    /// The convener is a member of mob `mob_id` and cannot be revived to
+    /// receive the outcome yet, for a reason that clears on its own. The
+    /// post-restore sweep delivers again once it has.
+    AwaitingConvener {
+        mob_id: meerkat_mob::MobId,
+        reason: OwnerRevivalDeferral,
+    },
     /// Delivery failed; a later re-link retries it.
     Failed(String),
 }
@@ -97,7 +108,7 @@ pub struct CouncilRelinkReport {
 pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
     // Latest observed lease expiry and renewal count per held record.
     let mut observed: BTreeMap<TemporaryCouncilId, (DateTime<Utc>, u32)> = BTreeMap::new();
-    for _ in 0..MAX_SWEEP_PASSES {
+    for pass in 0..MAX_SWEEP_PASSES {
         let Some(strong) = state.upgrade() else {
             return;
         };
@@ -129,6 +140,16 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
         };
         // After recovery, so councils it sealed deliver at once.
         let reports = relink_detached_councils(&strong, strong.created_at_ms).await;
+        // Conveners that cannot be revived yet: the next pass runs once
+        // one of them may be.
+        let mut awaited_conveners: Vec<(meerkat_mob::MobHandle, OwnerRevivalDeferral)> = Vec::new();
+        for report in &reports {
+            if let CouncilRelinkAction::AwaitingConvener { mob_id, reason } = &report.action
+                && let Ok(handle) = strong.handle_for(mob_id).await
+            {
+                awaited_conveners.push((handle, reason.clone()));
+            }
+        }
         let delivered = reports
             .iter()
             .filter(|report| report.action == CouncilRelinkAction::Delivered)
@@ -158,24 +179,58 @@ pub(crate) async fn restore_sweep(state: Weak<MobMcpState>) {
                 next.min(record.claim_lease_expires_at)
             }));
         }
-        let Some(next_expiry) = next_expiry else {
+        if next_expiry.is_none() && awaited_conveners.is_empty() {
             return;
-        };
-        let wait = (next_expiry - strong.temporary_council_now())
-            .to_std()
-            .unwrap_or_default()
-            .saturating_add(LEASE_EXPIRY_MARGIN);
+        }
+        let lease_wait = next_expiry.map(|next_expiry| {
+            (next_expiry - strong.temporary_council_now())
+                .to_std()
+                .unwrap_or_default()
+                .saturating_add(LEASE_EXPIRY_MARGIN)
+        });
         // Wait without keeping the state alive.
         drop(strong);
         tokio::select! {
-            () = tokio::time::sleep(wait) => {}
+            () = async {
+                match lease_wait {
+                    Some(wait) => tokio::time::sleep(wait).await,
+                    None => std::future::pending().await,
+                }
+            } => {}
             _ = clock.changed() => {}
+            // An awaited convener may be revivable, or none can be any
+            // more (the next pass then settles them as gone).
+            _ = any_convener_revivable(awaited_conveners, pass) => {}
         }
     }
     tracing::warn!(
         passes = MAX_SWEEP_PASSES,
         "temporary council recovery sweep stopped waiting for held records"
     );
+}
+
+/// Wait until one of `conveners` may be revivable. `true` then; `false` at
+/// once when none of them can be any more (each one's mob completed, was
+/// destroyed or lost its actor), and never when `conveners` is empty.
+async fn any_convener_revivable(
+    conveners: Vec<(meerkat_mob::MobHandle, OwnerRevivalDeferral)>,
+    attempt: usize,
+) -> bool {
+    if conveners.is_empty() {
+        return std::future::pending().await;
+    }
+    let attempt = u32::try_from(attempt).unwrap_or(u32::MAX);
+    let mut waits: futures::stream::FuturesUnordered<_> = conveners
+        .into_iter()
+        .map(|(handle, reason)| async move { reason.cleared(&handle, attempt).await })
+        .collect();
+    use futures::StreamExt as _;
+    while let Some(revivable) = waits.next().await {
+        if revivable {
+            return true;
+        }
+    }
+    false
 }
 
 /// Deliver the sealed outcome of every detached council created before
@@ -327,6 +382,9 @@ async fn deliver(
         Ok(DetachedCompletionDelivered::Delivered) => CouncilRelinkAction::Delivered,
         Ok(_) => CouncilRelinkAction::AlreadyDelivered,
         Err(DetachedCompletionError::OwnerGone { .. }) => CouncilRelinkAction::OwnerGone,
+        Err(DetachedCompletionError::OwnerRevivalDeferred { mob_id, reason, .. }) => {
+            CouncilRelinkAction::AwaitingConvener { mob_id, reason }
+        }
         Err(error) => CouncilRelinkAction::Failed(error.to_string()),
     }
 }

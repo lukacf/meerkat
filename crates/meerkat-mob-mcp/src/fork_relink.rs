@@ -17,18 +17,29 @@
 //! - idle without one (the turn did not survive the restart): delivers a
 //!   `restart_interrupted` outcome and leaves the child seated for its forker.
 //!
+//! A status read that does not observe the child (the mob has one status
+//! observation lane, so another reader can hold it) says nothing about the
+//! child's state: the pass reads again, and never takes it for an idle child.
+//!
 //! Delivery is the same durable completion record the live custodian admits
 //! ([`crate::detached_delivery`]), under the same idempotency key, so a job
 //! already delivered before the restart is never recorded twice, and an idle
-//! owner is woken to see it.
+//! owner is woken to see it. A forker that cannot be revived yet, because
+//! its mob is not running (a host that restores a stopped mob and activates
+//! it later) or the mob's resume of it is still in progress, is reported as
+//! [`ForkRelinkAction::AwaitingOwner`], and the automatic pass delivers again
+//! once that clears.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use meerkat_mob::{AgentIdentity, ForkJobRecord, MemberRunState, MobHandle, MobId};
+use meerkat_mob::{
+    AgentIdentity, ForkJobRecord, MemberRunState, MobError, MobHandle, MobId, MobMemberSnapshot,
+};
 
 use crate::MobMcpState;
 use crate::agent_tools::{ForkOffCompletion, ForkOffCompletionStatus, TOOL_FORK_OFF};
+use crate::detached_delivery::OwnerRevivalDeferral;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 
@@ -43,6 +54,10 @@ pub enum ForkRelinkAction {
     /// The forker is gone (retired, or its session archived or deleted), so
     /// the outcome can never be delivered.
     OwnerGone,
+    /// The forker cannot be revived to receive the outcome yet, for a
+    /// reason that clears on its own. The automatic pass delivers again once
+    /// it has.
+    AwaitingOwner(OwnerRevivalDeferral),
     /// Delivery failed.
     Failed(String),
 }
@@ -57,6 +72,14 @@ pub struct ForkRelinkReport {
 }
 
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Pause before reading a child's status again after a read that did not
+/// observe it (another reader held the mob's status lane).
+const UNOBSERVED_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Times the automatic pass waits for a deferred forker revival to clear and
+/// delivers again.
+const MAX_OWNER_REVIVAL_WAITS: u32 = 16;
 
 fn now_ms() -> u64 {
     u64::try_from(
@@ -83,17 +106,108 @@ pub async fn relink_restored_fork_children(
     for (mob_id, handle) in handles {
         let claimed = state.claim_fork_relink(&mob_id);
         if claimed || !respect_claims {
-            reports.extend(
-                relink_mob_fork_children(
-                    state.session_service(),
-                    state.runtime_adapter_for_relink(),
-                    &mob_id,
-                    &handle,
-                    restored_before_ms,
+            let mob_reports = relink_mob_fork_children(
+                state.session_service(),
+                state.runtime_adapter_for_relink(),
+                &mob_id,
+                &handle,
+                restored_before_ms,
+            )
+            .await;
+            let awaiting_owner = mob_reports
+                .iter()
+                .any(|report| matches!(report.action, ForkRelinkAction::AwaitingOwner(_)));
+            if claimed && awaiting_owner {
+                // This call holds the mob's one automatic re-link, so it
+                // also owns delivering again once a deferred forker
+                // revival clears.
+                let service = state.session_service();
+                let runtime = state.runtime_adapter_for_relink();
+                let pending = mob_reports.clone();
+                let (mob_id, handle) = (mob_id.clone(), handle.clone());
+                tokio::spawn(async move {
+                    redeliver_when_owners_revivable(
+                        service,
+                        runtime,
+                        &mob_id,
+                        &handle,
+                        restored_before_ms,
+                        pending,
+                    )
+                    .await;
+                });
+            }
+            reports.extend(mob_reports);
+        }
+    }
+    reports
+}
+
+/// Deliver again the outcomes `reports` could not deliver because the
+/// forker could not be revived yet ([`ForkRelinkAction::AwaitingOwner`]),
+/// each time that clears: the mob starts running, or the operation in
+/// progress on the forker has had time to finish. Returns the final report
+/// of every child in `reports`. Waiting ends when the mob completes, is
+/// destroyed or its actor is gone (its members are gone with it), or after
+/// [`MAX_OWNER_REVIVAL_WAITS`] waits. Delivery is idempotent per job, so
+/// nothing is recorded twice.
+pub(crate) async fn redeliver_when_owners_revivable(
+    service: Arc<dyn meerkat_mob::MobSessionService>,
+    runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    mob_id: &MobId,
+    handle: &MobHandle,
+    restored_before_ms: u64,
+    mut reports: Vec<ForkRelinkReport>,
+) -> Vec<ForkRelinkReport> {
+    for attempt in 0..MAX_OWNER_REVIVAL_WAITS {
+        let awaiting: std::collections::BTreeMap<String, OwnerRevivalDeferral> = reports
+            .iter()
+            .filter_map(|report| match &report.action {
+                ForkRelinkAction::AwaitingOwner(reason) => {
+                    Some((report.job_id.clone(), reason.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        // An operation in progress clears without a run transition, so it
+        // paces the wait when any child waits on one.
+        let Some(reason) = awaiting
+            .values()
+            .find(|reason| {
+                matches!(
+                    reason,
+                    OwnerRevivalDeferral::LifecycleOperationPending { .. }
                 )
-                .await,
+            })
+            .or_else(|| awaiting.values().next())
+        else {
+            break;
+        };
+        if !reason.cleared(handle, attempt).await {
+            break;
+        }
+        let retried = relink_mob_fork_children_where(
+            Arc::clone(&service),
+            runtime.clone(),
+            mob_id,
+            handle,
+            restored_before_ms,
+            |job| awaiting.contains_key(&job.job_id),
+        )
+        .await;
+        let delivered = retried
+            .iter()
+            .filter(|report| report.action == ForkRelinkAction::Delivered)
+            .count();
+        if delivered > 0 {
+            tracing::info!(
+                mob_id = %mob_id,
+                children = delivered,
+                "fork_off re-link delivered outcomes once their forker could be revived"
             );
         }
+        reports.retain(|report| !awaiting.contains_key(&report.job_id));
+        reports.extend(retried);
     }
     reports
 }
@@ -106,6 +220,21 @@ pub async fn relink_mob_fork_children(
     handle: &MobHandle,
     restored_before_ms: u64,
 ) -> Vec<ForkRelinkReport> {
+    relink_mob_fork_children_where(service, runtime, mob_id, handle, restored_before_ms, |_| {
+        true
+    })
+    .await
+}
+
+/// [`relink_mob_fork_children`] for the children whose job `select` picks.
+async fn relink_mob_fork_children_where(
+    service: Arc<dyn meerkat_mob::MobSessionService>,
+    runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    mob_id: &MobId,
+    handle: &MobHandle,
+    restored_before_ms: u64,
+    select: impl Fn(&ForkJobRecord) -> bool,
+) -> Vec<ForkRelinkReport> {
     let children: Vec<(AgentIdentity, ForkJobRecord)> = handle
         .roster()
         .await
@@ -116,7 +245,7 @@ pub async fn relink_mob_fork_children(
                 .clone()
                 .map(|job| (entry.agent_identity.clone(), job))
         })
-        .filter(|(_, job)| job.started_at_ms < restored_before_ms)
+        .filter(|(_, job)| job.started_at_ms < restored_before_ms && select(job))
         .collect();
     // Each child settles on its own task: observing a member waits for its
     // turn boundary, so one busy child must not hold up the others.
@@ -191,25 +320,71 @@ pub async fn relink_child(
                 }
             }
         };
-        let running = match &observed {
-            None => {
-                // The child may have finished while the limit ran down.
-                let completion = match durable_reply(&service, mob_id, handle, child, job).await {
-                    Some(completion) => completion,
-                    None => autokill(mob_id, handle, child, job).await,
-                };
+        let Some(observed) = observed else {
+            // The child may have finished while the limit ran down.
+            let completion = match durable_reply(&service, mob_id, handle, child, job).await {
+                Some(completion) => completion,
+                None => autokill(mob_id, handle, child, job).await,
+            };
+            return deliver(runtime.as_deref(), handle, child, job, completion).await;
+        };
+        match ChildObservation::of(observed) {
+            ChildObservation::Running => tokio::time::sleep(WATCH_INTERVAL).await,
+            ChildObservation::Settled => {
+                let completion = settled_outcome(&service, mob_id, handle, child, job).await;
                 return deliver(runtime.as_deref(), handle, child, job, completion).await;
             }
-            Some(Ok(snapshot)) => snapshot.progress.as_ref().is_some_and(|progress| {
-                progress.run_state == MemberRunState::RunOpen || progress.in_flight_work > 0
-            }),
-            Some(Err(_)) => false,
-        };
-        if !running {
-            let completion = settled_outcome(&service, mob_id, handle, child, job).await;
-            return deliver(runtime.as_deref(), handle, child, job, completion).await;
+            ChildObservation::Unobserved(error) => {
+                // The read says nothing about the child's state. A child
+                // that finished meanwhile shows in its durable transcript;
+                // otherwise read again.
+                if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await
+                {
+                    return deliver(runtime.as_deref(), handle, child, job, completion).await;
+                }
+                tracing::debug!(
+                    mob_id = %mob_id,
+                    child = %child,
+                    error = %error,
+                    "fork_off re-link could not observe the child; reading again"
+                );
+                tokio::time::sleep(UNOBSERVED_RETRY_INTERVAL).await;
+            }
         }
-        tokio::time::sleep(WATCH_INTERVAL).await;
+    }
+}
+
+/// What one status read says about a fork child.
+enum ChildObservation {
+    /// The child has a run open or work in flight.
+    Running,
+    /// The child is not running: idle, no longer seated, or its mob's actor
+    /// is gone (nothing runs it any more).
+    Settled,
+    /// The read did not observe the child, so it says nothing about the
+    /// child's state: another reader held the mob's one status observation
+    /// lane, the actor did not answer in time, or the read failed.
+    Unobserved(MobError),
+}
+
+impl ChildObservation {
+    fn of(read: Result<MobMemberSnapshot, MobError>) -> Self {
+        match read {
+            Ok(snapshot) => {
+                let running = snapshot.progress.as_ref().is_some_and(|progress| {
+                    progress.run_state == MemberRunState::RunOpen || progress.in_flight_work > 0
+                });
+                if running {
+                    Self::Running
+                } else {
+                    Self::Settled
+                }
+            }
+            Err(MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed) => {
+                Self::Settled
+            }
+            Err(error) => Self::Unobserved(error),
+        }
     }
 }
 
@@ -349,6 +524,10 @@ async fn deliver(
         Err(crate::detached_delivery::DetachedCompletionError::OwnerGone { .. }) => {
             ForkRelinkAction::OwnerGone
         }
+        Err(crate::detached_delivery::DetachedCompletionError::OwnerRevivalDeferred {
+            reason,
+            ..
+        }) => ForkRelinkAction::AwaitingOwner(reason),
         Err(error) => ForkRelinkAction::Failed(error.to_string()),
     }
 }

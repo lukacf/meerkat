@@ -16,6 +16,7 @@ use meerkat_mob::AgentIdentity;
 use meerkat_mob::ProfileName;
 use meerkat_mob::temporary_council::{TemporaryCouncilDurability, TemporaryCouncilJobBinding};
 use meerkat_mob_mcp::council_relink::CouncilRelinkAction;
+use meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral;
 use meerkat_mob_mcp::temporary_council::{
     MergeBackPolicy, TemporaryCouncilBounds, TemporaryCouncilParticipantSpec,
     TemporaryCouncilRequest,
@@ -444,5 +445,95 @@ async fn relink_settles_a_council_whose_convener_is_gone() {
         "an undeliverable job is settled"
     );
     assert!(restarted.relink_detached_councils().await.is_empty());
+    fixture.teardown().await;
+}
+
+/// A MobKit-style host restores the convener's mob stopped, inserts its
+/// handle, and activates it later. The convener is not live and cannot be
+/// revived while its mob is stopped: the re-link reports that typed, and the
+/// post-restore sweep delivers the sealed outcome once the mob runs, exactly
+/// once (lifecycle review: the single attempt failed and was never retried).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_council_relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(|_| ScriptedTurn::Text("RELINKED-POSITION".to_string()));
+    fixture.seed_source_mob(&["convener", "researcher"]).await;
+    let owner = member_session(&fixture, "convener").await;
+    let job_id = "council-job-stopped-mob";
+    let council_id = fixture.council_id("relink-stopped-mob");
+    fixture
+        .state
+        .temporary_council()
+        .run_detached(
+            one_participant_request(&fixture, "relink-stopped-mob"),
+            TemporaryCouncilJobBinding::new(job_id, owner.clone()),
+        )
+        .await
+        .expect("the council runs");
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .expect("source mob handle");
+    // The "restart": the mob comes back stopped and the convener is not live.
+    handle.stop().await.expect("stop the mob");
+    let runtime = fixture.runtime_adapter.clone().expect("runtime-backed");
+    runtime
+        .unregister_session(&owner)
+        .await
+        .expect("the convener is not live after the restart");
+    let council_store: std::sync::Arc<dyn meerkat_mob::store::TemporaryCouncilStore> =
+        std::sync::Arc::new(
+            meerkat_mob::store::SqliteTemporaryCouncilStore::open(fixture.realm_custody_path())
+                .expect("open the durable council store"),
+        );
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let restarted = meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+        fixture.service.clone(),
+        Some(std::sync::Arc::clone(&runtime)),
+        meerkat_mob::MobControlPrincipal::Owner,
+    )
+    .with_temporary_council_store(council_store.clone())
+    .into_shared();
+    restarted
+        .mob_insert_handle(fixture.source_mob_id(), handle.clone())
+        .await;
+
+    let reports = restarted.relink_detached_councils().await;
+    let report = reports
+        .iter()
+        .find(|report| report.council_id == council_id)
+        .expect("the council is visited");
+    assert_eq!(
+        report.action,
+        CouncilRelinkAction::AwaitingConvener {
+            mob_id: fixture.source_mob_id(),
+            reason: OwnerRevivalDeferral::MobNotRunning {
+                phase: meerkat_mob::MobState::Stopped,
+            },
+        }
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        completion_records(&fixture, &owner, job_id)
+            .await
+            .is_empty()
+    );
+
+    // The host activates the mob: the sweep delivers now.
+    handle.resume().await.expect("activate the mob");
+    let delivered = await_completion_records(&fixture, &owner, job_id).await;
+    assert!(
+        delivered[0].contains("RELINKED-POSITION"),
+        "the council's real result is delivered: {}",
+        delivered[0]
+    );
+    await_settled(&council_store, &council_id).await;
+    assert!(restarted.relink_detached_councils().await.is_empty());
+    assert_eq!(
+        completion_records(&fixture, &owner, job_id).await.len(),
+        1,
+        "delivered exactly once"
+    );
     fixture.teardown().await;
 }

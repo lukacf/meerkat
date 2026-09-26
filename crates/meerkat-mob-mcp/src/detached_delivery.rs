@@ -21,6 +21,9 @@ use meerkat_core::SessionId;
 use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::types::SystemNoticeMessage;
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
+
 /// Outcome of one delivery attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -46,6 +49,69 @@ pub enum DetachedCompletionError {
     /// caller may stop retrying it.
     #[error("the owner of the {tool} completion is gone: {detail}")]
     OwnerGone { tool: &'static str, detail: String },
+    /// The owner is a member of mob `mob_id` and cannot be revived to
+    /// receive the completion yet, for a reason that clears on its own.
+    /// Delivery succeeds once it has.
+    #[error("the owner of the {tool} completion, in mob {mob_id}, cannot be revived yet: {reason}")]
+    OwnerRevivalDeferred {
+        tool: &'static str,
+        mob_id: meerkat_mob::MobId,
+        reason: OwnerRevivalDeferral,
+    },
+}
+
+/// Why a mob member cannot be revived to receive a detached completion yet.
+/// Each reason clears on its own.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum OwnerRevivalDeferral {
+    /// Its mob is not running (`phase`): revival is admitted only while the
+    /// mob runs.
+    #[error("its mob is {phase}, not running")]
+    MobNotRunning { phase: meerkat_mob::MobState },
+    /// A lifecycle operation on the member is still in progress, such as
+    /// the mob's resume reviving it.
+    #[error("a lifecycle operation on it is still in progress: {intent}")]
+    LifecycleOperationPending { intent: String },
+}
+
+/// Longest pause before another delivery to an owner whose lifecycle
+/// operation was still in progress.
+const PENDING_OPERATION_MAX_PAUSE: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl OwnerRevivalDeferral {
+    /// Wait until an owner deferred for this reason may be revivable in
+    /// `handle`'s mob. `false` when it never will be: the mob completed, was
+    /// destroyed or its actor is gone. `attempt` counts the earlier waits and
+    /// paces the wait for an operation in progress, which has no completion
+    /// signal of its own.
+    pub(crate) async fn cleared(&self, handle: &meerkat_mob::MobHandle, attempt: u32) -> bool {
+        if let Self::LifecycleOperationPending { .. } = self {
+            let pause = std::time::Duration::from_millis(100)
+                .saturating_mul(2_u32.saturating_pow(attempt.min(16)))
+                .min(PENDING_OPERATION_MAX_PAUSE);
+            tokio::time::sleep(pause).await;
+        }
+        mob_runs(handle).await
+    }
+}
+
+/// Wait until `handle`'s mob is running. `false` when it will not run again:
+/// it completed or was destroyed, or its actor is gone.
+pub(crate) async fn mob_runs(handle: &meerkat_mob::MobHandle) -> bool {
+    use meerkat_mob::MobState;
+    // Subscribe before reading, so a transition after the read wakes us.
+    let mut changes = handle.machine_state_changes();
+    loop {
+        match handle.status_observation_snapshot() {
+            MobState::Running => return true,
+            MobState::Completed | MobState::Destroyed => return false,
+            MobState::Creating | MobState::Stopped => {}
+        }
+        if changes.changed().await.is_err() {
+            return false;
+        }
+    }
 }
 
 /// The idempotency key of job `job_id`'s completion input: one per job.
@@ -166,6 +232,36 @@ pub async fn deliver_detached_completion_to_member(
                             detail: format!(
                                 "the owner member {owner_identity} is no longer seated"
                             ),
+                        }
+                    }
+                    // Revival is admitted only while the mob runs. A mob that
+                    // has ended for good takes its members with it; any other
+                    // phase is a mob that is not running yet or again.
+                    meerkat_mob::MobError::InvalidTransition {
+                        from:
+                            phase
+                            @ (meerkat_mob::MobState::Completed | meerkat_mob::MobState::Destroyed),
+                        to: meerkat_mob::MobState::Running,
+                    } => DetachedCompletionError::OwnerGone {
+                        tool,
+                        detail: format!(
+                            "the owner member {owner_identity} is in mob {}, which is {phase}",
+                            owner.mob_id()
+                        ),
+                    },
+                    meerkat_mob::MobError::InvalidTransition {
+                        from: phase,
+                        to: meerkat_mob::MobState::Running,
+                    } => DetachedCompletionError::OwnerRevivalDeferred {
+                        tool,
+                        mob_id: owner.mob_id().clone(),
+                        reason: OwnerRevivalDeferral::MobNotRunning { phase },
+                    },
+                    meerkat_mob::MobError::LifecycleOperationPending { intent } => {
+                        DetachedCompletionError::OwnerRevivalDeferred {
+                            tool,
+                            mob_id: owner.mob_id().clone(),
+                            reason: OwnerRevivalDeferral::LifecycleOperationPending { intent },
                         }
                     }
                     error => DetachedCompletionError::Runtime {

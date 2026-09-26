@@ -1703,11 +1703,23 @@ impl MobMcpState {
             let restored_before_ms = self.created_at_ms;
             tokio::spawn(async move {
                 let reports = crate::fork_relink::relink_mob_fork_children(
+                    Arc::clone(&service),
+                    runtime.clone(),
+                    &mob_id,
+                    &handle,
+                    restored_before_ms,
+                )
+                .await;
+                // A handle inserted before its mob runs (MobKit restores a
+                // stopped mob and activates it later) cannot revive a
+                // forker yet: those outcomes are delivered once it can.
+                let reports = crate::fork_relink::redeliver_when_owners_revivable(
                     service,
                     runtime,
                     &mob_id,
                     &handle,
                     restored_before_ms,
+                    reports,
                 )
                 .await;
                 if !reports.is_empty() {

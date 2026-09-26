@@ -14,6 +14,7 @@ use std::time::Duration;
 use meerkat_mob::{
     AgentIdentity, ForkChildRunOutcome, ForkJobBinding, ProfileName, SpawnMemberSpec,
 };
+use meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral;
 use meerkat_mob_mcp::fork_relink::ForkRelinkAction;
 use support::{CouncilFixture, ScriptedTurn, TurnGate};
 
@@ -712,6 +713,183 @@ async fn a_respawned_fork_child_carries_no_fork_job() {
     assert_eq!(
         entry.spawned_by, predecessor.spawned_by,
         "ownership still belongs to the identity"
+    );
+    fixture.teardown().await;
+}
+
+/// Several children of one mob are still running when the re-link reaches
+/// them. Each settles on its own task and the mob has one member status
+/// observation lane, so their status reads collide. A read that loses the
+/// lane observes nothing and is read again, never taken for an idle child
+/// (lifecycle review: all but one were reported `restart_interrupted` while
+/// still running, and their real replies were lost).
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_of_several_running_children_delivers_each_real_reply() {
+    let gate = TurnGate::new();
+    let turn_gate = Arc::clone(&gate);
+    let fixture = CouncilFixture::new(move |request| {
+        if support::last_user_text(request).contains(CHILD_TASK) {
+            ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+        } else {
+            ScriptedTurn::Text("noted".to_string())
+        }
+    });
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let mut jobs = Vec::new();
+    for (index, child) in ["running-a", "running-b", "running-c"].iter().enumerate() {
+        let job_id = format!("job-running-{index}");
+        let (_fork, run) = handle
+            .fork_member_then_run_detached(
+                &AgentIdentity::from("forker"),
+                child_spec(child),
+                None,
+                "fork_off_result",
+                16 * 1024,
+                meerkat_core::DurableForkSourceAdmission::Quiescent,
+                None,
+                Some(ForkJobBinding {
+                    job_id: job_id.clone(),
+                    owner_session_id: owner.clone(),
+                }),
+            )
+            .await
+            .expect("fork");
+        // The custodian dies with the "old process".
+        drop(run);
+        jobs.push(job_id);
+    }
+    gate.wait_entered(3).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new(
+        fixture.service.clone(),
+        meerkat_mob::MobControlPrincipal::Owner,
+    ));
+    restarted
+        .mob_insert_handle(fixture.source_mob_id(), handle.clone())
+        .await;
+    // Every child is still mid-turn: nothing may be reported yet.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let mut premature = Vec::new();
+    for job_id in &jobs {
+        if completion_records(&fixture, &owner, job_id).await > 0 {
+            premature.push(completion_record_text(&fixture, &owner, job_id).await);
+        }
+    }
+    gate.open();
+    assert!(
+        premature.is_empty(),
+        "running children were reported before they finished: {premature:?}"
+    );
+    for job_id in &jobs {
+        await_completion_record(&fixture, &owner, job_id).await;
+        assert_eq!(completion_records(&fixture, &owner, job_id).await, 1);
+        let record = completion_record_text(&fixture, &owner, job_id).await;
+        assert!(
+            record.contains(CHILD_REPLY) && !record.contains("restart_interrupted"),
+            "job {job_id} is delivered its real reply: {record}"
+        );
+    }
+    fixture.teardown().await;
+}
+
+/// A host that restores a stopped mob inserts its handle before activating
+/// it (MobKit's identity-first gateway after a clean shutdown). The forker is
+/// not live and cannot be revived while its mob is stopped: the re-link
+/// reports that typed, then delivers the outcome once the mob runs, exactly
+/// once (lifecycle review: the single attempt failed and was never retried).
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-stopped-mob".to_string();
+    // A caller-turn fork, as fork_off makes it: the forker owns the child,
+    // so the re-link revives the forker through its mob.
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec("stopped-mob-child"),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    assert!(matches!(
+        run.outcome().await,
+        Some(ForkChildRunOutcome::Completed(_))
+    ));
+    // The "restart": the mob comes back stopped and the forker is not live.
+    handle.stop().await.expect("stop the mob");
+    let runtime = fixture.runtime_adapter.clone().expect("runtime-backed");
+    runtime
+        .unregister_session(&owner)
+        .await
+        .expect("the forker is not live after the restart");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+        fixture.service.clone(),
+        Some(Arc::clone(&runtime)),
+        meerkat_mob::MobControlPrincipal::Owner,
+    ));
+    restarted
+        .mob_insert_handle(fixture.source_mob_id(), handle.clone())
+        .await;
+
+    let reports = restarted.relink_restored_fork_children().await;
+    let report = reports
+        .iter()
+        .find(|report| report.job_id == job_id)
+        .expect("the child is visited");
+    assert_eq!(
+        report.action,
+        ForkRelinkAction::AwaitingOwner(OwnerRevivalDeferral::MobNotRunning {
+            phase: meerkat_mob::MobState::Stopped
+        })
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 0);
+
+    // The host activates the mob: the automatic pass delivers now.
+    handle.resume().await.expect("activate the mob");
+    await_completion_record(&fixture, &owner, &job_id).await;
+    assert!(
+        completion_record_text(&fixture, &owner, &job_id)
+            .await
+            .contains(CHILD_REPLY)
+    );
+    let reports = restarted.relink_restored_fork_children().await;
+    assert_eq!(
+        reports
+            .iter()
+            .find(|report| report.job_id == job_id)
+            .map(|report| report.action.clone()),
+        Some(ForkRelinkAction::AlreadyDelivered)
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        completion_records(&fixture, &owner, &job_id).await,
+        1,
+        "delivered exactly once"
     );
     fixture.teardown().await;
 }

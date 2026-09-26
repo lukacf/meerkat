@@ -2278,6 +2278,76 @@ mod tests {
     };
     use std::sync::{Arc, Mutex};
 
+    /// The transcript a durable in-turn Steer produces: the running turn's
+    /// tool results, then the durable system notice written at the next
+    /// model boundary, then the model's next assistant message.
+    fn durable_in_turn_notice_transcript() -> Vec<Message> {
+        vec![
+            Message::User(UserMessage::text("start the job")),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "lookup".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::new(
+                "call_1".to_string(),
+                "lookup result".to_string(),
+                false,
+            )]),
+            Message::SystemNotice(meerkat_core::SystemNoticeMessage::new(
+                meerkat_core::SystemNoticeKind::Generic,
+                "background job finished",
+            )),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "noted".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            )),
+        ]
+    }
+
+    #[test]
+    fn durable_in_turn_notice_after_tool_results_builds_a_valid_anthropic_body() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let request = LlmRequest::new("claude-sonnet-4-6", durable_in_turn_notice_transcript());
+        let body = client.build_request_body(&request).unwrap();
+        assert!(
+            body.get("system").is_none(),
+            "no system prompt was authored"
+        );
+        let messages = body["messages"].as_array().expect("messages array");
+        let roles = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user", "user", "assistant"]
+        );
+        assert!(
+            roles.iter().all(|role| *role != "system"),
+            "a mid-conversation notice never becomes a system row"
+        );
+        // The tool_result is the first block of the message that follows the
+        // assistant tool_use; the notice is a separate later user row.
+        let tool_result_message = messages[2]["content"]
+            .as_array()
+            .expect("tool result blocks");
+        assert_eq!(tool_result_message[0]["type"], "tool_result");
+        assert_eq!(tool_result_message[0]["tool_use_id"], "call_1");
+        assert!(
+            messages[3].to_string().contains("background job finished"),
+            "the notice renders as user content: {}",
+            messages[3]
+        );
+    }
+
     fn assistant_image_block() -> AssistantBlock {
         AssistantBlock::Image {
             image_id: AssistantImageId::new(meerkat_core::time_compat::new_uuid_v7()),

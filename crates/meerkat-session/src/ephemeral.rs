@@ -12,7 +12,7 @@ use meerkat_core::image_content::{MissingBlobBehavior, hydrate_deferred_turn_sta
 use meerkat_core::lifecycle::core_executor::{
     BoundSessionCommit, CoreApplyOutput, CoreApplyTerminal,
 };
-use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, TurnRequestContext};
+use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
@@ -3756,15 +3756,15 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         handle.shutdown_notify.notify_one();
     }
 
-    /// Prepare one exact active-turn model boundary and wait until its actor is
-    /// parked immediately before consumption. The returned non-clone authority
-    /// is tied to the exact registry actor allocation captured here; replacement
-    /// or removal revokes it before any shutdown await.
+    /// Prepare one exact active-turn model boundary delivery and wait until its
+    /// actor is parked immediately before consumption. The returned non-clone
+    /// authority is tied to the exact registry actor allocation captured here;
+    /// replacement or removal revokes it before any shutdown await.
     pub async fn prepare_transient_turn_context_for_active_turn(
         &self,
         id: &SessionId,
         expected_run_id: &RunId,
-        contexts: Vec<TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<
         meerkat_core::PreparedTransientTurnContextBoundary,
         meerkat_core::CoreBoundaryStageError,
@@ -3788,7 +3788,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         };
 
         let prepared = state
-            .prepare_active_turn_boundary(expected_run_id, contexts)
+            .prepare_active_turn_boundary(expected_run_id, delivery)
             .await?;
 
         let still_exact = self.sessions.read().await.get(id).is_some_and(|handle| {
@@ -3803,6 +3803,23 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             )));
         }
         Ok(prepared)
+    }
+
+    /// Report that the live image of `run_id` in session `id` will be
+    /// discarded without being committed: the owning durable service resyncs
+    /// it from durable authority before its next turn. Every durable boundary
+    /// delivery the runner applied during that run is marked discarded, so the
+    /// runtime redelivers its input once instead of consuming it.
+    pub async fn discard_uncommitted_boundary_deliveries(&self, id: &SessionId, run_id: &RunId) {
+        let state = self
+            .sessions
+            .read()
+            .await
+            .get(id)
+            .map(|handle| handle.transient_turn_context_state.clone());
+        if let Some(state) = state {
+            state.discard_uncommitted_durable_deliveries(run_id);
+        }
     }
 
     /// Publish an exact interaction-terminal batch only to the actor named by

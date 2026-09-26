@@ -509,8 +509,9 @@ The 0.8.24 handwritten parser has known integration gaps:
 - `reasoning_delta`, `reasoning_complete`, `assistant_image_appended`,
   `turn_usage_accounting_unmeasured`,
   `turn_usage_accounting_identity_disputed`,
-  `interaction_callback_pending`, `peer_content_ingested`, and
-  `provider_cache_breakpoints_discarded` are inventory-known but have no typed
+  `interaction_callback_pending`, `peer_content_ingested`,
+  `provider_cache_breakpoints_discarded`, and `boundary_append_applied` are
+  inventory-known but have no typed
   parser case, so they arrive as `UnknownEvent`
 - current Rust `server_tool_content` and
   `transcript_rewrite_audit_receipt_committed` are missing from the generated

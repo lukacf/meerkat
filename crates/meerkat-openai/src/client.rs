@@ -3295,6 +3295,77 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
 
+    /// The transcript a durable in-turn Steer produces: the running turn's
+    /// tool results, then the durable system notice written at the next
+    /// model boundary, then the model's next assistant message.
+    fn durable_in_turn_notice_transcript() -> Vec<Message> {
+        vec![
+            Message::User(UserMessage::text("start the job")),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "lookup".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::new(
+                "call_1".to_string(),
+                "lookup result".to_string(),
+                false,
+            )]),
+            Message::SystemNotice(meerkat_core::SystemNoticeMessage::new(
+                meerkat_core::SystemNoticeKind::Generic,
+                "background job finished",
+            )),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "noted".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            )),
+        ]
+    }
+
+    #[test]
+    fn durable_in_turn_notice_after_tool_results_builds_a_valid_openai_body() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new("gpt-5.2", durable_in_turn_notice_transcript());
+        let body = client.build_request_body(&request).unwrap();
+        let input = body["input"].as_array().expect("responses input array");
+        let call_index = input
+            .iter()
+            .position(|item| item["type"] == "function_call")
+            .expect("function_call item");
+        let output_index = input
+            .iter()
+            .position(|item| item["type"] == "function_call_output")
+            .expect("function_call_output item");
+        assert_eq!(input[call_index]["call_id"], "call_1");
+        assert_eq!(input[output_index]["call_id"], "call_1");
+        assert!(
+            output_index > call_index,
+            "the tool output follows its call"
+        );
+        let notice_index = input
+            .iter()
+            .position(|item| item.to_string().contains("background job finished"))
+            .expect("notice item");
+        assert!(
+            notice_index > output_index,
+            "the notice lands after the tool output"
+        );
+        assert_eq!(input[notice_index]["role"], "user");
+        assert!(
+            input
+                .iter()
+                .all(|item| item["role"] != "system" && item["role"] != "developer"),
+            "a mid-conversation notice never becomes a system/developer row"
+        );
+    }
+
     fn assistant_image_block() -> AssistantBlock {
         AssistantBlock::Image {
             image_id: AssistantImageId::new(meerkat_core::time_compat::new_uuid_v7()),

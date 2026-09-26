@@ -67,7 +67,7 @@ Ordinary collaboration should use `send_message` or `reply_to_peer`.
 
 | Input | `queue` | `steer` |
 | --- | --- | --- |
-| `send_message`, `reply_to_peer`, `send_request` to a running target | Staged for the next run start (next turn) | Injected at the next run checkpoint of the running turn |
+| `send_message`, `reply_to_peer`, `send_request` to a running target | Staged for the next run start (next turn) | At an open model boundary: injected into the next model request of the running turn (request-only: never written to the transcript). With no open boundary (the model is streaming, or another steer already holds the boundary): normalised to `queue`, so a follow-up turn writes it to the transcript |
 | The same, to an idle target | New turn; wakes keep-alive sessions and mob members | Normalised to `queue`: new turn |
 | Terminal `send_response` (`completed`, `failed`) | Appended as a durable notice, then a new requester reaction turn at run start | Same, plus preemption of the current run at its next boundary; never inside the running turn |
 | `accepted` progress response | Coalesced into the requester's next run; does not wake an idle requester | Override forbidden |
@@ -110,6 +110,16 @@ canonical identity of the peer described by the lifecycle notice. Neither
 `queue` and `steer` are runtime admission modes. A `peer_response` may override
 handling mode only when its status is terminal (`completed` or `failed`);
 `accepted` progress cannot carry that override.
+
+A peer steer that reaches an open model boundary is request-only: the running
+turn sees it in exactly one model request and it never enters the transcript.
+A peer steer that finds no open boundary (the model is still streaming, or
+another request-only steer already holds that boundary) is normalised to
+`queue` and runs as a follow-up turn, which does write it to the transcript. A
+steer prompt that carries typed conversation appends (for example a detached
+job's persisted notice) is durable instead: its rows are written into the
+running turn's transcript and committed with the run. See
+[Request-only and durable steer](/reference/session-contracts#request-only-and-durable-steer).
 
 The lower signed comms wire also carries ACKs and an internal
 `incarnation_fenced_message` used for exact placed-member residency. That kind

@@ -8,7 +8,6 @@ use super::RunId;
 use super::run_primitive::RunPrimitive;
 use super::run_receipt::RunBoundaryReceiptDraft;
 use crate::error::AgentError;
-use crate::lifecycle::run_primitive::TurnRequestContext;
 use crate::service::SessionError;
 use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
 use crate::types::{RunResult, SessionId};
@@ -1275,15 +1274,17 @@ pub(crate) trait CoreBoundaryStageCommitAuthority: Send {
 /// it synchronously aborts the preparation and wakes the runner.
 ///
 /// `commit` is the publication linearization point, not a claim that the LLM
-/// consumed the context. A hard cancel that linearizes after publication but
-/// before the runner's final synchronous consume still cancels that
-/// active-turn-only context; the runner-owned consumption witness distinguishes
-/// those outcomes.
+/// consumed the delivery. A hard cancel that linearizes after publication but
+/// before the runner's final synchronous consume still cancels it. For a
+/// durable delivery, [`Self::delivery_witness`] is the runner-owned fact that
+/// distinguishes those outcomes at the run terminal.
 #[must_use = "a prepared boundary must be committed or aborted; dropping it aborts"]
 pub struct CoreBoundaryStageOutput {
     /// Optional serialized session snapshot to commit atomically with the
     /// generated receipt and input-state updates.
     session_snapshot: Option<Vec<u8>>,
+    /// Witness of a durable boundary delivery; `None` for request-only context.
+    delivery_witness: Option<crate::lifecycle::CoreBoundaryDeliveryWitness>,
     authority: Option<Box<dyn CoreBoundaryStageCommitAuthority>>,
 }
 
@@ -1294,13 +1295,32 @@ impl CoreBoundaryStageOutput {
     ) -> Self {
         Self {
             session_snapshot,
+            delivery_witness: None,
             authority: Some(authority),
         }
+    }
+
+    pub(crate) fn with_delivery_witness(
+        mut self,
+        delivery_witness: Option<crate::lifecycle::CoreBoundaryDeliveryWitness>,
+    ) -> Self {
+        self.delivery_witness = delivery_witness;
+        self
     }
 
     #[must_use]
     pub fn session_snapshot(&self) -> Option<&[u8]> {
         self.session_snapshot.as_deref()
+    }
+
+    /// Witness of the durable delivery this preparation parked, `None` for
+    /// request-only context. It is final once the prepared run has ended: the
+    /// runner marks it `Applied`, every unapplied delivery is `Withdrawn`, and
+    /// the owning service or a compaction rollback marks an applied delivery
+    /// whose image did not survive `Discarded`.
+    #[must_use]
+    pub fn delivery_witness(&self) -> Option<&crate::lifecycle::CoreBoundaryDeliveryWitness> {
+        self.delivery_witness.as_ref()
     }
 
     /// Publish the prepared candidate exactly once and unblock its runner.
@@ -1335,6 +1355,7 @@ impl std::fmt::Debug for CoreBoundaryStageOutput {
                 "session_snapshot_len",
                 &self.session_snapshot.as_ref().map(Vec::len),
             )
+            .field("delivery_witness", &self.delivery_witness)
             .field("authority", &self.authority.as_ref().map(|_| "prepared"))
             .finish()
     }
@@ -1512,22 +1533,33 @@ pub trait CoreExecutorBoundaryHandle: Send + Sync {
         reason: String,
     ) -> Result<(), CoreExecutorError>;
 
-    /// Prepare request-only runtime context for one exact cooperative LLM
-    /// boundary and return only after the actor is parked immediately before
-    /// consumption. The non-clone result owns explicit commit/abort authority.
+    /// Prepare one typed delivery for one exact cooperative LLM boundary and
+    /// return only after the actor is parked immediately before consumption.
+    /// The non-clone result owns explicit commit/abort authority.
     ///
-    /// This context is never Session state and therefore carries no durable
-    /// session snapshot. Implementations must be cancellation-safe: dropping
-    /// this future before it returns must revoke the exact pending request and
-    /// wake any actor parked on it. Durable input admission must not depend on
-    /// this ephemeral optimization completing.
-    async fn prepare_transient_turn_context_at_boundary(
+    /// [`TurnBoundaryDelivery::RequestOnly`] context is never Session state.
+    /// [`TurnBoundaryDelivery::DurableAppends`] become Session state only
+    /// through the runner, which writes them into the running turn after the
+    /// boundary resolves; the result then carries a
+    /// [`CoreBoundaryStageOutput::delivery_witness`]. A durable delivery that
+    /// finds no open boundary waits for the next boundary of the same run and
+    /// reports `Unavailable` if the run ends first. Neither class carries a
+    /// session snapshot: this handle never mutates Session state.
+    ///
+    /// Implementations must be cancellation-safe: dropping this future before
+    /// it returns must revoke the exact pending request and wake any actor
+    /// parked on it. Durable input admission must not depend on this
+    /// optimization completing.
+    ///
+    /// [`TurnBoundaryDelivery::RequestOnly`]: crate::lifecycle::TurnBoundaryDelivery::RequestOnly
+    /// [`TurnBoundaryDelivery::DurableAppends`]: crate::lifecycle::TurnBoundaryDelivery::DurableAppends
+    async fn prepare_turn_boundary_delivery(
         &self,
         _expected_run_id: &RunId,
-        _contexts: Vec<TurnRequestContext>,
+        _delivery: crate::lifecycle::TurnBoundaryDelivery,
     ) -> Result<CoreBoundaryStageOutput, CoreBoundaryStageError> {
         Err(CoreBoundaryStageError::unavailable(
-            "live transient turn-context preparation is unsupported by this executor",
+            "live turn-boundary delivery is unsupported by this executor",
         ))
     }
 }

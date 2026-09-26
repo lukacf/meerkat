@@ -12,7 +12,7 @@
 use crate::Provider;
 use crate::generated::{session_document, session_persistence_version_authority};
 use crate::lifecycle::run_primitive::{TurnMetadataOverride, TurnRequestContext};
-use crate::lifecycle::{CoreBoundaryStageError, RunId};
+use crate::lifecycle::{CoreBoundaryDeliveryWitness, CoreBoundaryStageError, RunId};
 use crate::peer_meta::PeerMeta;
 use crate::realtime_transcript::{
     RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeUserContentIdentity,
@@ -1916,11 +1916,19 @@ fn fail_closed_generated_restore(authority: &'static str, err: serde_json::Error
     panic!("generated {authority} authority rejected durable restore: {err}");
 }
 
-/// Request-only context coordinator for one live actor.
+/// Cooperative model-boundary coordinator for one live actor.
 ///
-/// This handle owns no Session state and has no persistence or idempotency
-/// semantics. It only coordinates publication of exact runtime-owned context
-/// at one named model boundary.
+/// This handle coordinates publication of exact runtime-owned deliveries at
+/// one named model boundary. It owns no Session state and has no persistence
+/// or idempotency semantics. Request-only context is never Session state;
+/// durable appends become Session state only through the runner, which applies
+/// them in one synchronous segment after the boundary resolves.
+///
+/// A window holds at most one request-only preparation and one durable
+/// preparation, so a durable delivery waiting for a boundary never displaces a
+/// request-only steer. A durable preparation that finds the window closed (the
+/// model is streaming) or already claimed waits in a single next-boundary slot
+/// of the active run; the run ending first withdraws it.
 #[derive(Clone)]
 pub struct TransientTurnContextStateHandle {
     boundary: Arc<TransientTurnContextBoundaryCoordinator>,
@@ -1936,7 +1944,18 @@ struct TransientTurnContextBoundaryLifecycle {
     actor_live: bool,
     next_generation: u64,
     next_request_id: u64,
+    /// Run whose boundaries the runner currently opens.
+    active_run: Option<RunId>,
     window: TransientTurnContextBoundaryWindow,
+    /// One durable delivery waiting for the next boundary of `active_run`.
+    next_boundary_durable: Option<RegisteredBoundaryRequest>,
+    /// Durable delivery witnesses registered during the most recent run. They
+    /// outlive the run's close so the owning session service can report that
+    /// the image carrying an applied append was discarded.
+    run_durable_witnesses: Option<(RunId, Vec<CoreBoundaryDeliveryWitness>)>,
+    /// Durable applies on this actor so far (orders applies against
+    /// compaction rollback captures).
+    durable_apply_ordinal: u64,
 }
 
 enum TransientTurnContextBoundaryWindow {
@@ -1944,28 +1963,62 @@ enum TransientTurnContextBoundaryWindow {
     Open {
         run_id: RunId,
         generation: u64,
-        request: Option<RegisteredTransientTurnContextBoundaryRequest>,
+        request_only: Option<RegisteredBoundaryRequest>,
+        durable: Option<RegisteredBoundaryRequest>,
     },
     Parked {
         run_id: RunId,
         generation: u64,
-        request_id: u64,
-        contexts: Vec<TurnRequestContext>,
-    },
-    Resolved {
-        run_id: RunId,
-        request_id: u64,
-        contexts: Vec<TurnRequestContext>,
-        resolution: TransientTurnContextBoundaryResolution,
+        request_only: Option<ParkedBoundaryRequest>,
+        durable: Option<ParkedBoundaryRequest>,
     },
 }
 
-struct RegisteredTransientTurnContextBoundaryRequest {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundarySlot {
+    RequestOnly,
+    Durable,
+}
+
+enum BoundaryPayload {
+    RequestOnly(Vec<TurnRequestContext>),
+    Durable {
+        appends: crate::lifecycle::DurableTurnBoundaryAppends,
+        witness: CoreBoundaryDeliveryWitness,
+    },
+}
+
+impl BoundaryPayload {
+    fn withdraw(&self) {
+        if let Self::Durable { witness, .. } = self {
+            witness.mark_withdrawn();
+        }
+    }
+}
+
+struct RegisteredBoundaryRequest {
     request_id: u64,
-    contexts: Vec<TurnRequestContext>,
+    run_id: RunId,
+    payload: BoundaryPayload,
 }
 
-#[derive(Clone)]
+struct ParkedBoundaryRequest {
+    request_id: u64,
+    payload: BoundaryPayload,
+    resolution: Option<TransientTurnContextBoundaryResolution>,
+}
+
+impl ParkedBoundaryRequest {
+    fn from_registered(request: RegisteredBoundaryRequest) -> Self {
+        Self {
+            request_id: request.request_id,
+            payload: request.payload,
+            resolution: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TransientTurnContextBoundaryResolution {
     Committed,
     Aborted,
@@ -1979,10 +2032,79 @@ impl Default for TransientTurnContextBoundaryCoordinator {
                 actor_live: true,
                 next_generation: 0,
                 next_request_id: 0,
+                active_run: None,
                 window: TransientTurnContextBoundaryWindow::Closed,
+                next_boundary_durable: None,
+                run_durable_witnesses: None,
+                durable_apply_ordinal: 0,
             }),
             notify: tokio::sync::Notify::new(),
         }
+    }
+}
+
+impl TransientTurnContextBoundaryLifecycle {
+    /// Withdraw every registered or parked durable delivery owned by `run_id`
+    /// (every run when `None`) and close its window.
+    fn withdraw_run(&mut self, run_id: Option<&RunId>) -> bool {
+        let owns = |candidate: &RunId| run_id.is_none_or(|run_id| candidate == run_id);
+        let mut changed = false;
+        let owns_window = match &self.window {
+            TransientTurnContextBoundaryWindow::Open {
+                run_id: current, ..
+            }
+            | TransientTurnContextBoundaryWindow::Parked {
+                run_id: current, ..
+            } => owns(current),
+            TransientTurnContextBoundaryWindow::Closed => false,
+        };
+        if owns_window {
+            match std::mem::replace(&mut self.window, TransientTurnContextBoundaryWindow::Closed) {
+                TransientTurnContextBoundaryWindow::Open {
+                    request_only,
+                    durable,
+                    ..
+                } => {
+                    for request in request_only.iter().chain(durable.iter()) {
+                        request.payload.withdraw();
+                    }
+                }
+                TransientTurnContextBoundaryWindow::Parked {
+                    request_only,
+                    durable,
+                    ..
+                } => {
+                    for request in request_only.iter().chain(durable.iter()) {
+                        request.payload.withdraw();
+                    }
+                }
+                TransientTurnContextBoundaryWindow::Closed => {}
+            }
+            changed = true;
+        }
+        if self
+            .next_boundary_durable
+            .as_ref()
+            .is_some_and(|request| owns(&request.run_id))
+            && let Some(request) = self.next_boundary_durable.take()
+        {
+            request.payload.withdraw();
+            changed = true;
+        }
+        if let Some((witness_run, witnesses)) = self.run_durable_witnesses.as_ref()
+            && owns(witness_run)
+        {
+            // A delivery the runner never applied can no longer be applied
+            // once its run is closed.
+            for witness in witnesses {
+                witness.mark_withdrawn();
+            }
+        }
+        if self.active_run.as_ref().is_some_and(owns) {
+            self.active_run = None;
+            changed = true;
+        }
+        changed
     }
 }
 
@@ -1998,65 +2120,93 @@ impl TransientTurnContextBoundaryCoordinator {
 
     fn abort_request(&self, request_id: u64) -> Result<(), CoreBoundaryStageError> {
         let mut lifecycle = self.lock();
-        let parked_owner = match &lifecycle.window {
-            TransientTurnContextBoundaryWindow::Parked {
-                run_id,
-                request_id: current,
-                contexts,
-                ..
-            } if *current == request_id => Some((run_id.clone(), contexts.clone())),
-            _ => None,
-        };
-        if let Some((run_id, contexts)) = parked_owner {
-            lifecycle.window = TransientTurnContextBoundaryWindow::Resolved {
-                run_id,
-                request_id,
-                contexts,
-                resolution: TransientTurnContextBoundaryResolution::Aborted,
-            };
-            drop(lifecycle);
-            self.notify.notify_waiters();
-            return Ok(());
-        }
+        let lifecycle = &mut *lifecycle;
+        let mut found = false;
         match &mut lifecycle.window {
-            TransientTurnContextBoundaryWindow::Open { request, .. }
-                if request
-                    .as_ref()
-                    .is_some_and(|request| request.request_id == request_id) =>
-            {
-                *request = None;
-            }
-            TransientTurnContextBoundaryWindow::Resolved {
-                request_id: current,
+            TransientTurnContextBoundaryWindow::Parked {
+                request_only,
+                durable,
                 ..
-            } if *current == request_id => return Ok(()),
-            _ => {
-                return Err(CoreBoundaryStageError::stale(format!(
-                    "transient boundary request {request_id} no longer owns its actor window"
-                )));
+            } => {
+                for parked in [request_only, durable].into_iter().flatten() {
+                    if parked.request_id == request_id {
+                        if parked.resolution.is_none() {
+                            parked.resolution =
+                                Some(TransientTurnContextBoundaryResolution::Aborted);
+                        }
+                        found = true;
+                    }
+                }
             }
+            TransientTurnContextBoundaryWindow::Open {
+                request_only,
+                durable,
+                ..
+            } => {
+                for slot in [request_only, durable] {
+                    if slot
+                        .as_ref()
+                        .is_some_and(|request| request.request_id == request_id)
+                        && let Some(request) = slot.take()
+                    {
+                        request.payload.withdraw();
+                        found = true;
+                    }
+                }
+            }
+            TransientTurnContextBoundaryWindow::Closed => {}
         }
-        drop(lifecycle);
+        if !found
+            && lifecycle
+                .next_boundary_durable
+                .as_ref()
+                .is_some_and(|request| request.request_id == request_id)
+            && let Some(request) = lifecycle.next_boundary_durable.take()
+        {
+            request.payload.withdraw();
+            found = true;
+        }
+        if !found {
+            return Err(CoreBoundaryStageError::stale(format!(
+                "transient boundary request {request_id} no longer owns its actor window"
+            )));
+        }
         self.notify.notify_waiters();
         Ok(())
     }
 
+    /// The runner's parked future was dropped: nothing it parked can be
+    /// applied any more.
+    fn abandon_parked_generation(&self, generation: u64) {
+        let mut lifecycle = self.lock();
+        let owns = matches!(
+            &lifecycle.window,
+            TransientTurnContextBoundaryWindow::Parked {
+                generation: current,
+                ..
+            } if *current == generation
+        );
+        if owns {
+            if let TransientTurnContextBoundaryWindow::Parked {
+                request_only,
+                durable,
+                ..
+            } = std::mem::replace(
+                &mut lifecycle.window,
+                TransientTurnContextBoundaryWindow::Closed,
+            ) {
+                for request in request_only.iter().chain(durable.iter()) {
+                    request.payload.withdraw();
+                }
+            }
+            drop(lifecycle);
+            self.notify.notify_waiters();
+        }
+    }
+
     fn close_run(&self, run_id: &RunId) {
         let mut lifecycle = self.lock();
-        let owns_window = match &lifecycle.window {
-            TransientTurnContextBoundaryWindow::Open {
-                run_id: current, ..
-            }
-            | TransientTurnContextBoundaryWindow::Parked {
-                run_id: current, ..
-            }
-            | TransientTurnContextBoundaryWindow::Resolved {
-                run_id: current, ..
-            } => current == run_id,
-            TransientTurnContextBoundaryWindow::Closed => false,
-        };
-        if owns_window {
-            lifecycle.window = TransientTurnContextBoundaryWindow::Closed;
+        if lifecycle.withdraw_run(Some(run_id)) {
             drop(lifecycle);
             self.notify.notify_waiters();
         }
@@ -2065,10 +2215,29 @@ impl TransientTurnContextBoundaryCoordinator {
     fn revoke_actor(&self) {
         let mut lifecycle = self.lock();
         lifecycle.actor_live = false;
+        lifecycle.withdraw_run(None);
         lifecycle.window = TransientTurnContextBoundaryWindow::Closed;
         drop(lifecycle);
         self.notify.notify_waiters();
     }
+}
+
+/// Test-support wrapper around the run-scoped boundary guard.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub struct TransientTurnContextBoundaryRunGuardForTest {
+    // Held only for its drop, which closes the run's boundary.
+    _guard: TransientTurnContextBoundaryRunGuard,
+}
+
+/// Test-support view of one consumed boundary.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct BoundaryTakeForTest {
+    pub request_only: Vec<TurnRequestContext>,
+    pub applied_durable: Option<crate::lifecycle::DurableTurnBoundaryAppends>,
 }
 
 /// Run-scoped guard closing every unresolved transient-context preparation.
@@ -2105,6 +2274,8 @@ pub struct PreparedTransientTurnContextBoundary {
     expected_run_id: RunId,
     generation: u64,
     request_id: u64,
+    slot: BoundarySlot,
+    delivery_witness: Option<CoreBoundaryDeliveryWitness>,
     armed: bool,
     _not_sync: std::marker::PhantomData<std::cell::Cell<()>>,
 }
@@ -2117,6 +2288,7 @@ impl std::fmt::Debug for PreparedTransientTurnContextBoundary {
             .field("expected_run_id", &self.expected_run_id)
             .field("generation", &self.generation)
             .field("request_id", &self.request_id)
+            .field("slot", &self.slot)
             .finish_non_exhaustive()
     }
 }
@@ -2132,18 +2304,29 @@ impl PreparedTransientTurnContextBoundary {
         self.generation
     }
 
-    /// Bind this request-only preparation to the generic commit/abort carrier.
+    /// Witness of the durable delivery this preparation parked, `None` for
+    /// request-only context.
+    #[must_use]
+    pub fn delivery_witness(&self) -> Option<&CoreBoundaryDeliveryWitness> {
+        self.delivery_witness.as_ref()
+    }
+
+    /// Bind this preparation to the generic commit/abort carrier.
     ///
-    /// Transient context never has a Session snapshot; callers pass None.
+    /// Boundary deliveries never carry a Session snapshot; callers pass None.
+    /// A durable delivery becomes Session state only through the runner and
+    /// commits with the run's own final boundary.
     pub fn into_stage_output(
         self,
         session_snapshot: Option<Vec<u8>>,
     ) -> crate::lifecycle::CoreBoundaryStageOutput {
         debug_assert!(
             session_snapshot.is_none(),
-            "transient turn context cannot carry a durable Session snapshot"
+            "a boundary delivery cannot carry a durable Session snapshot"
         );
+        let witness = self.delivery_witness.clone();
         crate::lifecycle::CoreBoundaryStageOutput::prepared(None, Box::new(self))
+            .with_delivery_witness(witness)
     }
 
     fn resolve(
@@ -2155,50 +2338,36 @@ impl PreparedTransientTurnContextBoundary {
                 "prepared transient boundary authority was already resolved",
             ));
         }
+        self.armed = false;
         let mut lifecycle = self.state.boundary.lock();
         if !lifecycle.actor_live {
-            self.armed = false;
             return Err(CoreBoundaryStageError::stale(format!(
                 "actor incarnation {} was revoked",
                 self.state.boundary.incarnation_id
             )));
         }
-        let matches_exact = matches!(
-            &lifecycle.window,
+        let parked = match &mut lifecycle.window {
             TransientTurnContextBoundaryWindow::Parked {
                 run_id,
                 generation,
-                request_id,
-                ..
-            } if run_id == &self.expected_run_id
-                && *generation == self.generation
-                && *request_id == self.request_id
-        );
-        if !matches_exact {
-            self.armed = false;
+                request_only,
+                durable,
+            } if run_id == &self.expected_run_id && *generation == self.generation => {
+                match self.slot {
+                    BoundarySlot::RequestOnly => request_only.as_mut(),
+                    BoundarySlot::Durable => durable.as_mut(),
+                }
+            }
+            _ => None,
+        };
+        let Some(parked) = parked
+            .filter(|parked| parked.request_id == self.request_id && parked.resolution.is_none())
+        else {
             return Err(CoreBoundaryStageError::stale(
                 "prepared transient boundary no longer owns the exact parked generation",
             ));
-        }
-        let contexts = match std::mem::replace(
-            &mut lifecycle.window,
-            TransientTurnContextBoundaryWindow::Closed,
-        ) {
-            TransientTurnContextBoundaryWindow::Parked { contexts, .. } => contexts,
-            _ => {
-                self.armed = false;
-                return Err(CoreBoundaryStageError::stale(
-                    "prepared transient boundary lost its parked context",
-                ));
-            }
         };
-        lifecycle.window = TransientTurnContextBoundaryWindow::Resolved {
-            run_id: self.expected_run_id.clone(),
-            request_id: self.request_id,
-            contexts,
-            resolution,
-        };
-        self.armed = false;
+        parked.resolution = Some(resolution);
         drop(lifecycle);
         self.state.boundary.notify.notify_waiters();
         Ok(())
@@ -2252,6 +2421,17 @@ impl TransientTurnContextStateHandle {
         &self,
         run_id: RunId,
     ) -> Result<TransientTurnContextBoundaryRunGuard, CoreBoundaryStageError> {
+        {
+            let mut lifecycle = self.boundary.lock();
+            if !lifecycle.actor_live {
+                return Err(CoreBoundaryStageError::stale(format!(
+                    "actor incarnation {} was revoked",
+                    self.boundary.incarnation_id
+                )));
+            }
+            lifecycle.active_run = Some(run_id.clone());
+            lifecycle.run_durable_witnesses = Some((run_id.clone(), Vec::new()));
+        }
         self.open_next_boundary(&run_id)?;
         Ok(TransientTurnContextBoundaryRunGuard {
             boundary: Arc::clone(&self.boundary),
@@ -2273,8 +2453,7 @@ impl TransientTurnContextStateHandle {
                 generation,
                 ..
             } if current == run_id => return Ok(*generation),
-            TransientTurnContextBoundaryWindow::Parked { .. }
-            | TransientTurnContextBoundaryWindow::Resolved { .. } => {
+            TransientTurnContextBoundaryWindow::Parked { .. } => {
                 return Err(CoreBoundaryStageError::fault(
                     "runner attempted to open a boundary while its predecessor was unresolved",
                 ));
@@ -2293,77 +2472,147 @@ impl TransientTurnContextStateHandle {
             .checked_add(1)
             .ok_or_else(|| CoreBoundaryStageError::fault("boundary generation overflow"))?;
         let generation = lifecycle.next_generation;
+        // A durable delivery that waited for this run's next boundary attaches
+        // to the newly opened window.
+        let durable = if lifecycle
+            .next_boundary_durable
+            .as_ref()
+            .is_some_and(|request| &request.run_id == run_id)
+        {
+            lifecycle.next_boundary_durable.take()
+        } else {
+            None
+        };
         lifecycle.window = TransientTurnContextBoundaryWindow::Open {
             run_id: run_id.clone(),
             generation,
-            request: None,
+            request_only: None,
+            durable,
         };
         drop(lifecycle);
         self.boundary.notify.notify_waiters();
         Ok(generation)
     }
 
+    /// Prepare one exact delivery for the active turn and return only after
+    /// the actor is parked immediately before consumption.
+    ///
+    /// Request-only context needs an open window of the exact run. A durable
+    /// delivery that finds the window closed or claimed waits for the next
+    /// boundary of the active run; if the run ends first this returns
+    /// `Unavailable` and the caller takes its queued fallback.
     pub async fn prepare_active_turn_boundary(
         &self,
         expected_run_id: &RunId,
-        contexts: Vec<TurnRequestContext>,
+        delivery: crate::lifecycle::TurnBoundaryDelivery,
     ) -> Result<PreparedTransientTurnContextBoundary, CoreBoundaryStageError> {
-        if contexts.is_empty() {
+        if let crate::lifecycle::TurnBoundaryDelivery::RequestOnly(contexts) = &delivery
+            && contexts.is_empty()
+        {
             return Err(CoreBoundaryStageError::fault(
                 "transient boundary preparation requires at least one context value",
             ));
         }
 
-        let request_id = {
+        let (request_id, slot, delivery_witness) = {
             let mut lifecycle = self.boundary.lock();
+            let lifecycle = &mut *lifecycle;
             if !lifecycle.actor_live {
                 return Err(CoreBoundaryStageError::stale(format!(
                     "actor incarnation {} was revoked",
                     self.boundary.incarnation_id
                 )));
             }
-            let (run_id, request) = match &mut lifecycle.window {
-                TransientTurnContextBoundaryWindow::Open {
-                    run_id, request, ..
-                } => (run_id, request),
-                TransientTurnContextBoundaryWindow::Closed => {
-                    return Err(CoreBoundaryStageError::unavailable(format!(
-                        "run {expected_run_id} has no open cooperative model boundary"
-                    )));
-                }
-                TransientTurnContextBoundaryWindow::Parked { .. }
-                | TransientTurnContextBoundaryWindow::Resolved { .. } => {
-                    return Err(CoreBoundaryStageError::unavailable(format!(
-                        "the next boundary for run {expected_run_id} was already claimed"
-                    )));
-                }
-            };
-            if run_id != expected_run_id {
-                return Err(CoreBoundaryStageError::stale(format!(
-                    "open boundary belongs to run {run_id}, not {expected_run_id}"
-                )));
-            }
-            if request.is_some() {
-                return Err(CoreBoundaryStageError::unavailable(format!(
-                    "the next boundary for run {expected_run_id} already has a preparation"
-                )));
-            }
-            lifecycle.next_request_id = lifecycle
+            let request_id = lifecycle
                 .next_request_id
                 .checked_add(1)
                 .ok_or_else(|| CoreBoundaryStageError::fault("boundary request id overflow"))?;
-            let request_id = lifecycle.next_request_id;
-            let TransientTurnContextBoundaryWindow::Open { request, .. } = &mut lifecycle.window
-            else {
-                return Err(CoreBoundaryStageError::fault(
-                    "boundary window changed while registering preparation",
-                ));
-            };
-            *request = Some(RegisteredTransientTurnContextBoundaryRequest {
-                request_id,
-                contexts,
-            });
-            request_id
+            match delivery {
+                crate::lifecycle::TurnBoundaryDelivery::RequestOnly(contexts) => {
+                    let request_only = match &mut lifecycle.window {
+                        TransientTurnContextBoundaryWindow::Open {
+                            run_id,
+                            request_only,
+                            ..
+                        } => {
+                            if run_id != expected_run_id {
+                                return Err(CoreBoundaryStageError::stale(format!(
+                                    "open boundary belongs to run {run_id}, not {expected_run_id}"
+                                )));
+                            }
+                            request_only
+                        }
+                        TransientTurnContextBoundaryWindow::Closed => {
+                            return Err(CoreBoundaryStageError::unavailable(format!(
+                                "run {expected_run_id} has no open cooperative model boundary"
+                            )));
+                        }
+                        TransientTurnContextBoundaryWindow::Parked { .. } => {
+                            return Err(CoreBoundaryStageError::unavailable(format!(
+                                "the next boundary for run {expected_run_id} was already claimed"
+                            )));
+                        }
+                    };
+                    if request_only.is_some() {
+                        return Err(CoreBoundaryStageError::unavailable(format!(
+                            "the next boundary for run {expected_run_id} already has a preparation"
+                        )));
+                    }
+                    *request_only = Some(RegisteredBoundaryRequest {
+                        request_id,
+                        run_id: expected_run_id.clone(),
+                        payload: BoundaryPayload::RequestOnly(contexts),
+                    });
+                    lifecycle.next_request_id = request_id;
+                    (request_id, BoundarySlot::RequestOnly, None)
+                }
+                crate::lifecycle::TurnBoundaryDelivery::DurableAppends(appends) => {
+                    if let TransientTurnContextBoundaryWindow::Open { run_id, .. } =
+                        &lifecycle.window
+                        && run_id != expected_run_id
+                    {
+                        return Err(CoreBoundaryStageError::stale(format!(
+                            "open boundary belongs to run {run_id}, not {expected_run_id}"
+                        )));
+                    }
+                    if lifecycle.active_run.as_ref() != Some(expected_run_id) {
+                        return Err(CoreBoundaryStageError::unavailable(format!(
+                            "run {expected_run_id} is not the actor's active run"
+                        )));
+                    }
+                    let witness = CoreBoundaryDeliveryWitness::pending();
+                    let request = RegisteredBoundaryRequest {
+                        request_id,
+                        run_id: expected_run_id.clone(),
+                        payload: BoundaryPayload::Durable {
+                            appends,
+                            witness: witness.clone(),
+                        },
+                    };
+                    match &mut lifecycle.window {
+                        TransientTurnContextBoundaryWindow::Open { durable, .. }
+                            if durable.is_none() =>
+                        {
+                            *durable = Some(request);
+                        }
+                        _ => {
+                            if lifecycle.next_boundary_durable.is_some() {
+                                return Err(CoreBoundaryStageError::unavailable(format!(
+                                    "a durable delivery already waits for the next boundary of run {expected_run_id}"
+                                )));
+                            }
+                            lifecycle.next_boundary_durable = Some(request);
+                        }
+                    }
+                    if let Some((witness_run, witnesses)) = lifecycle.run_durable_witnesses.as_mut()
+                        && witness_run == expected_run_id
+                    {
+                        witnesses.push(witness.clone());
+                    }
+                    lifecycle.next_request_id = request_id;
+                    (request_id, BoundarySlot::Durable, Some(witness))
+                }
+            }
         };
 
         let mut pending = PendingTransientTurnContextBoundaryPreparation {
@@ -2380,31 +2629,41 @@ impl TransientTurnContextStateHandle {
             let poll = {
                 let lifecycle = self.boundary.lock();
                 if lifecycle.actor_live {
+                    let registered = |request: &Option<RegisteredBoundaryRequest>| {
+                        request
+                            .as_ref()
+                            .is_some_and(|request| request.request_id == request_id)
+                    };
                     match &lifecycle.window {
                         TransientTurnContextBoundaryWindow::Parked {
                             run_id,
                             generation,
-                            request_id: parked_request_id,
-                            ..
-                        } if *parked_request_id == request_id => {
+                            request_only,
+                            durable,
+                        } if [request_only, durable]
+                            .into_iter()
+                            .flatten()
+                            .any(|parked| parked.request_id == request_id) =>
+                        {
                             Ok(Some(PreparedTransientTurnContextBoundary {
                                 state: self.clone(),
                                 expected_run_id: run_id.clone(),
                                 generation: *generation,
                                 request_id,
+                                slot,
+                                delivery_witness: delivery_witness.clone(),
                                 armed: true,
                                 _not_sync: std::marker::PhantomData,
                             }))
                         }
-                        TransientTurnContextBoundaryWindow::Open { request, .. }
-                            if request
-                                .as_ref()
-                                .is_some_and(|request| request.request_id == request_id) =>
-                        {
-                            Ok(None)
-                        }
+                        TransientTurnContextBoundaryWindow::Open {
+                            request_only,
+                            durable,
+                            ..
+                        } if registered(request_only) || registered(durable) => Ok(None),
+                        _ if registered(&lifecycle.next_boundary_durable) => Ok(None),
                         _ => Err(CoreBoundaryStageError::unavailable(format!(
-                            "run {expected_run_id} ended before transient boundary request {request_id} parked"
+                            "run {expected_run_id} ended or refused boundary request {request_id} before it parked"
                         ))),
                     }
                 } else {
@@ -2425,15 +2684,22 @@ impl TransientTurnContextStateHandle {
         }
     }
 
-    /// Consume context published for this exact boundary.
+    /// Consume every delivery published for this exact boundary.
     ///
-    /// Runner-first closes the window with an empty result. Prepare-first parks
-    /// until the unique external authority commits or aborts.
+    /// Runner-first closes the window with nothing to deliver. Prepare-first
+    /// parks until every registered preparation's unique external authority
+    /// has committed or aborted. With [`BoundaryDeliveryAcceptance::RequestOnly`]
+    /// a registered durable delivery is refused before parking: its witness is
+    /// withdrawn and its preparer observes `Unavailable`.
+    ///
+    /// [`BoundaryDeliveryAcceptance::RequestOnly`]: crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnly
     pub(crate) async fn take_pending_at_exact_boundary(
         &self,
         run_id: &RunId,
-    ) -> Result<Vec<TurnRequestContext>, CoreBoundaryStageError> {
-        let request_id = {
+        acceptance: crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance,
+    ) -> Result<crate::lifecycle::boundary_delivery::TakenBoundaryDelivery, CoreBoundaryStageError>
+    {
+        let generation = {
             let mut lifecycle = self.boundary.lock();
             if !lifecycle.actor_live {
                 return Err(CoreBoundaryStageError::stale(format!(
@@ -2441,12 +2707,13 @@ impl TransientTurnContextStateHandle {
                     self.boundary.incarnation_id
                 )));
             }
-            let (generation, request) = match &mut lifecycle.window {
+            let (generation, request_only, durable) = match &mut lifecycle.window {
                 TransientTurnContextBoundaryWindow::Open {
                     run_id: current,
                     generation,
-                    request,
-                } if current == run_id => (*generation, request.take()),
+                    request_only,
+                    durable,
+                } if current == run_id => (*generation, request_only.take(), durable.take()),
                 TransientTurnContextBoundaryWindow::Open {
                     run_id: current, ..
                 } => {
@@ -2459,43 +2726,53 @@ impl TransientTurnContextStateHandle {
                         "run {run_id} reached a boundary with no open generation"
                     )));
                 }
-                TransientTurnContextBoundaryWindow::Parked { .. }
-                | TransientTurnContextBoundaryWindow::Resolved { .. } => {
+                TransientTurnContextBoundaryWindow::Parked { .. } => {
                     return Err(CoreBoundaryStageError::fault(
                         "runner re-entered an unresolved transient model boundary",
                     ));
                 }
             };
-            let Some(request) = request else {
-                lifecycle.window = TransientTurnContextBoundaryWindow::Closed;
-                return Ok(Vec::new());
+            let durable = match (durable, acceptance) {
+                (
+                    Some(request),
+                    crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnly,
+                ) => {
+                    request.payload.withdraw();
+                    None
+                }
+                (durable, _) => durable,
             };
-            let request_id = request.request_id;
+            if request_only.is_none() && durable.is_none() {
+                lifecycle.window = TransientTurnContextBoundaryWindow::Closed;
+                drop(lifecycle);
+                self.boundary.notify.notify_waiters();
+                return Ok(crate::lifecycle::boundary_delivery::TakenBoundaryDelivery::default());
+            }
             lifecycle.window = TransientTurnContextBoundaryWindow::Parked {
                 run_id: run_id.clone(),
                 generation,
-                request_id,
-                contexts: request.contexts,
+                request_only: request_only.map(ParkedBoundaryRequest::from_registered),
+                durable: durable.map(ParkedBoundaryRequest::from_registered),
             };
-            request_id
+            generation
         };
         self.boundary.notify.notify_waiters();
 
         struct RunnerParkGuard {
             boundary: Arc<TransientTurnContextBoundaryCoordinator>,
-            request_id: u64,
+            generation: u64,
             armed: bool,
         }
         impl Drop for RunnerParkGuard {
             fn drop(&mut self) {
                 if self.armed {
-                    let _ = self.boundary.abort_request(self.request_id);
+                    self.boundary.abandon_parked_generation(self.generation);
                 }
             }
         }
         let mut park_guard = RunnerParkGuard {
             boundary: Arc::clone(&self.boundary),
-            request_id,
+            generation,
             armed: true,
         };
 
@@ -2508,37 +2785,56 @@ impl TransientTurnContextStateHandle {
                 if lifecycle.actor_live {
                     match &lifecycle.window {
                         TransientTurnContextBoundaryWindow::Parked {
-                            request_id: parked_request_id,
-                            ..
-                        } if *parked_request_id == request_id => Ok(None),
-                        TransientTurnContextBoundaryWindow::Resolved {
-                            run_id: resolved_run_id,
-                            request_id: resolved_request_id,
-                            ..
-                        } if resolved_run_id == run_id && *resolved_request_id == request_id => {
-                            let (resolution, contexts) = match std::mem::replace(
-                                &mut lifecycle.window,
-                                TransientTurnContextBoundaryWindow::Closed,
-                            ) {
-                                TransientTurnContextBoundaryWindow::Resolved {
-                                    contexts,
-                                    resolution,
+                            run_id: parked_run_id,
+                            generation: parked_generation,
+                            request_only,
+                            durable,
+                        } if parked_run_id == run_id && *parked_generation == generation => {
+                            let resolved = [request_only, durable]
+                                .into_iter()
+                                .flatten()
+                                .all(|parked| parked.resolution.is_some());
+                            if resolved {
+                                let TransientTurnContextBoundaryWindow::Parked {
+                                    request_only,
+                                    durable,
                                     ..
-                                } => (resolution, contexts),
-                                _ => unreachable!("matched resolved transient boundary"),
-                            };
-                            let contexts = if matches!(
-                                resolution,
-                                TransientTurnContextBoundaryResolution::Committed
-                            ) {
-                                contexts
+                                } = std::mem::replace(
+                                    &mut lifecycle.window,
+                                    TransientTurnContextBoundaryWindow::Closed,
+                                )
+                                else {
+                                    unreachable!("matched parked transient boundary");
+                                };
+                                let mut taken =
+                                    crate::lifecycle::boundary_delivery::TakenBoundaryDelivery::default();
+                                for parked in request_only.into_iter().chain(durable) {
+                                    let committed = parked.resolution
+                                        == Some(TransientTurnContextBoundaryResolution::Committed);
+                                    match parked.payload {
+                                        BoundaryPayload::RequestOnly(contexts) if committed => {
+                                            taken.request_only = contexts;
+                                        }
+                                        BoundaryPayload::Durable { appends, witness }
+                                            if committed =>
+                                        {
+                                            taken.durable = Some(
+                                                crate::lifecycle::boundary_delivery::AcceptedDurableTurnAppends {
+                                                    appends,
+                                                    witness,
+                                                },
+                                            );
+                                        }
+                                        payload => payload.withdraw(),
+                                    }
+                                }
+                                Ok(Some(taken))
                             } else {
-                                Vec::new()
-                            };
-                            Ok(Some(contexts))
+                                Ok(None)
+                            }
                         }
                         _ => Err(CoreBoundaryStageError::stale(format!(
-                            "parked transient request {request_id} lost exact authority"
+                            "parked boundary generation {generation} lost exact authority"
                         ))),
                     }
                 } else {
@@ -2549,9 +2845,10 @@ impl TransientTurnContextStateHandle {
                 }
             };
             match poll {
-                Ok(Some(contexts)) => {
+                Ok(Some(taken)) => {
                     park_guard.armed = false;
-                    return Ok(contexts);
+                    self.boundary.notify.notify_waiters();
+                    return Ok(taken);
                 }
                 Ok(None) => notified.as_mut().await,
                 Err(error) => {
@@ -2562,9 +2859,166 @@ impl TransientTurnContextStateHandle {
         }
     }
 
+    /// Record that the runner is applying `witness`'s appends now. Returns
+    /// `false` when the delivery was already withdrawn (the actor was revoked
+    /// between the take and this call), in which case nothing may be written.
+    pub(crate) fn record_durable_apply(&self, witness: &CoreBoundaryDeliveryWitness) -> bool {
+        let mut lifecycle = self.boundary.lock();
+        let ordinal = lifecycle.durable_apply_ordinal.saturating_add(1);
+        if witness.mark_applied(ordinal) {
+            lifecycle.durable_apply_ordinal = ordinal;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Number of durable deliveries applied on this actor so far.
+    pub(crate) fn durable_apply_ordinal(&self) -> u64 {
+        self.boundary.lock().durable_apply_ordinal
+    }
+
+    /// Report that the session image of `run_id` was discarded without being
+    /// committed (the owning service resyncs it from durable authority before
+    /// its next turn). Every durable delivery the runner applied during that
+    /// run is marked discarded, so the runtime returns its input to the lane
+    /// for exactly one follow-up delivery instead of consuming it.
+    pub fn discard_uncommitted_durable_deliveries(&self, run_id: &RunId) {
+        let lifecycle = self.boundary.lock();
+        if let Some((witness_run, witnesses)) = lifecycle.run_durable_witnesses.as_ref()
+            && witness_run == run_id
+        {
+            for witness in witnesses {
+                witness.mark_discarded_if_applied_after(None);
+            }
+        }
+    }
+
+    /// A compaction rollback restored a session captured when
+    /// `durable_apply_ordinal` applies had happened: every later apply of the
+    /// most recent run is gone from the image.
+    pub(crate) fn discard_durable_deliveries_applied_after(&self, durable_apply_ordinal: u64) {
+        let lifecycle = self.boundary.lock();
+        if let Some((_, witnesses)) = lifecycle.run_durable_witnesses.as_ref() {
+            for witness in witnesses {
+                witness.mark_discarded_if_applied_after(Some(durable_apply_ordinal));
+            }
+        }
+    }
+
     #[doc(hidden)]
     pub fn revoke_boundary_actor(&self) {
         self.boundary.revoke_actor();
+    }
+
+    /// Test-support runner seam: open the first boundary of `run_id` exactly
+    /// as the agent loop does at run start. The returned guard closes the run
+    /// (withdrawing every unapplied delivery) when dropped.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn begin_boundary_run_for_test(
+        &self,
+        run_id: RunId,
+    ) -> Result<TransientTurnContextBoundaryRunGuardForTest, CoreBoundaryStageError> {
+        self.begin_boundary_run(run_id)
+            .map(|guard| TransientTurnContextBoundaryRunGuardForTest { _guard: guard })
+    }
+
+    /// Test-support runner seam: open the next boundary of `run_id` (the model
+    /// returned tool calls).
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn open_next_boundary_for_test(
+        &self,
+        run_id: &RunId,
+    ) -> Result<u64, CoreBoundaryStageError> {
+        self.open_next_boundary(run_id)
+    }
+
+    /// Test-support runner seam: consume the exact boundary like
+    /// `execute_calling_llm_request` does, applying an accepted durable
+    /// delivery (its witness becomes `Applied`). With `accept_durable ==
+    /// false` the boundary behaves like an extraction or noncommitting
+    /// live-bridge boundary and refuses durable deliveries.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn take_boundary_for_test(
+        &self,
+        run_id: &RunId,
+        accept_durable: bool,
+    ) -> Result<BoundaryTakeForTest, CoreBoundaryStageError> {
+        let acceptance = if accept_durable {
+            crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnlyAndDurable
+        } else {
+            crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnly
+        };
+        let taken = self
+            .take_pending_at_exact_boundary(run_id, acceptance)
+            .await?;
+        let applied_durable = taken.durable.and_then(|accepted| {
+            self.record_durable_apply(&accepted.witness)
+                .then_some(accepted.appends)
+        });
+        Ok(BoundaryTakeForTest {
+            request_only: taken.request_only,
+            applied_durable,
+        })
+    }
+
+    /// Test-support seam: whether request-only context is registered at the
+    /// open boundary.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn has_registered_request_only_delivery_for_test(&self) -> bool {
+        matches!(
+            &self.boundary.lock().window,
+            TransientTurnContextBoundaryWindow::Open {
+                request_only: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// Test-support seam: whether a delivery is registered and waiting.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn has_waiting_delivery_for_test(&self) -> bool {
+        let lifecycle = self.boundary.lock();
+        lifecycle.next_boundary_durable.is_some()
+            || matches!(
+                &lifecycle.window,
+                TransientTurnContextBoundaryWindow::Open { request_only, durable, .. }
+                    if request_only.is_some() || durable.is_some()
+            )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_run_for_test(&self) -> Option<RunId> {
+        self.boundary.lock().active_run.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_registered_durable_for_test(&self) -> bool {
+        let lifecycle = self.boundary.lock();
+        lifecycle.next_boundary_durable.is_some()
+            || matches!(
+                &lifecycle.window,
+                TransientTurnContextBoundaryWindow::Open {
+                    durable: Some(_),
+                    ..
+                }
+            )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_registered_request_only_for_test(&self) -> bool {
+        matches!(
+            &self.boundary.lock().window,
+            TransientTurnContextBoundaryWindow::Open {
+                request_only: Some(_),
+                ..
+            }
+        )
     }
 }
 /// Typed terminal-lifecycle projection of the canonical
@@ -8136,22 +8590,92 @@ mod tests {
     fn transient_context(text: &str) -> TurnRequestContext {
         TurnRequestContext::new(text.to_string()).expect("non-empty transient context")
     }
-    async fn wait_for_transient_boundary_request(handle: &TransientTurnContextStateHandle) {
+
+    fn request_only(contexts: Vec<TurnRequestContext>) -> crate::lifecycle::TurnBoundaryDelivery {
+        crate::lifecycle::TurnBoundaryDelivery::RequestOnly(contexts)
+    }
+
+    fn durable_notice(detail: &str) -> crate::lifecycle::TurnBoundaryDelivery {
+        crate::lifecycle::TurnBoundaryDelivery::DurableAppends(
+            crate::lifecycle::DurableTurnBoundaryAppends::try_new(
+                crate::lifecycle::InputId::new(),
+                vec![crate::lifecycle::ConversationAppend {
+                    role: crate::lifecycle::ConversationAppendRole::SystemNotice,
+                    content: crate::lifecycle::CoreRenderable::SystemNotice {
+                        kind: crate::types::SystemNoticeKind::Generic,
+                        body: Some(detail.to_string()),
+                        blocks: Vec::new(),
+                    },
+                    identity: None,
+                }],
+                None,
+            )
+            .expect("eligible durable notice"),
+        )
+    }
+
+    const BOTH: crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance =
+        crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnlyAndDurable;
+    const REQUEST_ONLY: crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance =
+        crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnly;
+
+    async fn wait_for_boundary_window(
+        handle: &TransientTurnContextStateHandle,
+        predicate: impl Fn(&TransientTurnContextBoundaryLifecycle) -> bool,
+        what: &str,
+    ) {
         for _ in 0..1_000 {
-            let registered = matches!(
-                &handle.boundary.lock().window,
-                TransientTurnContextBoundaryWindow::Open {
-                    request: Some(_),
-                    ..
-                }
-            );
-            if registered {
+            if predicate(&handle.boundary.lock()) {
                 return;
             }
             tokio::task::yield_now().await;
         }
-        panic!("transient boundary request did not register");
+        panic!("{what} did not happen");
     }
+
+    async fn wait_for_transient_boundary_request(handle: &TransientTurnContextStateHandle) {
+        wait_for_boundary_window(
+            handle,
+            |lifecycle| {
+                matches!(
+                    &lifecycle.window,
+                    TransientTurnContextBoundaryWindow::Open {
+                        request_only: Some(_),
+                        ..
+                    }
+                )
+            },
+            "request-only boundary registration",
+        )
+        .await;
+    }
+
+    async fn wait_for_open_durable_request(handle: &TransientTurnContextStateHandle) {
+        wait_for_boundary_window(
+            handle,
+            |lifecycle| {
+                matches!(
+                    &lifecycle.window,
+                    TransientTurnContextBoundaryWindow::Open {
+                        durable: Some(_),
+                        ..
+                    }
+                )
+            },
+            "durable boundary registration",
+        )
+        .await;
+    }
+
+    async fn wait_for_next_boundary_durable(handle: &TransientTurnContextStateHandle) {
+        wait_for_boundary_window(
+            handle,
+            |lifecycle| lifecycle.next_boundary_durable.is_some(),
+            "durable next-boundary registration",
+        )
+        .await;
+    }
+
     #[test]
     fn prepared_transient_boundary_authority_is_send() {
         fn assert_send<T: Send>() {}
@@ -8165,13 +8689,14 @@ mod tests {
         let _guard = state
             .begin_boundary_run(run_id.clone())
             .expect("open boundary");
-        let contexts = state
-            .take_pending_at_exact_boundary(&run_id)
+        let taken = state
+            .take_pending_at_exact_boundary(&run_id, BOTH)
             .await
             .expect("consume empty boundary");
-        assert!(contexts.is_empty());
+        assert!(taken.request_only.is_empty());
+        assert!(taken.durable.is_none());
         let error = state
-            .prepare_active_turn_boundary(&run_id, vec![transient_context("late")])
+            .prepare_active_turn_boundary(&run_id, request_only(vec![transient_context("late")]))
             .await
             .expect_err("runner-first boundary is closed");
         assert!(error.is_unavailable());
@@ -8189,7 +8714,10 @@ mod tests {
             prepare_state
                 .prepare_active_turn_boundary(
                     &prepare_run_id,
-                    vec![transient_context(" first "), transient_context("second")],
+                    request_only(vec![
+                        transient_context(" first "),
+                        transient_context("second"),
+                    ]),
                 )
                 .await
         });
@@ -8198,20 +8726,21 @@ mod tests {
         let runner_run_id = run_id.clone();
         let runner = tokio::spawn(async move {
             runner_state
-                .take_pending_at_exact_boundary(&runner_run_id)
+                .take_pending_at_exact_boundary(&runner_run_id, BOTH)
                 .await
         });
         let prepared = prepare
             .await
             .expect("prepare task")
             .expect("parked preparation");
-        prepared
-            .into_stage_output(None)
-            .commit()
-            .expect("publish transient context");
-        let contexts = runner.await.expect("runner task").expect("runner consume");
+        let stage = prepared.into_stage_output(None);
+        assert!(stage.delivery_witness().is_none());
+        stage.commit().expect("publish transient context");
+        let taken = runner.await.expect("runner task").expect("runner consume");
+        assert!(taken.durable.is_none());
         assert_eq!(
-            contexts
+            taken
+                .request_only
                 .iter()
                 .map(TurnRequestContext::as_str)
                 .collect::<Vec<_>>(),
@@ -8232,7 +8761,7 @@ mod tests {
             prepare_state
                 .prepare_active_turn_boundary(
                     &prepare_run_id,
-                    vec![transient_context("must not publish")],
+                    request_only(vec![transient_context("must not publish")]),
                 )
                 .await
         });
@@ -8241,7 +8770,7 @@ mod tests {
         let runner_run_id = run_id.clone();
         let runner = tokio::spawn(async move {
             runner_state
-                .take_pending_at_exact_boundary(&runner_run_id)
+                .take_pending_at_exact_boundary(&runner_run_id, BOTH)
                 .await
         });
         let prepared = prepare
@@ -8257,6 +8786,7 @@ mod tests {
                 .await
                 .expect("runner task")
                 .expect("runner released")
+                .request_only
                 .is_empty()
         );
     }
@@ -8274,7 +8804,7 @@ mod tests {
             prepare_state
                 .prepare_active_turn_boundary(
                     &prepare_run_id,
-                    vec![transient_context("cancelled before park")],
+                    request_only(vec![transient_context("cancelled before park")]),
                 )
                 .await
         });
@@ -8286,14 +8816,372 @@ mod tests {
             .expect_err("aborted preparation task must report cancellation");
         assert!(error.is_cancelled());
 
-        let contexts = tokio::time::timeout(
+        let taken = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            state.take_pending_at_exact_boundary(&run_id),
+            state.take_pending_at_exact_boundary(&run_id, BOTH),
         )
         .await
         .expect("dropping preparation must wake and release the exact boundary")
         .expect("the still-active boundary remains valid");
-        assert!(contexts.is_empty());
+        assert!(taken.request_only.is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_boundary_delivery_parks_and_applies_once_on_an_open_window() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(&prepare_run_id, durable_notice("job done"))
+                .await
+        });
+        wait_for_open_durable_request(&state).await;
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id, BOTH)
+                .await
+        });
+        let prepared = prepare
+            .await
+            .expect("prepare task")
+            .expect("parked durable preparation");
+        let stage = prepared.into_stage_output(None);
+        assert!(stage.session_snapshot().is_none());
+        let witness = stage
+            .delivery_witness()
+            .cloned()
+            .expect("durable preparation carries a witness");
+        assert_eq!(
+            witness.outcome(),
+            crate::lifecycle::CoreBoundaryDeliveryOutcome::Pending
+        );
+        stage.commit().expect("publish durable appends");
+        let taken = runner.await.expect("runner task").expect("runner consume");
+        assert!(taken.request_only.is_empty());
+        let accepted = taken.durable.expect("durable appends reach the runner");
+        assert!(accepted.witness.same_delivery(&witness));
+        assert_eq!(accepted.appends.messages().len(), 1);
+        assert!(state.record_durable_apply(&accepted.witness));
+        assert_eq!(
+            witness.outcome(),
+            crate::lifecycle::CoreBoundaryDeliveryOutcome::Applied
+        );
+        assert!(
+            !state.record_durable_apply(&accepted.witness),
+            "a delivery applies at most once"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_boundary_delivery_waits_across_a_closed_window_for_the_next_boundary() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        // The runner consumed the first boundary: the model is now streaming
+        // and the window is closed.
+        let taken = state
+            .take_pending_at_exact_boundary(&run_id, BOTH)
+            .await
+            .expect("consume first boundary");
+        assert!(taken.durable.is_none());
+
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(&prepare_run_id, durable_notice("late"))
+                .await
+        });
+        wait_for_next_boundary_durable(&state).await;
+        assert!(
+            !prepare.is_finished(),
+            "a durable delivery waits, it does not fail"
+        );
+
+        // The model returned tool calls: the next boundary opens and the
+        // waiting delivery attaches to it.
+        state
+            .open_next_boundary(&run_id)
+            .expect("open post-tool boundary");
+        wait_for_open_durable_request(&state).await;
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id, BOTH)
+                .await
+        });
+        prepare
+            .await
+            .expect("prepare task")
+            .expect("parked at the next boundary")
+            .into_stage_output(None)
+            .commit()
+            .expect("publish durable appends");
+        let taken = runner.await.expect("runner task").expect("runner consume");
+        assert!(taken.durable.is_some());
+    }
+
+    #[tokio::test]
+    async fn waiting_durable_delivery_is_withdrawn_when_the_run_ends_first() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        state
+            .take_pending_at_exact_boundary(&run_id, BOTH)
+            .await
+            .expect("consume first boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(&prepare_run_id, durable_notice("too late"))
+                .await
+        });
+        wait_for_next_boundary_durable(&state).await;
+        let witness = {
+            let lifecycle = state.boundary.lock();
+            match &lifecycle.next_boundary_durable {
+                Some(RegisteredBoundaryRequest {
+                    payload: BoundaryPayload::Durable { witness, .. },
+                    ..
+                }) => witness.clone(),
+                _ => panic!("durable delivery waits for the next boundary"),
+            }
+        };
+        // The model returned final text: the run ends without another boundary.
+        drop(guard);
+        let error = prepare
+            .await
+            .expect("prepare task")
+            .expect_err("run ended before a boundary opened");
+        assert!(error.is_unavailable());
+        assert_eq!(
+            witness.outcome(),
+            crate::lifecycle::CoreBoundaryDeliveryOutcome::Withdrawn
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_but_untaken_durable_delivery_is_withdrawn_when_the_runner_drops() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(&prepare_run_id, durable_notice("hard cancel"))
+                .await
+        });
+        wait_for_open_durable_request(&state).await;
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id, BOTH)
+                .await
+        });
+        let stage = prepare
+            .await
+            .expect("prepare task")
+            .expect("parked durable preparation")
+            .into_stage_output(None);
+        let witness = stage.delivery_witness().cloned().expect("durable witness");
+        // A hard cancel drops the runner's future while it is parked.
+        runner.abort();
+        let _ = runner.await;
+        assert_eq!(
+            witness.outcome(),
+            crate::lifecycle::CoreBoundaryDeliveryOutcome::Withdrawn
+        );
+        assert!(
+            stage.commit().is_err(),
+            "publication after the runner left is stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_only_acceptance_refuses_a_durable_delivery_before_parking() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let prepare_state = state.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare = tokio::spawn(async move {
+            prepare_state
+                .prepare_active_turn_boundary(&prepare_run_id, durable_notice("extraction"))
+                .await
+        });
+        wait_for_open_durable_request(&state).await;
+        let taken = state
+            .take_pending_at_exact_boundary(&run_id, REQUEST_ONLY)
+            .await
+            .expect("extraction boundary");
+        assert!(taken.durable.is_none());
+        let error = prepare
+            .await
+            .expect("prepare task")
+            .expect_err("extraction boundary refuses durable appends");
+        assert!(error.is_unavailable());
+    }
+
+    #[tokio::test]
+    async fn request_only_steer_is_not_displaced_by_a_waiting_durable_delivery() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let _guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        state
+            .take_pending_at_exact_boundary(&run_id, BOTH)
+            .await
+            .expect("consume first boundary");
+        let durable_state = state.clone();
+        let durable_run_id = run_id.clone();
+        let durable = tokio::spawn(async move {
+            durable_state
+                .prepare_active_turn_boundary(&durable_run_id, durable_notice("waits"))
+                .await
+        });
+        wait_for_next_boundary_durable(&state).await;
+
+        // While the model streams a request-only steer keeps today's rule: a
+        // closed window is Unavailable (queued fallback), not a follow-up
+        // caused by the waiting durable delivery.
+        let closed = state
+            .prepare_active_turn_boundary(&run_id, request_only(vec![transient_context("early")]))
+            .await
+            .expect_err("closed window");
+        assert!(closed.is_unavailable());
+
+        state
+            .open_next_boundary(&run_id)
+            .expect("open post-tool boundary");
+        wait_for_open_durable_request(&state).await;
+        let request_state = state.clone();
+        let request_run_id = run_id.clone();
+        let request = tokio::spawn(async move {
+            request_state
+                .prepare_active_turn_boundary(
+                    &request_run_id,
+                    request_only(vec![transient_context("peer steer")]),
+                )
+                .await
+        });
+        wait_for_transient_boundary_request(&state).await;
+        let runner_state = state.clone();
+        let runner_run_id = run_id.clone();
+        let runner = tokio::spawn(async move {
+            runner_state
+                .take_pending_at_exact_boundary(&runner_run_id, BOTH)
+                .await
+        });
+        let request = request
+            .await
+            .expect("request task")
+            .expect("request-only preparation parks beside the durable one");
+        let durable = durable
+            .await
+            .expect("durable task")
+            .expect("durable preparation parks");
+        request
+            .into_stage_output(None)
+            .commit()
+            .expect("publish request-only context");
+        assert!(
+            !runner.is_finished(),
+            "the runner waits for every registered preparation"
+        );
+        durable
+            .into_stage_output(None)
+            .commit()
+            .expect("publish durable appends");
+        let taken = runner.await.expect("runner task").expect("runner consume");
+        assert_eq!(taken.request_only.len(), 1);
+        assert!(taken.durable.is_some());
+    }
+
+    #[tokio::test]
+    async fn discarded_images_mark_only_the_applied_deliveries_they_lost() {
+        let state = TransientTurnContextStateHandle::new();
+        let run_id = RunId::new();
+        let guard = state
+            .begin_boundary_run(run_id.clone())
+            .expect("open boundary");
+        let mut witnesses = Vec::new();
+        for detail in ["first", "second"] {
+            let prepare_state = state.clone();
+            let prepare_run_id = run_id.clone();
+            let delivery = durable_notice(detail);
+            let prepare = tokio::spawn(async move {
+                prepare_state
+                    .prepare_active_turn_boundary(&prepare_run_id, delivery)
+                    .await
+            });
+            wait_for_open_durable_request(&state).await;
+            let runner_state = state.clone();
+            let runner_run_id = run_id.clone();
+            let runner = tokio::spawn(async move {
+                runner_state
+                    .take_pending_at_exact_boundary(&runner_run_id, BOTH)
+                    .await
+            });
+            prepare
+                .await
+                .expect("prepare task")
+                .expect("parked")
+                .into_stage_output(None)
+                .commit()
+                .expect("commit");
+            let accepted = runner
+                .await
+                .expect("runner task")
+                .expect("take")
+                .durable
+                .expect("durable");
+            assert!(state.record_durable_apply(&accepted.witness));
+            witnesses.push(accepted.witness);
+            state.open_next_boundary(&run_id).expect("next boundary");
+        }
+        // A compaction rollback captured after the first apply.
+        state.discard_durable_deliveries_applied_after(1);
+        assert_eq!(
+            witnesses[0].outcome(),
+            crate::lifecycle::CoreBoundaryDeliveryOutcome::Applied
+        );
+        assert_eq!(
+            witnesses[1].outcome(),
+            crate::lifecycle::CoreBoundaryDeliveryOutcome::Discarded
+        );
+        drop(guard);
+        // The owning service resyncs the uncommitted image of the run.
+        state.discard_uncommitted_durable_deliveries(&RunId::new());
+        assert_eq!(
+            witnesses[0].outcome(),
+            crate::lifecycle::CoreBoundaryDeliveryOutcome::Applied,
+            "another run's discard never touches this run"
+        );
+        state.discard_uncommitted_durable_deliveries(&run_id);
+        assert_eq!(
+            witnesses[0].outcome(),
+            crate::lifecycle::CoreBoundaryDeliveryOutcome::Discarded
+        );
     }
 
     fn block_assistant_text(message: &BlockAssistantMessage) -> String {

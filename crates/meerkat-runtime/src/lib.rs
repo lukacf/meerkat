@@ -995,6 +995,7 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
             continuation_kind: meerkat_machine::dsl::AdmissionContinuationKind::from(
                 input.continuation_kind(),
             ),
+            turn_append_shape: input::admission_turn_append_shape(input),
             silent_intent_match: false,
             existing_superseded_input_id: None,
             runtime_running: false,
@@ -1013,6 +1014,7 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
                 runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent,
                 live_interrupt_required,
+                live_boundary_delivery,
                 ..
             } => Some(ingress_types::RuntimeInputSemantics {
                 boundary: runtime_boundary.into(),
@@ -1021,6 +1023,7 @@ fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::Runtim
                 peer_response_terminal_apply_intent: runtime_peer_response_terminal_apply_intent
                     .map(Into::into),
                 live_interrupt_required,
+                live_boundary_delivery: live_boundary_delivery.map(Into::into),
             }),
             _ => None,
         })

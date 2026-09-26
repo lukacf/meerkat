@@ -4,9 +4,7 @@ use crate::budget::Budget;
 use crate::error::{AgentError, ToolError};
 use crate::event::AgentEvent;
 use crate::hooks::{HookInvocation, HookPoint};
-use crate::lifecycle::run_primitive::{
-    ConversationAppend, ConversationAppendRole, CoreRenderable, TurnRequestContext,
-};
+use crate::lifecycle::run_primitive::{ConversationAppend, ConversationAppendRole, CoreRenderable};
 use crate::ops::{ToolDispatchOutcome, ToolDispatchTimeoutPolicy};
 use crate::pending_continuation::{observe_session_tail, resolve_pending_continuation};
 use crate::retry::RetryPolicy;
@@ -83,7 +81,7 @@ impl StagedAuthLeaseRotation {
     }
 }
 
-fn user_message_from_operator_renderable(
+pub(crate) fn user_message_from_operator_renderable(
     content: CoreRenderable,
 ) -> Result<crate::types::UserMessage, AgentError> {
     match content {
@@ -97,7 +95,7 @@ fn user_message_from_operator_renderable(
     }
 }
 
-fn injected_context_message_from_operator_renderable(
+pub(crate) fn injected_context_message_from_operator_renderable(
     content: CoreRenderable,
 ) -> Result<crate::types::UserMessage, AgentError> {
     match content {
@@ -1493,11 +1491,57 @@ where
     pub(crate) async fn take_transient_turn_context_at_boundary(
         &self,
         run_id: &crate::lifecycle::RunId,
-    ) -> Result<Vec<TurnRequestContext>, AgentControlStateError> {
+        acceptance: crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance,
+    ) -> Result<crate::lifecycle::boundary_delivery::TakenBoundaryDelivery, AgentControlStateError>
+    {
         self.transient_turn_context_state
-            .take_pending_at_exact_boundary(run_id)
+            .take_pending_at_exact_boundary(run_id, acceptance)
             .await
             .map_err(AgentControlStateError::Boundary)
+    }
+
+    /// Write one accepted durable boundary delivery into the running turn.
+    ///
+    /// Called in the same synchronous segment that took the delivery (no await
+    /// in between), so a hard-cancel future drop cannot split the witness from
+    /// the Session write. The messages were lowered when the runtime built the
+    /// delivery, so the write itself cannot fail. Returns the events to
+    /// publish when the appends were written (`BoundaryAppendApplied`, then
+    /// one `PeerContentIngested` per incoming comms block, exactly as the
+    /// turn-start path publishes them); `None` when the delivery was withdrawn
+    /// first (the actor was revoked), in which case nothing is written.
+    pub(crate) fn apply_durable_boundary_appends(
+        &mut self,
+        run_id: &crate::lifecycle::RunId,
+        accepted: crate::lifecycle::boundary_delivery::AcceptedDurableTurnAppends,
+    ) -> Option<Vec<AgentEvent>> {
+        let crate::lifecycle::boundary_delivery::AcceptedDurableTurnAppends { appends, witness } =
+            accepted;
+        if !self
+            .transient_turn_context_state
+            .record_durable_apply(&witness)
+        {
+            return None;
+        }
+        let crate::lifecycle::boundary_delivery::DurableTurnBoundaryAppendParts {
+            input_id,
+            messages,
+            model_projection,
+            peer_ingested_events,
+        } = appends.into_parts();
+        let append_count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
+        for message in messages {
+            self.session.push(message);
+        }
+        let mut events = Vec::with_capacity(1 + peer_ingested_events.len());
+        events.push(AgentEvent::BoundaryAppendApplied {
+            run_id: run_id.clone(),
+            input_id,
+            content: model_projection,
+            append_count,
+        });
+        events.extend(peer_ingested_events);
+        Some(events)
     }
     /// Whether requests composed for this agent carry the request-only
     /// structured-output instruction projection.
@@ -4197,12 +4241,12 @@ mod skill_activation_effect_tests {
             prepare_state
                 .prepare_active_turn_boundary(
                     &prepare_run_id,
-                    vec![
+                    crate::lifecycle::TurnBoundaryDelivery::RequestOnly(vec![
                         crate::lifecycle::run_primitive::TurnRequestContext::new(
                             "ordinary pending context",
                         )
                         .expect("context"),
-                    ],
+                    ]),
                 )
                 .await
         });
@@ -4211,7 +4255,10 @@ mod skill_activation_effect_tests {
         let take_run_id = ordinary_run_id.clone();
         let take_task = tokio::spawn(async move {
             take_state
-                .take_pending_at_exact_boundary(&take_run_id)
+                .take_pending_at_exact_boundary(
+                    &take_run_id,
+                    crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnlyAndDurable,
+                )
                 .await
         });
         let mut prepared = tokio::time::timeout(std::time::Duration::from_secs(1), prepare_task)
@@ -4251,11 +4298,16 @@ mod skill_activation_effect_tests {
             .expect("ordinary boundary resumed")
             .expect("take task")
             .expect("take original ordinary context");
+        assert!(contexts.durable.is_none());
+        let contexts = contexts.request_only;
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].as_str(), "ordinary pending context");
         assert!(
             ordinary_context_state
-                .take_pending_at_exact_boundary(&ordinary_run_id)
+                .take_pending_at_exact_boundary(
+                    &ordinary_run_id,
+                    crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnlyAndDurable,
+                )
                 .await
                 .is_err(),
             "original ordinary context request must resolve exactly once"

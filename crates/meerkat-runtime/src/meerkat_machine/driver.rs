@@ -5054,6 +5054,89 @@ impl DriverEntry {
         }
     }
 
+    /// Join one durable-class Steer input to the current run at its parked
+    /// boundary, before the caller publishes the payload to the runner.
+    pub(crate) async fn machine_realize_live_boundary_durable_append_joined(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+        witness: meerkat_core::CoreBoundaryDeliveryWitness,
+    ) -> Result<LiveBoundaryJoinOutcome, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(driver) => {
+                match driver.machine_join_live_boundary_durable_append(run_id, input_id, witness) {
+                    Ok(()) => Ok(LiveBoundaryJoinOutcome::Joined),
+                    Err(error) => Ok(LiveBoundaryJoinOutcome::Refused {
+                        reason: error.to_string(),
+                    }),
+                }
+            }
+            DriverEntry::Persistent(driver) => {
+                driver
+                    .machine_join_live_boundary_durable_append(run_id, input_id, witness)
+                    .await
+            }
+        }
+    }
+
+    /// Resolve every durable join of `run_id` from its core delivery witness
+    /// before the run's terminal realization.
+    pub(crate) async fn machine_resolve_live_boundary_joins_for_terminal(
+        &mut self,
+        run_id: &RunId,
+    ) -> Result<LiveBoundaryJoinResolution, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(driver) => driver.machine_resolve_live_boundary_joins(run_id),
+            DriverEntry::Persistent(driver) => {
+                driver.machine_resolve_live_boundary_joins(run_id).await
+            }
+        }
+    }
+
+    /// Consume one Retained durable join of a run that ends without a
+    /// committed boundary, staging its own completion batch.
+    pub(crate) async fn machine_realize_retained_live_boundary_join_consumed(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+        owner_session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        let terminal_checkpoint =
+            self.begin_terminal_transition("live_boundary_join_terminal_realization")?;
+        if let Err(error) = self.stage_input_terminal_completion_batch(
+            InteractionTerminalBatchScope::Run(run_id),
+            std::slice::from_ref(input_id),
+            crate::input_state::InteractionTerminalCandidate::CompletedWithoutResult,
+            false,
+        ) {
+            return Err(self.fail_terminal_transition(
+                terminal_checkpoint,
+                "live_boundary_join_completion_batch_stage",
+                error,
+            ));
+        }
+        let result = match self {
+            DriverEntry::Ephemeral(driver) => driver
+                .machine_consume_retained_live_boundary_join(run_id, input_id)
+                .map(|_| ()),
+            DriverEntry::Persistent(driver) => driver
+                .machine_consume_retained_live_boundary_join(run_id, input_id, owner_session_id)
+                .await
+                .map(|_| ()),
+        };
+        match result {
+            Ok(()) => {
+                terminal_checkpoint.complete();
+                Ok(())
+            }
+            Err(error) => Err(self.fail_terminal_transition(
+                terminal_checkpoint,
+                "live_boundary_join_terminal_persist",
+                error,
+            )),
+        }
+    }
+
     pub(crate) async fn machine_realize_live_boundary_context_injected(
         &mut self,
         run_id: &RunId,
@@ -5697,6 +5780,29 @@ pub(crate) fn machine_begin_run(
 /// turn-state authority has recorded a typed failed terminal cause; `Rollback`
 /// is non-semantic cleanup for prepare/stage failures before turn failure
 /// exists.
+/// Result of joining one durable-class Steer input to the current run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LiveBoundaryJoinOutcome {
+    /// `JoinLiveBoundaryDurableAppend` applied (and, on the persistent driver,
+    /// the Staged binding is durable). The caller may publish the payload.
+    Joined,
+    /// Generated authority refused the join; nothing changed. The caller must
+    /// withdraw the preparation and take the queued fallback.
+    Refused { reason: String },
+}
+
+/// Run-terminal resolution of the durable joins of one run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LiveBoundaryJoinResolution {
+    /// Applied appends in the surviving image: consumed with the run (or, for
+    /// a run without a committed boundary, at a checkpoint), in admission
+    /// order.
+    pub(crate) retained: Vec<InputId>,
+    /// Unapplied or discarded appends: back at the head of their lane for
+    /// exactly one follow-up turn.
+    pub(crate) requeued: Vec<InputId>,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum RunReturnDisposition<'a> {
     Commit { input_id: &'a InputId },
@@ -8258,6 +8364,7 @@ mod tests {
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                     live_interrupt_required: false,
+                    live_boundary_delivery: None,
                 },
                 &resume_state,
                 &seed,
@@ -8275,6 +8382,7 @@ mod tests {
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                     live_interrupt_required: false,
+                    live_boundary_delivery: None,
                 },
                 &prompt_state,
                 &seed,
@@ -8326,6 +8434,7 @@ mod tests {
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                     live_interrupt_required: false,
+                    live_boundary_delivery: None,
                 },
                 &prefix_state,
                 &seed,
@@ -8343,6 +8452,7 @@ mod tests {
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                     live_interrupt_required: false,
+                    live_boundary_delivery: None,
                 },
                 &prompt_state,
                 &seed,
@@ -8418,6 +8528,7 @@ mod tests {
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                     live_interrupt_required: false,
+                    live_boundary_delivery: None,
                 },
                 &event_state,
                 &seed,
@@ -8435,6 +8546,7 @@ mod tests {
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                     live_interrupt_required: false,
+                    live_boundary_delivery: None,
                 },
                 &prompt_state,
                 &seed,
@@ -8480,6 +8592,7 @@ mod tests {
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                     live_interrupt_required: false,
+                    live_boundary_delivery: None,
                 },
                 &state,
                 &seed,
@@ -8527,6 +8640,7 @@ mod tests {
                     execution_handling_mode: None,
                     peer_response_terminal_apply_intent: None,
                     live_interrupt_required: false,
+                    live_boundary_delivery: None,
                 },
                 &state,
                 &seed,

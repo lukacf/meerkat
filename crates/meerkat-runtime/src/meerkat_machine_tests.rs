@@ -20079,15 +20079,20 @@ impl CoreExecutorBoundaryHandle for InterruptYieldingBoundaryHandle {
         Ok(())
     }
 
-    async fn prepare_transient_turn_context_at_boundary(
+    async fn prepare_turn_boundary_delivery(
         &self,
         _expected_run_id: &RunId,
-        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<
         meerkat_core::lifecycle::CoreBoundaryStageOutput,
         meerkat_core::lifecycle::CoreBoundaryStageError,
     > {
         let call = self.probe.prepare_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let meerkat_core::TurnBoundaryDelivery::RequestOnly(contexts) = delivery else {
+            return Err(meerkat_core::lifecycle::CoreBoundaryStageError::fault(
+                "synthetic exact boundary probe only models request-only context",
+            ));
+        };
         self.probe
             .prepared_texts
             .lock()

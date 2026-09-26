@@ -264,14 +264,16 @@ pub use lifecycle::run_primitive::{
 };
 pub use lifecycle::{
     CommittedSessionBoundaryAuthority, ConversationAppend, ConversationAppendRole,
-    CoreApplyFailureCause, CoreApplyFailureCauseKind, CoreBoundaryStageError,
-    CoreBoundaryStageOutput, CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor,
-    CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle,
-    CoreExecutorPostStopCleanupHandle, CoreExecutorPreDequeueHandle, CoreExecutorPublicationHandle,
-    CoreExecutorTeardownReason, CoreExecutorTurnFinalizationBoundaryHandle,
-    CoreExecutorTurnFinalizationGuard, CoreInteractionTerminalPublicationReceipt,
-    CorePreDequeueOutcome, CoreRenderable, InputId, RunApplyBoundary, RunBoundaryReceipt,
-    RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput,
+    CoreApplyFailureCause, CoreApplyFailureCauseKind, CoreBoundaryDeliveryOutcome,
+    CoreBoundaryDeliveryWitness, CoreBoundaryStageError, CoreBoundaryStageOutput,
+    CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor, CoreExecutorBoundaryHandle,
+    CoreExecutorError, CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle,
+    CoreExecutorPreDequeueHandle, CoreExecutorPublicationHandle, CoreExecutorTeardownReason,
+    CoreExecutorTurnFinalizationBoundaryHandle, CoreExecutorTurnFinalizationGuard,
+    CoreInteractionTerminalPublicationReceipt, CorePreDequeueOutcome, CoreRenderable,
+    DurableTurnBoundaryAppends, DurableTurnBoundaryAppendsError, InputId, RunApplyBoundary,
+    RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput,
+    TurnBoundaryDelivery,
 };
 pub use live_execution::{
     AmbiguousDeliveryNoRetryEvidence, CanonicalContextRevision, CanonicalTranscriptPrefixDigest,

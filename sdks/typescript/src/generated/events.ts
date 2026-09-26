@@ -44,7 +44,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "background_job_completed",
   "transcript_rewrite_committed",
   "peer_content_ingested",
-  "provider_cache_breakpoints_discarded"
+  "provider_cache_breakpoints_discarded",
+  "boundary_append_applied"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];

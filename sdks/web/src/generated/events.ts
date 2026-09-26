@@ -311,6 +311,8 @@ export type HookPoint = "run_started" | "run_completed" | "run_failed" | "pre_ll
 
 export type HookReasonCode = "policy_violation" | "safety_violation" | "schema_violation" | "timeout" | "runtime_error";
 
+export type InputId = string;
+
 export type InteractionFailureReason = {
   kind: "cancelled";
 } | {
@@ -522,6 +524,8 @@ export type RevisedPromptDisposition = {
 };
 
 export type RevisedPromptSource = "provider" | "meerkat_projection";
+
+export type RunId = string;
 
 export type RunInput = {
   content: ContentInput;
@@ -1090,6 +1094,14 @@ export interface ModelFallbackTargetFailedEvent {
   type: "model_fallback_target_failed";
 }
 
+export interface BoundaryAppendAppliedEvent {
+  append_count: number;
+  content: ContentInput;
+  input_id: InputId;
+  run_id: RunId;
+  type: "boundary_append_applied";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -1129,7 +1141,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "background_job_completed",
   "transcript_rewrite_committed",
   "peer_content_ingested",
-  "provider_cache_breakpoints_discarded"
+  "provider_cache_breakpoints_discarded",
+  "boundary_append_applied"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
@@ -1179,4 +1192,5 @@ export type AgentEvent =
   ModelFallbackSkippedEvent |
   ModelFallbackStagedEvent |
   ModelFallbackCommittedEvent |
-  ModelFallbackTargetFailedEvent;
+  ModelFallbackTargetFailedEvent |
+  BoundaryAppendAppliedEvent;

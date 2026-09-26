@@ -100,6 +100,22 @@ export JDK_JAVA_OPTIONS="${tlc_jdk_java_options}"
 echo "running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness"
 tlc -workers "${tlc_workers}" -config "${adaptive_witness}" "${adaptive_model}"
 
+# The canonical meerkat_machine ci.cfg sweep is structural (it stops after one
+# step), so durable in-turn Steer delivery is model-checked by a hand-written
+# bounded audit over the SAME generated model: admission, the durable join,
+# every terminal resolution, input lifecycle actions and every run-ending arm
+# of one runtime-loop run, under every generated invariant plus the audit's
+# exactly-once invariants. Its TLC config is derived from the generated ci.cfg
+# on each run, so it cannot drift from the model. 16 steps reach every
+# resolution followed by every run-ending arm; deeper bounds run by hand.
+durable_steer_audit="${workspace_root}/specs/machines/meerkat_machine/durable_in_turn_steer_audit.sh"
+if [[ ! -x "${durable_steer_audit}" ]]; then
+  echo "error: durable in-turn steer audit runner is missing from workspace runfiles: ${durable_steer_audit}" >&2
+  exit 1
+fi
+echo "running bounded durable in-turn steer TLC audit"
+TLC_WORKERS="${tlc_workers}" "${durable_steer_audit}" "${DURABLE_STEER_AUDIT_MAX_STEPS:-16}"
+
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
 # ci.cfg structural-invariant contract before honoring these skips. The earlier

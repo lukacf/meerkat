@@ -344,6 +344,25 @@ fn render_event(
             );
         }
 
+        // A durable steer (for example a background job's persisted notice)
+        // joined the running turn at a model boundary instead of waiting for
+        // a follow-up turn.
+        AgentEvent::BoundaryAppendApplied { append_count, .. } => {
+            end_text_block(state);
+            let rows = if *append_count == 1 { "row" } else { "rows" };
+            chrome_line(
+                mux,
+                scope_id,
+                &format!(
+                    "{}  ↳ steer joined this turn ({} transcript {}){}",
+                    style(ansi, DIM),
+                    append_count,
+                    rows,
+                    reset(ansi)
+                ),
+            );
+        }
+
         AgentEvent::TurnUsageAccountingIdentityDisputed { dispute, .. } => {
             end_text_block(state);
             chrome_line(

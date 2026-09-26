@@ -7,6 +7,8 @@ mod brain_swap_promotion_tests;
 mod builder;
 pub mod comms_impl;
 pub mod compact;
+#[cfg(test)]
+mod durable_boundary_tests;
 mod extraction;
 mod hook_impl;
 #[cfg(test)]
@@ -66,6 +68,9 @@ use std::sync::Arc;
 pub use builder::{AgentBuildPolicyError, AgentBuilder, DefaultSystemPromptPolicy};
 pub use runner::{
     AgentControlStateError, AgentRunner, LiveBridgePreparedOperation, SnapshotProjectionError,
+};
+pub(crate) use runner::{
+    injected_context_message_from_operator_renderable, user_message_from_operator_renderable,
 };
 
 /// Whether one turn's accounting agrees with the request identity it answered.
@@ -2746,6 +2751,11 @@ pub(crate) struct CompactionRollbackState {
     pub(crate) rollback_last_input_tokens: u64,
     pub(crate) rollback_compaction_cadence: SessionCompactionCadence,
     pub(crate) rollback_durable_row_floor: usize,
+    /// Durable boundary applies that had happened on this actor when the
+    /// rollback session was captured. A restore discards every later apply,
+    /// so its delivery witness is marked discarded and the runtime redelivers
+    /// that input instead of consuming it.
+    pub(crate) rollback_durable_boundary_apply_ordinal: u64,
 }
 
 pub(crate) enum CompactionTransactionPhase {

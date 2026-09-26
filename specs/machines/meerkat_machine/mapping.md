@@ -3293,6 +3293,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveBoundaryUnavailableRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `JoinLiveBoundaryDurableAppendRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveBoundaryDurableAppendJoinNotAppliedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveBoundaryDurableAppendJoinAppliedDiscardedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveBoundaryDurableAppendJoinAppliedRetainedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ConsumeOnAcceptIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8200,6 +8212,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `staged_inputs_have_run_association`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_boundary_delivery_only_for_queued_steer`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_boundary_join_maps_lockstep`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_boundary_join_bound_to_current_run`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_boundary_join_is_unlaned_contributor`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_boundary_published_join_is_recoverable`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_boundary_retained_join_is_consumable`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `staged_surface_ops_are_known_and_sequenced`

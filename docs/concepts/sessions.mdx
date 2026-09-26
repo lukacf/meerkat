@@ -65,6 +65,12 @@ conversational-row anchor and does not change the durable `injected_context`
 before-user rule above. A deferred create cannot carry it because no runtime
 input exists yet; attach it to the eventual turn.
 
+A steer prompt that carries typed conversation appends is not request-only: its
+rows are written into the running turn's transcript at the next model boundary
+and committed with the run, or delivered by exactly one follow-up turn when no
+boundary opens in time. See
+[Request-only and durable steer](/reference/session-contracts#request-only-and-durable-steer).
+
 The JSON-RPC `session/inject_context` method is a separate compatibility
 surface: it appends durable system context with a source and optional
 idempotency key for a later turn.

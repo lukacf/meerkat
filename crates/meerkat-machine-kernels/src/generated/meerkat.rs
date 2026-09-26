@@ -1007,6 +1007,60 @@ impl std::fmt::Display for AdmissionRuntimeExecutionKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum AdmissionTurnAppendShape {
+    #[default]
+    #[serde(rename = "FollowUpOnly")]
+    FollowUpOnly,
+    #[serde(rename = "Untyped")]
+    Untyped,
+    #[serde(rename = "InTurnEligible")]
+    InTurnEligible,
+}
+impl AdmissionTurnAppendShape {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FollowUpOnly => "FollowUpOnly",
+            Self::Untyped => "Untyped",
+            Self::InTurnEligible => "InTurnEligible",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionTurnAppendShape {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "FollowUpOnly" => Ok(Self::FollowUpOnly),
+            "Untyped" => Ok(Self::Untyped),
+            "InTurnEligible" => Ok(Self::InTurnEligible),
+            other => Err(format!("invalid AdmissionTurnAppendShape value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionTurnAppendShape {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionTurnAppendShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum AdmissionValidationResultKind {
     #[default]
     #[serde(rename = "Accept")]
@@ -2809,6 +2863,166 @@ impl std::convert::TryFrom<String> for LiveAssistantTurnOrigin {
     }
 }
 impl std::fmt::Display for LiveAssistantTurnOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveBoundaryDelivery {
+    #[default]
+    #[serde(rename = "FollowUpOnly")]
+    FollowUpOnly,
+    #[serde(rename = "RequestOnly")]
+    RequestOnly,
+    #[serde(rename = "DurableAppend")]
+    DurableAppend,
+}
+impl LiveBoundaryDelivery {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FollowUpOnly => "FollowUpOnly",
+            Self::RequestOnly => "RequestOnly",
+            Self::DurableAppend => "DurableAppend",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveBoundaryDelivery {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "FollowUpOnly" => Ok(Self::FollowUpOnly),
+            "RequestOnly" => Ok(Self::RequestOnly),
+            "DurableAppend" => Ok(Self::DurableAppend),
+            other => Err(format!("invalid LiveBoundaryDelivery value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveBoundaryDelivery {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveBoundaryDelivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveBoundaryJoinObservation {
+    #[default]
+    #[serde(rename = "NotApplied")]
+    NotApplied,
+    #[serde(rename = "AppliedRetained")]
+    AppliedRetained,
+    #[serde(rename = "AppliedDiscarded")]
+    AppliedDiscarded,
+}
+impl LiveBoundaryJoinObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotApplied => "NotApplied",
+            Self::AppliedRetained => "AppliedRetained",
+            Self::AppliedDiscarded => "AppliedDiscarded",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveBoundaryJoinObservation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotApplied" => Ok(Self::NotApplied),
+            "AppliedRetained" => Ok(Self::AppliedRetained),
+            "AppliedDiscarded" => Ok(Self::AppliedDiscarded),
+            other => Err(format!(
+                "invalid LiveBoundaryJoinObservation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveBoundaryJoinObservation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveBoundaryJoinObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveBoundaryJoinPhase {
+    #[default]
+    #[serde(rename = "Published")]
+    Published,
+    #[serde(rename = "Retained")]
+    Retained,
+}
+impl LiveBoundaryJoinPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Published => "Published",
+            Self::Retained => "Retained",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveBoundaryJoinPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Published" => Ok(Self::Published),
+            "Retained" => Ok(Self::Retained),
+            other => Err(format!("invalid LiveBoundaryJoinPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveBoundaryJoinPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveBoundaryJoinPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -13259,6 +13473,11 @@ pub struct State {
     pub admission_idempotency_inputs: std::collections::BTreeMap<String, String>,
     pub input_idempotency_keys: std::collections::BTreeMap<String, String>,
     pub recovered_admitted_inputs: std::collections::BTreeSet<String>,
+    pub admission_authorized_live_boundary_delivery:
+        std::collections::BTreeMap<String, LiveBoundaryDelivery>,
+    pub input_live_boundary_delivery: std::collections::BTreeMap<String, LiveBoundaryDelivery>,
+    pub input_live_boundary_join_run: std::collections::BTreeMap<String, RunId>,
+    pub input_live_boundary_join_phase: std::collections::BTreeMap<String, LiveBoundaryJoinPhase>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
     pub op_completion_seq: std::collections::BTreeMap<String, u64>,
@@ -14197,11 +14416,24 @@ pub mod inputs {
         pub input_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct JoinLiveBoundaryDurableAppend {
+        pub run_id: RunId,
+        pub input_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveBoundaryDurableAppendJoin {
+        pub run_id: RunId,
+        pub input_id: String,
+        pub lane: InputLane,
+        pub observation: LiveBoundaryJoinObservation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveAdmissionPlan {
         pub input_id: String,
         pub input_kind: AdmissionInputKind,
         pub requested_lane: Option<InputLane>,
         pub continuation_kind: AdmissionContinuationKind,
+        pub turn_append_shape: AdmissionTurnAppendShape,
         pub silent_intent_match: bool,
         pub existing_superseded_input_id: Option<String>,
         pub runtime_running: bool,
@@ -16159,6 +16391,8 @@ pub enum Input {
     ResolveLiveBoundaryContextReceipt(inputs::ResolveLiveBoundaryContextReceipt),
     CommitTerminalBoundarySequence(inputs::CommitTerminalBoundarySequence),
     LiveBoundaryUnavailable(inputs::LiveBoundaryUnavailable),
+    JoinLiveBoundaryDurableAppend(inputs::JoinLiveBoundaryDurableAppend),
+    ResolveLiveBoundaryDurableAppendJoin(inputs::ResolveLiveBoundaryDurableAppendJoin),
     ResolveAdmissionPlan(inputs::ResolveAdmissionPlan),
     ResolveAdmissionValidation(inputs::ResolveAdmissionValidation),
     ResolveAdmissionIdempotency(inputs::ResolveAdmissionIdempotency),
@@ -16595,6 +16829,10 @@ impl Input {
             }
             Self::CommitTerminalBoundarySequence(_) => InputKind::CommitTerminalBoundarySequence,
             Self::LiveBoundaryUnavailable(_) => InputKind::LiveBoundaryUnavailable,
+            Self::JoinLiveBoundaryDurableAppend(_) => InputKind::JoinLiveBoundaryDurableAppend,
+            Self::ResolveLiveBoundaryDurableAppendJoin(_) => {
+                InputKind::ResolveLiveBoundaryDurableAppendJoin
+            }
             Self::ResolveAdmissionPlan(_) => InputKind::ResolveAdmissionPlan,
             Self::ResolveAdmissionValidation(_) => InputKind::ResolveAdmissionValidation,
             Self::ResolveAdmissionIdempotency(_) => InputKind::ResolveAdmissionIdempotency,
@@ -17104,6 +17342,8 @@ pub enum InputKind {
     ResolveLiveBoundaryContextReceipt,
     CommitTerminalBoundarySequence,
     LiveBoundaryUnavailable,
+    JoinLiveBoundaryDurableAppend,
+    ResolveLiveBoundaryDurableAppendJoin,
     ResolveAdmissionPlan,
     ResolveAdmissionValidation,
     ResolveAdmissionIdempotency,
@@ -17679,12 +17919,14 @@ pub mod effects {
         pub wake_if_idle: bool,
         pub execution_handling_mode: Option<InputLane>,
         pub live_interrupt_required: bool,
+        pub live_boundary_delivery: Option<LiveBoundaryDelivery>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveBoundaryUnavailableNormalized {
         pub input_id: String,
         pub execution_handling_mode: InputLane,
         pub live_interrupt_required: bool,
+        pub live_boundary_delivery: Option<LiveBoundaryDelivery>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmissionValidationResolved {
@@ -20935,6 +21177,10 @@ pub enum TransitionId {
     CommitTerminalBoundarySequenceRunning,
     LiveBoundaryUnavailableAttached,
     LiveBoundaryUnavailableRunning,
+    JoinLiveBoundaryDurableAppendRunning,
+    ResolveLiveBoundaryDurableAppendJoinNotAppliedRunning,
+    ResolveLiveBoundaryDurableAppendJoinAppliedDiscardedRunning,
+    ResolveLiveBoundaryDurableAppendJoinAppliedRetainedRunning,
     ConsumeOnAcceptIdle,
     ConsumeOnAcceptAttached,
     ConsumeOnAcceptRunning,
@@ -22545,6 +22791,10 @@ pub fn initial_state() -> State {
         admission_idempotency_inputs: Default::default(),
         input_idempotency_keys: Default::default(),
         recovered_admitted_inputs: Default::default(),
+        admission_authorized_live_boundary_delivery: Default::default(),
+        input_live_boundary_delivery: Default::default(),
+        input_live_boundary_join_run: Default::default(),
+        input_live_boundary_join_phase: Default::default(),
         recovered_admitted_lanes: Default::default(),
         op_statuses: Default::default(),
         op_completion_seq: Default::default(),

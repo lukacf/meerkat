@@ -21,6 +21,9 @@ mod live_support;
 #[path = "e2e_fast/cross_host_live_member.rs"]
 mod cross_host_live_member;
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "e2e_fast/durable_in_turn_steer.rs"]
+mod durable_in_turn_steer;
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "e2e_fast/mixed_temporary_council.rs"]
 mod mixed_temporary_council;
 #[cfg(not(target_arch = "wasm32"))]

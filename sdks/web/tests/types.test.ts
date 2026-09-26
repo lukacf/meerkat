@@ -488,6 +488,10 @@ function handleEvent(event: AgentEvent): string {
       // published exactly as minted and neither is ever rewritten to agree,
       // so a renderer must show both rather than picking a winner.
       return `${event.type}:${event.dispute.reported_provider}/${event.dispute.reported_model} vs ${event.dispute.active_provider}/${event.dispute.active_model}`;
+    case 'boundary_append_applied':
+      // A durable steer's typed appends joined the RUNNING turn at a model
+      // boundary: they are transcript rows of `run_id` now, not a new turn.
+      return `${event.type}:${event.run_id}:${event.input_id}:${event.append_count}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;

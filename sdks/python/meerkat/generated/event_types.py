@@ -29,6 +29,7 @@ from .types import (  # noqa: F401
     RealmId,
     RevisedPromptDisposition,
     RevisedPromptSource,
+    RunId,
     SchemaCompat,
     SchemaFormat,
     SenderContentTaint,
@@ -584,6 +585,13 @@ class HookFailureReasonObserveOnlyViolation(TypedDict, total=False):
 #
 # [`Display`]: std::fmt::Display
 HookFailureReason = HookFailureReasonTimeout | HookFailureReasonExecutionFailed | HookFailureReasonConfigInvalid | HookFailureReasonObserveOnlyViolation
+
+
+# Opaque identifier for an input accepted by the runtime layer.
+#
+# Core passes this through in `contributing_input_ids` on receipts and events
+# but NEVER interprets it. The runtime layer creates and manages these.
+InputId = str
 
 
 # Typed reason an interaction stream was abandoned before normal terminal
@@ -1952,10 +1960,31 @@ class AgentEventModelFallbackTargetFailed(TypedDict, total=False):
     type: Required[Literal['model_fallback_target_failed']]
 
 
+class AgentEventBoundaryAppendApplied(TypedDict, total=False):
+    """A durable runtime input joined the running turn at a cooperative model
+    boundary: its typed conversation appends (for example a background
+    job's persisted system notice delivered as a Steer) were written into
+    the session transcript before the next model request of the same run.
+
+    Emitted once, after the append is applied, so live streams and consoles
+    see a mid-turn append without waiting for history. The appends commit
+    with the run like tool results. If the image that carried them is later
+    discarded (an uncommitted persistent run, or a compaction rollback),
+    the runtime redelivers the input in exactly one follow-up turn, so
+    consumers should reconcile this event against the run terminal and the
+    committed transcript. Request-only steers never emit it.
+    """
+    append_count: Required[int]
+    content: Required[ContentInput]
+    input_id: Required[InputId]
+    run_id: Required[RunId]
+    type: Required[Literal['boundary_append_applied']]
+
+
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

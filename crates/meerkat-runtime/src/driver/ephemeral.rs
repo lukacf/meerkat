@@ -134,6 +134,7 @@ pub(crate) struct EphemeralDriverRollbackSnapshot {
     reservation_key: HashMap<InputId, Option<ReservationKey>>,
     policy_snapshot: HashMap<InputId, PolicyDecision>,
     admission_order: HashSet<InputId>,
+    live_boundary_join_witnesses: HashMap<InputId, meerkat_core::CoreBoundaryDeliveryWitness>,
 }
 
 /// Ephemeral runtime driver -- all state in-memory.
@@ -178,6 +179,12 @@ pub struct EphemeralRuntimeDriver {
     /// this set is only a bounded membership index and supports O(1) terminal
     /// removal.
     admission_order: HashSet<InputId>,
+    /// Core delivery witness of every durable Steer input joined to the
+    /// current run (`JoinLiveBoundaryDurableAppend`). The generated join maps
+    /// own which inputs are joined; this shell map only carries the runner's
+    /// typed apply fact to the run terminal, where
+    /// `ResolveLiveBoundaryDurableAppendJoin` consumes it.
+    live_boundary_join_witnesses: HashMap<InputId, meerkat_core::CoreBoundaryDeliveryWitness>,
 }
 
 /// Wrapper around the DSL authority that provides `Debug` output.
@@ -281,6 +288,7 @@ impl EphemeralRuntimeDriver {
             reservation_key: HashMap::new(),
             policy_snapshot: HashMap::new(),
             admission_order: HashSet::new(),
+            live_boundary_join_witnesses: HashMap::new(),
         }
     }
 
@@ -300,6 +308,7 @@ impl EphemeralRuntimeDriver {
             reservation_key: self.reservation_key.clone(),
             policy_snapshot: self.policy_snapshot.clone(),
             admission_order: self.admission_order.clone(),
+            live_boundary_join_witnesses: self.live_boundary_join_witnesses.clone(),
         }
     }
 
@@ -335,6 +344,7 @@ impl EphemeralRuntimeDriver {
         self.reservation_key = snapshot.reservation_key;
         self.policy_snapshot = snapshot.policy_snapshot;
         self.admission_order = snapshot.admission_order;
+        self.live_boundary_join_witnesses = snapshot.live_boundary_join_witnesses;
     }
 
     pub(crate) fn shared_dsl_authority(&self) -> SharedIngressDslAuthority {
@@ -2667,11 +2677,21 @@ impl EphemeralRuntimeDriver {
                 input_id,
                 execution_handling_mode,
                 live_interrupt_required,
-            } => Some((input_id, execution_handling_mode, live_interrupt_required)),
+                live_boundary_delivery,
+            } => Some((
+                input_id,
+                execution_handling_mode,
+                live_interrupt_required,
+                live_boundary_delivery,
+            )),
             _ => None,
         });
-        let Some((effect_input_id, execution_handling_mode, live_interrupt_required)) =
-            normalized.next()
+        let Some((
+            effect_input_id,
+            execution_handling_mode,
+            live_interrupt_required,
+            live_boundary_delivery,
+        )) = normalized.next()
         else {
             return Err(RuntimeDriverError::Internal(format!(
                 "generated machine emitted no unavailable-boundary normalization for input \
@@ -2687,6 +2707,7 @@ impl EphemeralRuntimeDriver {
         if effect_input_id != input_key
             || execution_handling_mode != mm_dsl::InputLane::Queue
             || live_interrupt_required
+            || live_boundary_delivery.is_some()
         {
             return Err(RuntimeDriverError::Internal(format!(
                 "generated machine emitted mismatched unavailable-boundary normalization for \
@@ -2702,6 +2723,7 @@ impl EphemeralRuntimeDriver {
         };
         semantics.execution_handling_mode = Some(HandlingMode::Queue);
         semantics.live_interrupt_required = false;
+        semantics.live_boundary_delivery = None;
         let normalized_semantics = *semantics;
         let Some(state) = self.ledger.get_mut(input_id) else {
             return Err(RuntimeDriverError::Internal(format!(
@@ -2786,6 +2808,216 @@ impl EphemeralRuntimeDriver {
             Err(err) => {
                 self.restore_rollback_snapshot(checkpoint);
                 Err(err)
+            }
+        }
+    }
+
+    /// Join one durable-class Steer input to the current run at its exact
+    /// parked model boundary (`JoinLiveBoundaryDurableAppend`) and retain the
+    /// core delivery witness for the run terminal. Atomic: a generated guard
+    /// refusal leaves the driver exactly as it was.
+    pub(crate) fn machine_join_live_boundary_durable_append(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+        witness: meerkat_core::CoreBoundaryDeliveryWitness,
+    ) -> Result<(), RuntimeDriverError> {
+        let checkpoint = self.rollback_snapshot();
+        let result = self
+            .input_phase_required(input_id, "before durable live-boundary join")
+            .and_then(|from_phase| {
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::JoinLiveBoundaryDurableAppend {
+                        run_id: mm_dsl::RunId::from_domain(run_id),
+                        input_id: Self::dsl_key(input_id),
+                    },
+                    "JoinLiveBoundaryDurableAppend",
+                )
+                .map(|()| from_phase)
+            });
+        let from_phase = match result {
+            Ok(from_phase) => from_phase,
+            Err(error) => {
+                self.restore_rollback_snapshot(checkpoint);
+                return Err(error);
+            }
+        };
+        self.live_boundary_join_witnesses
+            .insert(input_id.clone(), witness);
+        let now = Utc::now();
+        if let Some(state) = self.ledger.get_mut(input_id) {
+            state.history.push(InputStateHistoryEntry {
+                timestamp: now,
+                from: from_phase,
+                to: InputLifecycleState::Staged,
+                reason: Some(format!("JoinLiveBoundaryDurableAppend({run_id})")),
+            });
+            state.updated_at = now;
+        }
+        self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Staged {
+            input_id: input_id.clone(),
+            run_id: run_id.clone(),
+        }));
+        Ok(())
+    }
+
+    /// Durable joins of `run_id` still awaiting terminal resolution, in
+    /// admission (ledger) order.
+    pub(crate) fn published_live_boundary_joins(&self, run_id: &RunId) -> Vec<InputId> {
+        let dsl_run_id = mm_dsl::RunId::from_domain(run_id);
+        self.with_dsl_state(|state| {
+            self.ledger
+                .iter()
+                .filter(|(input_id, _)| {
+                    let key = Self::dsl_key(input_id);
+                    state.input_live_boundary_join_run.get(&key) == Some(&dsl_run_id)
+                        && state.input_live_boundary_join_phase.get(&key)
+                            == Some(&mm_dsl::LiveBoundaryJoinPhase::Published)
+                })
+                .map(|(input_id, _)| input_id.clone())
+                .collect()
+        })
+    }
+
+    /// Resolve every durable join of `run_id` from its core delivery witness
+    /// (`ResolveLiveBoundaryDurableAppendJoin`) before the run's terminal
+    /// realization. Applied appends that survive in the run's image become
+    /// `Retained` contributors; unapplied or discarded ones return to their
+    /// recovery lane at the head of the queue for exactly one follow-up turn.
+    /// A missing or still-pending witness fails closed: after the run guard
+    /// closed the run, every delivery is final. Atomic on failure.
+    pub(crate) fn machine_resolve_live_boundary_joins(
+        &mut self,
+        run_id: &RunId,
+    ) -> Result<crate::meerkat_machine::driver::LiveBoundaryJoinResolution, RuntimeDriverError>
+    {
+        let joined = self.published_live_boundary_joins(run_id);
+        let mut resolution = crate::meerkat_machine::driver::LiveBoundaryJoinResolution::default();
+        if joined.is_empty() {
+            self.prune_resolved_live_boundary_join_witnesses();
+            return Ok(resolution);
+        }
+        let checkpoint = self.rollback_snapshot();
+        for input_id in joined {
+            match self.resolve_one_live_boundary_join(run_id, &input_id) {
+                Ok(true) => resolution.retained.push(input_id),
+                Ok(false) => resolution.requeued.push(input_id),
+                Err(error) => {
+                    self.restore_rollback_snapshot(checkpoint);
+                    return Err(error);
+                }
+            }
+        }
+        self.prune_resolved_live_boundary_join_witnesses();
+        Ok(resolution)
+    }
+
+    fn resolve_one_live_boundary_join(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let outcome = self
+            .live_boundary_join_witnesses
+            .get(input_id)
+            .map(meerkat_core::CoreBoundaryDeliveryWitness::outcome)
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "durable live-boundary input {input_id} joined run {run_id} without a core delivery witness"
+                ))
+            })?;
+        let observation = match outcome {
+            meerkat_core::CoreBoundaryDeliveryOutcome::Applied => {
+                mm_dsl::LiveBoundaryJoinObservation::AppliedRetained
+            }
+            meerkat_core::CoreBoundaryDeliveryOutcome::Discarded => {
+                mm_dsl::LiveBoundaryJoinObservation::AppliedDiscarded
+            }
+            meerkat_core::CoreBoundaryDeliveryOutcome::Withdrawn => {
+                mm_dsl::LiveBoundaryJoinObservation::NotApplied
+            }
+            meerkat_core::CoreBoundaryDeliveryOutcome::Pending => {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "durable live-boundary input {input_id} still has a pending core delivery witness after run {run_id} ended"
+                )));
+            }
+        };
+        let lane = self.input_recovery_lane(input_id).ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "generated recovery lane missing for durable live-boundary input {input_id}"
+            ))
+        })?;
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::ResolveLiveBoundaryDurableAppendJoin {
+                run_id: mm_dsl::RunId::from_domain(run_id),
+                input_id: Self::dsl_key(input_id),
+                lane: mm_dsl::InputLane::from(lane),
+                observation,
+            },
+            "ResolveLiveBoundaryDurableAppendJoin",
+        )?;
+        self.live_boundary_join_witnesses.remove(input_id);
+        let retained = observation == mm_dsl::LiveBoundaryJoinObservation::AppliedRetained;
+        if !retained {
+            let now = Utc::now();
+            if let Some(state) = self.ledger.get_mut(input_id) {
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from: InputLifecycleState::Staged,
+                    to: InputLifecycleState::Queued,
+                    reason: Some(format!(
+                        "ResolveLiveBoundaryDurableAppendJoin({observation:?})"
+                    )),
+                });
+                state.updated_at = now;
+            }
+            self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Queued {
+                input_id: input_id.clone(),
+            }));
+        }
+        Ok(retained)
+    }
+
+    /// Drop witnesses whose join the machine no longer holds (resolved, or
+    /// cleared by an abnormal run end that leaves the input Staged for
+    /// recovery).
+    fn prune_resolved_live_boundary_join_witnesses(&mut self) {
+        let joined = self.with_dsl_state(|state| {
+            state
+                .input_live_boundary_join_run
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        });
+        self.live_boundary_join_witnesses
+            .retain(|input_id, _| joined.contains(&Self::dsl_key(input_id)));
+    }
+
+    /// Consume one Retained durable join under its still-current run with a
+    /// live-boundary checkpoint receipt. Used when the run ends without a
+    /// committed boundary but the image that carries the append is retained
+    /// (an ephemeral session keeps the failed or cancelled run's transcript):
+    /// the input is consumed exactly once and never replayed with its batch.
+    pub(crate) fn machine_consume_retained_live_boundary_join(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+    ) -> Result<RunBoundaryReceipt, RuntimeDriverError> {
+        let checkpoint = self.rollback_snapshot();
+        let result = self
+            .machine_resolve_live_boundary_context_receipt(run_id, input_id)
+            .and_then(|receipt| {
+                self.machine_realize_boundary_applied(run_id, &receipt)
+                    .and_then(|()| {
+                        self.machine_realize_run_completed(run_id, std::slice::from_ref(input_id))
+                    })
+                    .map(|()| receipt)
+            });
+        match result {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.restore_rollback_snapshot(checkpoint);
+                Err(error)
             }
         }
     }
@@ -3471,6 +3703,7 @@ impl EphemeralRuntimeDriver {
                 wake_if_idle,
                 execution_handling_mode,
                 live_interrupt_required,
+                live_boundary_delivery,
             } => Some((
                 input_id,
                 policy_version,
@@ -3495,6 +3728,7 @@ impl EphemeralRuntimeDriver {
                 wake_if_idle,
                 execution_handling_mode,
                 live_interrupt_required,
+                live_boundary_delivery,
             )),
             _ => None,
         }) else {
@@ -3527,6 +3761,7 @@ impl EphemeralRuntimeDriver {
             wake_if_idle,
             execution_handling_mode,
             live_interrupt_required,
+            live_boundary_delivery,
         ) = effect;
 
         if input_id != authority.input_id() {
@@ -3558,6 +3793,7 @@ impl EphemeralRuntimeDriver {
             peer_response_terminal_apply_intent: runtime_peer_response_terminal_apply_intent
                 .map(Into::into),
             live_interrupt_required,
+            live_boundary_delivery: live_boundary_delivery.map(Into::into),
         };
         let handling_mode = Self::handling_mode_from_admission_lane(lane);
         let admission_plan = Self::admission_plan_from_machine_effect(
@@ -3599,6 +3835,7 @@ impl EphemeralRuntimeDriver {
             mm_dsl::AdmissionInputKind::from(input.kind()),
             input.handling_mode().map(mm_dsl::InputLane::from),
             mm_dsl::AdmissionContinuationKind::from(input.continuation_kind()),
+            crate::input::admission_turn_append_shape(input),
             self.matches_silent_intent_authority(input),
             existing_superseded_id,
             self.runtime_phase_snapshot() == RuntimeState::Running,
@@ -3774,6 +4011,7 @@ impl EphemeralRuntimeDriver {
             mm_dsl::AdmissionInputKind::from(input.kind()),
             input.handling_mode().map(mm_dsl::InputLane::from),
             mm_dsl::AdmissionContinuationKind::from(input.continuation_kind()),
+            crate::input::admission_turn_append_shape(&input),
             self.matches_silent_intent_authority(&input),
             existing_superseded_id,
             self.runtime_phase_snapshot() == RuntimeState::Running,
@@ -3997,6 +4235,7 @@ impl EphemeralRuntimeDriver {
             mm_dsl::AdmissionInputKind::from(input.kind()),
             input.handling_mode().map(mm_dsl::InputLane::from),
             mm_dsl::AdmissionContinuationKind::from(input.continuation_kind()),
+            crate::input::admission_turn_append_shape(input),
             self.matches_silent_intent_authority(input),
             existing_superseded_id,
             self.runtime_phase_snapshot() == RuntimeState::Running,

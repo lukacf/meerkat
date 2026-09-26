@@ -2356,6 +2356,71 @@ pub enum AdmissionContinuationKind {
     WorkgraphAttention,
 }
 
+/// Typed shape of the runtime-authored transcript appends carried by one
+/// admitted input, observed by the shell from structure only (never content).
+///
+/// `InTurnEligible` means the input is a prompt whose typed appends are all of
+/// a kind every provider accepts in the middle of a conversation
+/// (`SystemNotice`, `User`, `InjectedContext`) and the input is not a directed
+/// interaction (whose terminal is owned by its own run). `FollowUpOnly` means
+/// the prompt carries typed appends that must not join a running turn. Every
+/// input without typed appends reports `Untyped`. The fail-closed default never
+/// selects in-turn delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionTurnAppendShape {
+    #[default]
+    FollowUpOnly,
+    Untyped,
+    InTurnEligible,
+}
+
+/// Machine-owned delivery class for an admitted Steer input that reaches an
+/// active cooperative model boundary.
+///
+/// `RequestOnly` projects the input into the next model request only (peer
+/// comms and text-only steers). `DurableAppend` writes the input's typed
+/// conversation appends into the running turn's transcript, committed with the
+/// run. `FollowUpOnly` never joins a running turn: the input takes the ordinary
+/// queued follow-up turn with its full durable projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBoundaryDelivery {
+    #[default]
+    FollowUpOnly,
+    RequestOnly,
+    DurableAppend,
+}
+
+/// Phase of a durable Steer input that joined a running run at a cooperative
+/// model boundary.
+///
+/// `Published` means the payload was handed to the parked runner but the run
+/// terminal has not yet resolved whether it was applied. `Retained` means the
+/// runner applied it and the append survives in the session image the run
+/// commits or retains, so the input is consumed with the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBoundaryJoinPhase {
+    #[default]
+    Published,
+    Retained,
+}
+
+/// Typed observation, read from the core delivery witness at the run terminal,
+/// of what became of one joined durable append.
+///
+/// `NotApplied`: the runner never took the payload (the run ended, was
+/// cancelled, or refused it first). `AppliedRetained`: the append is present in
+/// the session image the run commits or retains. `AppliedDiscarded`: the runner
+/// applied it but the image that carried it was discarded (an uncommitted
+/// persistent image that the next turn resyncs away, or a compaction rollback
+/// that restored a pre-append session).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBoundaryJoinObservation {
+    #[default]
+    NotApplied,
+    AppliedRetained,
+    AppliedDiscarded,
+}
+
 /// Typed durability class observed on an input. The shell may observe and
 /// carry this class, but admission validity and recovered-retention behavior
 /// are generated MeerkatMachine decisions.
@@ -3688,6 +3753,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             // map records the machine-validated queue/steer witness so
             // RecoverInputLifecycle cannot write a different lane.
             recovered_admitted_inputs: Set<String>,
+            // Durable in-turn Steer delivery. `admission_authorized_live_boundary_delivery`
+            // is the pre-admission witness written by `ResolveAdmissionPlan`;
+            // `SteerAccepted` moves it onto the tracked input. A tracked class
+            // exists only while the input is Queued in the Steer lane. The two
+            // join maps move in lockstep and exist only while their run is the
+            // current run: `JoinLiveBoundaryDurableAppend` records `Published`,
+            // `ResolveLiveBoundaryDurableAppendJoin` either returns the input to
+            // its lane or marks it `Retained`, and every run-ending transition
+            // clears both maps. None of these facts is recovered after restart.
+            admission_authorized_live_boundary_delivery: Map<String, Enum<LiveBoundaryDelivery>>,
+            input_live_boundary_delivery: Map<String, Enum<LiveBoundaryDelivery>>,
+            input_live_boundary_join_run: Map<String, RunId>,
+            input_live_boundary_join_phase: Map<String, Enum<LiveBoundaryJoinPhase>>,
             recovered_admitted_lanes: Map<String, Enum<InputLane>>,
 
             // --- Ops lifecycle substate ---
@@ -4327,6 +4405,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_idempotency_keys = EmptyMap,
             recovered_admitted_inputs = EmptySet,
             recovered_admitted_lanes = EmptyMap,
+            admission_authorized_live_boundary_delivery = EmptyMap,
+            input_live_boundary_delivery = EmptyMap,
+            input_live_boundary_join_run = EmptyMap,
+            input_live_boundary_join_phase = EmptyMap,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
@@ -5076,11 +5158,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             // prepared. The machine, not the shell, authorizes the exact
             // queue-compatible execution normalization used by fallback.
             LiveBoundaryUnavailable { input_id: String },
+            // A durable-class Steer input joins the current run at the exact
+            // parked model boundary, before the core publishes its payload.
+            JoinLiveBoundaryDurableAppend { run_id: RunId, input_id: String },
+            // Run-terminal resolution of one joined durable append from the
+            // typed core delivery witness. `lane` is the generated recovery
+            // lane witness, as in `ResolveStagedRollback`.
+            ResolveLiveBoundaryDurableAppendJoin {
+                run_id: RunId,
+                input_id: String,
+                lane: Enum<InputLane>,
+                observation: Enum<LiveBoundaryJoinObservation>,
+            },
             ResolveAdmissionPlan {
                 input_id: String,
                 input_kind: Enum<AdmissionInputKind>,
                 requested_lane: Option<Enum<InputLane>>,
                 continuation_kind: Enum<AdmissionContinuationKind>,
+                turn_append_shape: Enum<AdmissionTurnAppendShape>,
                 silent_intent_match: bool,
                 existing_superseded_input_id: Option<String>,
                 runtime_running: bool,
@@ -6670,6 +6765,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // The shell reads this typed fact instead of re-scanning admitted
                 // inputs for `HandlingMode::Steer`.
                 live_interrupt_required: bool,
+                // Machine-owned delivery class for a live-interrupt Steer
+                // admission (`None` for every admission that never reaches a
+                // live boundary). The runtime mirrors it into the admitted
+                // input semantics and chooses the boundary branch from it.
+                live_boundary_delivery: Option<Enum<LiveBoundaryDelivery>>,
             },
             // Machine-owned normalization after a typed active-boundary
             // Unavailable result. The runtime mirrors these exact values into
@@ -6678,6 +6778,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 input_id: String,
                 execution_handling_mode: Enum<InputLane>,
                 live_interrupt_required: bool,
+                live_boundary_delivery: Option<Enum<LiveBoundaryDelivery>>,
             },
             AdmissionValidationResolved {
                 input_id: String,
@@ -9131,6 +9232,61 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.input_run_associations.contains_key(input_id))
         }
 
+        // Durable in-turn Steer delivery. The tracked delivery class exists
+        // only while its input still awaits a live boundary in the Steer lane.
+        invariant live_boundary_delivery_only_for_queued_steer {
+            for_all(input_id in self.input_live_boundary_delivery.keys(),
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued)
+                && self.input_lane.get_cloned(input_id) == Some(InputLane::Steer))
+        }
+
+        invariant live_boundary_join_maps_lockstep {
+            for_all(input_id in self.input_live_boundary_join_run.keys(),
+                self.input_live_boundary_join_phase.contains_key(input_id))
+            && for_all(input_id in self.input_live_boundary_join_phase.keys(),
+                self.input_live_boundary_join_run.contains_key(input_id))
+        }
+
+        // A join exists only while its run is the current run of a Running
+        // lifecycle; every transition that ends or replaces the run clears it.
+        invariant live_boundary_join_bound_to_current_run {
+            (self.lifecycle_phase == Phase::Running
+                || !exists(input_id in self.input_live_boundary_join_run.keys(),
+                    self.input_live_boundary_join_run.contains_key(input_id)))
+            && for_all(input_id in self.input_live_boundary_join_run.keys(),
+                self.current_run_id == self.input_live_boundary_join_run.get_cloned(input_id))
+        }
+
+        // A joined input is a contributor of exactly its join run and is in no
+        // work lane, so the runtime loop can never stage it for a follow-up
+        // turn while the running turn may apply it.
+        invariant live_boundary_join_is_unlaned_contributor {
+            for_all(input_id in self.input_live_boundary_join_run.keys(),
+                !self.input_lane.contains_key(input_id)
+                && self.input_run_associations.get_cloned(input_id)
+                    == self.input_live_boundary_join_run.get_cloned(input_id))
+        }
+
+        // A Published join is still Staged and can always return to its lane.
+        invariant live_boundary_published_join_is_recoverable {
+            for_all(input_id in self.input_live_boundary_join_phase.keys(),
+                self.input_live_boundary_join_phase.get_cloned(input_id)
+                    != Some(LiveBoundaryJoinPhase::Published)
+                || (self.input_phases.get_cloned(input_id) == Some(InputPhase::Staged)
+                    && self.input_recovery_lanes.contains_key(input_id)))
+        }
+
+        // A Retained join is in the surviving session image: it is on its way
+        // to consumption and never terminal by any other route.
+        invariant live_boundary_retained_join_is_consumable {
+            for_all(input_id in self.input_live_boundary_join_phase.keys(),
+                self.input_live_boundary_join_phase.get_cloned(input_id)
+                    != Some(LiveBoundaryJoinPhase::Retained)
+                || self.input_phases.get_cloned(input_id) == Some(InputPhase::Staged)
+                || self.input_phases.get_cloned(input_id) == Some(InputPhase::Applied)
+                || self.input_phases.get_cloned(input_id) == Some(InputPhase::AppliedPendingConsumption))
+        }
+
         invariant staged_surface_ops_are_known_and_sequenced {
             for_all(surface_id in self.surface_staged_op.keys(),
                 self.known_surfaces.contains(surface_id)
@@ -10559,6 +10715,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "comms_drain_exited" { self.unregister_comms_drain_exit_pending == false }
             guard "completion_waiters_drained" { self.unregister_completion_waiter_drain_pending == false }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.session_id = None;
                 self.active_runtime_id = None;
                 self.active_fence_token = None;
@@ -13382,6 +13540,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RuntimeExecutorExited
             guard { self.lifecycle_phase == Phase::Running }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
                 self.runtime_stop_deferred = false;
@@ -14171,6 +14331,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.lifecycle_phase == Phase::Stopped
             }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
                 self.runtime_stop_deferred = false;
@@ -16177,10 +16339,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         // lifecycle transitions require.
         transition ResolveAdmissionPlanRequestedTerminalQueue {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "turn_append_shape_matches_kind" {
+                input_kind == AdmissionInputKind::Prompt
+                || turn_append_shape == AdmissionTurnAppendShape::Untyped
             }
             guard "terminal_queue_override" {
                 input_kind == AdmissionInputKind::PeerResponseTerminal
@@ -16188,6 +16354,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
@@ -16221,16 +16388,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interrupt_yielding: false,
                 wake_if_idle: without_wake == false,
                 execution_handling_mode: None,
-                live_interrupt_required: false
+                live_interrupt_required: false,
+                live_boundary_delivery: None
             }
         }
 
         transition ResolveAdmissionPlanRequestedTerminalSteer {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "turn_append_shape_matches_kind" {
+                input_kind == AdmissionInputKind::Prompt
+                || turn_append_shape == AdmissionTurnAppendShape::Untyped
             }
             guard "terminal_steer_override" {
                 input_kind == AdmissionInputKind::PeerResponseTerminal
@@ -16238,6 +16410,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
@@ -16283,16 +16456,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 } else {
                     None
                 },
-                live_interrupt_required: true
+                live_interrupt_required: true,
+                live_boundary_delivery: Some(LiveBoundaryDelivery::RequestOnly)
             }
         }
 
         transition ResolveAdmissionPlanRequestedQueue {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "turn_append_shape_matches_kind" {
+                input_kind == AdmissionInputKind::Prompt
+                || turn_append_shape == AdmissionTurnAppendShape::Untyped
             }
             guard "queue_override" {
                 requested_lane == Some(InputLane::Queue)
@@ -16302,6 +16480,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
             }
             update {
+                self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
@@ -16357,16 +16536,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && runtime_running == false
                     && active_turn_boundary_available == false,
                 execution_handling_mode: None,
-                live_interrupt_required: false
+                live_interrupt_required: false,
+                live_boundary_delivery: None
             }
         }
 
         transition ResolveAdmissionPlanRequestedSteer {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "turn_append_shape_matches_kind" {
+                input_kind == AdmissionInputKind::Prompt
+                || turn_append_shape == AdmissionTurnAppendShape::Untyped
             }
             guard "steer_override" {
                 requested_lane == Some(InputLane::Steer)
@@ -16376,6 +16560,18 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
             }
             update {
+                self.admission_authorized_live_boundary_delivery.insert(input_id, if input_kind == AdmissionInputKind::Prompt
+                    && turn_append_shape == AdmissionTurnAppendShape::InTurnEligible
+                    && silent_intent_match == false
+                {
+                    LiveBoundaryDelivery::DurableAppend
+                } else {
+                    if turn_append_shape == AdmissionTurnAppendShape::FollowUpOnly {
+                        LiveBoundaryDelivery::FollowUpOnly
+                    } else {
+                        LiveBoundaryDelivery::RequestOnly
+                    }
+                });
                 self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
@@ -16436,16 +16632,32 @@ macro_rules! meerkat_catalog_machine_dsl {
                 } else {
                     None
                 },
-                live_interrupt_required: true
+                live_interrupt_required: true,
+                live_boundary_delivery: if input_kind == AdmissionInputKind::Prompt
+                    && turn_append_shape == AdmissionTurnAppendShape::InTurnEligible
+                    && silent_intent_match == false
+                {
+                    Some(LiveBoundaryDelivery::DurableAppend)
+                } else {
+                    if turn_append_shape == AdmissionTurnAppendShape::FollowUpOnly {
+                        Some(LiveBoundaryDelivery::FollowUpOnly)
+                    } else {
+                        Some(LiveBoundaryDelivery::RequestOnly)
+                    }
+                }
             }
         }
 
         transition ResolveAdmissionPlanDefaultQueueKind {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "turn_append_shape_matches_kind" {
+                input_kind == AdmissionInputKind::Prompt
+                || turn_append_shape == AdmissionTurnAppendShape::Untyped
             }
             guard "default_queue_kind" {
                 requested_lane == None
@@ -16455,6 +16667,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || input_kind == AdmissionInputKind::ExternalEvent)
             }
             update {
+                self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
@@ -16500,16 +16713,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && runtime_running == false
                     && active_turn_boundary_available == false,
                 execution_handling_mode: None,
-                live_interrupt_required: false
+                live_interrupt_required: false,
+                live_boundary_delivery: None
             }
         }
 
         transition ResolveAdmissionPlanDefaultPeerMessageOrRequest {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "turn_append_shape_matches_kind" {
+                input_kind == AdmissionInputKind::Prompt
+                || turn_append_shape == AdmissionTurnAppendShape::Untyped
             }
             guard "default_peer_message_or_request" {
                 requested_lane == None
@@ -16518,6 +16736,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
             }
             update {
+                self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
@@ -16564,16 +16783,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && runtime_running == false
                     && active_turn_boundary_available == false,
                 execution_handling_mode: None,
-                live_interrupt_required: false
+                live_interrupt_required: false,
+                live_boundary_delivery: None
             }
         }
 
         transition ResolveAdmissionPlanPeerResponseProgress {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "turn_append_shape_matches_kind" {
+                input_kind == AdmissionInputKind::Prompt
+                || turn_append_shape == AdmissionTurnAppendShape::Untyped
             }
             guard "peer_response_progress" {
                 input_kind == AdmissionInputKind::PeerResponseProgress
@@ -16584,6 +16808,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.input_phases.contains_key(existing_superseded_input_id.get("value"))
             }
             update {
+                self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 if existing_superseded_input_id != None {
@@ -16626,16 +16851,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 } else {
                     None
                 },
-                live_interrupt_required: true
+                live_interrupt_required: true,
+                live_boundary_delivery: Some(LiveBoundaryDelivery::RequestOnly)
             }
         }
 
         transition ResolveAdmissionPlanDefaultPeerResponseTerminal {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "turn_append_shape_matches_kind" {
+                input_kind == AdmissionInputKind::Prompt
+                || turn_append_shape == AdmissionTurnAppendShape::Untyped
             }
             guard "default_peer_response_terminal" {
                 input_kind == AdmissionInputKind::PeerResponseTerminal
@@ -16643,6 +16873,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
@@ -16676,16 +16907,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interrupt_yielding: false,
                 wake_if_idle: without_wake == false,
                 execution_handling_mode: None,
-                live_interrupt_required: false
+                live_interrupt_required: false,
+                live_boundary_delivery: None
             }
         }
 
         transition ResolveAdmissionPlanDefaultContinuation {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "turn_append_shape_matches_kind" {
+                input_kind == AdmissionInputKind::Prompt
+                || turn_append_shape == AdmissionTurnAppendShape::Untyped
             }
             guard "default_continuation" {
                 input_kind == AdmissionInputKind::Continuation
@@ -16694,6 +16930,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
@@ -16738,7 +16975,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && runtime_running == false
                     && active_turn_boundary_available == false,
                 execution_handling_mode: None,
-                live_interrupt_required: true
+                live_interrupt_required: true,
+                live_boundary_delivery: Some(LiveBoundaryDelivery::RequestOnly)
             }
         }
 
@@ -16750,10 +16988,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         // overrides the projected runtime semantics.
         transition ResolveAdmissionPlanWorkgraphAttentionContinuation {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "turn_append_shape_matches_kind" {
+                input_kind == AdmissionInputKind::Prompt
+                || turn_append_shape == AdmissionTurnAppendShape::Untyped
             }
             guard "workgraph_attention_continuation" {
                 input_kind == AdmissionInputKind::Continuation
@@ -16761,6 +17003,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
                 self.admission_authorized_existing_actions.remove(input_id);
@@ -16806,16 +17049,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && runtime_running == false
                     && active_turn_boundary_available == false,
                 execution_handling_mode: None,
-                live_interrupt_required: false
+                live_interrupt_required: false,
+                live_boundary_delivery: None
             }
         }
 
         transition ResolveAdmissionPlanOperation {
             per_phase [Idle, Attached, Running]
-            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
             guard "runtime_running_matches_phase" {
                 (runtime_running == true && self.lifecycle_phase == Phase::Running)
                 || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "turn_append_shape_matches_kind" {
+                input_kind == AdmissionInputKind::Prompt
+                || turn_append_shape == AdmissionTurnAppendShape::Untyped
             }
             guard "operation" {
                 input_kind == AdmissionInputKind::Operation
@@ -16823,6 +17071,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && silent_intent_match == false
             }
             update {
+                self.admission_authorized_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
                 self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::ConsumedOnAccept);
                 self.admission_authorized_existing_actions.remove(input_id);
@@ -16856,7 +17105,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interrupt_yielding: false,
                 wake_if_idle: false,
                 execution_handling_mode: None,
-                live_interrupt_required: false
+                live_interrupt_required: false,
+                live_boundary_delivery: None
             }
         }
 
@@ -18611,6 +18861,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (admitted_content_shape == ContentShape::Conversation
                     || admitted_content_shape == ContentShape::Empty)
             }
+            guard "no_live_boundary_join" {
+                !exists(joined_input_id in self.input_live_boundary_join_run.keys(),
+                    self.input_live_boundary_join_run.contains_key(joined_input_id))
+            }
             update {
                 self.current_run_id = Some(run_id);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
@@ -18733,6 +18987,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Completed
                 || self.turn_phase == TurnPhase::Failed
                 || self.turn_phase == TurnPhase::Cancelled
+            }
+            guard "no_live_boundary_join" {
+                !exists(joined_input_id in self.input_live_boundary_join_run.keys(),
+                    self.input_live_boundary_join_run.contains_key(joined_input_id))
             }
             update {
                 self.current_run_id = Some(run_id);
@@ -19388,6 +19646,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "standalone_failed_coherent" { self.turn_phase != TurnPhase::Failed || self.terminal_outcome == Some(if self.terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) { TurnTerminalOutcome::BudgetExhausted } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::TimeBudgetExceeded) { TurnTerminalOutcome::TimeBudgetExceeded } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } }) }
             guard "standalone_no_completion_obligation" { self.runtime_completion_result_run_id == None && self.runtime_completion_result_resolved == true }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -19410,6 +19670,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "failed_terminal_has_specific_cause" { self.turn_phase != TurnPhase::Failed || (self.terminal_cause_kind != None && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)) }
             guard "failed_terminal_outcome_matches_cause" { self.turn_phase != TurnPhase::Failed || self.terminal_outcome == Some(if self.terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) { TurnTerminalOutcome::BudgetExhausted } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::TimeBudgetExceeded) { TurnTerminalOutcome::TimeBudgetExceeded } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } }) }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -19425,6 +19687,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "failed_terminal_has_specific_cause" { self.turn_phase != TurnPhase::Failed || (self.terminal_cause_kind != None && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)) }
             guard "failed_terminal_outcome_matches_cause" { self.turn_phase != TurnPhase::Failed || self.terminal_outcome == Some(if self.terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) { TurnTerminalOutcome::BudgetExhausted } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::TimeBudgetExceeded) { TurnTerminalOutcome::TimeBudgetExceeded } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } }) }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -19440,6 +19704,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "failed_terminal_has_specific_cause" { self.turn_phase != TurnPhase::Failed || (self.terminal_cause_kind != None && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)) }
             guard "failed_terminal_outcome_matches_cause" { self.turn_phase != TurnPhase::Failed || self.terminal_outcome == Some(if self.terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) { TurnTerminalOutcome::BudgetExhausted } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::TimeBudgetExceeded) { TurnTerminalOutcome::TimeBudgetExceeded } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } }) }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20770,7 +21036,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            // Every durable join of the committing run is resolved: an
+            // unapplied or discarded append already went back to its lane, and
+            // a retained one is a receipt contributor of this commit (the
+            // commit preview runs before the boundary marks it applied).
+            guard "live_boundary_joins_retained" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20781,7 +21058,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some(PreRunPhase::Attached) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            // Every durable join of the committing run is resolved: an
+            // unapplied or discarded append already went back to its lane, and
+            // a retained one is a receipt contributor of this commit (the
+            // commit preview runs before the boundary marks it applied).
+            guard "live_boundary_joins_retained" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20792,7 +21080,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some(PreRunPhase::Retired) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            // Every durable join of the committing run is resolved: an
+            // unapplied or discarded append already went back to its lane, and
+            // a retained one is a receipt contributor of this commit (the
+            // commit preview runs before the boundary marks it applied).
+            guard "live_boundary_joins_retained" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20810,7 +21109,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.terminal_cause_kind != None
                 && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)
             }
+            // Every durable join of the ending run is resolved: an unapplied or
+            // discarded append already went back to its lane, and a retained
+            // one is already applied with the run (its boundary receipt or a
+            // live-boundary checkpoint) and is consumed next.
+            guard "live_boundary_joins_retained_and_applied" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained)
+                    && (self.input_phases.get_cloned(joined_input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(joined_input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20827,7 +21140,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.terminal_cause_kind != None
                 && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)
             }
+            // Every durable join of the ending run is resolved: an unapplied or
+            // discarded append already went back to its lane, and a retained
+            // one is already applied with the run (its boundary receipt or a
+            // live-boundary checkpoint) and is consumed next.
+            guard "live_boundary_joins_retained_and_applied" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained)
+                    && (self.input_phases.get_cloned(joined_input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(joined_input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20844,7 +21171,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.terminal_cause_kind != None
                 && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)
             }
+            // Every durable join of the ending run is resolved: an unapplied or
+            // discarded append already went back to its lane, and a retained
+            // one is already applied with the run (its boundary receipt or a
+            // live-boundary checkpoint) and is consumed next.
+            guard "live_boundary_joins_retained_and_applied" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained)
+                    && (self.input_phases.get_cloned(joined_input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(joined_input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20865,7 +21206,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_phase == TurnPhase::Cancelled
                 && self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled)
             }
+            // Every durable join of the ending run is resolved: an unapplied or
+            // discarded append already went back to its lane, and a retained
+            // one is already applied with the run (its boundary receipt or a
+            // live-boundary checkpoint) and is consumed next.
+            guard "live_boundary_joins_retained_and_applied" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained)
+                    && (self.input_phases.get_cloned(joined_input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(joined_input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20881,7 +21236,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_phase == TurnPhase::Cancelled
                 && self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled)
             }
+            // Every durable join of the ending run is resolved: an unapplied or
+            // discarded append already went back to its lane, and a retained
+            // one is already applied with the run (its boundary receipt or a
+            // live-boundary checkpoint) and is consumed next.
+            guard "live_boundary_joins_retained_and_applied" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained)
+                    && (self.input_phases.get_cloned(joined_input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(joined_input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20897,7 +21266,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_phase == TurnPhase::Cancelled
                 && self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled)
             }
+            // Every durable join of the ending run is resolved: an unapplied or
+            // discarded append already went back to its lane, and a retained
+            // one is already applied with the run (its boundary receipt or a
+            // live-boundary checkpoint) and is consumed next.
+            guard "live_boundary_joins_retained_and_applied" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained)
+                    && (self.input_phases.get_cloned(joined_input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(joined_input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20914,7 +21297,21 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            // Every durable join of the ending run is resolved: an unapplied or
+            // discarded append already went back to its lane, and a retained
+            // one is already applied with the run (its boundary receipt or a
+            // live-boundary checkpoint) and is consumed next.
+            guard "live_boundary_joins_retained_and_applied" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained)
+                    && (self.input_phases.get_cloned(joined_input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(joined_input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20925,7 +21322,21 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some(PreRunPhase::Attached) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            // Every durable join of the ending run is resolved: an unapplied or
+            // discarded append already went back to its lane, and a retained
+            // one is already applied with the run (its boundary receipt or a
+            // live-boundary checkpoint) and is consumed next.
+            guard "live_boundary_joins_retained_and_applied" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained)
+                    && (self.input_phases.get_cloned(joined_input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(joined_input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -20936,7 +21347,21 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some(PreRunPhase::Retired) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            // Every durable join of the ending run is resolved: an unapplied or
+            // discarded append already went back to its lane, and a retained
+            // one is already applied with the run (its boundary receipt or a
+            // live-boundary checkpoint) and is consumed next.
+            guard "live_boundary_joins_retained_and_applied" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained)
+                    && (self.input_phases.get_cloned(joined_input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(joined_input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
             update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
             }
@@ -21176,6 +21601,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.input_phases.insert(input_id, phase);
+                // Live-boundary delivery classes and joins are never recovered:
+                // a recovered input only ever takes the queued path.
+                self.input_live_boundary_delivery.remove(input_id);
+                self.input_live_boundary_join_run.remove(input_id);
+                self.input_live_boundary_join_phase.remove(input_id);
 
                 if terminal_kind != None {
                     self.input_terminal_kind.insert(input_id, terminal_kind.get("value"));
@@ -21283,6 +21713,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_attempt_counts.insert(input_id, 0);
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
                 self.next_admission_seq += 1;
+                self.input_live_boundary_delivery.remove(input_id);
+                self.admission_authorized_live_boundary_delivery.remove(input_id);
             }
             to Idle
             emit IngressAccepted
@@ -21307,6 +21739,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_attempt_counts.insert(input_id, 0);
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
                 self.next_admission_seq += 1;
+                if self.admission_authorized_live_boundary_delivery.contains_key(input_id) {
+                    self.input_live_boundary_delivery.insert(
+                        input_id,
+                        self.admission_authorized_live_boundary_delivery.get_cloned(input_id).get("value")
+                    );
+                } else {
+                    self.input_live_boundary_delivery.remove(input_id);
+                }
+                self.admission_authorized_live_boundary_delivery.remove(input_id);
             }
             to Idle
             emit IngressAccepted
@@ -21320,9 +21761,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ChangeLane { input_id, new_lane }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            // Only a queued input has a work lane to change. A staged (or
+            // durably joined) input left its lane when its run claimed it;
+            // re-laning it would make the runtime loop stage it twice.
+            guard "input_queued" {
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued)
+                && self.input_lane.contains_key(input_id)
+            }
             update {
                 self.input_lane.insert(input_id, new_lane);
                 self.input_recovery_lanes.insert(input_id, new_lane);
+                self.input_live_boundary_delivery.remove(input_id);
             }
             to Idle
         }
@@ -21441,6 +21890,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_completion_boundaries.remove(input_id);
                 self.input_lane.remove(input_id);
                 self.input_attempt_counts.increment(input_id, 1);
+                self.input_live_boundary_delivery.remove(input_id);
             }
             to Idle
             emit RecordRunAssociation
@@ -21465,11 +21915,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RollbackStaged { input_id, lane }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_not_live_boundary_joined" {
+                !self.input_live_boundary_join_run.contains_key(input_id)
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_run_associations.remove(input_id);
                 self.input_lane.insert(input_id, lane);
                 self.input_recovery_lanes.insert(input_id, lane);
+                self.input_live_boundary_delivery.remove(input_id);
             }
             to Idle
             emit InputLifecycleNotice
@@ -21483,6 +21937,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ResolveStagedRollback { input_id, lane }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_not_live_boundary_joined" {
+                !self.input_live_boundary_join_run.contains_key(input_id)
+            }
             guard "input_staged" {
                 self.input_phases.get(input_id).get("value") == InputPhase::Staged
             }
@@ -21501,6 +21958,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_run_associations.remove(input_id);
                 self.input_lane.insert(input_id, lane);
                 self.input_recovery_lanes.insert(input_id, lane);
+                self.input_live_boundary_delivery.remove(input_id);
             }
             to Idle
             emit InputLifecycleNotice
@@ -21510,6 +21968,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ResolveStagedRollback { input_id, lane }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_not_live_boundary_joined" {
+                !self.input_live_boundary_join_run.contains_key(input_id)
+            }
             guard "input_staged" {
                 self.input_phases.get(input_id).get("value") == InputPhase::Staged
             }
@@ -21535,6 +21996,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 );
                 self.input_superseded_by.remove(input_id);
                 self.input_aggregate_id.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
+                self.input_live_boundary_join_run.remove(input_id);
+                self.input_live_boundary_join_phase.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -21573,6 +22037,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_attempt_counts.increment(input_id, 1);
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
                 self.next_admission_seq += 1;
+                self.input_live_boundary_delivery.remove(input_id);
             }
             to Idle
             emit InputLifecycleNotice
@@ -21612,6 +22077,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 );
                 self.input_superseded_by.remove(input_id);
                 self.input_aggregate_id.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
+                self.input_live_boundary_join_run.remove(input_id);
+                self.input_live_boundary_join_phase.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -21622,8 +22090,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input MarkApplied { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            // A Published join is resolved only by
+            // `ResolveLiveBoundaryDurableAppendJoin`; only a Retained join may
+            // be applied with its run.
+            guard "live_boundary_join_not_published" {
+                self.input_live_boundary_join_phase.get_cloned(input_id)
+                    != Some(LiveBoundaryJoinPhase::Published)
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Applied);
+                self.input_live_boundary_delivery.remove(input_id);
             }
             to Idle
             emit InputLifecycleNotice
@@ -21634,8 +22110,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input MarkAppliedPendingConsumption { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            // A Published join is resolved only by
+            // `ResolveLiveBoundaryDurableAppendJoin`; only a Retained join may
+            // be applied with its run.
+            guard "live_boundary_join_not_published" {
+                self.input_live_boundary_join_phase.get_cloned(input_id)
+                    != Some(LiveBoundaryJoinPhase::Published)
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::AppliedPendingConsumption);
+                self.input_live_boundary_delivery.remove(input_id);
             }
             to Idle
             emit InputLifecycleNotice
@@ -21718,13 +22202,155 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_lane.insert(input_id, InputLane::Queue);
                 self.input_recovery_lanes.insert(input_id, InputLane::Queue);
+                self.input_live_boundary_delivery.remove(input_id);
             }
             to Running
             emit LiveBoundaryUnavailableNormalized {
                 input_id: input_id,
                 execution_handling_mode: InputLane::Queue,
-                live_interrupt_required: false
+                live_interrupt_required: false,
+                live_boundary_delivery: None
             }
+        }
+
+        // JoinLiveBoundaryDurableAppend: a durable-class Steer input joins the
+        // current run as a late contributor at the exact parked model boundary.
+        // It is linearized BEFORE the core publishes the payload to the runner,
+        // and the persistent driver makes the Staged binding (last_run_id)
+        // durable in the same step, so crash recovery can attribute a
+        // provisional tail that contains the append. The input leaves its work
+        // lane (so the runtime loop can never stage it for a follow-up while
+        // the running turn may apply it) but keeps its recovery lane and
+        // admission sequence, so an unapplied join returns to the head of its
+        // lane. No attempt is counted: an unapplied join never executed.
+        //
+        // The run must be owned by the runtime loop (at least one batch
+        // contributor is Staged for it): a direct service turn commits through
+        // `ServiceTurnCommitted` with no contributors and would strand the
+        // joined input, so a durable steer never joins one.
+        transition JoinLiveBoundaryDurableAppend {
+            per_phase [Running]
+            on input JoinLiveBoundaryDurableAppend { run_id, input_id }
+            guard "current_run_matches" { self.current_run_id == Some(run_id) }
+            guard "turn_at_model_boundary" { self.turn_phase == TurnPhase::CallingLlm }
+            guard "no_cancel_after_boundary" { self.cancel_after_boundary == false }
+            guard "run_owned_by_runtime_loop" {
+                exists(owner_input_id in self.input_run_associations.keys(),
+                    self.input_run_associations.get_cloned(owner_input_id) == Some(run_id)
+                    && self.input_phases.get_cloned(owner_input_id) == Some(InputPhase::Staged)
+                    && !self.input_live_boundary_join_run.contains_key(owner_input_id))
+            }
+            guard "input_is_queued_steer" {
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued)
+                && self.input_lane.get_cloned(input_id) == Some(InputLane::Steer)
+            }
+            guard "input_recovery_lane_bound" { self.input_recovery_lanes.contains_key(input_id) }
+            guard "input_sequence_bound" { self.input_admission_seq.contains_key(input_id) }
+            guard "durable_append_delivery" {
+                self.input_live_boundary_delivery.get_cloned(input_id)
+                    == Some(LiveBoundaryDelivery::DurableAppend)
+            }
+            guard "not_already_joined" { !self.input_live_boundary_join_run.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, InputPhase::Staged);
+                self.input_run_associations.insert(input_id, run_id);
+                self.input_completion_boundaries.remove(input_id);
+                self.input_lane.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
+                self.input_live_boundary_join_run.insert(input_id, run_id);
+                self.input_live_boundary_join_phase.insert(input_id, LiveBoundaryJoinPhase::Published);
+            }
+            to Running
+            emit RecordRunAssociation
+        }
+
+        // ResolveLiveBoundaryDurableAppendJoin: the run terminal resolves every
+        // Published join from the typed core delivery witness before any
+        // terminal realization. The three arms are the exactly-once rule:
+        // an append that is not in the surviving session image re-enters its
+        // lane for exactly one follow-up turn; an append that is retained is
+        // consumed with the run and can never be requeued or abandoned
+        // (`ResolveStagedRollback*`, `RollbackStaged`, `ChangeLane`,
+        // `SupersedeInput` and `CoalesceInput` refuse joined inputs and
+        // `AbandonInput` refuses Retained ones).
+        transition ResolveLiveBoundaryDurableAppendJoinNotApplied {
+            per_phase [Running]
+            on input ResolveLiveBoundaryDurableAppendJoin { run_id, input_id, lane, observation }
+            guard "current_run_matches" { self.current_run_id == Some(run_id) }
+            guard "joined_to_run" { self.input_live_boundary_join_run.get_cloned(input_id) == Some(run_id) }
+            guard "join_published" {
+                self.input_live_boundary_join_phase.get_cloned(input_id)
+                    == Some(LiveBoundaryJoinPhase::Published)
+            }
+            guard "input_staged_for_run" {
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Staged)
+                && self.input_run_associations.get_cloned(input_id) == Some(run_id)
+            }
+            guard "recovery_lane_matches" { self.input_recovery_lanes.get_cloned(input_id) == Some(lane) }
+            guard "not_applied" { observation == LiveBoundaryJoinObservation::NotApplied }
+            update {
+                self.input_phases.insert(input_id, InputPhase::Queued);
+                self.input_run_associations.remove(input_id);
+                self.input_lane.insert(input_id, lane);
+                self.input_recovery_lanes.insert(input_id, lane);
+                self.input_live_boundary_join_run.remove(input_id);
+                self.input_live_boundary_join_phase.remove(input_id);
+            }
+            to Running
+            emit InputLifecycleNotice
+        }
+
+        // The append was applied but its image was discarded. The input
+        // re-enters its lane, and its run attribution is kept: if the process
+        // dies before the follow-up commits, durable-tail recovery that adopts
+        // the discarded run's provisional tail (which carries the append)
+        // attributes the input to that tail instead of redelivering it.
+        transition ResolveLiveBoundaryDurableAppendJoinAppliedDiscarded {
+            per_phase [Running]
+            on input ResolveLiveBoundaryDurableAppendJoin { run_id, input_id, lane, observation }
+            guard "current_run_matches" { self.current_run_id == Some(run_id) }
+            guard "joined_to_run" { self.input_live_boundary_join_run.get_cloned(input_id) == Some(run_id) }
+            guard "join_published" {
+                self.input_live_boundary_join_phase.get_cloned(input_id)
+                    == Some(LiveBoundaryJoinPhase::Published)
+            }
+            guard "input_staged_for_run" {
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Staged)
+                && self.input_run_associations.get_cloned(input_id) == Some(run_id)
+            }
+            guard "recovery_lane_matches" { self.input_recovery_lanes.get_cloned(input_id) == Some(lane) }
+            guard "applied_then_discarded" { observation == LiveBoundaryJoinObservation::AppliedDiscarded }
+            update {
+                self.input_phases.insert(input_id, InputPhase::Queued);
+                self.input_lane.insert(input_id, lane);
+                self.input_recovery_lanes.insert(input_id, lane);
+                self.input_live_boundary_join_run.remove(input_id);
+                self.input_live_boundary_join_phase.remove(input_id);
+            }
+            to Running
+            emit InputLifecycleNotice
+        }
+
+        transition ResolveLiveBoundaryDurableAppendJoinAppliedRetained {
+            per_phase [Running]
+            on input ResolveLiveBoundaryDurableAppendJoin { run_id, input_id, lane, observation }
+            guard "current_run_matches" { self.current_run_id == Some(run_id) }
+            guard "joined_to_run" { self.input_live_boundary_join_run.get_cloned(input_id) == Some(run_id) }
+            guard "join_published" {
+                self.input_live_boundary_join_phase.get_cloned(input_id)
+                    == Some(LiveBoundaryJoinPhase::Published)
+            }
+            guard "input_staged_for_run" {
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Staged)
+                && self.input_run_associations.get_cloned(input_id) == Some(run_id)
+            }
+            guard "recovery_lane_matches" { self.input_recovery_lanes.get_cloned(input_id) == Some(lane) }
+            guard "applied_and_retained" { observation == LiveBoundaryJoinObservation::AppliedRetained }
+            update {
+                self.input_live_boundary_join_phase.insert(input_id, LiveBoundaryJoinPhase::Retained);
+            }
+            to Running
+            emit InputLifecycleNotice
         }
 
         // ConsumeOnAccept: direct Accepted → Consumed (skip queue)
@@ -21732,6 +22358,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ConsumeOnAccept { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_not_live_boundary_joined" {
+                !self.input_live_boundary_join_run.contains_key(input_id)
+            }
             guard "live_admission_authorized_consume_on_accept" {
                 self.admission_authorized_plans.contains_key(input_id)
                 && self.admission_authorized_plans.get_cloned(input_id).get("value") == AdmissionPlanKind::ConsumedOnAccept
@@ -21745,6 +22374,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_aggregate_id.remove(input_id);
                 self.input_abandon_reason.remove(input_id);
                 self.input_abandon_attempt_count.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -21782,6 +22412,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ConsumeInput { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            // A Published join has not been resolved against the core
+            // delivery witness; consuming it could drop an append the runner
+            // never wrote.
+            guard "live_boundary_join_not_published" {
+                self.input_live_boundary_join_phase.get_cloned(input_id)
+                    != Some(LiveBoundaryJoinPhase::Published)
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Consumed);
                 self.input_lane.remove(input_id);
@@ -21791,6 +22428,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_aggregate_id.remove(input_id);
                 self.input_abandon_reason.remove(input_id);
                 self.input_abandon_attempt_count.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
+                self.input_live_boundary_join_run.remove(input_id);
+                self.input_live_boundary_join_phase.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -21803,6 +22443,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SupersedeInput { input_id, superseded_by }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_not_live_boundary_joined" {
+                !self.input_live_boundary_join_run.contains_key(input_id)
+            }
             guard "live_admission_authorized_supersede_target" {
                 self.admission_authorized_existing_actions.contains_key(superseded_by)
                 && self.admission_authorized_existing_actions.get_cloned(superseded_by).get("value") == AdmissionExistingQueuedActionKind::Supersede
@@ -21818,6 +22461,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_aggregate_id.remove(input_id);
                 self.input_abandon_reason.remove(input_id);
                 self.input_abandon_attempt_count.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_existing_actions.remove(superseded_by);
                 self.admission_authorized_existing_targets.remove(superseded_by);
             }
@@ -21831,6 +22475,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CoalesceInput { input_id, aggregate_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_not_live_boundary_joined" {
+                !self.input_live_boundary_join_run.contains_key(input_id)
+            }
             guard "live_admission_authorized_coalesce_target" {
                 self.admission_authorized_existing_actions.contains_key(aggregate_id)
                 && self.admission_authorized_existing_actions.get_cloned(aggregate_id).get("value") == AdmissionExistingQueuedActionKind::Coalesce
@@ -21846,6 +22493,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_superseded_by.remove(input_id);
                 self.input_abandon_reason.remove(input_id);
                 self.input_abandon_attempt_count.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
                 self.admission_authorized_existing_actions.remove(aggregate_id);
                 self.admission_authorized_existing_targets.remove(aggregate_id);
             }
@@ -21858,6 +22506,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input AbandonInput { input_id, reason, attempt_count }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            // A Retained join is in the session image the run commits or
+            // retains, so it may only be consumed. A Published join is still
+            // abandoned with the batch by teardown paths (destroy, stop,
+            // reset), exactly like the batch contributors it joined.
+            guard "live_boundary_join_not_retained" {
+                self.input_live_boundary_join_phase.get_cloned(input_id)
+                    != Some(LiveBoundaryJoinPhase::Retained)
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Abandoned);
                 self.input_lane.remove(input_id);
@@ -21867,6 +22523,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_abandon_attempt_count.insert(input_id, attempt_count);
                 self.input_superseded_by.remove(input_id);
                 self.input_aggregate_id.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
+                self.input_live_boundary_join_run.remove(input_id);
+                self.input_live_boundary_join_phase.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -22012,6 +22671,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_existing_targets.remove(input_id);
                 self.recovered_admitted_inputs.remove(input_id);
                 self.recovered_admitted_lanes.remove(input_id);
+                self.admission_authorized_live_boundary_delivery.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
+                self.input_live_boundary_join_run.remove(input_id);
+                self.input_live_boundary_join_phase.remove(input_id);
                 if idempotency_key != None {
                     self.admission_idempotency_inputs.remove(idempotency_key.get("value"));
                 }

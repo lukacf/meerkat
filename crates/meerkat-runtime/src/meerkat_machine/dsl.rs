@@ -3647,6 +3647,43 @@ impl From<crate::input::ContinuationKind> for AdmissionContinuationKind {
     }
 }
 
+/// Typed shape of an admitted input's runtime-authored transcript appends.
+/// Bridging copy of the catalog-owned enum; the shell observes it from input
+/// structure (see `crate::input::admission_turn_append_shape`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionTurnAppendShape {
+    #[default]
+    FollowUpOnly,
+    Untyped,
+    InTurnEligible,
+}
+
+/// Bridging copy of the catalog-owned live-boundary delivery class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBoundaryDelivery {
+    #[default]
+    FollowUpOnly,
+    RequestOnly,
+    DurableAppend,
+}
+
+/// Bridging copy of the catalog-owned durable join phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBoundaryJoinPhase {
+    #[default]
+    Published,
+    Retained,
+}
+
+/// Bridging copy of the catalog-owned run-terminal join observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveBoundaryJoinObservation {
+    #[default]
+    NotApplied,
+    AppliedRetained,
+    AppliedDiscarded,
+}
+
 /// Typed durability class observed on an input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum InputDurabilityKind {

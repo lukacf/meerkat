@@ -288,10 +288,13 @@ fi
 # succeeds.
 tlc_env_tmp="$(mktemp -d "${TMPDIR:-/tmp}/machine-verify-java-options.XXXXXX")"
 trap 'rm -rf "$tlc_env_tmp"' EXIT
+# The fake reports TLC's success line: the lane's direct audit runner
+# (durable_in_turn_steer_audit.sh) requires it before it accepts a run.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
   'printf "%s\n" "$JDK_JAVA_OPTIONS" > "$TLC_JDK_JAVA_OPTIONS_CAPTURE"' \
+  'echo "Model checking completed. No error has been found."' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 

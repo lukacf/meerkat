@@ -583,6 +583,7 @@ rust_test(
     ],
     srcs = [
         "tests/e2e_fast/cross_host_live_member.rs",
+        "tests/e2e_fast/durable_in_turn_steer.rs",
         "tests/e2e_fast/mixed_temporary_council.rs",
         "tests/e2e_fast/mob_fork_off_detached.rs",
         "tests/e2e_fast/multi_host_bind.rs",

@@ -31,6 +31,7 @@ import type {
   RealmId,
   RevisedPromptDisposition,
   RevisedPromptSource,
+  RunId,
   SchemaCompat,
   SchemaFormat,
   SenderContentTaint,
@@ -453,6 +454,14 @@ export type HookFailureReason = {
 } | {
   reason_code: "observe_only_violation";
 };
+
+/**
+ * Opaque identifier for an input accepted by the runtime layer.
+ *
+ * Core passes this through in `contributing_input_ids` on receipts and events
+ * but NEVER interprets it. The runtime layer creates and manages these.
+ */
+export type InputId = string;
 
 /**
  * Typed reason an interaction stream was abandoned before normal terminal
@@ -1327,6 +1336,12 @@ export type AgentEvent = {
   previous: SessionLlmIdentity;
   target: SessionLlmIdentity;
   type: "model_fallback_target_failed";
+} | {
+  append_count: number;
+  content: ContentInput;
+  input_id: InputId;
+  run_id: RunId;
+  type: "boundary_append_applied";
 };
 
 /**

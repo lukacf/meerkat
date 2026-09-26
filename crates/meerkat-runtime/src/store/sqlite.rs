@@ -16086,6 +16086,7 @@ ORDER BY runtime_id";
                 execution_handling_mode: None,
                 peer_response_terminal_apply_intent: None,
                 live_interrupt_required: true,
+                live_boundary_delivery: None,
             };
             let released_steer_id = insert_released_context_row(
                 &tx,
@@ -16120,6 +16121,7 @@ ORDER BY runtime_id";
                 execution_handling_mode: None,
                 peer_response_terminal_apply_intent: None,
                 live_interrupt_required: false,
+                live_boundary_delivery: None,
             };
             let released_instruction_id = insert_released_context_row(
                 &tx,

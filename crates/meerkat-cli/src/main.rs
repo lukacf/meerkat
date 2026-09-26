@@ -9786,10 +9786,10 @@ impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryH
             })
     }
 
-    async fn prepare_transient_turn_context_at_boundary(
+    async fn prepare_turn_boundary_delivery(
         &self,
         expected_run_id: &meerkat_core::RunId,
-        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
         #[cfg(feature = "session-store")]
         if let Some(persistent) = self.persistent_service.as_ref() {
@@ -9797,11 +9797,11 @@ impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryH
                 .prepare_live_transient_turn_context_boundary(
                     &self.session_id,
                     expected_run_id,
-                    contexts,
+                    delivery,
                 )
                 .await;
         }
-        let _ = (expected_run_id, contexts);
+        let _ = (expected_run_id, delivery);
         Err(meerkat_core::CoreBoundaryStageError::unavailable(
             "CLI session service has no persistent exact-boundary authority",
         ))
@@ -10794,14 +10794,14 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
-    async fn prepare_transient_turn_context_for_active_turn(
+    async fn prepare_turn_boundary_delivery_for_active_turn(
         &self,
         session_id: &SessionId,
         expected_run_id: &meerkat_core::RunId,
-        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
         self.inner
-            .prepare_transient_turn_context_for_active_turn(session_id, expected_run_id, contexts)
+            .prepare_transient_turn_context_for_active_turn(session_id, expected_run_id, delivery)
             .await
             .map(|prepared| prepared.into_stage_output(None))
     }
@@ -14250,14 +14250,14 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
-    async fn prepare_transient_turn_context_for_active_turn(
+    async fn prepare_turn_boundary_delivery_for_active_turn(
         &self,
         session_id: &SessionId,
         expected_run_id: &meerkat_core::RunId,
-        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
         self.inner
-            .prepare_live_transient_turn_context_boundary(session_id, expected_run_id, contexts)
+            .prepare_live_transient_turn_context_boundary(session_id, expected_run_id, delivery)
             .await
     }
 

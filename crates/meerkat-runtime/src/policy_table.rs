@@ -60,6 +60,7 @@ pub(crate) fn generated_admission_projection_for_input(
         input.kind(),
         input.handling_mode().map(mm_dsl::InputLane::from),
         mm_dsl::AdmissionContinuationKind::from(input.continuation_kind()),
+        crate::input::admission_turn_append_shape(input),
         runtime_idle,
     )
 }
@@ -73,6 +74,7 @@ pub(crate) fn generated_admission_projection_for_kind(
         kind.kind(),
         None,
         mm_dsl::AdmissionContinuationKind::Ordinary,
+        mm_dsl::AdmissionTurnAppendShape::Untyped,
         runtime_idle,
     )
 }
@@ -82,6 +84,7 @@ fn generated_admission_projection(
     input_kind: InputKind,
     requested_lane: Option<mm_dsl::InputLane>,
     continuation_kind: mm_dsl::AdmissionContinuationKind,
+    turn_append_shape: mm_dsl::AdmissionTurnAppendShape,
     runtime_idle: bool,
 ) -> Result<GeneratedAdmissionProjection, String> {
     let mut authority = projection_authority(runtime_idle)?;
@@ -92,6 +95,7 @@ fn generated_admission_projection(
             input_kind: mm_dsl::AdmissionInputKind::from(input_kind),
             requested_lane,
             continuation_kind,
+            turn_append_shape,
             silent_intent_match: false,
             existing_superseded_input_id: None,
             runtime_running: !runtime_idle,
@@ -122,6 +126,7 @@ fn generated_admission_projection(
                 record_transcript,
                 execution_handling_mode,
                 live_interrupt_required,
+                live_boundary_delivery,
                 ..
             } if effect_input_id == input_id => {
                 let apply_mode: crate::policy::ApplyMode = policy_apply_mode.into();
@@ -155,6 +160,7 @@ fn generated_admission_projection(
                         peer_response_terminal_apply_intent:
                             runtime_peer_response_terminal_apply_intent.map(Into::into),
                         live_interrupt_required,
+                        live_boundary_delivery: live_boundary_delivery.map(Into::into),
                     },
                 })
             }

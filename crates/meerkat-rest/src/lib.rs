@@ -259,10 +259,10 @@ impl CoreExecutorBoundaryHandle for RestSessionRuntimeBoundaryHandle {
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 
-    async fn prepare_transient_turn_context_at_boundary(
+    async fn prepare_turn_boundary_delivery(
         &self,
         expected_run_id: &meerkat_core::lifecycle::RunId,
-        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<
         meerkat_core::lifecycle::CoreBoundaryStageOutput,
         meerkat_core::lifecycle::CoreBoundaryStageError,
@@ -272,7 +272,7 @@ impl CoreExecutorBoundaryHandle for RestSessionRuntimeBoundaryHandle {
             .prepare_live_transient_turn_context_boundary(
                 &self.session_id,
                 expected_run_id,
-                contexts,
+                delivery,
             )
             .await
     }

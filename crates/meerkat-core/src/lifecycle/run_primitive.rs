@@ -1362,6 +1362,59 @@ impl RuntimeTurnMetadata {
         (!self.transcript_identity.is_empty()).then(|| self.transcript_identity.clone())
     }
 
+    /// Whether an input carrying this metadata may join an already running
+    /// turn through a durable in-turn boundary delivery.
+    ///
+    /// Such a delivery writes only the input's typed conversation appends into
+    /// the running turn; it honours the routing facts (`handling_mode`,
+    /// `execution_kind`) and the transcript identity it stamps on the rows,
+    /// and nothing else. Every other field is a turn-start directive that only
+    /// a fresh turn applies (System rows, skill activation, a tool overlay,
+    /// instructions, request-local context, model/provider/auth routing,
+    /// keep-alive, render metadata, a terminal peer-response intent, directed
+    /// interaction terminals). An input that carries one takes its follow-up
+    /// turn, so the two delivery paths can never write different rows.
+    #[must_use]
+    pub fn joins_running_turn(&self) -> bool {
+        // Exhaustive destructuring: a new field must decide here whether a
+        // running turn can honour it.
+        let Self {
+            handling_mode: _,
+            skill_references,
+            turn_tool_overlay,
+            additional_instructions,
+            system_prompts,
+            transient_turn_context,
+            transient_turn_context_appends,
+            model,
+            provider,
+            self_hosted_server_id,
+            provider_params,
+            auth_binding,
+            keep_alive,
+            render_metadata,
+            execution_kind: _,
+            peer_response_terminal_apply_intent,
+            directed_interaction_ids,
+            transcript_identity: _,
+        } = self;
+        skill_references.as_ref().is_none_or(Vec::is_empty)
+            && turn_tool_overlay.is_none()
+            && additional_instructions.as_ref().is_none_or(Vec::is_empty)
+            && system_prompts.is_empty()
+            && transient_turn_context.is_none()
+            && transient_turn_context_appends.is_empty()
+            && model.is_none()
+            && provider.is_none()
+            && self_hosted_server_id.is_none()
+            && provider_params.is_none()
+            && auth_binding.is_none()
+            && keep_alive.is_none()
+            && render_metadata.is_none()
+            && peer_response_terminal_apply_intent.is_none()
+            && directed_interaction_ids.is_empty()
+    }
+
     /// Merge another metadata carrier into this one. Scalar conflicts (two
     /// inputs in a batch disagreeing on `model`, `provider`, `auth_binding`,
     /// etc.) return a typed [`TurnMetadataMergeConflict`] rather than

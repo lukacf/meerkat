@@ -2423,6 +2423,62 @@ mod tests {
     };
     use meerkat_llm_core::ImageGenerationExecutor;
     use std::sync::{Arc, Mutex};
+
+    /// The transcript a durable in-turn Steer produces: the running turn's
+    /// tool results, then the durable system notice written at the next
+    /// model boundary, then the model's next assistant message.
+    fn durable_in_turn_notice_transcript() -> Vec<Message> {
+        vec![
+            Message::User(UserMessage::text("start the job")),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "lookup".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::new(
+                "call_1".to_string(),
+                "lookup result".to_string(),
+                false,
+            )]),
+            Message::SystemNotice(meerkat_core::SystemNoticeMessage::new(
+                meerkat_core::SystemNoticeKind::Generic,
+                "background job finished",
+            )),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "noted".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            )),
+        ]
+    }
+
+    #[test]
+    fn durable_in_turn_notice_after_tool_results_builds_a_valid_gemini_body() {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new("gemini-3-pro", durable_in_turn_notice_transcript());
+        let body = client
+            .build_request_body(&request)
+            .expect("a notice after tool results is a valid Gemini contents sequence");
+        assert!(body.get("systemInstruction").is_none());
+        let contents = body["contents"].as_array().expect("contents array");
+        let roles = contents
+            .iter()
+            .map(|content| content["role"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, vec!["user", "model", "user", "user", "model"]);
+        assert!(contents[1]["parts"][0].get("functionCall").is_some());
+        assert!(
+            contents[2]["parts"][0].get("functionResponse").is_some(),
+            "the functionResponse immediately follows its functionCall"
+        );
+        assert!(contents[3].to_string().contains("background job finished"));
+    }
     use tokio::net::TcpListener;
 
     /// The conversation a detached fork_off leaves behind: the forker's

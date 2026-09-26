@@ -9873,3 +9873,6 @@ impl MeerkatMachine {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 #[path = "../meerkat_machine_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod durable_steer_tests;

@@ -6,7 +6,7 @@ use meerkat_core::PeerIngressRuntimeSnapshot;
 use meerkat_core::Session;
 use meerkat_core::ToolScopeSnapshot;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
-use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, TurnRequestContext};
+use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::service::StartTurnRequest;
 use meerkat_core::service::{
@@ -1527,13 +1527,13 @@ pub trait MobSessionService:
 
     /// Prepare one exact already-active LLM boundary. Success means the actor
     /// is parked and owned by the returned non-clone commit/abort authority.
-    async fn prepare_transient_turn_context_for_active_turn(
+    async fn prepare_turn_boundary_delivery_for_active_turn(
         &self,
         session_id: &SessionId,
         expected_run_id: &RunId,
-        contexts: Vec<TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
-        let _ = (session_id, expected_run_id, contexts);
+        let _ = (session_id, expected_run_id, delivery);
         Err(meerkat_core::CoreBoundaryStageError::unavailable(
             "session service does not support exact active-turn boundary preparation",
         ))
@@ -2222,18 +2222,18 @@ where
             })
     }
 
-    async fn prepare_transient_turn_context_for_active_turn(
+    async fn prepare_turn_boundary_delivery_for_active_turn(
         &self,
         session_id: &SessionId,
         expected_run_id: &RunId,
-        contexts: Vec<TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
         let prepared =
             meerkat_session::EphemeralSessionService::<B>::prepare_transient_turn_context_for_active_turn(
                 self,
                 session_id,
                 expected_run_id,
-                contexts,
+                delivery,
             )
             .await?;
         Ok(prepared.into_stage_output(None))
@@ -3080,17 +3080,17 @@ where
         .await
     }
 
-    async fn prepare_transient_turn_context_for_active_turn(
+    async fn prepare_turn_boundary_delivery_for_active_turn(
         &self,
         session_id: &SessionId,
         expected_run_id: &RunId,
-        contexts: Vec<TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
         meerkat_session::PersistentSessionService::<B>::prepare_live_transient_turn_context_boundary(
             self,
             session_id,
             expected_run_id,
-            contexts,
+            delivery,
         )
         .await
     }

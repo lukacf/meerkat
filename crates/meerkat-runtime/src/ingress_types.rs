@@ -84,6 +84,38 @@ pub struct RuntimeInputSemantics {
     /// of re-scanning `handling_mode == Steer`.
     #[serde(default)]
     pub(crate) live_interrupt_required: bool,
+    /// Machine-owned delivery class for a live-interrupt Steer admission
+    /// (`ResolveAdmissionPlan` / `AdmissionResolved`). `None` for every input
+    /// that never reaches a live boundary, and after the machine normalizes
+    /// an unavailable live attempt to its queued fallback. Absent on rows
+    /// persisted before durable in-turn delivery existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) live_boundary_delivery: Option<LiveBoundaryDeliveryClass>,
+}
+
+/// Runtime mirror of the machine's `LiveBoundaryDelivery` class for one
+/// admitted live-interrupt input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveBoundaryDeliveryClass {
+    /// The input never joins a running turn; it takes its queued follow-up
+    /// turn with its full durable projection.
+    FollowUpOnly,
+    /// Request-local context for exactly one model request.
+    RequestOnly,
+    /// Typed conversation appends written into the running turn's transcript
+    /// and committed with the run.
+    DurableAppend,
+}
+
+impl From<crate::meerkat_machine::dsl::LiveBoundaryDelivery> for LiveBoundaryDeliveryClass {
+    fn from(class: crate::meerkat_machine::dsl::LiveBoundaryDelivery) -> Self {
+        match class {
+            crate::meerkat_machine::dsl::LiveBoundaryDelivery::FollowUpOnly => Self::FollowUpOnly,
+            crate::meerkat_machine::dsl::LiveBoundaryDelivery::RequestOnly => Self::RequestOnly,
+            crate::meerkat_machine::dsl::LiveBoundaryDelivery::DurableAppend => Self::DurableAppend,
+        }
+    }
 }
 
 /// Admitted conversation projection for one input.
@@ -125,6 +157,12 @@ impl RuntimeInputSemantics {
 
     pub fn peer_response_terminal_apply_intent(&self) -> Option<PeerResponseTerminalApplyIntent> {
         self.peer_response_terminal_apply_intent
+    }
+
+    /// Machine-owned live-boundary delivery class, when this input reaches a
+    /// live boundary.
+    pub fn live_boundary_delivery(&self) -> Option<LiveBoundaryDeliveryClass> {
+        self.live_boundary_delivery
     }
 }
 

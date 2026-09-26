@@ -223,6 +223,7 @@ mod tests {
         tap_send_terminal(
             &tap,
             AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id: crate::types::SessionId::new(),
                 result: "done".to_string(),
                 structured_output: None,
@@ -244,6 +245,7 @@ mod tests {
         tap_send_terminal(
             &tap,
             AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id: crate::types::SessionId::new(),
                 result: "done".to_string(),
                 structured_output: None,

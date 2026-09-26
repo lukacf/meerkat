@@ -862,6 +862,7 @@ mod tests {
             &sid,
             &[
                 AgentEvent::RunStarted {
+                    identity: Default::default(),
                     session_id: sid.clone(),
                     input: meerkat_core::types::RunInput::Content {
                         content: meerkat_core::ContentInput::Text("Hello".to_string()),
@@ -871,6 +872,7 @@ mod tests {
                     content: "Hi there!".to_string(),
                 },
                 AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id: sid.clone(),
                     result: "Hi there!".to_string(),
                     structured_output: None,

@@ -1664,6 +1664,7 @@ mod tests {
 
     fn run_completed(result: &str) -> AgentEvent {
         AgentEvent::RunCompleted {
+            identity: Default::default(),
             session_id: SessionId::new(),
             result: result.to_string(),
             structured_output: None,

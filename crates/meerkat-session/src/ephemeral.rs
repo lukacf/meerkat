@@ -6620,6 +6620,7 @@ async fn drain_session_task_commands<A: SessionAgent>(
                     next_seq,
                     source,
                     AgentEvent::RunFailed {
+                        identity: Default::default(),
                         session_id: session_id.clone(),
                         terminal_cause_kind: None,
                         error_report: meerkat_core::event::AgentErrorReport {
@@ -7609,6 +7610,7 @@ async fn session_task<A: SessionAgent>(
                     &mut next_seq,
                     &source,
                     AgentEvent::RunFailed {
+                        identity: Default::default(),
                         session_id: session_id.clone(),
                         terminal_cause_kind: None,
                         error_report: meerkat_core::event::AgentErrorReport {

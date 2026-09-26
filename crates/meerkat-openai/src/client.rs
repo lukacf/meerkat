@@ -919,11 +919,15 @@ impl OpenAiClient {
                         &t.name,
                         &t.input_schema,
                     )?;
+                    // Responses may otherwise normalize optional parameters into
+                    // required fields. Preserve the authored ToolDef contract;
+                    // the dispatcher remains the argument-validation owner.
                     Ok(serde_json::json!({
                         "type": "function",
                         "name": t.name,
                         "description": t.description,
-                        "parameters": parameters
+                        "parameters": parameters,
+                        "strict": false
                     }))
                 })
                 .collect::<Result<Vec<Value>, LlmError>>()?;
@@ -5875,6 +5879,71 @@ mod tests {
         assert!(tools[0]["parameters"].is_object());
         // Should NOT have "function" wrapper
         assert!(tools[0].get("function").is_none());
+    }
+
+    #[test]
+    fn test_tool_definition_preserves_optional_nonnullable_fields_without_strict_normalization() {
+        use meerkat_core::ToolDef;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "due_at": {"type": "string", "format": "date-time"},
+                "not_before": {"type": "string", "format": "date-time"},
+                "labels": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["title"],
+            "additionalProperties": false
+        });
+        let tool = Arc::new(ToolDef {
+            name: "workgraph_create".into(),
+            description: "Create an item, optionally with a schedule.".to_string(),
+            input_schema: schema.clone(),
+            provenance: None,
+        });
+        let request = LlmRequest::new(
+            "gpt-5.5",
+            vec![Message::User(UserMessage::text(
+                "Create an unscheduled work item.".to_string(),
+            ))],
+        )
+        .with_tools(vec![Arc::clone(&tool)]);
+
+        for (backend, client) in [
+            ("public", OpenAiClient::new("test-key".to_string())),
+            (
+                "chatgpt",
+                OpenAiClient::new("test-key".to_string()).with_chatgpt_backend_wire(),
+            ),
+            (
+                "azure",
+                OpenAiClient::new("test-key".to_string())
+                    .with_azure_openai_wire(AzureOpenAiWireConfig::default()),
+            ),
+        ] {
+            let body = client.build_request_body(&request).expect("build request");
+            let emitted_tool = &body["tools"][0];
+
+            assert_eq!(
+                emitted_tool["strict"], false,
+                "{backend}: optional fields must not be made required by Responses"
+            );
+            assert_eq!(emitted_tool["parameters"], schema, "{backend}");
+            assert_eq!(
+                emitted_tool["parameters"]["required"],
+                serde_json::json!(["title"]),
+                "{backend}"
+            );
+            assert_eq!(
+                emitted_tool["parameters"]["properties"]["due_at"]["type"], "string",
+                "{backend}: optional does not imply nullable"
+            );
+            assert_eq!(
+                tool.input_schema, schema,
+                "{backend}: preserve the source schema"
+            );
+        }
     }
 
     /// Regression (A2): the `workgraph_claim` schema shipped from 0.8.22 to

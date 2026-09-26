@@ -4630,6 +4630,7 @@ impl SessionService for LocalSessionService {
                 next_seq(&mut seq),
                 None,
                 AgentEvent::RunStarted {
+                    identity: Default::default(),
                     session_id: id.clone(),
                     input: meerkat_core::types::RunInput::Content {
                         content: effective_prompt.clone(),
@@ -4662,6 +4663,7 @@ impl SessionService for LocalSessionService {
                 next_seq(&mut seq),
                 None,
                 AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id: id.clone(),
                     result: "ok".to_string(),
                     structured_output: None,

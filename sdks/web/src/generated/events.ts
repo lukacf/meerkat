@@ -335,6 +335,14 @@ export type InteractionId = string;
 
 export type InteractionStreamAbandonReason = "send_failed" | "admission_rejected" | "response_rejected" | "terminal_delivery_failed";
 
+export type LiveChannelId = string;
+
+export interface LiveContextObservationId {
+  channel_id: LiveChannelId;
+  namespace: string;
+  nonce: string;
+}
+
 export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response" | "authorization_route_changed" | "request_too_large" | "quota_exhausted" | "policy_stop";
 
 export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
@@ -381,6 +389,8 @@ export type ModelFallbackSkippedTarget = {
   identity: SessionLlmIdentity;
   reason: ModelFallbackSkipReason;
 };
+
+export type ObjectiveId = string;
 
 export type OpaqueProviderBody = string;
 
@@ -506,6 +516,14 @@ export interface ProviderTokenAccounting {
 }
 
 export type RealmId = string;
+
+export type RealtimeMessageOrigin = {
+  canonical_row_sequence: number;
+  channel_id: LiveChannelId;
+  context_observation_id?: LiveContextObservationId | null;
+  provider_item_ids?: string[];
+  session_id: SessionId;
+};
 
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -710,6 +728,13 @@ export interface TranscriptEditRewriteRange {
   start: number;
 }
 
+export type TranscriptMessageIdentity = {
+  interaction_id?: InteractionId | null;
+  objective_id?: ObjectiveId | null;
+  realtime_origin?: RealtimeMessageOrigin | null;
+  run_id?: RunId | null;
+};
+
 export type TranscriptRevisionBody = {
   created_at: SystemTime;
   messages: unknown[];
@@ -795,6 +820,7 @@ export type Usage = {
 };
 
 export interface RunStartedEvent {
+  identity?: TranscriptMessageIdentity;
   input: RunInput;
   session_id: SessionId;
   type: "run_started";
@@ -802,6 +828,7 @@ export interface RunStartedEvent {
 
 export interface RunCompletedEvent {
   extraction_required?: boolean;
+  identity?: TranscriptMessageIdentity;
   result: string;
   session_id: SessionId;
   structured_output?: unknown;
@@ -830,6 +857,7 @@ export interface ExtractionFailedEvent {
 
 export interface RunFailedEvent {
   error_report: AgentErrorReport;
+  identity?: TranscriptMessageIdentity;
   session_id: SessionId;
   terminal_cause_kind?: TurnTerminalCauseKind | null;
   type: "run_failed";

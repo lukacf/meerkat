@@ -216,10 +216,16 @@ mod tests {
         );
         let report = AgentErrorReport::from_agent_error(&error);
         let session_id = SessionId::new();
+        let identity = meerkat_core::types::TranscriptMessageIdentity {
+            interaction_id: Some(meerkat_core::interaction::InteractionId::new()),
+            run_id: Some(meerkat_core::lifecycle::RunId::new()),
+            ..Default::default()
+        };
         let event = WireEvent {
             session_id: session_id.clone(),
             sequence: 1,
             event: AgentEvent::RunFailed {
+                identity: identity.clone(),
                 session_id,
                 error_report: report.clone(),
                 terminal_cause_kind: Some(meerkat_core::TurnTerminalCauseKind::LlmFailure),
@@ -236,10 +242,16 @@ mod tests {
             "misalignment_policy_violation"
         );
         let decoded: WireEvent = serde_json::from_value(encoded).expect("deserialize policy stop");
-        let AgentEvent::RunFailed { error_report, .. } = decoded.event else {
+        let AgentEvent::RunFailed {
+            identity: decoded_identity,
+            error_report,
+            ..
+        } = decoded.event
+        else {
             panic!("policy stop must remain a failed run");
         };
         assert_eq!(error_report, report);
+        assert_eq!(decoded_identity, identity);
     }
 
     #[test]
@@ -331,6 +343,7 @@ mod tests {
             session_id: SessionId::new(),
             sequence: 8,
             event: AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id: SessionId::new(),
                 result: "done".to_string(),
                 structured_output: None,

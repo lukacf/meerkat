@@ -3949,6 +3949,7 @@ mod tests {
 
     fn run_started(session: &SessionId, content: &str) -> AgentEvent {
         AgentEvent::RunStarted {
+            identity: Default::default(),
             session_id: session.clone(),
             input: meerkat_core::types::RunInput::Content {
                 content: meerkat_core::types::ContentInput::Text(content.to_string()),
@@ -3958,6 +3959,7 @@ mod tests {
 
     fn run_completed(session: &SessionId, output: &str) -> AgentEvent {
         AgentEvent::RunCompleted {
+            identity: Default::default(),
             session_id: session.clone(),
             result: output.to_string(),
             structured_output: None,

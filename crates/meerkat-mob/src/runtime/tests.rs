@@ -3587,6 +3587,7 @@ impl SessionService for MockSessionService {
                             1,
                             None,
                             AgentEvent::RunFailed {
+                                identity: Default::default(),
                                 session_id,
                                 terminal_cause_kind: None,
                                 error_report: meerkat_core::event::AgentErrorReport {
@@ -3604,6 +3605,7 @@ impl SessionService for MockSessionService {
                             1,
                             None,
                             AgentEvent::RunCompleted {
+                                identity: Default::default(),
                                 session_id,
                                 result: completed_result,
                                 structured_output: None,
@@ -12128,6 +12130,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
         let result = mock_run_result(session_id.clone(), "{}".to_string());
         let _ = event_tx
             .send(AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id,
                 result: result.text.clone(),
                 structured_output: result.structured_output.clone(),
@@ -52747,6 +52750,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                 }
             } else {
                 AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id: session_id.clone(),
                     result: "runtime terminal before commit".to_string(),
                     structured_output: None,

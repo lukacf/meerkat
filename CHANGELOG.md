@@ -39,6 +39,11 @@ them.
 
 ### Breaking
 
+- `AgentEvent::RunStarted`, `RunCompleted`, and `RunFailed` gain an
+  `identity: TranscriptMessageIdentity` field. Rust constructors must supply
+  it, and exhaustive matches must bind it or use `..`. The JSON field is
+  optional and omitted when empty, so older event records remain readable.
+
 - Behavior-only: `fork_off` is detached (`meerkat-mob-mcp`
   `AgentMobToolSurface`) on hosts that declare
   `DetachedCompletionDelivery::Available` and have a runtime adapter (the
@@ -807,6 +812,15 @@ them.
   coordinator-owned binding of a member that never joined the roster: its
   rollback retires the coordinator's operation and releases the binding, so a
   later spawn of the same session under another owner is no longer rejected.
+- Run boundary events carry the same interaction, run, objective, and realtime
+  lineage as persisted assistant history. The start is published after the
+  existing execution authority selects the run ID and before its model output;
+  pre-start failures cannot claim a previous or caller-supplied run ID.
+- Responses function tools explicitly opt out of automatic strict schema
+  normalization. Optional nonnullable fields retain their authored contract
+  instead of becoming required provider arguments, including optional WorkGraph
+  scheduling dates. Dispatcher argument validation is unchanged.
+
 - The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
   and 033 (the office demo) pass again and run in pull-request CI. A new
   "Example web suites" lane builds the `sdks/web` wasm runtime once with the

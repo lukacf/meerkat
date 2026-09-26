@@ -788,6 +788,7 @@ mod tests {
 
         events_tx
             .send(AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id: meerkat_core::SessionId::new(),
                 result: "{\"answer\":42}".to_string(),
                 structured_output: Some(serde_json::json!({"answer": 42})),
@@ -829,6 +830,7 @@ mod tests {
 
         events_tx
             .send(AgentEvent::RunFailed {
+                identity: Default::default(),
                 session_id: meerkat_core::SessionId::new(),
                 terminal_cause_kind: Some(meerkat_core::TurnTerminalCauseKind::LlmFailure),
                 error_report: report.clone(),
@@ -855,6 +857,7 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
         events_tx
             .send(AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id: session_id.clone(),
                 result: "main answer".to_string(),
                 structured_output: None,
@@ -898,6 +901,7 @@ mod tests {
         let session_id = meerkat_core::SessionId::new();
         events_tx
             .send(AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id: session_id.clone(),
                 result: "main answer".to_string(),
                 structured_output: None,

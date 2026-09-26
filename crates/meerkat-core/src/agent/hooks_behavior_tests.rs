@@ -657,9 +657,22 @@ async fn run_started_deny_emits_no_run_started_event() {
     };
     let mut agent = build_agent(ClientMode::TextOnly, hooks, seen_args, seen_tokens).await;
 
+    let admitted_identity = crate::types::TranscriptMessageIdentity {
+        interaction_id: Some(crate::interaction::InteractionId(uuid::Uuid::from_u128(
+            0xfeed_6001,
+        ))),
+        run_id: Some(crate::lifecycle::RunId::new()),
+        ..Default::default()
+    };
     let (tx, mut rx) = mpsc::channel::<AgentEvent>(32);
     let err = agent
-        .run_with_events("test".to_string().into(), tx)
+        .run_with_events_and_typed_turn_appends(
+            "test".to_string().into(),
+            Vec::new(),
+            Vec::new(),
+            Some(admitted_identity.clone()),
+            tx,
+        )
         .await
         .expect_err("run-start denial should terminalize the run");
     assert!(matches!(
@@ -675,7 +688,14 @@ async fn run_started_deny_emits_no_run_started_event() {
     while let Ok(event) = rx.try_recv() {
         match event {
             AgentEvent::RunStarted { .. } => saw_run_started = true,
-            AgentEvent::RunFailed { .. } => saw_run_failed = true,
+            AgentEvent::RunFailed { identity, .. } => {
+                saw_run_failed = true;
+                assert_eq!(identity.interaction_id, admitted_identity.interaction_id);
+                assert!(
+                    identity.run_id.is_none(),
+                    "a denied start has no executed run identity"
+                );
+            }
             _ => {}
         }
     }
@@ -716,6 +736,14 @@ async fn run_pending_started_deny_emits_no_run_started_event() {
             "pending prompt".to_string(),
         )));
 
+    let admitted_identity = crate::types::TranscriptMessageIdentity {
+        interaction_id: Some(crate::interaction::InteractionId(uuid::Uuid::from_u128(
+            0xfeed_6001,
+        ))),
+        run_id: Some(crate::lifecycle::RunId::new()),
+        ..Default::default()
+    };
+    agent.set_active_transcript_identity(Some(admitted_identity.clone()));
     let (tx, mut rx) = mpsc::channel::<AgentEvent>(32);
     let err = agent
         .run_pending_with_events(tx)
@@ -734,7 +762,14 @@ async fn run_pending_started_deny_emits_no_run_started_event() {
     while let Ok(event) = rx.try_recv() {
         match event {
             AgentEvent::RunStarted { .. } => saw_run_started = true,
-            AgentEvent::RunFailed { .. } => saw_run_failed = true,
+            AgentEvent::RunFailed { identity, .. } => {
+                saw_run_failed = true;
+                assert_eq!(identity.interaction_id, admitted_identity.interaction_id);
+                assert!(
+                    identity.run_id.is_none(),
+                    "a denied start has no executed run identity"
+                );
+            }
             _ => {}
         }
     }

@@ -15068,6 +15068,7 @@ mod tests {
                 0,
                 None,
                 AgentEvent::RunStarted {
+                    identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {
                         content: ContentInput::Text("seed".to_string()),
@@ -15165,6 +15166,7 @@ mod tests {
                 0,
                 None,
                 AgentEvent::RunStarted {
+                    identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {
                         content: ContentInput::Text("seed".to_string()),
@@ -15265,6 +15267,7 @@ mod tests {
                 1,
                 None,
                 AgentEvent::RunStarted {
+                    identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {
                         content: ContentInput::Text("seed".to_string()),
@@ -18525,6 +18528,7 @@ mod tests {
             let session_id = self.inner.session_id();
             let _ = event_tx
                 .send(AgentEvent::RunStarted {
+                    identity: Default::default(),
                     session_id: session_id.clone(),
                     input: meerkat_core::types::RunInput::Content {
                         content: prompt.clone(),
@@ -18541,6 +18545,7 @@ mod tests {
             let result = self.inner.run_with_events(prompt, event_tx.clone()).await?;
             let _ = event_tx
                 .send(AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id,
                     result: result.text.clone(),
                     structured_output: result.structured_output.clone(),

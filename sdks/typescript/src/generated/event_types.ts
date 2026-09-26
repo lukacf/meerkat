@@ -990,6 +990,51 @@ export type StructuredOutputOrigin = "extraction_request" | "final_reply";
 
 export type ToolCallArguments = Record<string, unknown>;
 
+/**
+ * Durable correlation identity for one delegated objective.
+ */
+export type ObjectiveId = string;
+
+/**
+ * Opaque identity of one live channel binding.
+ *
+ * A replacement channel receives a new value. Semantic observations retain
+ * this identity so a delayed callback from the old binding fails its fence.
+ */
+export type LiveChannelId = string;
+
+/**
+ * Opaque provenance identifier. Its namespace is data, not admission or
+ * temporal authority; only the runtime's generated registry grants a claim.
+ */
+export interface LiveContextObservationId {
+  channel_id: LiveChannelId;
+  namespace: string;
+  nonce: string;
+}
+
+export type RealtimeMessageOrigin = {
+  canonical_row_sequence: number;
+  channel_id: LiveChannelId;
+  context_observation_id?: LiveContextObservationId | null;
+  provider_item_ids?: string[];
+  session_id: SessionId;
+};
+
+/**
+ * Stable runtime identity for a transcript message.
+ *
+ * These fields are optional so older persisted sessions deserialize without a
+ * migration, while new runtime-backed turns can expose the same identity that
+ * live event streams carry.
+ */
+export type TranscriptMessageIdentity = {
+  interaction_id?: InteractionId | null;
+  objective_id?: ObjectiveId | null;
+  realtime_origin?: RealtimeMessageOrigin | null;
+  run_id?: RunId | null;
+};
+
 export interface SystemTime {
   nanos_since_epoch: number;
   secs_since_epoch: number;
@@ -1127,11 +1172,13 @@ export interface UnmeasuredTurnUsageAccounting {
  * These events form the streaming API for consumers.
  */
 export type AgentEvent = {
+  identity?: TranscriptMessageIdentity;
   input: RunInput;
   session_id: SessionId;
   type: "run_started";
 } | {
   extraction_required?: boolean;
+  identity?: TranscriptMessageIdentity;
   result: string;
   session_id: SessionId;
   structured_output?: unknown;
@@ -1154,6 +1201,7 @@ export type AgentEvent = {
   type: "extraction_failed";
 } | {
   error_report: AgentErrorReport;
+  identity?: TranscriptMessageIdentity;
   session_id: SessionId;
   terminal_cause_kind?: TurnTerminalCauseKind | null;
   type: "run_failed";

@@ -1847,6 +1847,31 @@
           }
         ]
       },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveContextObservationId": {
+        "additionalProperties": false,
+        "description": "Opaque provenance identifier. Its namespace is data, not admission or\ntemporal authority; only the runtime's generated registry grants a claim.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "nonce": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "channel_id",
+          "nonce"
+        ],
+        "type": "object"
+      },
       "LlmProviderErrorKind": {
         "oneOf": [
           {
@@ -2084,6 +2109,10 @@
           "reason"
         ],
         "type": "object"
+      },
+      "ObjectiveId": {
+        "description": "Durable correlation identity for one delegated objective.",
+        "type": "string"
       },
       "OpaqueProviderBody": {
         "description": "Opaque provider-native JSON body carried verbatim from caller to\nprovider. Used for pass-through sub-shapes (web search config,\nprovider-native custom compaction edits, OpenAI-compatible\n`chat_template_kwargs`/`thinking`/`reasoning` forwards) where the\nexact wire shape varies across downstream providers (Anthropic /\nDeepSeek / OpenRouter / custom proxies) and the runtime deliberately\ndoes not parse the body — it simply forwards it.",
@@ -2898,6 +2927,44 @@
       "RealmId": {
         "description": "Opaque slug identifying a realm.",
         "type": "string"
+      },
+      "RealtimeMessageOrigin": {
+        "properties": {
+          "canonical_row_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "context_observation_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveContextObservationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_item_ids": {
+            "description": "Every provider item id this row materialized from, in transcript\norder. A user row has one; an assistant row carries one per item of\nthe response group it committed (a barge-in that re-keys speech into\na second item yields two), so a console that rendered the live deltas\nfor any of them can retire that rendering by id and replace it with\nthis canonical row. Empty on rows committed before the field existed.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "canonical_row_sequence"
+        ],
+        "type": "object"
       },
       "ReasoningEffort": {
         "description": "Typed projection of OpenAI's reasoning-effort knob.",
@@ -3857,6 +3924,54 @@
         ],
         "type": "object"
       },
+      "TranscriptMessageIdentity": {
+        "description": "Stable runtime identity for a transcript message.\n\nThese fields are optional so older persisted sessions deserialize without a\nmigration, while new runtime-backed turns can expose the same identity that\nlive event streams carry.",
+        "properties": {
+          "interaction_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InteractionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "objective_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ObjectiveId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Durable delegated-objective causality, shared by every message in a\ncausally-related turn chain."
+          },
+          "realtime_origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RealtimeMessageOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "TranscriptRevisionBody": {
         "description": "Immutable transcript revision body retained by the session-local graph.",
         "properties": {
@@ -4274,6 +4389,10 @@
       {
         "description": "Agent run started",
         "properties": {
+          "identity": {
+            "$ref": "#/$defs/TranscriptMessageIdentity",
+            "description": "Runtime-owned transcript lineage. Older events may omit it; an\nabsent run id never authorizes association with the current run."
+          },
           "input": {
             "$ref": "#/$defs/RunInput",
             "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
@@ -4300,6 +4419,10 @@
             "default": false,
             "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
             "type": "boolean"
+          },
+          "identity": {
+            "$ref": "#/$defs/TranscriptMessageIdentity",
+            "description": "Runtime-owned transcript lineage. Older events may omit it; an\nabsent run id never authorizes association with the current run."
           },
           "result": {
             "type": "string"
@@ -4419,6 +4542,10 @@
           "error_report": {
             "$ref": "#/$defs/AgentErrorReport",
             "description": "Typed failure fact (class + reason + display message). This is the\nsingle owner of the failure truth on the run boundary; there is no\nseparately-carried `error` string or `error_class` mirror — wire\nconsumers read `error_report.class` / `error_report.message`."
+          },
+          "identity": {
+            "$ref": "#/$defs/TranscriptMessageIdentity",
+            "description": "Runtime-owned transcript lineage. Older events may omit it; an\nabsent run id never authorizes association with the current run."
           },
           "session_id": {
             "$ref": "#/$defs/SessionId"
@@ -5889,6 +6016,10 @@
           {
             "description": "Agent run started",
             "properties": {
+              "identity": {
+                "$ref": "#/$defs/TranscriptMessageIdentity",
+                "description": "Runtime-owned transcript lineage. Older events may omit it; an\nabsent run id never authorizes association with the current run."
+              },
               "input": {
                 "$ref": "#/$defs/RunInput",
                 "description": "Typed run input: caller content, or the pending tool-results\ncontinuation variant (no fabricated empty prompt)."
@@ -5915,6 +6046,10 @@
                 "default": false,
                 "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
                 "type": "boolean"
+              },
+              "identity": {
+                "$ref": "#/$defs/TranscriptMessageIdentity",
+                "description": "Runtime-owned transcript lineage. Older events may omit it; an\nabsent run id never authorizes association with the current run."
               },
               "result": {
                 "type": "string"
@@ -6034,6 +6169,10 @@
               "error_report": {
                 "$ref": "#/$defs/AgentErrorReport",
                 "description": "Typed failure fact (class + reason + display message). This is the\nsingle owner of the failure truth on the run boundary; there is no\nseparately-carried `error` string or `error_class` mirror — wire\nconsumers read `error_report.class` / `error_report.message`."
+              },
+              "identity": {
+                "$ref": "#/$defs/TranscriptMessageIdentity",
+                "description": "Runtime-owned transcript lineage. Older events may omit it; an\nabsent run id never authorizes association with the current run."
               },
               "session_id": {
                 "$ref": "#/$defs/SessionId"
@@ -8537,6 +8676,31 @@
           }
         ]
       },
+      "LiveChannelId": {
+        "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
+        "type": "string"
+      },
+      "LiveContextObservationId": {
+        "additionalProperties": false,
+        "description": "Opaque provenance identifier. Its namespace is data, not admission or\ntemporal authority; only the runtime's generated registry grants a claim.",
+        "properties": {
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "nonce": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "channel_id",
+          "nonce"
+        ],
+        "type": "object"
+      },
       "LlmProviderErrorKind": {
         "oneOf": [
           {
@@ -8774,6 +8938,10 @@
           "reason"
         ],
         "type": "object"
+      },
+      "ObjectiveId": {
+        "description": "Durable correlation identity for one delegated objective.",
+        "type": "string"
       },
       "OpaqueProviderBody": {
         "description": "Opaque provider-native JSON body carried verbatim from caller to\nprovider. Used for pass-through sub-shapes (web search config,\nprovider-native custom compaction edits, OpenAI-compatible\n`chat_template_kwargs`/`thinking`/`reasoning` forwards) where the\nexact wire shape varies across downstream providers (Anthropic /\nDeepSeek / OpenRouter / custom proxies) and the runtime deliberately\ndoes not parse the body — it simply forwards it.",
@@ -9588,6 +9756,44 @@
       "RealmId": {
         "description": "Opaque slug identifying a realm.",
         "type": "string"
+      },
+      "RealtimeMessageOrigin": {
+        "properties": {
+          "canonical_row_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "channel_id": {
+            "$ref": "#/$defs/LiveChannelId"
+          },
+          "context_observation_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveContextObservationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_item_ids": {
+            "description": "Every provider item id this row materialized from, in transcript\norder. A user row has one; an assistant row carries one per item of\nthe response group it committed (a barge-in that re-keys speech into\na second item yields two), so a console that rendered the live deltas\nfor any of them can retire that rendering by id and replace it with\nthis canonical row. Empty on rows committed before the field existed.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "channel_id",
+          "canonical_row_sequence"
+        ],
+        "type": "object"
       },
       "ReasoningEffort": {
         "description": "Typed projection of OpenAI's reasoning-effort knob.",
@@ -10588,6 +10794,54 @@
           "start",
           "end"
         ],
+        "type": "object"
+      },
+      "TranscriptMessageIdentity": {
+        "description": "Stable runtime identity for a transcript message.\n\nThese fields are optional so older persisted sessions deserialize without a\nmigration, while new runtime-backed turns can expose the same identity that\nlive event streams carry.",
+        "properties": {
+          "interaction_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InteractionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "objective_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ObjectiveId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Durable delegated-objective causality, shared by every message in a\ncausally-related turn chain."
+          },
+          "realtime_origin": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RealtimeMessageOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
         "type": "object"
       },
       "TranscriptRevisionBody": {

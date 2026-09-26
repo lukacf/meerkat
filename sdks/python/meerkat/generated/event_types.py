@@ -1308,6 +1308,47 @@ class ToolConfigChangedPayload(TypedDict, total=False):
     target: Required[str]
 
 
+# Durable correlation identity for one delegated objective.
+ObjectiveId = str
+
+
+# Opaque identity of one live channel binding.
+#
+# A replacement channel receives a new value. Semantic observations retain
+# this identity so a delayed callback from the old binding fails its fence.
+LiveChannelId = str
+
+
+class LiveContextObservationId(TypedDict, total=False):
+    """Opaque provenance identifier. Its namespace is data, not admission or
+    temporal authority; only the runtime's generated registry grants a claim.
+    """
+    channel_id: Required[LiveChannelId]
+    namespace: Required[str]
+    nonce: Required[str]
+
+
+class RealtimeMessageOrigin(TypedDict, total=False):
+    canonical_row_sequence: Required[int]
+    channel_id: Required[LiveChannelId]
+    context_observation_id: NotRequired[Optional[LiveContextObservationId]]
+    provider_item_ids: NotRequired[list[str]]
+    session_id: Required[SessionId]
+
+
+class TranscriptMessageIdentity(TypedDict, total=False):
+    """Stable runtime identity for a transcript message.
+
+    These fields are optional so older persisted sessions deserialize without a
+    migration, while new runtime-backed turns can expose the same identity that
+    live event streams carry.
+    """
+    interaction_id: NotRequired[Optional[InteractionId]]
+    objective_id: NotRequired[Optional[ObjectiveId]]
+    realtime_origin: NotRequired[Optional[RealtimeMessageOrigin]]
+    run_id: NotRequired[Optional[RunId]]
+
+
 class SystemTime(TypedDict, total=False):
     nanos_since_epoch: Required[int]
     secs_since_epoch: Required[int]
@@ -1460,6 +1501,7 @@ class UnmeasuredTurnUsageAccounting(TypedDict, total=False):
 class AgentEventRunStarted(TypedDict, total=False):
     """Agent run started
     """
+    identity: NotRequired[TranscriptMessageIdentity]
     input: Required[RunInput]
     session_id: Required[SessionId]
     type: Required[Literal['run_started']]
@@ -1469,6 +1511,7 @@ class AgentEventRunCompleted(TypedDict, total=False):
     """Agent run completed successfully
     """
     extraction_required: NotRequired[bool]
+    identity: NotRequired[TranscriptMessageIdentity]
     result: Required[str]
     session_id: Required[SessionId]
     structured_output: NotRequired[Any]
@@ -1503,6 +1546,7 @@ class AgentEventRunFailed(TypedDict, total=False):
     """Agent run failed
     """
     error_report: Required[AgentErrorReport]
+    identity: NotRequired[TranscriptMessageIdentity]
     session_id: Required[SessionId]
     terminal_cause_kind: NotRequired[Optional[TurnTerminalCauseKind]]
     type: Required[Literal['run_failed']]

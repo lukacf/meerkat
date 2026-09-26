@@ -423,12 +423,14 @@ fn agent_event_all_variants_roundtrip() {
     // Variants that can be constructed without chrono or uuid (direct construction).
     let direct_variants: Vec<AgentEvent> = vec![
         AgentEvent::RunStarted {
+            identity: Default::default(),
             session_id: session_id.clone(),
             input: meerkat_core::types::RunInput::Content {
                 content: ContentInput::Text("hello".to_string()),
             },
         },
         AgentEvent::RunCompleted {
+            identity: Default::default(),
             session_id: session_id.clone(),
             result: "done".to_string(),
             structured_output: Some(serde_json::json!({"ok": true})),
@@ -445,6 +447,7 @@ fn agent_event_all_variants_roundtrip() {
             terminal_cause_kind: None,
         },
         AgentEvent::RunFailed {
+            identity: Default::default(),
             session_id,
             error_report: meerkat_core::event::AgentErrorReport {
                 class: AgentErrorClass::Internal,
@@ -685,12 +688,14 @@ fn agent_event_all_variants_roundtrip() {
 fn documented_event_catalog_covers_core_agent_event_discriminators() {
     let events = vec![
         AgentEvent::RunStarted {
+            identity: Default::default(),
             session_id: SessionId::new(),
             input: meerkat_core::types::RunInput::Content {
                 content: ContentInput::Text("hello".to_string()),
             },
         },
         AgentEvent::RunCompleted {
+            identity: Default::default(),
             session_id: SessionId::new(),
             result: "done".to_string(),
             structured_output: None,
@@ -699,6 +704,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             terminal_cause_kind: None,
         },
         AgentEvent::RunFailed {
+            identity: Default::default(),
             session_id: SessionId::new(),
             error_report: meerkat_core::event::AgentErrorReport {
                 class: AgentErrorClass::Internal,

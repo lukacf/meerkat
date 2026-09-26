@@ -27,6 +27,7 @@ pub fn message_timestamp_now() -> MessageTimestamp {
 /// These fields are optional so older persisted sessions deserialize without a
 /// migration, while new runtime-backed turns can expose the same identity that
 /// live event streams carry.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct TranscriptMessageIdentity {
@@ -45,11 +46,13 @@ pub struct TranscriptMessageIdentity {
 
 /// Opaque provenance identifier. Its namespace is data, not admission or
 /// temporal authority; only the runtime's generated registry grants a claim.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LiveContextObservationId {
     namespace: String,
     channel_id: crate::LiveChannelId,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     nonce: uuid::Uuid,
 }
 
@@ -83,6 +86,7 @@ impl std::fmt::Display for LiveContextObservationId {
     }
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RealtimeMessageOrigin {
     session_id: crate::types::SessionId,

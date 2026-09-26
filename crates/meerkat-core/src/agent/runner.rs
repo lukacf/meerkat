@@ -1699,6 +1699,16 @@ where
         Ok(())
     }
 
+    /// Project the same interaction/objective lineage used by the transcript,
+    /// with only the run id already selected by the execution authority.
+    fn live_run_identity(&self) -> TranscriptMessageIdentity {
+        let mut identity = self.active_transcript_identity.clone().unwrap_or_default();
+        // Before a run starts (for example a hook denial), retain its admitted
+        // interaction but do not claim a caller-supplied or previous run id.
+        identity.run_id = self.runtime_started_run_id.clone();
+        identity
+    }
+
     pub(super) async fn emit_run_completed_event(
         &self,
         result: &RunResult,
@@ -1710,6 +1720,7 @@ where
             event_tx,
             AgentEvent::RunCompleted {
                 session_id: self.session.id().clone(),
+                identity: self.live_run_identity(),
                 result: result.text.clone(),
                 structured_output: result.structured_output.clone(),
                 extraction_required,
@@ -1760,7 +1771,7 @@ where
         .await;
     }
 
-    async fn emit_run_started_event(
+    pub(super) async fn emit_run_started_event(
         &self,
         input: RunInput,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
@@ -1770,6 +1781,7 @@ where
             event_tx,
             AgentEvent::RunStarted {
                 session_id: self.session.id().clone(),
+                identity: self.live_run_identity(),
                 input,
             },
         )
@@ -1811,6 +1823,7 @@ where
             event_tx,
             AgentEvent::RunFailed {
                 session_id: self.session.id().clone(),
+                identity: self.live_run_identity(),
                 error_report,
                 terminal_cause_kind,
             },
@@ -2391,9 +2404,6 @@ where
             }
         }
 
-        self.emit_run_started_event(run_prompt_input.clone(), event_tx.as_ref())
-            .await;
-
         let mut dispatch_metadata = self.turn_tool_dispatch_metadata.clone();
         if let Some(objective_id) = self
             .active_transcript_identity
@@ -2419,7 +2429,9 @@ where
                 .clone()
                 .with_live_bridge_admission(admission);
         }
-        let loop_result = self.run_loop(event_tx.clone()).await;
+        let loop_result = self
+            .run_loop(Some(run_prompt_input), event_tx.clone())
+            .await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
         match loop_result {
@@ -2562,9 +2574,6 @@ where
             return Err(err);
         }
 
-        self.emit_run_started_event(prompt.clone(), event_tx.as_ref())
-            .await;
-
         let mut dispatch_metadata = self.turn_tool_dispatch_metadata.clone();
         if let Some(objective_id) = self
             .active_transcript_identity
@@ -2584,7 +2593,7 @@ where
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
             );
-        let loop_result = self.run_loop(event_tx.clone()).await;
+        let loop_result = self.run_loop(Some(prompt), event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
         match loop_result {
@@ -3998,20 +4007,34 @@ mod skill_activation_effect_tests {
     async fn runtime_transcript_identity_is_persisted_on_user_and_assistant_messages() {
         let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
         let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_beef));
+        let objective_id = crate::interaction::ObjectiveId(uuid::Uuid::from_u128(0xfeed_bee0));
+        let realtime_origin = crate::types::RealtimeMessageOrigin::new(
+            agent.session().id().clone(),
+            crate::LiveChannelId::new("lineage-test-channel"),
+            7,
+        )
+        .with_context_observation(crate::types::LiveContextObservationId::new(
+            "lineage-test",
+            crate::LiveChannelId::new("lineage-test-channel"),
+        ))
+        .with_provider_item_ids(vec![
+            "provider-item-a".to_string(),
+            "provider-item-b".to_string(),
+        ]);
         let transcript_identity = crate::types::TranscriptMessageIdentity {
-            realtime_origin: None,
+            realtime_origin: Some(realtime_origin),
             interaction_id: Some(interaction_id),
             run_id: None,
-            objective_id: None,
+            objective_id: Some(objective_id),
         };
 
-        let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
         agent
             .run_with_events_and_typed_turn_appends(
                 "Still here.".to_string().into(),
                 Vec::new(),
                 Vec::new(),
-                Some(transcript_identity),
+                Some(transcript_identity.clone()),
                 tx,
             )
             .await
@@ -4032,6 +4055,7 @@ mod skill_activation_effect_tests {
             "runtime-stamped interaction id must survive into persisted user history"
         );
         assert_eq!(user.identity.run_id, None);
+        assert_eq!(user.identity, transcript_identity);
 
         let assistant = agent
             .session()
@@ -4052,6 +4076,199 @@ mod skill_activation_effect_tests {
             assistant.identity.run_id.is_some(),
             "assistant transcript identity must include the concrete run id for exact run-scoped joins"
         );
+        assert_eq!(
+            assistant.identity.objective_id,
+            transcript_identity.objective_id
+        );
+        assert_eq!(
+            assistant.identity.realtime_origin,
+            transcript_identity.realtime_origin
+        );
+        let expected = serde_json::to_value(&assistant.identity).unwrap();
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(serde_json::to_value(event).unwrap());
+        }
+        let starts = events
+            .iter()
+            .filter(|event| event["type"] == "run_started")
+            .collect::<Vec<_>>();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0]["identity"], expected);
+        let complete = events
+            .iter()
+            .find(|event| event["type"] == "run_completed")
+            .unwrap();
+        assert_eq!(complete["identity"], expected);
+        let start_index = events
+            .iter()
+            .position(|event| event["type"] == "run_started")
+            .unwrap();
+        let first_output = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event["type"].as_str(),
+                    Some(
+                        "text_delta"
+                            | "text_complete"
+                            | "reasoning_delta"
+                            | "tool_call_requested"
+                            | "assistant_image_appended"
+                    )
+                )
+            })
+            .unwrap();
+        assert!(start_index < first_output);
+    }
+
+    #[tokio::test]
+    async fn peer_notice_ids_do_not_override_runtime_owned_run_lineage() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let owner_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_2001));
+        let notice_id = uuid::Uuid::from_u128(0xfeed_2002).to_string();
+        let comms: crate::types::SystemNoticeBlock = serde_json::from_value(serde_json::json!({
+            "type": "comms", "kind": "request", "direction": "incoming",
+            "request_id": notice_id, "content": [{"type": "text", "text": "same text"}],
+        }))
+        .unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "same text".into(),
+                vec![ConversationAppend {
+                    role: ConversationAppendRole::SystemNotice,
+                    content: CoreRenderable::SystemNotice {
+                        kind: crate::types::SystemNoticeKind::Comms,
+                        body: Some("Peer request".into()),
+                        blocks: vec![comms],
+                    },
+                    identity: None,
+                }],
+                Vec::new(),
+                Some(TranscriptMessageIdentity {
+                    interaction_id: Some(owner_id),
+                    ..Default::default()
+                }),
+                tx,
+            )
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(serde_json::to_value(event).unwrap());
+        }
+        let ingestion = events
+            .iter()
+            .find(|event| event["type"] == "peer_content_ingested")
+            .unwrap();
+        assert_eq!(ingestion["request_id"], notice_id);
+        let start = events
+            .iter()
+            .find(|event| event["type"] == "run_started")
+            .unwrap();
+        assert_eq!(start["identity"]["interaction_id"], owner_id.to_string());
+        assert_ne!(start["identity"]["interaction_id"], ingestion["request_id"]);
+        let assistant = agent
+            .session()
+            .messages()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::BlockAssistant(message) => Some(message),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            start["identity"],
+            serde_json::to_value(&assistant.identity).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn equal_content_in_distinct_interactions_retains_distinct_live_lineage() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let mut run_ids = Vec::new();
+        for value in [0xfeed_3001, 0xfeed_3002] {
+            let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(value));
+            let (tx, mut rx) = mpsc::channel(64);
+            agent
+                .run_with_events_and_typed_turn_appends(
+                    "same text".into(),
+                    Vec::new(),
+                    Vec::new(),
+                    Some(TranscriptMessageIdentity {
+                        interaction_id: Some(interaction_id),
+                        ..Default::default()
+                    }),
+                    tx,
+                )
+                .await
+                .unwrap();
+            let mut events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                events.push(serde_json::to_value(event).unwrap());
+            }
+            let start = events
+                .iter()
+                .find(|event| event["type"] == "run_started")
+                .unwrap();
+            let end = events
+                .iter()
+                .find(|event| event["type"] == "run_completed")
+                .unwrap();
+            assert_eq!(
+                start["identity"]["interaction_id"],
+                interaction_id.to_string()
+            );
+            assert_eq!(start["identity"], end["identity"]);
+            assert!(start["identity"]["run_id"].is_string());
+            run_ids.push(start["identity"]["run_id"].clone());
+        }
+        assert_ne!(run_ids[0], run_ids[1]);
+    }
+
+    #[tokio::test]
+    async fn run_failure_carries_the_exact_started_identity() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_4001));
+        let run_id = crate::lifecycle::RunId::new();
+        agent.set_active_transcript_identity(Some(TranscriptMessageIdentity {
+            interaction_id: Some(interaction_id),
+            ..Default::default()
+        }));
+        agent.runtime_started_run_id = Some(run_id.clone());
+        let (tx, mut rx) = mpsc::channel(8);
+        agent
+            .emit_run_failed_event(&AgentError::ConfigError("after start".into()), Some(&tx))
+            .await;
+        let event = serde_json::to_value(rx.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            event["identity"]["interaction_id"],
+            interaction_id.to_string()
+        );
+        assert_eq!(event["identity"]["run_id"], run_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn failure_before_execution_keeps_interaction_without_inventing_a_run() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_1001));
+        agent.set_active_transcript_identity(Some(TranscriptMessageIdentity {
+            interaction_id: Some(interaction_id),
+            run_id: Some(crate::lifecycle::RunId::new()),
+            ..Default::default()
+        }));
+        let (tx, mut rx) = mpsc::channel(8);
+        agent
+            .emit_run_failed_event(&AgentError::ConfigError("before start".into()), Some(&tx))
+            .await;
+        let event = serde_json::to_value(rx.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            event["identity"]["interaction_id"],
+            interaction_id.to_string()
+        );
+        assert!(event["identity"].get("run_id").is_none());
     }
 
     /// Ask-15 addendum pin: a committed turn's interaction id survives the
@@ -4432,7 +4649,8 @@ mod skill_activation_effect_tests {
             )
             .await;
 
-        let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_7001));
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
         let error = agent
             .run_with_events_and_typed_turn_appends(
                 "projected prompt".to_string().into(),
@@ -4453,11 +4671,41 @@ mod skill_activation_effect_tests {
                     },
                 ],
                 Vec::new(),
-                None,
+                Some(TranscriptMessageIdentity {
+                    interaction_id: Some(interaction_id),
+                    ..Default::default()
+                }),
                 tx,
             )
             .await
             .expect_err("limited provider projection must fail typed");
+
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let (start_index, started_identity) = events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| match event {
+                AgentEvent::RunStarted { identity, .. } => Some((index, identity)),
+                _ => None,
+            })
+            .expect("the provider request follows a typed run boundary");
+        let (failure_index, failed_identity) = events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| match event {
+                AgentEvent::RunFailed { identity, .. } => Some((index, identity)),
+                _ => None,
+            })
+            .expect("the actual provider failure has a typed terminal");
+        assert_eq!(started_identity.interaction_id, Some(interaction_id));
+        assert!(started_identity.run_id.is_some());
+        assert_eq!(failed_identity, started_identity);
+        assert!(start_index < failure_index);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::RunCompleted { .. }))
+        );
 
         assert!(
             provider_called.load(Ordering::SeqCst),

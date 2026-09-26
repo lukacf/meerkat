@@ -9172,6 +9172,7 @@ mod tests {
                 2,
                 None,
                 meerkat_core::AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id,
                     result: "done".to_string(),
                     structured_output: None,
@@ -9223,6 +9224,7 @@ mod tests {
                 1,
                 None,
                 meerkat_core::AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id: session_id.clone(),
                     result: "committed primary output".to_string(),
                     structured_output: None,
@@ -9294,6 +9296,7 @@ mod tests {
                 1,
                 None,
                 meerkat_core::AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id: session_id.clone(),
                     result: "committed primary output".to_string(),
                     structured_output: None,

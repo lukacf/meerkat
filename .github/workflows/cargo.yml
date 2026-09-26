@@ -802,7 +802,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
-      RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+      # Link the 8 MiB wasm stack the shipped @rkat/web runtime uses
+      # (sdks/web/scripts/build-wasm.mjs). At the 1 MiB default this
+      # unoptimized test build overflows the stack in its first turn
+      # ("RuntimeError: memory access out of bounds").
+      RUSTFLAGS: '--cfg getrandom_backend="wasm_js" -C link-arg=-zstack-size=8388608'
     steps:
       - name: Checkout
         uses: actions/checkout@v6

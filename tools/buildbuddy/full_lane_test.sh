@@ -345,9 +345,34 @@ cd "${work_root}"
 # from this variable instead of the crate directory Cargo runs them from.
 export MEERKAT_WORKSPACE_ROOT="${work_root}"
 
+# The browser contract exercises the runtime as @rkat/web ships it, linked
+# with an 8 MiB wasm stack (sdks/web/scripts/build-wasm.mjs). At the 1 MiB
+# default the unoptimized test build overflows the stack in its first turn
+# ("RuntimeError: memory access out of bounds").
+WASM_STACK_LINK_ARG="link-arg=-zstack-size=8388608"
+
+append_wasm_stack_size() {
+  if [[ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+    local unit_separator
+    unit_separator=$'\x1f'
+    case "${CARGO_ENCODED_RUSTFLAGS}" in
+      *"${WASM_STACK_LINK_ARG}"*) ;;
+      *)
+        export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${unit_separator}-C${unit_separator}${WASM_STACK_LINK_ARG}"
+        ;;
+    esac
+  else
+    case " ${RUSTFLAGS:-} " in
+      *" -C ${WASM_STACK_LINK_ARG} "*) ;;
+      *) export RUSTFLAGS="${RUSTFLAGS:-} -C ${WASM_STACK_LINK_ARG}" ;;
+    esac
+  fi
+}
+
 run_wasm_contract_test() {
   local test_name="$1"
   local runner="$2"
+  append_wasm_stack_size
   "${CARGO}" test -p meerkat-web-runtime --target wasm32-unknown-unknown --test "${test_name}" --no-run
   case "${runner}" in
     chrome)

@@ -10099,7 +10099,8 @@ mod tests {
                 &super::super::composition::binding_for_actor(
                     &Some(runtime.clone()),
                     mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY).0,
-                ),
+                )
+                .0,
             )
             .await
             .expect_err("restoration must not synthesize missing local resources");
@@ -10139,7 +10140,8 @@ mod tests {
                 &super::super::composition::binding_for_actor(
                     &Some(runtime.clone()),
                     mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY).0,
-                ),
+                )
+                .0,
             )
             .await
             .expect_err("restoration must not overwrite a conflicting placement");
@@ -10164,7 +10166,8 @@ mod tests {
                 &super::super::composition::binding_for_actor(
                     &Some(runtime.clone()),
                     mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY).0,
-                ),
+                )
+                .0,
             )
             .await
             .expect_err("a successful actor build cannot mint mob revival authority");

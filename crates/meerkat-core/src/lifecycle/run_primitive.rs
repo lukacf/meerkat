@@ -2308,8 +2308,8 @@ mod tests {
             identity: None,
             runtime_source: Some(source.clone()),
         };
-        assert_eq!(append.clone().runtime_source, Some(source));
-        let mut wire = serde_json::to_value(&append).unwrap();
+        let mut wire = serde_json::to_value(append.clone()).unwrap();
+        assert_eq!(append.runtime_source, Some(source));
         assert!(wire.get("runtime_source").is_none());
         wire["runtime_source"] =
             serde_json::json!({"input_id": InputId::new(), "append_ordinal": 999});

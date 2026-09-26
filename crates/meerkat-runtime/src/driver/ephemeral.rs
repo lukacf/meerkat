@@ -2901,7 +2901,7 @@ impl EphemeralRuntimeDriver {
         for input_id in joined {
             match self.resolve_one_live_boundary_join(run_id, &input_id) {
                 Ok(mm_dsl::LiveBoundaryJoinObservation::AppliedRetained) => {
-                    resolution.retained.push(input_id)
+                    resolution.retained.push(input_id);
                 }
                 Ok(observation) => {
                     if observation == mm_dsl::LiveBoundaryJoinObservation::AppliedDiscarded {

@@ -433,7 +433,9 @@ restart: its custody record carries the convener's job, and the post-restore
 recovery sweep delivers the council's sealed result, or
 `coordinator_interrupted` once the dead coordinator's claim lease has expired
 (councils are never re-executed). The sweep runs on every host whose council
-store is durable, and it retries after the earliest observed lease expiry;
+store is durable and whose `MobMcpState` was built with `into_shared()` (a
+state wrapped in a plain `Arc::new` never runs it), and it retries after the
+earliest observed lease expiry;
 `MobMcpState::relink_detached_councils` runs the re-link explicitly. Blocking, `council` returns the sealed outcome as its tool
 result, with `blocked_because`. Its own `timeout_seconds` bounds it in both
 forms, and the agent loop's default tool deadline does not. See

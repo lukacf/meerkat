@@ -117,7 +117,10 @@ A coordinator that dies mid-council leaves a record with no result. The next
 council operation — or an explicit recovery sweep — seals it as a typed
 `coordinator_interrupted` terminal and runs cleanup. After a restart, every host
 whose council store is durable runs that sweep on its own, including a host
-that supplies a durable store without a persistent root. A record whose
+that supplies a durable store without a persistent root, provided the host
+built its `MobMcpState` with `MobMcpState::into_shared()`. The sweep runs on
+its own task through the state's weak self-reference, which only `into_shared`
+sets; a state wrapped in a plain `Arc::new` never runs it. A record whose
 previous claim lease has not expired yet is reported as held and retried once
 the lease expires, rather than skipped. Recovery never re-executes
 a council, because a re-run would duplicate model work and result delivery.

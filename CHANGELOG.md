@@ -96,6 +96,15 @@ them.
   temporary mob id and every participant's comms name, which refuse those
   characters, so such a council could never seat a member. Stored records
   whose ids contain `.` or `:` still deserialize.
+- Behavior-only: an external durable fork of a mob member
+  (`MobHandle::fork_member` and every other `Quiescent` fork, including
+  council participant seating) is refused at once with
+  `ForkSourceUnavailable { Running }` while the source owes a turn, where it
+  used to wait behind an admitted-but-not-started input and then fork. A
+  Quiescent fork whose committed end is still an unanswered input or tool
+  result is refused as busy. Callers that relied on the wait must retry after
+  the source's turn. `ForkSourceUnavailableCause::Running` now means work the
+  source owes. Details under Fixed.
 - Behavior-only: forks start with zero usage (`meerkat-core`). `Session::fork`,
   `Session::fork_at`, `Session::fork_replacing`, and
   `Session::fork_at_complete_boundary` (with its `_with_identity` form) return
@@ -403,9 +412,11 @@ them.
   sweep, every council from an earlier process whose job is not settled has
   its outcome delivered once: its sealed result, or `coordinator_interrupted`
   once the dead coordinator's claim lease is observed expired. Councils are
-  never re-executed. A job whose owner no longer exists (a convener session
-  that was deleted or archived, or a forker no longer seated) is reported as
-  owner gone and settled, so later restarts do not retry it.
+  never re-executed. This runs from the council recovery sweep, so it needs
+  a `MobMcpState` built with `into_shared()` (see Fixed). A job whose owner no
+  longer exists (a convener session that was deleted or archived, or a forker
+  no longer seated) is reported as owner gone and settled, so later restarts
+  do not retry it.
 - Member status never waits for the member's running turn.
   `MobHandle::member_status` (and so RPC `mob/member_status`,
   `mob_check_member`, and the operator tool `member_status`) still tries the
@@ -567,7 +578,12 @@ them.
   restore and from `mob_insert_handle`), retries after the earliest observed
   lease expiry within a bounded number of passes, and reports held records
   (`TemporaryCouncilCoordinator::sweep_unfinished`); `recover_unfinished`
-  keeps its shape.
+  keeps its shape. The host must build its `MobMcpState` with
+  `MobMcpState::into_shared()`: the sweep runs on its own task through the
+  state's weak self-reference, which only `into_shared` sets. A state wrapped
+  with a plain `Arc::new` never runs it. MobKit 0.8.43 builds the state with
+  `into_shared`; MobKit 0.8.42 and earlier use `Arc::new`, so the fix does not
+  apply there.
 - The runtime loop injected a completion wake into an idle owner even when the
   owner's own turn had already applied that completion. The wake found no
   pending boundary, so each such completion cost a spurious wake, an executor

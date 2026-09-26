@@ -7878,7 +7878,7 @@ mod tests {
                         "must-never-execute",
                         Vec::new(),
                         HashMap::new(),
-                    ))
+                    ));
                 }
                 Capability::Hooks => config.hooks.entries.push(Default::default()),
                 Capability::RuntimeSkills => config.skills.repositories.push(
@@ -7899,10 +7899,10 @@ mod tests {
                     build.backend = Some(meerkat_core::RecoveryBackendKind::Memory);
                 }
                 Capability::ImageGeneration => {
-                    build.override_image_generation = ToolCategoryOverride::Enable
+                    build.override_image_generation = ToolCategoryOverride::Enable;
                 }
                 Capability::DurablePersistence => {
-                    build.backend = Some(meerkat_core::RecoveryBackendKind::Sqlite)
+                    build.backend = Some(meerkat_core::RecoveryBackendKind::Sqlite);
                 }
                 Capability::TcpComms => config.comms.mode = meerkat_core::CommsRuntimeMode::Tcp,
                 Capability::UdsComms => config.comms.mode = meerkat_core::CommsRuntimeMode::Uds,

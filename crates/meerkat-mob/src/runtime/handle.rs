@@ -4360,11 +4360,14 @@ impl ForkJobRecord {
     ///
     /// `Some` when the child committed a terminal reply to this job after the
     /// fork prefix: its own assistant message that neither requests tools nor
-    /// was cancelled, with nothing but System context after it. That reply
-    /// is the job's real outcome whatever the runtime is doing now, which is
-    /// what a restarted host needs before it decides a limit elapsed. `None`
-    /// when the transcript holds no such reply (the turn is still running or
-    /// did not survive).
+    /// was cancelled, followed by nothing but context (System instructions
+    /// and the durable completion records of detached jobs). A completion
+    /// record that arrived after that reply starts a later turn, the child's
+    /// reaction to a job of its own (a nested fork), and nothing from there
+    /// on is this job's. That reply is the job's real outcome whatever the
+    /// runtime is doing now, which is what a restarted host needs before it
+    /// decides a limit elapsed. `None` when the transcript holds no such
+    /// reply (the turn is still running or did not survive).
     pub fn durable_terminal_result(
         &self,
         session: &meerkat_core::Session,
@@ -4373,28 +4376,18 @@ impl ForkJobRecord {
             .messages()
             .get(self.prefix_message_count..)
             .unwrap_or_default();
-        let Some(reply) = own_exchange
+        let Some(reply) = Self::job_exchange(own_exchange)
             .iter()
             .rev()
-            .find(|message| !matches!(message, meerkat_core::Message::System(_)))
+            .find(|message| !Self::is_reply_context(message))
         else {
             return Ok(None);
         };
         let meerkat_core::Message::BlockAssistant(reply) = reply else {
             return Ok(None);
         };
-        let requests_tools = reply
-            .blocks
-            .iter()
-            .any(|block| matches!(block, meerkat_core::types::AssistantBlock::ToolUse { .. }));
-        if requests_tools
-            || matches!(
-                reply.stop_reason,
-                Some(
-                    meerkat_core::types::StopReason::ToolUse
-                        | meerkat_core::types::StopReason::Cancelled
-                )
-            )
+        if Self::requests_tools(reply)
+            || reply.stop_reason == Some(meerkat_core::types::StopReason::Cancelled)
         {
             return Ok(None);
         }
@@ -4419,6 +4412,53 @@ impl ForkJobRecord {
             false,
         )
         .map(Some)
+    }
+
+    /// The part of the child's own exchange that belongs to this job: all of
+    /// it, up to the first detached-job completion record admitted after the
+    /// child had replied. Such a record is a later turn's input. A record
+    /// admitted while the child was still working (between its tool calls)
+    /// is context of this job's turn, which goes on to its reply.
+    fn job_exchange(own_exchange: &[meerkat_core::Message]) -> &[meerkat_core::Message] {
+        let mut replied = false;
+        for (index, message) in own_exchange.iter().enumerate() {
+            match message {
+                meerkat_core::Message::System(_) => {}
+                meerkat_core::Message::SystemNotice(notice)
+                    if notice.persisted_background_job_id().is_some() =>
+                {
+                    if replied {
+                        return own_exchange.get(..index).unwrap_or_default();
+                    }
+                }
+                meerkat_core::Message::BlockAssistant(reply) => {
+                    replied = !Self::requests_tools(reply);
+                }
+                _ => replied = false,
+            }
+        }
+        own_exchange
+    }
+
+    /// Context a reply can be followed by and still be the job's reply:
+    /// System instructions, and the durable completion record of a detached
+    /// job (`BackgroundJob`, persisted).
+    fn is_reply_context(message: &meerkat_core::Message) -> bool {
+        match message {
+            meerkat_core::Message::System(_) => true,
+            meerkat_core::Message::SystemNotice(notice) => {
+                notice.persisted_background_job_id().is_some()
+            }
+            _ => false,
+        }
+    }
+
+    fn requests_tools(reply: &meerkat_core::types::BlockAssistantMessage) -> bool {
+        reply.stop_reason == Some(meerkat_core::types::StopReason::ToolUse)
+            || reply
+                .blocks
+                .iter()
+                .any(|block| matches!(block, meerkat_core::types::AssistantBlock::ToolUse { .. }))
     }
 }
 

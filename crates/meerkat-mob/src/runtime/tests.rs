@@ -22003,6 +22003,113 @@ async fn a_detached_fork_dropped_mid_spawn_leaves_no_child_seated() {
     );
 }
 
+/// The job record's terminal reply read from a fork child's durable
+/// transcript, around the durable completion record of the child's own
+/// detached job (a nested fork): a record admitted after the child replied
+/// starts a later turn and never displaces the reply; a record admitted
+/// mid-turn is context of the job's turn.
+#[test]
+fn a_fork_jobs_durable_reply_skips_nested_job_completion_records() {
+    use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, UserMessage};
+
+    let text = |text: &str| {
+        Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: text.to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        ))
+    };
+    let tool_call = || {
+        Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::ToolUse {
+                id: "call-fork-d".to_string(),
+                name: "fork_off".to_string(),
+                args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                meta: None,
+            }],
+            StopReason::ToolUse,
+        ))
+    };
+    let tool_result = || {
+        Message::tool_results(vec![ToolResult::new(
+            "call-fork-d".to_string(),
+            "running".to_string(),
+            false,
+        )])
+    };
+    let nested_record = || {
+        Message::SystemNotice(SystemNoticeMessage::persisted_background_job(
+            "fork_off",
+            "job-d",
+            meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+            "{\"status\":\"completed\"}".to_string(),
+        ))
+    };
+    let prefix = [
+        Message::User(UserMessage::text("forker context")),
+        text("forker reply"),
+    ];
+    let job = ForkJobRecord {
+        job_id: "job-c".to_string(),
+        owner_session_id: SessionId::new(),
+        started_at_ms: 0,
+        max_run_ms: None,
+        prefix_message_count: prefix.len(),
+        result_label: "fork_off_result".to_string(),
+        max_text_bytes: 4096,
+    };
+    let reply_of = |own_exchange: Vec<Message>| {
+        let mut session = meerkat_core::Session::new();
+        for message in prefix.iter().cloned().chain(own_exchange) {
+            session.push(message);
+        }
+        job.durable_terminal_result(&session)
+            .expect("the reply fits its bounds")
+            .map(|result| result.text().to_string())
+    };
+    let task = || Message::User(UserMessage::text("the job"));
+
+    // The record of the child's own fork landed after its reply, with or
+    // without the turn that reacted to it.
+    assert_eq!(
+        reply_of(vec![task(), text("R1"), nested_record()]).as_deref(),
+        Some("R1")
+    );
+    assert_eq!(
+        reply_of(vec![task(), text("R1"), nested_record(), text("R2")]).as_deref(),
+        Some("R1")
+    );
+    // Admitted mid-turn, between the child's tool calls: the turn went on to
+    // its reply, or has not replied yet.
+    assert_eq!(
+        reply_of(vec![
+            task(),
+            tool_call(),
+            tool_result(),
+            nested_record(),
+            text("R1"),
+        ])
+        .as_deref(),
+        Some("R1")
+    );
+    assert_eq!(
+        reply_of(vec![task(), tool_call(), tool_result(), nested_record()]),
+        None
+    );
+    // System context after the reply was already skipped.
+    assert_eq!(
+        reply_of(vec![
+            task(),
+            text("R1"),
+            Message::System(meerkat_core::types::SystemMessage::new("context")),
+        ])
+        .as_deref(),
+        Some("R1")
+    );
+}
+
 /// Autokill of a child with its own running child retires both, deepest
 /// first (lifecycle review: C autokilled cascades to D).
 #[tokio::test]

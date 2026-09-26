@@ -23979,8 +23979,7 @@ impl MobActor {
                                         )
                                         .await;
                                     if let Err(error) = route_result {
-                                        self.reachability_observations
-                                            .mark_host_failure(host_id.as_str(), &error);
+                                        self.mark_current_host_observation_failure(&host_id, &error);
                                         tracing::error!(
                                             mob_id = %self.definition.id,
                                             host = %host_id.as_str(),
@@ -23993,8 +23992,7 @@ impl MobActor {
                                     }
                                 }
                                 Err(error) => {
-                                    self.reachability_observations
-                                        .mark_host_failure(host_id.as_str(), &error);
+                                    self.mark_current_host_observation_failure(&host_id, &error);
                                     tracing::warn!(
                                         mob_id = %self.definition.id,
                                         host = %host_id.as_str(),
@@ -24008,8 +24006,7 @@ impl MobActor {
                             if Self::host_status_rejection_requires_fail_stop(&error) {
                                 self.durable_uncertainty_fail_stop = true;
                             }
-                            self.reachability_observations
-                                .mark_host_failure(host_id.as_str(), &error);
+                            self.mark_current_host_observation_failure(&host_id, &error);
                             tracing::warn!(
                                 mob_id = %self.definition.id,
                                 host = %host_id.as_str(),
@@ -47137,6 +47134,21 @@ impl MobActor {
             )));
         }
         Ok(host_id)
+    }
+
+    /// A current outage invalidates the observer's cached assumption of volatile
+    /// route realization. Even a delayed reply carrying the previous boot
+    /// token must re-derive machine-owned installs against the current binding
+    /// before recovery can publish a complete route ledger. Call only after
+    /// fencing the observation against the current host binding.
+    fn mark_current_host_observation_failure(
+        &mut self,
+        host_id: &mob_dsl::HostId,
+        error: &MobError,
+    ) {
+        self.host_runtime_incarnations.remove(host_id);
+        self.reachability_observations
+            .mark_host_failure(host_id.as_str(), error);
     }
 
     fn record_host_runtime_incarnation(

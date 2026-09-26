@@ -732,6 +732,7 @@ export type SystemNoticeBlock = {
   detail?: string | null;
   display_name?: string | null;
   job_id: string;
+  persisted?: boolean;
   status: BackgroundJobTerminalStatus;
   type: "background_job";
 } | {

@@ -889,6 +889,10 @@ them.
   coordinator-owned binding of a member that never joined the roster: its
   rollback retires the coordinator's operation and releases the binding, so a
   later spawn of the same session under another owner is no longer rejected.
+- Member-host shutdown cancels outstanding event polls and refuses late
+  successful pages from the stopped observation. After a current host-status
+  failure, the next authenticated observation re-derives wired-peer trust
+  obligations even when it carries the previously observed boot token.
 - Durable notice history and live boundary events carry the same canonical
   notice rows, exact session/run/input provenance and ordinal in the input's
   complete append list. `transcript_start` reports the application-time image

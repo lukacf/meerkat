@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio_util::sync::CancellationToken;
 
 use meerkat_contracts::wire::supervisor_bridge::{
     BRIDGE_BOUNDED_RESULT_TRUNCATION_MARKER, BRIDGE_TURN_OUTCOME_ACK_MAX, BridgeBoundedResultSpec,
@@ -743,7 +744,7 @@ pub struct HostMemberObservation {
     event_ring_capacity: usize,
     rings: tokio::sync::Mutex<HashMap<SessionId, Arc<SessionEventRing>>>,
     pending_recovery_started: AtomicBool,
-    shutting_down: AtomicBool,
+    shutting_down: CancellationToken,
     directed_turn_tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
     active_turn_watchers: Arc<StdMutex<HashSet<ActiveTurnWatcherKey>>>,
     /// Exact-key lock shared by the final delivery-admission interval and the
@@ -762,9 +763,7 @@ pub struct HostMemberObservationTaskOwner {
 
 impl HostMemberObservationTaskOwner {
     pub async fn shutdown(mut self) {
-        self.observation
-            .shutting_down
-            .store(true, Ordering::Release);
+        self.observation.shutting_down.cancel();
         if let Some(task) = self.pending_recovery.take() {
             task.abort();
             let _ = task.await;
@@ -775,9 +774,7 @@ impl HostMemberObservationTaskOwner {
 
 impl Drop for HostMemberObservationTaskOwner {
     fn drop(&mut self) {
-        self.observation
-            .shutting_down
-            .store(true, Ordering::Release);
+        self.observation.shutting_down.cancel();
         if let Some(task) = &self.pending_recovery {
             task.abort();
         }
@@ -999,7 +996,7 @@ impl HostMemberObservation {
             event_ring_capacity: MEMBER_EVENT_RING_CAPACITY,
             rings: tokio::sync::Mutex::new(HashMap::new()),
             pending_recovery_started: AtomicBool::new(false),
-            shutting_down: AtomicBool::new(false),
+            shutting_down: CancellationToken::new(),
             directed_turn_tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
             active_turn_watchers: Arc::new(StdMutex::new(HashSet::new())),
             admission_locks: StdMutex::new(HashMap::new()),
@@ -1983,75 +1980,94 @@ impl MemberObservationHost for HostMemberObservation {
         session: &SessionId,
         request: MemberEventsPollRequest<'_>,
     ) -> Result<MemberEventsWindow, MemberObservationError> {
-        let MemberEventsPollRequest {
-            expected_member,
-            cursor,
-            max,
-            wait,
-            outcome_acks,
-            max_outcomes,
-        } = request;
-        let facts_before_ack = self.session_facts(session)?;
-        if &facts_before_ack.incarnation != expected_member {
-            return Err(MemberObservationError::StaleIncarnation {
-                reason: format!(
-                    "poll expected {expected_member:?}; host projection is {:?}",
-                    facts_before_ack.incarnation
-                ),
-            });
-        }
-        self.acknowledge_outcomes(&facts_before_ack, outcome_acks)
-            .await?;
-        // The actor publishes the pruned projection before completing the
-        // acknowledgement request, so this re-read cannot replay an already
-        // acknowledged row in the same response.
-        let facts = self.session_facts(session)?;
-        if &facts.incarnation != expected_member {
-            return Err(MemberObservationError::StaleIncarnation {
-                reason: format!(
-                    "poll expected {expected_member:?}; host projection changed to {:?}",
-                    facts.incarnation
-                ),
-            });
-        }
-        let page = match self.durable_watermark(session).await? {
-            Some(watermark) => {
-                let log =
-                    self.durable_log
-                        .clone()
-                        .ok_or_else(|| MemberObservationError::Internal {
+        // The composition owner's shutdown is also the lifetime of every
+        // detached event poll. Cancel the whole operation, including backing
+        // reads and ACK waits, without introducing a second liveness state.
+        let poll = async {
+            let MemberEventsPollRequest {
+                expected_member,
+                cursor,
+                max,
+                wait,
+                outcome_acks,
+                max_outcomes,
+            } = request;
+            let facts_before_ack = self.session_facts(session)?;
+            if &facts_before_ack.incarnation != expected_member {
+                return Err(MemberObservationError::StaleIncarnation {
+                    reason: format!(
+                        "poll expected {expected_member:?}; host projection is {:?}",
+                        facts_before_ack.incarnation
+                    ),
+                });
+            }
+            self.acknowledge_outcomes(&facts_before_ack, outcome_acks)
+                .await?;
+            // The actor publishes the pruned projection before completing the
+            // acknowledgement request, so this re-read cannot replay an already
+            // acknowledged row in the same response.
+            let facts = self.session_facts(session)?;
+            if &facts.incarnation != expected_member {
+                return Err(MemberObservationError::StaleIncarnation {
+                    reason: format!(
+                        "poll expected {expected_member:?}; host projection changed to {:?}",
+                        facts.incarnation
+                    ),
+                });
+            }
+            let page = match self.durable_watermark(session).await? {
+                Some(watermark) => {
+                    let log = self.durable_log.clone().ok_or_else(|| {
+                        MemberObservationError::Internal {
                             reason: "durable watermark without a durable log".to_string(),
-                        })?;
-                self.poll_events_durable(
-                    session,
-                    &log,
-                    cursor,
-                    max,
-                    max_outcomes,
-                    wait,
-                    &facts,
-                    watermark,
-                )
-                .await?
-            }
-            None => {
-                self.poll_events_ring(session, cursor, max, wait, &facts)
+                        }
+                    })?;
+                    self.poll_events_durable(
+                        session,
+                        &log,
+                        cursor,
+                        max,
+                        max_outcomes,
+                        wait,
+                        &facts,
+                        watermark,
+                    )
                     .await?
+                }
+                None => {
+                    self.poll_events_ring(session, cursor, max, wait, &facts)
+                        .await?
+                }
+            };
+            // A long-poll may outlive this residency. Never label rows observed
+            // after rematerialization with the captured old generation/fence:
+            // the controlling pump treats a matching page tuple as authority.
+            let facts_after_poll = self.session_facts(session)?;
+            if &facts_after_poll.incarnation != expected_member {
+                return Err(MemberObservationError::StaleIncarnation {
+                    reason: format!(
+                        "poll expected {expected_member:?}; host projection changed during poll to {:?}",
+                        facts_after_poll.incarnation
+                    ),
+                });
             }
+            Ok(page)
         };
-        // A long-poll may outlive this residency. Never label rows observed
-        // after rematerialization with the captured old generation/fence:
-        // the controlling pump treats a matching page tuple as authority.
-        let facts_after_poll = self.session_facts(session)?;
-        if &facts_after_poll.incarnation != expected_member {
-            return Err(MemberObservationError::StaleIncarnation {
-                reason: format!(
-                    "poll expected {expected_member:?}; host projection changed during poll to {:?}",
-                    facts_after_poll.incarnation
-                ),
-            });
+        let stopped = || MemberObservationError::Unavailable {
+            reason: "member observation owner is shutting down".to_string(),
+        };
+        tokio::select! {
+            biased;
+            () = self.shutting_down.cancelled() => Err(stopped()),
+            result = poll => {
+                // Cancellation can begin while an immediately-ready backing
+                // read is being polled. Never publish that old-boot success.
+                if self.shutting_down.is_cancelled() {
+                    return Err(stopped());
+                }
+                result
+            }
         }
-        Ok(page)
     }
 
     async fn open_directed_turn_window(
@@ -2430,7 +2446,7 @@ impl MemberObservationHost for HostMemberObservation {
         session: &SessionId,
         admission: DirectedTurnAdmission,
     ) -> Result<(), DirectedTurnReject> {
-        if self.shutting_down.load(Ordering::Acquire) {
+        if self.shutting_down.is_cancelled() {
             return Err(DirectedTurnReject::unsupported(
                 "member observation is shutting down; retaining the directed turn Pending",
             ));
@@ -2499,7 +2515,7 @@ impl MemberObservationHost for HostMemberObservation {
                     .map_err(DirectedTurnReject::unsupported)?;
             let session = session.clone();
             let mut tasks = self.directed_turn_tasks.lock().await;
-            if self.shutting_down.load(Ordering::Acquire) {
+            if self.shutting_down.is_cancelled() {
                 return Err(DirectedTurnReject::unsupported(
                     "member observation began shutting down before watcher attachment; retaining the directed turn Pending",
                 ));
@@ -3544,6 +3560,7 @@ mod tests {
     struct BoundarySessionService {
         subscription_calls: std::sync::atomic::AtomicUsize,
         history_gate: Option<BoundaryHistoryGate>,
+        idle_event_stream: bool,
     }
 
     struct BoundaryHistoryGate {
@@ -3770,6 +3787,9 @@ mod tests {
         ) -> Result<meerkat_core::EventStream, meerkat_core::StreamError> {
             self.subscription_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.idle_event_stream {
+                return Ok(Box::pin(futures::stream::pending()));
+            }
             Err(meerkat_core::StreamError::Internal(
                 "boundary test subscribed past sequence exhaustion".to_string(),
             ))
@@ -3814,9 +3834,293 @@ mod tests {
 
         owner.shutdown().await;
 
-        assert!(observation.shutting_down.load(Ordering::Acquire));
+        assert!(observation.shutting_down.is_cancelled());
         assert!(dropped.load(Ordering::SeqCst));
         assert!(observation.directed_turn_tasks.lock().await.is_empty());
+    }
+
+    async fn poll_lifetime_fixture(
+        durable_log: Option<Arc<dyn DurableEventLogRead>>,
+    ) -> (
+        Arc<HostMemberObservation>,
+        HostMemberObservationTaskOwner,
+        SessionId,
+        BridgeMemberIncarnation,
+        watch::Sender<HostObservationProjection>,
+    ) {
+        let session = SessionId::new();
+        let expected = incarnation(&session, 3, 5);
+        let facts = SessionObservationFacts {
+            mob_id: expected.mob_id.clone(),
+            agent_identity: expected.agent_identity.clone(),
+            generation: expected.generation,
+            fence_token: expected.fence_token,
+            incarnation: expected.clone(),
+            generation_start_seq: 1,
+            pending_turns: Vec::new(),
+            turn_outcomes: Vec::new(),
+        };
+        let (projection_tx, projection_rx) = watch::channel(HostObservationProjection {
+            sessions: BTreeMap::from([(session.to_string(), facts)]),
+        });
+        let (pending_tx, _pending_rx) = mpsc::channel(1);
+        let (outcome_ack_tx, _outcome_ack_rx) = mpsc::channel(1);
+        let observation = Arc::new(HostMemberObservation::new(
+            BridgeHostRuntimeIncarnation::new(),
+            Arc::new(BoundarySessionService {
+                idle_event_stream: true,
+                ..BoundarySessionService::default()
+            }),
+            durable_log,
+            projection_rx,
+            pending_tx,
+            outcome_ack_tx,
+        ));
+        let owner = observation
+            .recover_pending_turns()
+            .await
+            .expect("fixture owns observation lifetime");
+        (observation, owner, session, expected, projection_tx)
+    }
+
+    fn lifetime_poll_request(
+        expected_member: &BridgeMemberIncarnation,
+        wait: Duration,
+    ) -> MemberEventsPollRequest<'_> {
+        MemberEventsPollRequest {
+            expected_member,
+            cursor: MemberObservationCursor::At {
+                generation: expected_member.generation,
+                seq: 1,
+            },
+            max: 1,
+            wait,
+            outcome_acks: &[],
+            max_outcomes: 1,
+        }
+    }
+
+    fn empty_lifetime_log(durable: bool) -> Option<Arc<dyn DurableEventLogRead>> {
+        durable.then(|| {
+            Arc::new(CountingEmptyLog {
+                reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }) as Arc<dyn DurableEventLogRead>
+        })
+    }
+
+    #[derive(Default)]
+    struct PollWake(AtomicBool);
+
+    impl std::task::Wake for PollWake {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn assert_poll_shutdown(result: Result<MemberEventsWindow, MemberObservationError>) {
+        assert!(
+            matches!(result, Err(MemberObservationError::Unavailable { .. })),
+            "a stopped observation must not serve an old-boot page: {result:?}"
+        );
+    }
+
+    struct DropOwnerDuringReadLog {
+        owner: StdMutex<Option<HostMemberObservationTaskOwner>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DurableEventLogRead for DropOwnerDuringReadLog {
+        async fn read_from(
+            &self,
+            _session: &SessionId,
+            _from_seq: u64,
+            _max_rows: usize,
+        ) -> Result<Option<Vec<(u64, EventEnvelope<AgentEvent>)>>, MemberObservationError> {
+            // Stop after poll's cancellation branch was checked, but before
+            // this ready read can return a successful old-boot page.
+            drop(self.owner.lock().unwrap().take());
+            Ok(Some(vec![(
+                1,
+                EventEnvelope::new(
+                    "worker",
+                    1,
+                    Some("mob-exhausted".to_string()),
+                    AgentEvent::TurnStarted { turn_number: 1 },
+                ),
+            )]))
+        }
+
+        async fn latest_seq(
+            &self,
+            _session: &SessionId,
+        ) -> Result<Option<u64>, MemberObservationError> {
+            Ok(Some(1))
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_poll_lifetime_rejects_shutdown_during_ready_durable_read() {
+        let log = Arc::new(DropOwnerDuringReadLog {
+            owner: StdMutex::new(None),
+        });
+        let (observation, owner, session, expected, _projection_tx) =
+            poll_lifetime_fixture(Some(log.clone())).await;
+        *log.owner.lock().unwrap() = Some(owner);
+        assert_poll_shutdown(
+            observation
+                .poll_events(&session, lifetime_poll_request(&expected, Duration::ZERO))
+                .await,
+        );
+        assert!(log.owner.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn observation_poll_lifetime_live_owner_serves_durable_and_ring_rows() {
+        let row = EventEnvelope::new(
+            "worker",
+            1,
+            Some("mob-exhausted".to_string()),
+            AgentEvent::TurnStarted { turn_number: 1 },
+        );
+        for durable in [true, false] {
+            let log = durable
+                .then(|| Arc::new(RowsLog(vec![(1, row.clone())])) as Arc<dyn DurableEventLogRead>);
+            let (observation, owner, session, expected, _projection_tx) =
+                poll_lifetime_fixture(log).await;
+            if !durable {
+                let ring = observation
+                    .ring_for(&session, expected.generation)
+                    .await
+                    .unwrap();
+                ring.state.lock().unwrap().push(row.clone()).unwrap();
+            }
+            let page = observation
+                .poll_events(&session, lifetime_poll_request(&expected, Duration::ZERO))
+                .await
+                .expect("a live owner must still serve event rows");
+            assert_eq!(page.runtime_incarnation, observation.runtime_incarnation);
+            assert_eq!(page.generation, expected.generation);
+            assert_eq!(page.fence_token, expected.fence_token);
+            assert_eq!(page.rows.len(), 1);
+            assert_eq!(page.rows[0].0, 1);
+            assert_eq!(page.next_seq, 2);
+            owner.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_poll_lifetime_rejects_entry_after_owner_shutdown() {
+        for durable in [true, false] {
+            let (observation, owner, session, expected, _projection_tx) =
+                poll_lifetime_fixture(empty_lifetime_log(durable)).await;
+            owner.shutdown().await;
+            assert_poll_shutdown(
+                observation
+                    .poll_events(&session, lifetime_poll_request(&expected, Duration::ZERO))
+                    .await,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_poll_lifetime_rejects_durable_read_released_after_shutdown() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let log = Arc::new(BlockingEmptyLog {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let (observation, owner, session, expected, _projection_tx) =
+            poll_lifetime_fixture(Some(log)).await;
+        let mut poll = Box::pin(
+            observation.poll_events(&session, lifetime_poll_request(&expected, Duration::ZERO)),
+        );
+        assert!(futures::poll!(poll.as_mut()).is_pending());
+        let mut entered_wait = Box::pin(entered.notified());
+        assert!(futures::poll!(entered_wait.as_mut()).is_ready());
+        owner.shutdown().await;
+        release.notify_one();
+        assert_poll_shutdown(poll.await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn observation_poll_lifetime_shutdown_wakes_blocked_durable_read() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let log = Arc::new(BlockingEmptyLog {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let (observation, owner, session, expected, _projection_tx) =
+            poll_lifetime_fixture(Some(log)).await;
+        let mut poll = Box::pin(observation.poll_events(
+            &session,
+            lifetime_poll_request(&expected, Duration::from_secs(3600)),
+        ));
+        let wake = Arc::new(PollWake::default());
+        let waker = std::task::Waker::from(Arc::clone(&wake));
+        assert!(
+            poll.as_mut()
+                .poll(&mut std::task::Context::from_waker(&waker))
+                .is_pending()
+        );
+        let mut entered_wait = Box::pin(entered.notified());
+        assert!(futures::poll!(entered_wait.as_mut()).is_ready());
+        wake.0.store(false, Ordering::SeqCst);
+        let before_shutdown = tokio::time::Instant::now();
+        owner.shutdown().await;
+        assert!(
+            wake.0.load(Ordering::SeqCst),
+            "shutdown must wake the blocked read"
+        );
+        let result = poll
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker));
+        let std::task::Poll::Ready(result) = result else {
+            panic!("shutdown must cancel a read without waiting for its release")
+        };
+        assert_poll_shutdown(result);
+        assert_eq!(tokio::time::Instant::now(), before_shutdown);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn observation_poll_lifetime_shutdown_wakes_idle_durable_and_ring_polls() {
+        for durable in [true, false] {
+            for explicit_shutdown in [true, false] {
+                let (observation, owner, session, expected, _projection_tx) =
+                    poll_lifetime_fixture(empty_lifetime_log(durable)).await;
+                let mut poll = Box::pin(observation.poll_events(
+                    &session,
+                    lifetime_poll_request(&expected, Duration::from_secs(3600)),
+                ));
+                let wake = Arc::new(PollWake::default());
+                let waker = std::task::Waker::from(Arc::clone(&wake));
+                assert!(
+                    poll.as_mut()
+                        .poll(&mut std::task::Context::from_waker(&waker))
+                        .is_pending()
+                );
+                wake.0.store(false, Ordering::SeqCst);
+                let before_shutdown = tokio::time::Instant::now();
+                if explicit_shutdown {
+                    owner.shutdown().await;
+                } else {
+                    drop(owner);
+                }
+                assert!(
+                    wake.0.load(Ordering::SeqCst),
+                    "shutdown must wake durable={durable}, explicit_shutdown={explicit_shutdown}"
+                );
+                let result = poll
+                    .as_mut()
+                    .poll(&mut std::task::Context::from_waker(&waker));
+                let std::task::Poll::Ready(result) = result else {
+                    panic!("shutdown must resolve the poll without advancing its deadline")
+                };
+                assert_poll_shutdown(result);
+                assert_eq!(tokio::time::Instant::now(), before_shutdown);
+            }
+        }
     }
 
     struct FixedWatermarkLog(u64);

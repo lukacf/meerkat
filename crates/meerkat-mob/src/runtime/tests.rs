@@ -76683,6 +76683,8 @@ fn placement_fixture_uses_local_mob_authority_types() {
     );
 }
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod host_outage_recovery;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod resume_bind_custody;
 mod retirement_isolation;
 /// #1105 spawn-activation isolation: a parked activation must not stall the

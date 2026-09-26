@@ -744,6 +744,112 @@ async fn durable_notice_event_rows_equal_applied_transcript_rows() {
     }
 }
 
+#[tokio::test]
+async fn durable_persisted_background_job_keeps_exact_notice_origin_through_refresh() {
+    let input_id = meerkat_core::lifecycle::InputId::new();
+    let notice = meerkat_core::types::SystemNoticeMessage::persisted_background_job(
+        "integration probe",
+        "persisted-job-origin-probe",
+        meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+        "Exact detached result\nwith a second paragraph.".to_string(),
+    );
+    let expected_body = notice.body.clone();
+    let expected_blocks = serde_json::to_value(&notice.blocks).unwrap();
+    let delivery = meerkat_core::lifecycle::TurnBoundaryDelivery::DurableAppends(
+        meerkat_core::lifecycle::DurableTurnBoundaryAppends::try_new(
+            input_id.clone(),
+            vec![meerkat_core::lifecycle::ConversationAppend {
+                runtime_source: None,
+                role: meerkat_core::lifecycle::ConversationAppendRole::SystemNotice,
+                content: meerkat_core::lifecycle::CoreRenderable::SystemNotice {
+                    kind: notice.kind,
+                    body: notice.body,
+                    blocks: notice.blocks,
+                },
+                identity: None,
+            }],
+            None,
+        )
+        .expect("typed persisted job is an eligible durable append"),
+    );
+    let (agent, _, witness, events) =
+        run_with_durable_delivery_at_post_tool_boundary(delivery).await;
+    assert_eq!(
+        witness.outcome(),
+        meerkat_core::CoreBoundaryDeliveryOutcome::Applied
+    );
+    let applied = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, AgentEvent::BoundaryAppendApplied { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(applied.len(), 1);
+    let (applied_at, applied_event) = applied[0];
+    let event = serde_json::to_value(applied_event).unwrap();
+    assert_eq!(event["append_count"], 1);
+    let emitted = event["notices"].as_array().expect("canonical notice rows");
+    assert_eq!(emitted.len(), 1);
+
+    let collect_job = |messages: &[Message]| {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::SystemNotice(notice)
+                    if notice.persisted_background_job_id()
+                        == Some("persisted-job-origin-probe") =>
+                {
+                    Some(serde_json::to_value(notice).unwrap())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let canonical = collect_job(agent.session().messages());
+    assert_eq!(canonical.len(), 1, "refresh retains one committed job row");
+    assert_eq!(*emitted, canonical, "live event contains the saved row");
+    assert_eq!(canonical[0]["kind"], "background_job");
+    assert_eq!(
+        canonical[0]["body"],
+        serde_json::to_value(expected_body).unwrap()
+    );
+    assert_eq!(canonical[0]["blocks"], expected_blocks);
+    assert_eq!(canonical[0]["blocks"][0]["persisted"], true);
+    assert_eq!(
+        canonical[0]["runtime_origin"],
+        serde_json::json!({
+            "session_id": agent.session().id(),
+            "run_id": event["run_id"],
+            "input_id": input_id,
+            "append_ordinal": 0,
+        })
+    );
+    let requests = agent.client.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(collect_job(&requests[0]).is_empty());
+    for request in &requests[1..] {
+        assert_eq!(
+            collect_job(request),
+            canonical,
+            "later model requests retain exact content and runtime provenance"
+        );
+    }
+    let completed = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, AgentEvent::RunCompleted { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        completed.len(),
+        1,
+        "job outcome does not mint a run terminal"
+    );
+    assert!(completed[0].0 > applied_at);
+    assert!(matches!(
+        completed[0].1,
+        AgentEvent::RunCompleted { result, .. } if result == "done"
+    ));
+}
+
 #[test]
 fn legacy_boundary_event_deserializes_without_typed_notice_projection() {
     let old = serde_json::json!({

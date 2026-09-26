@@ -373,6 +373,7 @@ impl PromptInput {
             },
             content: ContentInput::Text(String::new()),
             typed_turn_appends: vec![ConversationAppend {
+                runtime_source: None,
                 role: ConversationAppendRole::SystemNotice,
                 content: CoreRenderable::SystemNotice {
                     kind: notice.kind,

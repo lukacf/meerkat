@@ -216,6 +216,7 @@ mod tests {
 
     fn run_completed(result: &str, structured: Option<Value>, extraction: bool) -> AgentEvent {
         AgentEvent::RunCompleted {
+            identity: Default::default(),
             session_id: SessionId::new(),
             result: result.to_string(),
             structured_output: structured,
@@ -325,6 +326,7 @@ mod tests {
         let mut classifier = TurnTerminalClassifier::new();
         let terminal = classifier
             .observe(&AgentEvent::RunFailed {
+                identity: Default::default(),
                 session_id: SessionId::new(),
                 terminal_cause_kind: None,
                 error_report: AgentErrorReport {

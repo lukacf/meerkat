@@ -1044,6 +1044,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         }
         AgentEvent::PeerContentIngested { .. } => "peer_content_ingested",
         AgentEvent::BoundaryAppendApplied { .. } => "boundary_append_applied",
+        AgentEvent::BoundaryAppendsDiscarded(_) => "boundary_appends_discarded",
         AgentEvent::ProviderCacheBreakpointsDiscarded { .. } => {
             "provider_cache_breakpoints_discarded"
         }
@@ -2068,6 +2069,13 @@ pub enum AgentEvent {
     /// Agent run started
     RunStarted {
         session_id: SessionId,
+        /// Runtime-owned transcript lineage. Older events may omit it; an
+        /// absent run id never authorizes association with the current run.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::TranscriptMessageIdentity::is_empty"
+        )]
+        identity: crate::types::TranscriptMessageIdentity,
         /// Typed run input: caller content, or the pending tool-results
         /// continuation variant (no fabricated empty prompt).
         input: RunInput,
@@ -2076,6 +2084,13 @@ pub enum AgentEvent {
     /// Agent run completed successfully
     RunCompleted {
         session_id: SessionId,
+        /// Runtime-owned transcript lineage. Older events may omit it; an
+        /// absent run id never authorizes association with the current run.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::TranscriptMessageIdentity::is_empty"
+        )]
+        identity: crate::types::TranscriptMessageIdentity,
         result: String,
         /// Structured output from the completed run, when schema extraction
         /// produced a typed value.
@@ -2134,6 +2149,13 @@ pub enum AgentEvent {
     /// Agent run failed
     RunFailed {
         session_id: SessionId,
+        /// Runtime-owned transcript lineage. Older events may omit it; an
+        /// absent run id never authorizes association with the current run.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::TranscriptMessageIdentity::is_empty"
+        )]
+        identity: crate::types::TranscriptMessageIdentity,
         /// Typed failure fact (class + reason + display message). This is the
         /// single owner of the failure truth on the run boundary; there is no
         /// separately-carried `error` string or `error_class` mirror — wire
@@ -2556,8 +2578,9 @@ pub enum AgentEvent {
     /// with the run like tool results. If the image that carried them is later
     /// discarded (an uncommitted persistent run, or a compaction rollback),
     /// the runtime redelivers the input in exactly one follow-up turn, so
-    /// consumers should reconcile this event against the run terminal and the
-    /// committed transcript. Request-only steers never emit it.
+    /// consumers should reconcile against exact discard facts and canonical
+    /// transcript history. A run terminal alone is not proof of discard.
+    /// Request-only steers never emit it.
     BoundaryAppendApplied {
         /// The running turn the appends joined.
         run_id: crate::lifecycle::RunId,
@@ -2567,7 +2590,28 @@ pub enum AgentEvent {
         content: crate::types::ContentInput,
         /// Number of transcript rows appended.
         append_count: u32,
+        /// Exact canonical notice rows, in order within the applied append list.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notices: Vec<crate::types::SystemNoticeMessage>,
+        /// First appended row's offset in the image at application time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transcript_start: Option<u64>,
     },
+    /// Existing durable-join authority resolved these applications as discarded.
+    /// Published only after any required requeue persistence succeeds.
+    BoundaryAppendsDiscarded(BoundaryAppendsDiscarded),
+}
+
+/// Exact negative application fact projected from durable boundary join resolution.
+///
+/// This does not terminalize an input or invalidate a later application in a
+/// different run. A canonical retained history row remains authoritative.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryAppendsDiscarded {
+    pub session_id: SessionId,
+    pub run_id: crate::lifecycle::RunId,
+    pub input_ids: Vec<crate::lifecycle::InputId>,
 }
 
 impl AgentEvent {
@@ -2932,6 +2976,35 @@ mod tests {
     use crate::retry::{LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule};
     use crate::skills::SkillName;
     use crate::types::{ContentBlock, Usage};
+
+    #[test]
+    fn boundary_appends_discarded_has_flat_exact_source_wire_shape() {
+        let discarded = BoundaryAppendsDiscarded {
+            session_id: SessionId::new(),
+            run_id: crate::lifecycle::RunId::new(),
+            input_ids: vec![
+                crate::lifecycle::InputId::new(),
+                crate::lifecycle::InputId::new(),
+            ],
+        };
+        let event = AgentEvent::BoundaryAppendsDiscarded(discarded.clone());
+        assert_eq!(agent_event_type(&event), "boundary_appends_discarded");
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "type": "boundary_appends_discarded",
+                "session_id": discarded.session_id,
+                "run_id": discarded.run_id,
+                "input_ids": discarded.input_ids,
+            })
+        );
+        let decoded: AgentEvent = serde_json::from_value(wire).unwrap();
+        let AgentEvent::BoundaryAppendsDiscarded(decoded) = decoded else {
+            panic!("exact discard event");
+        };
+        assert_eq!(decoded, discarded);
+    }
 
     /// A fit is a conjunction over both axes and either axis alone can prove
     /// an excess. Absence on either axis is reported as absence, never as a
@@ -3615,11 +3688,79 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "schema")]
+    #[test]
+    fn run_boundary_schema_exposes_optional_canonical_lineage() {
+        fn find_variant<'a>(
+            value: &'a serde_json::Value,
+            kind: &str,
+        ) -> Option<&'a serde_json::Value> {
+            let discriminator = &value["properties"]["type"];
+            if discriminator["const"] == kind
+                || discriminator["enum"]
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|value| value == kind))
+            {
+                return Some(value);
+            }
+            match value {
+                serde_json::Value::Object(fields) => {
+                    fields.values().find_map(|value| find_variant(value, kind))
+                }
+                serde_json::Value::Array(values) => {
+                    values.iter().find_map(|value| find_variant(value, kind))
+                }
+                _ => None,
+            }
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(AgentEvent)).unwrap();
+        for kind in ["run_started", "run_completed", "run_failed"] {
+            let variant = find_variant(&schema, kind).expect("existing run boundary schema");
+            assert!(variant["properties"].get("identity").is_some());
+            assert!(
+                !variant["required"]
+                    .as_array()
+                    .is_some_and(|fields| fields.iter().any(|field| field == "identity"))
+            );
+        }
+        let identity = serde_json::to_value(schemars::schema_for!(
+            crate::types::TranscriptMessageIdentity
+        ))
+        .unwrap();
+        for field in [
+            "interaction_id",
+            "run_id",
+            "objective_id",
+            "realtime_origin",
+        ] {
+            assert!(
+                identity["properties"].get(field).is_some(),
+                "canonical field {field} remains in the schema"
+            );
+        }
+    }
+
+    #[test]
+    fn old_run_boundary_without_identity_round_trips_without_invented_lineage() {
+        let old = serde_json::json!({
+            "type": "run_started",
+            "session_id": SessionId::new(),
+            "input": {"kind": "content", "content": "same text"},
+        });
+        let parsed: AgentEvent = serde_json::from_value(old.clone()).unwrap();
+        let AgentEvent::RunStarted { identity, .. } = &parsed else {
+            panic!("run start");
+        };
+        assert!(identity.is_empty());
+        assert_eq!(serde_json::to_value(parsed).unwrap(), old);
+    }
+
     #[test]
     fn test_agent_event_json_schema() {
         // Test all event variants serialize correctly
         let events = vec![
             AgentEvent::RunStarted {
+                identity: Default::default(),
                 session_id: SessionId::new(),
                 input: RunInput::Content {
                     content: crate::types::ContentInput::Text("Hello".to_string()),
@@ -3675,6 +3816,7 @@ mod tests {
                 },
             },
             AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id: SessionId::new(),
                 result: "Done".to_string(),
                 structured_output: None,
@@ -3691,6 +3833,7 @@ mod tests {
                 terminal_cause_kind: None,
             },
             AgentEvent::RunFailed {
+                identity: Default::default(),
                 session_id: SessionId::new(),
                 error_report: AgentErrorReport {
                     class: AgentErrorClass::Budget,
@@ -3981,6 +4124,7 @@ mod tests {
     #[test]
     fn run_failed_carries_typed_report_without_string_mirrors() {
         let event = AgentEvent::RunFailed {
+            identity: Default::default(),
             session_id: SessionId::new(),
             error_report: AgentErrorReport {
                 class: AgentErrorClass::Llm,
@@ -4004,6 +4148,7 @@ mod tests {
     #[test]
     fn run_started_pending_tail_serializes_typed_variant() {
         let event = AgentEvent::RunStarted {
+            identity: Default::default(),
             session_id: SessionId::new(),
             input: RunInput::PendingToolResults,
         };
@@ -4181,12 +4326,14 @@ mod tests {
     fn test_agent_event_type_mapping_is_total_for_all_variants() {
         let events = vec![
             AgentEvent::RunStarted {
+                identity: Default::default(),
                 session_id: SessionId::new(),
                 input: RunInput::Content {
                     content: crate::types::ContentInput::Text("Hello".to_string()),
                 },
             },
             AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id: SessionId::new(),
                 result: "Done".to_string(),
                 structured_output: None,
@@ -4195,6 +4342,7 @@ mod tests {
                 terminal_cause_kind: None,
             },
             AgentEvent::RunFailed {
+                identity: Default::default(),
                 session_id: SessionId::new(),
                 error_report: AgentErrorReport {
                     class: AgentErrorClass::Internal,

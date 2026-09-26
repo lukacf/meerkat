@@ -42248,6 +42248,84 @@ async fn stage_refusal_stages_one_linked_nondirected_terminal_completion() {
 }
 
 #[tokio::test]
+async fn stage_refusal_completion_keeps_prior_run_attribution_without_claiming_its_receipt() {
+    let driver = stage_refusal_terminal_driver("stage-refusal-prior-run-carrier");
+    let (input, input_id) = interrupt_yielding_peer_input("input with an earlier attempt", None);
+    assert!(
+        driver
+            .lock()
+            .await
+            .as_driver_mut()
+            .accept_input(input)
+            .await
+            .unwrap()
+            .is_accepted()
+    );
+    let prior_run = RunId::new();
+    assert!(matches!(
+        prepare_runtime_loop_batch_start(
+            &driver,
+            prior_run.clone(),
+            crate::meerkat_machine::driver::test_authorized_runtime_loop_batch(vec![
+                input_id.clone()
+            ]),
+        )
+        .await
+        .unwrap(),
+        crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started
+    ));
+    {
+        let mut entry = driver.lock().await;
+        crate::meerkat_machine::driver::machine_apply_run_return_projection(
+            &mut entry,
+            &prior_run,
+            crate::meerkat_machine::driver::RunReturnDisposition::Rollback,
+        )
+        .expect("return the run while its input remains staged for recovery");
+        let DriverEntry::Ephemeral(ephemeral) = &mut *entry else {
+            panic!("test uses ephemeral driver");
+        };
+        assert_eq!(
+            ephemeral.input_phase(&input_id),
+            Some(crate::input_state::InputLifecycleState::Staged)
+        );
+        ephemeral.recover_ephemeral().unwrap();
+        assert_eq!(
+            ephemeral.input_phase(&input_id),
+            Some(crate::input_state::InputLifecycleState::Queued)
+        );
+        assert_eq!(ephemeral.input_attempt_count(&input_id), 1);
+        assert_eq!(
+            ephemeral.input_last_run_id(&input_id),
+            Some(prior_run.clone())
+        );
+    }
+    let refused_run = drive_stage_refusal_to_terminal(&driver, &input_id).await;
+    assert_ne!(prior_run, refused_run);
+    let entry = driver.lock().await;
+    assert_eq!(
+        entry.as_driver().input_last_run_id(&input_id),
+        Some(prior_run)
+    );
+    let batches = entry
+        .input_terminal_completion_recovery_batches()
+        .await
+        .expect("refused attempt remains recoverable without rebinding its input");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].input_ids, vec![input_id]);
+    assert_eq!(
+        batches[0].batch_key,
+        crate::input_state::InputTerminalCompletionBatchKey::Run {
+            run_id: refused_run
+        }
+    );
+    assert_eq!(
+        batches[0].correlation,
+        crate::meerkat_machine::dsl::TerminalCompletionCorrelation::Run
+    );
+}
+
+#[tokio::test]
 async fn stage_refusal_stages_directed_outbox_from_the_completion_witness() {
     let driver = stage_refusal_terminal_driver("stage-refusal-directed-carrier");
     let (input, input_id) =

@@ -1860,6 +1860,7 @@ struct MockSessionService {
     checkpointers_armed: AtomicBool,
     start_turn_calls: AtomicU64,
     keep_alive_start_turn_calls: AtomicU64,
+    non_host_start_turn_calls: AtomicU64,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     pause_keep_alive_before_wait: AtomicBool,
     keep_alive_before_wait_started: AtomicBool,
@@ -2026,6 +2027,7 @@ impl MockSessionService {
             checkpointers_armed: AtomicBool::new(true),
             start_turn_calls: AtomicU64::new(0),
             keep_alive_start_turn_calls: AtomicU64::new(0),
+            non_host_start_turn_calls: AtomicU64::new(0),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             pause_keep_alive_before_wait: AtomicBool::new(false),
             keep_alive_before_wait_started: AtomicBool::new(false),
@@ -3478,6 +3480,9 @@ impl SessionService for MockSessionService {
                 .write()
                 .await
                 .push((id.clone(), req.prompt.text_content()));
+        } else {
+            self.non_host_start_turn_calls
+                .fetch_add(1, Ordering::Release);
         }
         let start_turn_delay = self.start_turn_delay_ms.load(Ordering::Relaxed);
         if start_turn_delay > 0 {
@@ -3587,6 +3592,7 @@ impl SessionService for MockSessionService {
                             1,
                             None,
                             AgentEvent::RunFailed {
+                                identity: Default::default(),
                                 session_id,
                                 terminal_cause_kind: None,
                                 error_report: meerkat_core::event::AgentErrorReport {
@@ -3604,6 +3610,7 @@ impl SessionService for MockSessionService {
                             1,
                             None,
                             AgentEvent::RunCompleted {
+                                identity: Default::default(),
                                 session_id,
                                 result: completed_result,
                                 structured_output: None,
@@ -12128,6 +12135,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
         let result = mock_run_result(session_id.clone(), "{}".to_string());
         let _ = event_tx
             .send(AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id,
                 result: result.text.clone(),
                 structured_output: result.structured_output.clone(),
@@ -39890,9 +39898,7 @@ async fn test_flow_dispatch_autonomous_mode_uses_injector_and_avoids_non_host_st
         )
         .await
         .expect("spawn worker");
-    let baseline_non_host_start_turn = service
-        .start_turn_call_count()
-        .saturating_sub(service.keep_alive_start_turn_call_count());
+    let baseline_non_host_start_turn = service.non_host_start_turn_calls.load(Ordering::Acquire);
 
     let run_id = handle
         .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
@@ -39907,9 +39913,7 @@ async fn test_flow_dispatch_autonomous_mode_uses_injector_and_avoids_non_host_st
         terminal.step_ledger
     );
 
-    let non_host_start_turn = service
-        .start_turn_call_count()
-        .saturating_sub(service.keep_alive_start_turn_call_count());
+    let non_host_start_turn = service.non_host_start_turn_calls.load(Ordering::Acquire);
     assert_eq!(
         non_host_start_turn, baseline_non_host_start_turn,
         "autonomous flow dispatch should avoid non-host start_turn calls"
@@ -42058,9 +42062,7 @@ async fn test_unplaced_external_flow_step_fails_typed_per_step_at_dispatch() {
             .await
             .expect("spawn external autonomous worker");
     }
-    let baseline_non_host_start_turn = service
-        .start_turn_call_count()
-        .saturating_sub(service.keep_alive_start_turn_call_count());
+    let baseline_non_host_start_turn = service.non_host_start_turn_calls.load(Ordering::Acquire);
 
     let run_id = handle
         .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
@@ -42101,9 +42103,7 @@ async fn test_unplaced_external_flow_step_fails_typed_per_step_at_dispatch() {
         "the reason is the typed peer-only tracked-turn reject, got: {failure_reasons:?}"
     );
 
-    let non_host_start_turn = service
-        .start_turn_call_count()
-        .saturating_sub(service.keep_alive_start_turn_call_count());
+    let non_host_start_turn = service.non_host_start_turn_calls.load(Ordering::Acquire);
     assert_eq!(
         non_host_start_turn, baseline_non_host_start_turn,
         "peer-only external flow dispatch should avoid non-host start_turn calls"
@@ -52747,6 +52747,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                 }
             } else {
                 AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id: session_id.clone(),
                     result: "runtime terminal before commit".to_string(),
                     structured_output: None,
@@ -76681,6 +76682,8 @@ fn placement_fixture_uses_local_mob_authority_types() {
         "shared unit fixtures must not import the separately compiled self-dev-dependency",
     );
 }
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod host_outage_recovery;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod resume_bind_custody;
 mod retirement_isolation;

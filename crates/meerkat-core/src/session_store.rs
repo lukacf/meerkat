@@ -7600,6 +7600,7 @@ mod tests {
         let mut previous = Session::new();
         previous.push(Message::User(UserMessage::text("hello".to_string())));
         previous.push(Message::SystemNotice(SystemNoticeMessage {
+            runtime_origin: None,
             kind: SystemNoticeKind::McpPending,
             body: Some("connecting".to_string()),
             blocks: vec![SystemNoticeBlock::Mcp {

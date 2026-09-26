@@ -373,6 +373,7 @@ impl PromptInput {
             },
             content: ContentInput::Text(String::new()),
             typed_turn_appends: vec![ConversationAppend {
+                runtime_source: None,
                 role: ConversationAppendRole::SystemNotice,
                 content: CoreRenderable::SystemNotice {
                     kind: notice.kind,
@@ -1200,6 +1201,7 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
     };
 
     Some(ConversationAppend {
+        runtime_source: None,
         role,
         content,
         identity: None,
@@ -1300,6 +1302,7 @@ fn injected_context_appends(entries: &[ContentInput]) -> Vec<ConversationAppend>
     entries
         .iter()
         .map(|entry| ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::InjectedContext,
             content: match entry {
                 ContentInput::Blocks(blocks) => CoreRenderable::Blocks {
@@ -1528,6 +1531,7 @@ mod tests {
 
     fn typed_runtime_notice_append(detail: &str) -> ConversationAppend {
         ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::SystemNotice {
                 kind: meerkat_core::types::SystemNoticeKind::Generic,
@@ -2047,6 +2051,7 @@ mod tests {
         let projection = crate::ingress_types::RuntimeInputProjection {
             injected_context_appends: Vec::new(),
             append: Some(ConversationAppend {
+                runtime_source: None,
                 role: ConversationAppendRole::User,
                 content: CoreRenderable::Text {
                     text: "steer at the active turn".into(),
@@ -2077,6 +2082,7 @@ mod tests {
                 dispatch_context: Default::default(),
             }),
             turn_append: Some(ConversationAppend {
+                runtime_source: None,
                 role: ConversationAppendRole::User,
                 content: CoreRenderable::Text {
                     text: "WorkGraph attention projection".into(),
@@ -2430,6 +2436,7 @@ mod tests {
         let whitespace_projection = crate::ingress_types::RuntimeInputProjection {
             injected_context_appends: Vec::new(),
             append: Some(ConversationAppend {
+                runtime_source: None,
                 role: ConversationAppendRole::User,
                 content: CoreRenderable::Text { text: "  ".into() },
                 identity: None,
@@ -2445,6 +2452,7 @@ mod tests {
         let append_projection = crate::ingress_types::RuntimeInputProjection {
             injected_context_appends: Vec::new(),
             append: Some(ConversationAppend {
+                runtime_source: None,
                 role: ConversationAppendRole::SystemNotice,
                 content: CoreRenderable::Text {
                     text: String::new(),

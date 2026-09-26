@@ -1284,6 +1284,7 @@ pub enum TerminalCompletionCorrelation {
     #[default]
     Run,
     CheckpointInput,
+    AbandonedInput,
 }
 
 /// Typed observation of the live-session projection available to generated
@@ -6554,6 +6555,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 run_id: Option<RunId>,
                 terminal: Option<Enum<RuntimeCompletionTerminalObservation>>,
                 recipient_input_ids: Set<String>,
+                terminal_outcome: Option<Enum<TurnTerminalOutcome>>,
+                terminal_cause_kind: Option<Enum<TurnTerminalCauseKind>>,
+                requires_session_checkpoint: bool,
+                has_interaction_terminal_outbox: bool,
             },
             RecoverInputCompletionBoundary {
                 input_id: String,
@@ -6569,6 +6574,18 @@ macro_rules! meerkat_catalog_machine_dsl {
                 completion_input_ids_digest: String,
                 requires_session_checkpoint: bool,
                 recipient_input_ids: Set<String>,
+                finalization: Enum<RuntimeCompletionFinalizationObservation>,
+            },
+            ResolveAbandonedCompletionResult {
+                owner_input_id: String,
+                run_id: RunId,
+                candidate_digest: String,
+                completion_input_ids_digest: String,
+                recipient_input_ids: Set<String>,
+                terminal_outcome: Enum<TurnTerminalOutcome>,
+                terminal_cause_kind: Enum<TurnTerminalCauseKind>,
+                requires_session_checkpoint: bool,
+                has_interaction_terminal_outbox: bool,
                 finalization: Enum<RuntimeCompletionFinalizationObservation>,
             },
         }
@@ -7823,6 +7840,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                 result_class: Enum<RuntimeCompletionResultClass>,
                 cleanup_outcome: Enum<RuntimeCompletionObservedOutcome>,
             },
+            AbandonedCompletionResultResolved {
+                session_id: SessionId,
+                agent_runtime_id: Option<AgentRuntimeId>,
+                fence_token: Option<FenceToken>,
+                runtime_generation: Option<Generation>,
+                runtime_epoch_id: Option<RuntimeEpochId>,
+                run_id: RunId,
+                owner_input_id: String,
+                candidate_digest: String,
+                completion_input_ids_digest: String,
+                recipient_input_ids: Set<String>,
+                requires_session_checkpoint: bool,
+                result_class: Enum<RuntimeCompletionResultClass>,
+                cleanup_outcome: Enum<RuntimeCompletionObservedOutcome>,
+            },
         }
 
         // =====================================================================
@@ -7853,6 +7885,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RuntimeCompletionResultResolved => local seam SurfaceResultAlignment,
         disposition TerminalCompletionCorrelationClassified => local seam SurfaceResultAlignment,
         disposition CheckpointCompletionResultResolved => local seam SurfaceResultAlignment,
+        disposition AbandonedCompletionResultResolved => local seam SurfaceResultAlignment,
         disposition RuntimeCompletionCleanupResolved => local seam NoOwnerRealization,
         disposition RuntimeCompletionWaitFailureResolved => local seam SurfaceResultAlignment,
         disposition RuntimeOpsLifecycleDurabilityResolved => local seam SurfaceResultAlignment,
@@ -34046,7 +34079,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition ClassifyTerminalCompletionCorrelationCheckpoint {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_input_ids }
+            on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox }
             guard "session_registered" { self.session_id != None }
             guard "checkpoint_input" {
                 self.input_completion_boundaries.contains_key(owner_input_id)
@@ -34085,10 +34118,93 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // These already-abandoned inputs own an exact failed-attempt receipt.
+        // Resolving it cannot replace a later live run's terminal/correlation.
+        // A refused staging attempt never binds its inputs to that run. Those
+        // receipts retain ordinary run recovery, even if the input still has
+        // attribution to an older run it previously contributed to.
+        transition ClassifyTerminalCompletionCorrelationAbandoned {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox }
+            guard "session_registered" { self.session_id != None }
+            guard "abandoned_runtime_apply_failure" {
+                terminal == Some(RuntimeCompletionTerminalObservation::MachineTerminal)
+                && terminal_outcome == Some(TurnTerminalOutcome::Failed)
+                && terminal_cause_kind == Some(TurnTerminalCauseKind::RuntimeApplyFailure)
+                && !requires_session_checkpoint
+                && !has_interaction_terminal_outbox
+                && run_id != None
+                && self.input_phases.get(owner_input_id).get("value") == InputPhase::Abandoned
+                && self.input_run_associations.contains_key(owner_input_id)
+                && self.input_run_associations.get(owner_input_id).get("value") == run_id.get("value")
+            }
+            guard "exact_batch" {
+                recipient_input_ids.len() > 0
+                && recipient_input_ids.len() <= 256
+                && recipient_input_ids.contains(owner_input_id)
+            }
+            guard "all_recipients_abandoned_by_run" {
+                for_all(recipient in recipient_input_ids,
+                    self.input_phases.contains_key(recipient)
+                    && self.input_phases.get(recipient).get("value") == InputPhase::Abandoned
+                    && self.input_terminal_kind.contains_key(recipient)
+                    && self.input_terminal_kind.get(recipient).get("value") == InputTerminalKind::Abandoned
+                    && self.input_run_associations.contains_key(recipient)
+                    && self.input_run_associations.get(recipient).get("value") == run_id.get("value"))
+            }
+            update {}
+            to Idle
+            emit TerminalCompletionCorrelationClassified {
+                owner_input_id: owner_input_id,
+                run_id: run_id,
+                correlation: TerminalCompletionCorrelation::AbandonedInput
+            }
+        }
+
         transition ClassifyTerminalCompletionCorrelationRun {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped, Destroyed]
-            on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_input_ids }
+            on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox }
             guard "session_registered" { self.session_id != None }
+            guard "not_abandoned_input_completion" {
+                !(
+                terminal == Some(RuntimeCompletionTerminalObservation::MachineTerminal)
+                && terminal_outcome == Some(TurnTerminalOutcome::Failed)
+                && terminal_cause_kind == Some(TurnTerminalCauseKind::RuntimeApplyFailure)
+                && !requires_session_checkpoint
+                && !has_interaction_terminal_outbox
+                && run_id != None
+                && self.input_phases.get(owner_input_id).get("value") == InputPhase::Abandoned
+                && self.input_run_associations.contains_key(owner_input_id)
+                && self.input_run_associations.get(owner_input_id).get("value") == run_id.get("value")
+                )
+            }
+            guard "refused_staging_batch" {
+                // A refusal cannot mix unstaged recipients with recipients
+                // bound to this run, even when its owner has older attribution.
+                !(
+                    terminal == Some(RuntimeCompletionTerminalObservation::MachineTerminal)
+                    && terminal_outcome == Some(TurnTerminalOutcome::Failed)
+                    && terminal_cause_kind == Some(TurnTerminalCauseKind::RuntimeApplyFailure)
+                    && !requires_session_checkpoint
+                    && !has_interaction_terminal_outbox
+                    && run_id != None
+                    && self.input_phases.get(owner_input_id).get("value") == InputPhase::Abandoned
+                )
+                || (
+                    recipient_input_ids.len() > 0
+                    && recipient_input_ids.len() <= 256
+                    && recipient_input_ids.contains(owner_input_id)
+                    && for_all(recipient in recipient_input_ids,
+                        self.input_phases.contains_key(recipient)
+                        && self.input_phases.get(recipient).get("value") == InputPhase::Abandoned
+                        && self.input_terminal_kind.contains_key(recipient)
+                        && self.input_terminal_kind.get(recipient).get("value") == InputTerminalKind::Abandoned
+                        && (
+                            !self.input_run_associations.contains_key(recipient)
+                            || self.input_run_associations.get(recipient).get("value") != run_id.get("value")
+                        ))
+                )
+            }
             guard "ordinary_run_completion" {
                 // The apply boundary does not determine the terminal kind:
                 // a queued Steer run can produce a full result at a checkpoint.
@@ -34115,6 +34231,56 @@ macro_rules! meerkat_catalog_machine_dsl {
                 owner_input_id: owner_input_id,
                 run_id: run_id,
                 correlation: TerminalCompletionCorrelation::Run
+            }
+        }
+
+        transition ResolveAbandonedCompletionResultRuntimeApplyFailed {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ResolveAbandonedCompletionResult { owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization }
+            guard "session_registered" { self.session_id != None }
+            guard "exact_abandoned_batch" {
+                recipient_input_ids.len() > 0
+                && recipient_input_ids.len() <= 256
+                && recipient_input_ids.contains(owner_input_id)
+                && candidate_digest != ""
+                && completion_input_ids_digest != ""
+                && !requires_session_checkpoint
+                && !has_interaction_terminal_outbox
+            }
+            guard "exact_runtime_apply_failure" {
+                terminal_outcome == TurnTerminalOutcome::Failed
+                && terminal_cause_kind == TurnTerminalCauseKind::RuntimeApplyFailure
+            }
+            guard "all_recipients_abandoned_by_run" {
+                for_all(recipient in recipient_input_ids,
+                    self.input_phases.contains_key(recipient)
+                    && self.input_phases.get(recipient).get("value") == InputPhase::Abandoned
+                    && self.input_terminal_kind.contains_key(recipient)
+                    && self.input_terminal_kind.get(recipient).get("value") == InputTerminalKind::Abandoned
+                    && self.input_run_associations.contains_key(recipient)
+                    && self.input_run_associations.get(recipient).get("value") == run_id)
+            }
+            guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
+            update {
+                if self.runtime_completion_result_run_id == Some(run_id) {
+                    self.runtime_completion_result_resolved = true;
+                }
+            }
+            to Idle
+            emit AbandonedCompletionResultResolved {
+                session_id: self.session_id.get("value"),
+                agent_runtime_id: self.active_runtime_id,
+                fence_token: self.active_fence_token,
+                runtime_generation: self.active_runtime_generation,
+                runtime_epoch_id: self.active_runtime_epoch_id,
+                run_id: run_id,
+                owner_input_id: owner_input_id,
+                candidate_digest: candidate_digest,
+                completion_input_ids_digest: completion_input_ids_digest,
+                recipient_input_ids: recipient_input_ids,
+                requires_session_checkpoint: requires_session_checkpoint,
+                result_class: RuntimeCompletionResultClass::AbandonedWithError,
+                cleanup_outcome: RuntimeCompletionObservedOutcome::RuntimeApplyFailed
             }
         }
 
@@ -34225,7 +34391,10 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         pub mod command_capabilities {
-            use super::{InputLane, InputPhase, MeerkatMachineState, RunId};
+            use super::{
+                InputLane, InputPhase, MeerkatMachineState,
+                RecoveredPeerResponseTerminalApplyIntent, RunId,
+            };
 
             mod private {
                 #[derive(Debug, PartialEq, Eq)]
@@ -34339,9 +34508,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             ) -> Option<RuntimeLoopBatchPlan> {
                 let ordered = ordered_queued_lane_inputs(state, lane)?;
                 let first = ordered.first()?;
-                let selected = match source {
-                    RuntimeLoopBatchSource::Steer => select_steer_batch(state, &ordered, first),
-                    RuntimeLoopBatchSource::Queue => select_queue_batch(state, &ordered, first),
+                // AppendContentAndRun owns exactly one SystemNotice per run.
+                let selected = if state.input_runtime_peer_response_terminal_apply_intent.get(first)
+                    == Some(&RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun)
+                {
+                    vec![first.clone()]
+                } else {
+                    match source {
+                        RuntimeLoopBatchSource::Steer => select_steer_batch(state, &ordered, first),
+                        RuntimeLoopBatchSource::Queue => select_queue_batch(state, &ordered, first),
+                    }
                 };
                 if selected.is_empty() {
                     None
@@ -34361,6 +34537,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 source: RuntimeLoopBatchSource,
             ) -> Option<StageForRunPlan> {
                 if input_ids.is_empty() {
+                    return None;
+                }
+                // A separately requested stage must preserve terminal-response cardinality.
+                if input_ids.len() > 1 && input_ids.iter().any(|input_id| {
+                    state.input_runtime_peer_response_terminal_apply_intent.get(input_id)
+                        == Some(&RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun)
+                }) {
                     return None;
                 }
                 if state.current_run_id.as_ref() != Some(run_id) {

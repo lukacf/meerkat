@@ -12505,12 +12505,15 @@ pub enum TerminalCompletionCorrelation {
     Run,
     #[serde(rename = "CheckpointInput")]
     CheckpointInput,
+    #[serde(rename = "AbandonedInput")]
+    AbandonedInput,
 }
 impl TerminalCompletionCorrelation {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Run => "Run",
             Self::CheckpointInput => "CheckpointInput",
+            Self::AbandonedInput => "AbandonedInput",
         }
     }
 }
@@ -12520,6 +12523,7 @@ impl std::convert::TryFrom<&str> for TerminalCompletionCorrelation {
         match value {
             "Run" => Ok(Self::Run),
             "CheckpointInput" => Ok(Self::CheckpointInput),
+            "AbandonedInput" => Ok(Self::AbandonedInput),
             other => Err(format!(
                 "invalid TerminalCompletionCorrelation value `{other}`"
             )),
@@ -16269,6 +16273,10 @@ pub mod inputs {
         pub run_id: Option<RunId>,
         pub terminal: Option<RuntimeCompletionTerminalObservation>,
         pub recipient_input_ids: std::collections::BTreeSet<String>,
+        pub terminal_outcome: Option<TurnTerminalOutcome>,
+        pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
+        pub requires_session_checkpoint: bool,
+        pub has_interaction_terminal_outbox: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverInputCompletionBoundary {
@@ -16286,6 +16294,19 @@ pub mod inputs {
         pub completion_input_ids_digest: String,
         pub requires_session_checkpoint: bool,
         pub recipient_input_ids: std::collections::BTreeSet<String>,
+        pub finalization: RuntimeCompletionFinalizationObservation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveAbandonedCompletionResult {
+        pub owner_input_id: String,
+        pub run_id: RunId,
+        pub candidate_digest: String,
+        pub completion_input_ids_digest: String,
+        pub recipient_input_ids: std::collections::BTreeSet<String>,
+        pub terminal_outcome: TurnTerminalOutcome,
+        pub terminal_cause_kind: TurnTerminalCauseKind,
+        pub requires_session_checkpoint: bool,
+        pub has_interaction_terminal_outbox: bool,
         pub finalization: RuntimeCompletionFinalizationObservation,
     }
 }
@@ -16688,6 +16709,7 @@ pub enum Input {
     ClassifyTerminalCompletionCorrelation(inputs::ClassifyTerminalCompletionCorrelation),
     RecoverInputCompletionBoundary(inputs::RecoverInputCompletionBoundary),
     ResolveCheckpointCompletionResult(inputs::ResolveCheckpointCompletionResult),
+    ResolveAbandonedCompletionResult(inputs::ResolveAbandonedCompletionResult),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -17240,6 +17262,9 @@ impl Input {
             Self::ResolveCheckpointCompletionResult(_) => {
                 InputKind::ResolveCheckpointCompletionResult
             }
+            Self::ResolveAbandonedCompletionResult(_) => {
+                InputKind::ResolveAbandonedCompletionResult
+            }
         }
     }
 }
@@ -17629,6 +17654,7 @@ pub enum InputKind {
     ClassifyTerminalCompletionCorrelation,
     RecoverInputCompletionBoundary,
     ResolveCheckpointCompletionResult,
+    ResolveAbandonedCompletionResult,
 }
 
 pub mod signals {
@@ -19216,6 +19242,22 @@ pub mod effects {
         pub result_class: RuntimeCompletionResultClass,
         pub cleanup_outcome: RuntimeCompletionObservedOutcome,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbandonedCompletionResultResolved {
+        pub session_id: SessionId,
+        pub agent_runtime_id: Option<AgentRuntimeId>,
+        pub fence_token: Option<FenceToken>,
+        pub runtime_generation: Option<Generation>,
+        pub runtime_epoch_id: Option<RuntimeEpochId>,
+        pub run_id: RunId,
+        pub owner_input_id: String,
+        pub candidate_digest: String,
+        pub completion_input_ids_digest: String,
+        pub recipient_input_ids: std::collections::BTreeSet<String>,
+        pub requires_session_checkpoint: bool,
+        pub result_class: RuntimeCompletionResultClass,
+        pub cleanup_outcome: RuntimeCompletionObservedOutcome,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19471,6 +19513,7 @@ pub enum Effect {
     ),
     TerminalCompletionCorrelationClassified(effects::TerminalCompletionCorrelationClassified),
     CheckpointCompletionResultResolved(effects::CheckpointCompletionResultResolved),
+    AbandonedCompletionResultResolved(effects::AbandonedCompletionResultResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -19713,6 +19756,7 @@ pub enum EffectKind {
     RecoveredTerminalCompletionDeclaredUnrecoverable,
     TerminalCompletionCorrelationClassified,
     CheckpointCompletionResultResolved,
+    AbandonedCompletionResultResolved,
 }
 
 pub mod command_capabilities {
@@ -19976,9 +20020,18 @@ pub mod command_capabilities {
     ) -> Option<RuntimeLoopBatchPlan> {
         let ordered = ordered_queued_lane_inputs(state, lane)?;
         let first = ordered.first()?;
-        let selected = match source {
-            RuntimeLoopBatchSource::Steer => select_steer_batch(state, &ordered, first),
-            RuntimeLoopBatchSource::Queue => select_queue_batch(state, &ordered, first),
+        // AppendContentAndRun owns exactly one SystemNotice per run.
+        let selected = if state
+            .input_runtime_peer_response_terminal_apply_intent
+            .get(first)
+            == Some(&super::RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun)
+        {
+            vec![first.clone()]
+        } else {
+            match source {
+                RuntimeLoopBatchSource::Steer => select_steer_batch(state, &ordered, first),
+                RuntimeLoopBatchSource::Queue => select_queue_batch(state, &ordered, first),
+            }
         };
         if selected.is_empty() {
             None
@@ -19998,6 +20051,17 @@ pub mod command_capabilities {
         source: RuntimeLoopBatchSource,
     ) -> Option<StageForRunPlan> {
         if input_ids.is_empty() {
+            return None;
+        }
+        // A separately requested stage must preserve terminal-response cardinality.
+        if input_ids.len() > 1
+            && input_ids.iter().any(|input_id| {
+                state
+                    .input_runtime_peer_response_terminal_apply_intent
+                    .get(input_id)
+                    == Some(&super::RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun)
+            })
+        {
             return None;
         }
         if state.current_run_id.as_ref() != Some(run_id) {
@@ -22549,6 +22613,12 @@ pub enum TransitionId {
     ClassifyTerminalCompletionCorrelationCheckpointRunning,
     ClassifyTerminalCompletionCorrelationCheckpointRetired,
     ClassifyTerminalCompletionCorrelationCheckpointStopped,
+    ClassifyTerminalCompletionCorrelationAbandonedInitializing,
+    ClassifyTerminalCompletionCorrelationAbandonedIdle,
+    ClassifyTerminalCompletionCorrelationAbandonedAttached,
+    ClassifyTerminalCompletionCorrelationAbandonedRunning,
+    ClassifyTerminalCompletionCorrelationAbandonedRetired,
+    ClassifyTerminalCompletionCorrelationAbandonedStopped,
     ClassifyTerminalCompletionCorrelationRunInitializing,
     ClassifyTerminalCompletionCorrelationRunIdle,
     ClassifyTerminalCompletionCorrelationRunAttached,
@@ -22556,6 +22626,12 @@ pub enum TransitionId {
     ClassifyTerminalCompletionCorrelationRunRetired,
     ClassifyTerminalCompletionCorrelationRunStopped,
     ClassifyTerminalCompletionCorrelationRunDestroyed,
+    ResolveAbandonedCompletionResultRuntimeApplyFailedInitializing,
+    ResolveAbandonedCompletionResultRuntimeApplyFailedIdle,
+    ResolveAbandonedCompletionResultRuntimeApplyFailedAttached,
+    ResolveAbandonedCompletionResultRuntimeApplyFailedRunning,
+    ResolveAbandonedCompletionResultRuntimeApplyFailedRetired,
+    ResolveAbandonedCompletionResultRuntimeApplyFailedStopped,
     ResolveCheckpointCompletionResultSucceededInitializing,
     ResolveCheckpointCompletionResultSucceededIdle,
     ResolveCheckpointCompletionResultSucceededAttached,

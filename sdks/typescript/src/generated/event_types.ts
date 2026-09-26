@@ -39,6 +39,9 @@ import type {
   SkillName,
   SourceUuid,
   StructuredProviderExtension,
+  SystemNoticeBlock,
+  SystemNoticeDirection,
+  SystemNoticeKind,
   SystemNoticePeer,
   ToolConfigChangeDomain,
   ToolConfigChangeOperation,
@@ -166,6 +169,31 @@ export interface AssistantImageEvent {
   meta: ProviderImageMetadata;
   revised_prompt: RevisedPromptDisposition;
   width: number;
+}
+
+/**
+ * Opaque identifier for an input accepted by the runtime layer.
+ *
+ * Core passes this through in `contributing_input_ids` on receipts and events
+ * but NEVER interprets it. The runtime layer creates and manages these.
+ */
+export type InputId = string;
+
+/**
+ * Unique identifier for a session (UUID v7 for time-ordering)
+ */
+export type SessionId = string;
+
+/**
+ * Exact negative application fact projected from durable boundary join resolution.
+ *
+ * This does not terminalize an input or invalidate a later application in a
+ * different run. A canonical retained history row remains authoritative.
+ */
+export interface BoundaryAppendsDiscarded {
+  input_ids: InputId[];
+  run_id: RunId;
+  session_id: SessionId;
 }
 
 /**
@@ -454,14 +482,6 @@ export type HookFailureReason = {
 } | {
   reason_code: "observe_only_violation";
 };
-
-/**
- * Opaque identifier for an input accepted by the runtime layer.
- *
- * Core passes this through in `contributing_input_ids` on receipts and events
- * but NEVER interprets it. The runtime layer creates and manages these.
- */
-export type InputId = string;
 
 /**
  * Typed reason an interaction stream was abandoned before normal terminal
@@ -894,11 +914,6 @@ export type ServerToolKind = {
 };
 
 /**
- * Unique identifier for a session (UUID v7 for time-ordering)
- */
-export type SessionId = string;
-
-/**
  * Slug-validated capability identifier for skill requirements.
  *
  * Replaces the legacy `Vec<String>` capability lists with a typed
@@ -988,7 +1003,76 @@ export type StreamTruncationReason = {
  */
 export type StructuredOutputOrigin = "extraction_request" | "final_reply";
 
+/**
+ * Exact runtime application provenance for one canonical notice.
+ *
+ * Input and ordinal identify the logical append; session and run identify
+ * its application attempt. This record grants no execution or commit authority.
+ */
+export interface RuntimeAppendOrigin {
+  append_ordinal: number;
+  input_id: InputId;
+  run_id: RunId;
+  session_id: SessionId;
+}
+
+/**
+ * System notice message stored in the canonical transcript.
+ */
+export type SystemNoticeMessage = {
+  blocks?: SystemNoticeBlock[];
+  body?: string | null;
+  created_at?: string;
+  kind: SystemNoticeKind;
+  runtime_origin?: RuntimeAppendOrigin | null;
+};
+
 export type ToolCallArguments = Record<string, unknown>;
+
+/**
+ * Durable correlation identity for one delegated objective.
+ */
+export type ObjectiveId = string;
+
+/**
+ * Opaque identity of one live channel binding.
+ *
+ * A replacement channel receives a new value. Semantic observations retain
+ * this identity so a delayed callback from the old binding fails its fence.
+ */
+export type LiveChannelId = string;
+
+/**
+ * Opaque provenance identifier. Its namespace is data, not admission or
+ * temporal authority; only the runtime's generated registry grants a claim.
+ */
+export interface LiveContextObservationId {
+  channel_id: LiveChannelId;
+  namespace: string;
+  nonce: string;
+}
+
+export type RealtimeMessageOrigin = {
+  canonical_row_sequence: number;
+  channel_id: LiveChannelId;
+  context_observation_id?: LiveContextObservationId | null;
+  provider_item_ids?: string[];
+  session_id: SessionId;
+};
+
+/**
+ * Stable runtime identity for a transcript message.
+ *
+ * These fields are optional so older persisted sessions deserialize without a
+ * migration, while new runtime-backed turns can expose the same identity that
+ * live event streams carry.
+ */
+export type TranscriptMessageIdentity = {
+  interaction_id?: InteractionId | null;
+  objective_id?: ObjectiveId | null;
+  realtime_origin?: RealtimeMessageOrigin | null;
+  run_id?: RunId | null;
+};
 
 export interface SystemTime {
   nanos_since_epoch: number;
@@ -1127,11 +1211,13 @@ export interface UnmeasuredTurnUsageAccounting {
  * These events form the streaming API for consumers.
  */
 export type AgentEvent = {
+  identity?: TranscriptMessageIdentity;
   input: RunInput;
   session_id: SessionId;
   type: "run_started";
 } | {
   extraction_required?: boolean;
+  identity?: TranscriptMessageIdentity;
   result: string;
   session_id: SessionId;
   structured_output?: unknown;
@@ -1154,6 +1240,7 @@ export type AgentEvent = {
   type: "extraction_failed";
 } | {
   error_report: AgentErrorReport;
+  identity?: TranscriptMessageIdentity;
   session_id: SessionId;
   terminal_cause_kind?: TurnTerminalCauseKind | null;
   type: "run_failed";
@@ -1340,8 +1427,15 @@ export type AgentEvent = {
   append_count: number;
   content: ContentInput;
   input_id: InputId;
+  notices?: SystemNoticeMessage[];
   run_id: RunId;
+  transcript_start?: number | null;
   type: "boundary_append_applied";
+} | {
+  input_ids: InputId[];
+  run_id: RunId;
+  session_id: SessionId;
+  type: "boundary_appends_discarded";
 };
 
 /**

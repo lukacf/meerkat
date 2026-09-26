@@ -424,7 +424,7 @@ use meerkat::AgentEvent;
 
 match event {
     // Session lifecycle
-    AgentEvent::RunStarted { session_id, input } => {}
+    AgentEvent::RunStarted { session_id, input, .. } => {}
     AgentEvent::RunCompleted { session_id, result, structured_output, extraction_required, usage, .. } => {}
     AgentEvent::RunFailed { session_id, error_report, .. } => {}
 
@@ -496,13 +496,23 @@ match event {
     AgentEvent::TurnUsageAccountingUnmeasured { session_id, unmeasured } => {}
     AgentEvent::TurnUsageAccountingIdentityDisputed { session_id, dispute } => {}
 
-    // Durable steer: typed appends written into the RUNNING turn at a model
-    // boundary (reconcile with the run terminal; a discarded image redelivers)
-    AgentEvent::BoundaryAppendApplied { run_id, input_id, content, append_count } => {}
+    // Durable steer: mid-turn appends and exact discarded applications
+    AgentEvent::BoundaryAppendApplied {
+        run_id, input_id, content, append_count, notices, transcript_start, ..
+    } => {}
+    AgentEvent::BoundaryAppendsDiscarded(discarded) => {}
 
     _ => {} // non_exhaustive: forward compatibility
 }
 ```
+
+Reconcile `BoundaryAppendApplied` with `BoundaryAppendsDiscarded` for the same
+session, run, and input IDs, and with canonical transcript history. The discard
+payload carries `session_id`, `run_id`, and `input_ids`; the applied event can
+include canonical `notices` and the application-time `transcript_start` offset.
+A run terminal alone does not prove discard. A discard does not terminalize
+the input or invalidate its later application in another run; retained
+canonical history remains authoritative.
 </Accordion>
 
 ---

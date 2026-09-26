@@ -2047,6 +2047,23 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
 
+    async fn publish_boundary_appends_discarded(
+        &mut self,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), CoreExecutorError> {
+        let actor = self.publication_actor.as_ref().ok_or_else(|| {
+            CoreExecutorError::control_failed_runtime(format!(
+                "discard publication refused because executor for session {} has no exact service-minted actor witness",
+                self.session_id
+            ))
+        })?;
+        let witness = actor.witness()?;
+        self.service
+            .publish_boundary_appends_discarded_for_actor(&witness, discarded)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn publish_interaction_terminals(
         &mut self,
         events: &[AgentEvent],
@@ -2119,6 +2136,7 @@ mod typed_transcript_contract_tests {
             meerkat_core::lifecycle::run_primitive::StagedRunInput {
                 boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                 appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                    runtime_source: None,
                     role:
                         meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice,
                     content: CoreRenderable::SystemNotice {
@@ -2251,6 +2269,7 @@ mod tests {
             RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
                 boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                 appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                    runtime_source: None,
                     role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
                     content: CoreRenderable::Text {
                         text: "hello".to_string(),
@@ -3556,6 +3575,7 @@ mod tests {
                 RunPrimitive::StagedInput(StagedRunInput {
                     boundary: RunApplyBoundary::RunStart,
                     appends: vec![ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::User,
                         content: CoreRenderable::Text {
                             text: "trigger terminal LLM failure".to_string(),
@@ -3748,6 +3768,7 @@ mod tests {
                 RunPrimitive::StagedInput(StagedRunInput {
                     boundary: RunApplyBoundary::RunStart,
                     appends: vec![ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::User,
                         content: CoreRenderable::Text {
                             text: "normal turn after archive".to_string(),
@@ -3802,6 +3823,7 @@ mod tests {
                 RunPrimitive::StagedInput(StagedRunInput {
                     boundary: RunApplyBoundary::RunStart,
                     appends: vec![ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::User,
                         content: CoreRenderable::Text {
                             text: "normal turn for missing session".to_string(),
@@ -3867,6 +3889,7 @@ mod tests {
                 RunPrimitive::StagedInput(StagedRunInput {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     appends: vec![ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::SystemNotice,
                         content: CoreRenderable::Text {
                             text: "Peer terminal response from analyst-rt\nRequest ID: req-456\nStatus: completed\ndone".to_string(),
@@ -3933,6 +3956,7 @@ mod tests {
                 RunPrimitive::StagedInput(StagedRunInput {
                     boundary: RunApplyBoundary::Immediate,
                     appends: vec![ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::SystemNotice,
                         content: CoreRenderable::Text {
                             text: "Peer terminal response from analyst-rt\nRequest ID: req-invalid\nStatus: completed\ninvalid".to_string(),

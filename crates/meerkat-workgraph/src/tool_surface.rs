@@ -61,6 +61,7 @@ pub fn workgraph_attention_turn_append(
     projection: &AttentionContextProjection,
 ) -> ConversationAppend {
     ConversationAppend {
+        runtime_source: None,
         role: ConversationAppendRole::SystemNotice,
         identity: None,
         content: CoreRenderable::SystemNotice {

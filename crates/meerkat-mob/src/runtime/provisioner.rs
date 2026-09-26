@@ -9172,6 +9172,7 @@ mod tests {
                 2,
                 None,
                 meerkat_core::AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id,
                     result: "done".to_string(),
                     structured_output: None,
@@ -9223,6 +9224,7 @@ mod tests {
                 1,
                 None,
                 meerkat_core::AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id: session_id.clone(),
                     result: "committed primary output".to_string(),
                     structured_output: None,
@@ -9294,6 +9296,7 @@ mod tests {
                 1,
                 None,
                 meerkat_core::AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id: session_id.clone(),
                     result: "committed primary output".to_string(),
                     structured_output: None,
@@ -10432,6 +10435,22 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .abort_rejected_runtime_run_projections(&self.bridge_session_id)
             .await
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn publish_boundary_appends_discarded(
+        &mut self,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), CoreExecutorError> {
+        let actor_witness = self.state.actor_witness().ok_or_else(|| {
+            CoreExecutorError::control_failed_runtime(format!(
+                "runtime sidecar for session '{}' has no exact actor witness for boundary discard publication",
+                self.bridge_session_id,
+            ))
+        })?;
+        self.session_service
+            .publish_boundary_appends_discarded_for_actor(&actor_witness, discarded)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
     async fn publish_interaction_terminals(

@@ -5242,6 +5242,7 @@ mod tests {
             &current_member,
         );
         let stale_event = AgentEvent::RunCompleted {
+            identity: Default::default(),
             session_id: meerkat_core::types::SessionId::new(),
             result: "stale".to_string(),
             structured_output: None,

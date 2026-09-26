@@ -42,6 +42,9 @@ use std::sync::Mutex;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
+#[path = "live_meerkat_regression/optional_tool_contract.rs"]
+mod optional_tool_contract;
+
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================

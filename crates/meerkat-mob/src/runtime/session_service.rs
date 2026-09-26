@@ -1616,6 +1616,17 @@ pub trait MobSessionService:
             .await
     }
 
+    /// Project a persisted durable-join discard only through its exact actor.
+    async fn publish_boundary_appends_discarded_for_actor(
+        &self,
+        _actor_witness: &meerkat_session::LiveSessionActorWitness,
+        _discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "exact boundary discard publication requires actor-incarnation authority".to_string(),
+        ))
+    }
+
     /// Publish predecessor terminals only through one service-minted actor
     /// incarnation. Runtime retirement drops its mutation gate before calling
     /// arbitrary publication code, so resolving only by SessionId here would
@@ -1755,6 +1766,19 @@ impl<B> MobSessionService for meerkat_session::EphemeralSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    async fn publish_boundary_appends_discarded_for_actor(
+        &self,
+        actor_witness: &meerkat_session::LiveSessionActorWitness,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::publish_boundary_appends_discarded_for_actor(
+            self,
+            actor_witness,
+            discarded,
+        )
+        .await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         _source_session_id: &meerkat_core::SessionId,
@@ -2265,6 +2289,16 @@ impl<B> MobSessionService for meerkat_session::PersistentSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    async fn publish_boundary_appends_discarded_for_actor(
+        &self,
+        actor_witness: &meerkat_session::LiveSessionActorWitness,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::publish_boundary_appends_discarded_for_actor(
+            self, actor_witness, discarded,
+        ).await
+    }
+
     /// The persistent service owns durable session bodies, so it IS the
     /// capability source runtime (the impl lives at the bottom of this file).
     fn forked_participant_source_runtime(

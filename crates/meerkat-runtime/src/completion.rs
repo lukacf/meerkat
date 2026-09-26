@@ -846,6 +846,7 @@ pub(crate) struct AuthorizedRuntimeTerminalBundle {
     interaction_events: Vec<meerkat_core::event::AgentEvent>,
     terminal_completion_witness:
         crate::meerkat_machine::driver::InputTerminalCompletionAuthorizationWitness,
+    receipt_commit_input: Option<Box<crate::meerkat_machine::dsl::MeerkatMachineInput>>,
 }
 
 /// Non-constructible carrier for the exact public result selected by generated
@@ -856,9 +857,16 @@ pub(crate) struct AuthorizedInputTerminalCompletion {
     outcome: CompletionOutcome,
     finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
     witness: crate::meerkat_machine::driver::InputTerminalCompletionAuthorizationWitness,
+    receipt_commit_input: Option<Box<crate::meerkat_machine::dsl::MeerkatMachineInput>>,
 }
 
 impl AuthorizedInputTerminalCompletion {
+    pub(crate) fn receipt_commit_input(
+        &self,
+    ) -> Option<&crate::meerkat_machine::dsl::MeerkatMachineInput> {
+        self.receipt_commit_input.as_deref()
+    }
+
     pub(crate) fn outcome(&self) -> &CompletionOutcome {
         &self.outcome
     }
@@ -886,6 +894,7 @@ impl AuthorizedRuntimeTerminalBundle {
             outcome: self.outcome.clone(),
             finalization: self.finalization,
             witness: self.terminal_completion_witness.clone(),
+            receipt_commit_input: self.receipt_commit_input.clone(),
         }
     }
 }
@@ -907,6 +916,9 @@ pub(crate) fn authorize_runtime_terminal_bundle(
                 .to_string(),
         ));
     }
+    let receipt_commit_input = authority
+        .receipt_commit_input()
+        .map(|input| Box::new(input.clone()));
     let result_class = authority.result_class();
     let finalization = authority.finalization();
     if finalization == crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed
@@ -974,6 +986,7 @@ pub(crate) fn authorize_runtime_terminal_bundle(
         cleanup_observation,
         interaction_events,
         terminal_completion_witness,
+        receipt_commit_input,
     })
 }
 

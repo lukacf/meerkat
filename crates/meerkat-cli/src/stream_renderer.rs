@@ -1154,6 +1154,7 @@ mod tests {
 
     fn run_completed(extraction_required: bool) -> AgentEvent {
         AgentEvent::RunCompleted {
+            identity: Default::default(),
             session_id: meerkat_core::SessionId::new(),
             result: "done".into(),
             structured_output: None,
@@ -1171,6 +1172,7 @@ mod tests {
 
     fn run_started() -> AgentEvent {
         AgentEvent::RunStarted {
+            identity: Default::default(),
             session_id: meerkat_core::SessionId::new(),
             input: meerkat_core::RunInput::Content {
                 content: meerkat_core::ContentInput::Text("go".into()),

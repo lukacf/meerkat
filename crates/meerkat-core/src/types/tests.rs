@@ -155,6 +155,50 @@ fn test_message_json_schema() {
     assert!(json["results"].is_array());
 }
 
+#[cfg(feature = "schema")]
+#[test]
+fn test_system_notice_timestamp_schema_is_stable_and_optional() {
+    let schema = schema_for::<SystemNoticeMessage>();
+    let timestamp = &schema["properties"]["created_at"];
+    assert_eq!(timestamp["type"], "string");
+    assert!(timestamp.get("default").is_none());
+    assert!(
+        !schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "created_at")
+    );
+    assert_eq!(schema, schema_for::<SystemNoticeMessage>());
+
+    let before = message_timestamp_now();
+    let notice: SystemNoticeMessage = serde_json::from_value(json!({
+        "kind": "generic",
+        "body": "Legacy notice without a timestamp"
+    }))
+    .unwrap();
+    let after = message_timestamp_now();
+    assert!(notice.created_at >= before && notice.created_at <= after);
+
+    assert!(
+        serde_json::from_value::<SystemNoticeMessage>(json!({
+            "kind": "generic",
+            "created_at": null
+        }))
+        .is_err()
+    );
+    let timestamp = "2026-01-02T03:04:05Z";
+    let notice: SystemNoticeMessage = serde_json::from_value(json!({
+        "kind": "generic",
+        "created_at": timestamp
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(notice).unwrap()["created_at"],
+        timestamp
+    );
+}
+
 #[test]
 fn test_user_message_render_metadata_serialization() {
     let user = Message::User(UserMessage::text_with_render_metadata(

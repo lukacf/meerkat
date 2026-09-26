@@ -226,9 +226,22 @@ pub enum ConversationAppendRole {
     InjectedContext,
 }
 
+/// Runtime-local provenance assigned before per-input appends are flattened.
+///
+/// This seed is intentionally not serializable. Accepted input persistence
+/// reconstructs it before execution; caller JSON cannot mint runtime provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeAppendSource {
+    pub input_id: InputId,
+    pub append_ordinal: u64,
+}
+
 /// A single conversation append operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationAppend {
+    /// Runtime-only input/ordinal seed. It is not ordinary System adoption identity.
+    #[serde(skip)]
+    pub runtime_source: Option<RuntimeAppendSource>,
     /// The role for this message.
     pub role: ConversationAppendRole,
     /// The content to append.
@@ -1931,6 +1944,7 @@ mod tests {
     #[test]
     fn extract_content_from_staged_text() {
         let p = make_staged(vec![ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::User,
             identity: None,
             content: CoreRenderable::Text {
@@ -1946,6 +1960,7 @@ mod tests {
     #[test]
     fn extract_content_from_staged_blocks() {
         let p = make_staged(vec![ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::User,
             identity: None,
             content: CoreRenderable::Blocks {
@@ -1974,6 +1989,7 @@ mod tests {
     #[test]
     fn extract_content_single_text_block_collapses() {
         let p = make_staged(vec![ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::User,
             identity: None,
             content: CoreRenderable::Blocks {
@@ -1991,6 +2007,7 @@ mod tests {
     #[test]
     fn system_notice_append_does_not_leak_projection_into_operator_prompt() {
         let append = ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::SystemNotice,
             identity: None,
             content: CoreRenderable::SystemNotice {
@@ -2037,6 +2054,7 @@ mod tests {
             },
         };
         let p = make_staged(vec![ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::SystemNotice,
             identity: None,
             content: CoreRenderable::SystemNotice {
@@ -2085,6 +2103,7 @@ mod tests {
         let p = RunPrimitive::StagedInput(StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
             appends: vec![ConversationAppend {
+                runtime_source: None,
                 role: ConversationAppendRole::SystemNotice,
                 identity: None,
                 content: CoreRenderable::SystemNotice {
@@ -2113,6 +2132,7 @@ mod tests {
             boundary: RunApplyBoundary::RunStart,
             appends: vec![
                 ConversationAppend {
+                    runtime_source: None,
                     role: ConversationAppendRole::User,
                     identity: None,
                     content: CoreRenderable::Blocks {
@@ -2122,6 +2142,7 @@ mod tests {
                     },
                 },
                 ConversationAppend {
+                    runtime_source: None,
                     role: ConversationAppendRole::SystemNotice,
                     identity: None,
                     content: CoreRenderable::SystemNotice {
@@ -2274,9 +2295,37 @@ mod tests {
             serde_json::json!("injected_context"),
         );
     }
+
+    #[test]
+    fn runtime_append_source_is_clone_only_and_cannot_be_deserialized() {
+        let source = RuntimeAppendSource {
+            input_id: InputId::new(),
+            append_ordinal: 2,
+        };
+        let append = ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::text("notice"),
+            identity: None,
+            runtime_source: Some(source.clone()),
+        };
+        let mut wire = serde_json::to_value(append.clone()).unwrap();
+        assert_eq!(append.runtime_source, Some(source));
+        assert!(wire.get("runtime_source").is_none());
+        wire["runtime_source"] =
+            serde_json::json!({"input_id": InputId::new(), "append_ordinal": 999});
+        let decoded: ConversationAppend = serde_json::from_value(wire).unwrap();
+        assert!(
+            decoded.runtime_source.is_none(),
+            "caller JSON cannot supply runtime provenance"
+        );
+        assert_eq!(decoded.role, append.role);
+        assert_eq!(decoded.content, append.content);
+    }
+
     #[test]
     fn conversation_append_serde() {
         let append = ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::User,
             identity: None,
             content: CoreRenderable::Text {
@@ -2292,6 +2341,7 @@ mod tests {
         let staged = StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
             appends: vec![ConversationAppend {
+                runtime_source: None,
                 role: ConversationAppendRole::User,
                 identity: None,
                 content: CoreRenderable::Text {
@@ -2352,6 +2402,7 @@ mod tests {
     #[test]
     fn run_primitive_immediate_append_serde() {
         let primitive = RunPrimitive::ImmediateAppend(ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::SystemNotice,
             identity: None,
             content: CoreRenderable::Text {
@@ -2374,6 +2425,7 @@ mod tests {
         });
         assert_eq!(primitive.contributing_input_ids(), &ids);
         let immediate = RunPrimitive::ImmediateAppend(ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::User,
             identity: None,
             content: CoreRenderable::Text { text: "hi".into() },

@@ -492,6 +492,9 @@ function handleEvent(event: AgentEvent): string {
       // A durable steer's typed appends joined the RUNNING turn at a model
       // boundary: they are transcript rows of `run_id` now, not a new turn.
       return `${event.type}:${event.run_id}:${event.input_id}:${event.append_count}`;
+    case 'boundary_appends_discarded':
+      // Exact attempt IDs are retired only after durable requeue succeeds.
+      return `${event.type}:${event.session_id}:${event.run_id}:${event.input_ids.join(',')}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;

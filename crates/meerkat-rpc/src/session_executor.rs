@@ -882,6 +882,23 @@ impl CoreExecutor for SessionRuntimeExecutor {
         Ok(())
     }
 
+    async fn publish_boundary_appends_discarded(
+        &mut self,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), CoreExecutorError> {
+        let actor_witness = self.actor_witness_slot.witness().ok_or_else(|| {
+            CoreExecutorError::control_failed_runtime(format!(
+                "RPC runtime {} has no exact service actor publication authority",
+                self.session_id
+            ))
+        })?;
+        self.runtime
+            .persistent_service()
+            .publish_boundary_appends_discarded_for_actor(&actor_witness, discarded)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
     async fn publish_interaction_terminals(
         &mut self,
         events: &[AgentEvent],
@@ -1211,6 +1228,16 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 .notify_committed_live_context(&self.session_id);
         }
         Ok(())
+    }
+
+    async fn publish_boundary_appends_discarded(
+        &mut self,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .publish_boundary_appends_discarded_for_actor(&self.actor_witness, discarded)
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
     async fn publish_interaction_terminals(

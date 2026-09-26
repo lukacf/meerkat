@@ -295,6 +295,7 @@ impl TrajectoryBuilder {
             AgentEvent::RunStarted {
                 session_id: id,
                 input,
+                ..
             } => {
                 self.session_id = Some(id.to_string());
                 // A new run opens with no extraction phase in progress, even
@@ -880,6 +881,7 @@ mod tests {
                 1,
                 None,
                 AgentEvent::RunStarted {
+                    identity: Default::default(),
                     session_id: id.clone(),
                     input: RunInput::Content {
                         content: ContentInput::Text("hello".into()),
@@ -1008,6 +1010,7 @@ mod tests {
                 1,
                 None,
                 AgentEvent::RunStarted {
+                    identity: Default::default(),
                     session_id: id.clone(),
                     input: RunInput::Content {
                         content: ContentInput::Text("hello".into()),
@@ -1060,6 +1063,7 @@ mod tests {
                 6,
                 None,
                 AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id: run_session_id,
                     result: "partial".into(),
                     structured_output: None,
@@ -1212,6 +1216,7 @@ mod tests {
     ) -> Vec<EventEnvelope<AgentEvent>> {
         let mut events = vec![
             AgentEvent::RunStarted {
+                identity: Default::default(),
                 session_id: id.clone(),
                 input: RunInput::Content {
                     content: ContentInput::Text("review this".into()),
@@ -1250,6 +1255,7 @@ mod tests {
                 usage: Some(openai_usage(1200, 20, 1000, 4)),
             },
             AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id: id.clone(),
                 result: "looks fine".into(),
                 structured_output: None,
@@ -1415,6 +1421,7 @@ mod tests {
         let reply = r#"{"comments":[]}"#;
         let events = [
             AgentEvent::RunStarted {
+                identity: Default::default(),
                 session_id: id.clone(),
                 input: RunInput::Content {
                     content: ContentInput::Text("review this".into()),
@@ -1429,6 +1436,7 @@ mod tests {
                 usage: Some(openai_usage(1200, 20, 1000, 4)),
             },
             AgentEvent::RunCompleted {
+                identity: Default::default(),
                 session_id: id.clone(),
                 result: reply.into(),
                 structured_output: None,
@@ -1491,6 +1499,7 @@ mod tests {
                 &id,
                 3,
                 AgentEvent::RunCompleted {
+                    identity: Default::default(),
                     session_id: id.clone(),
                     result: "answer".into(),
                     structured_output: None,
@@ -1553,6 +1562,7 @@ mod tests {
 
     fn run_started(id: &SessionId, text: &str) -> AgentEvent {
         AgentEvent::RunStarted {
+            identity: Default::default(),
             session_id: id.clone(),
             input: RunInput::Content {
                 content: ContentInput::Text(text.into()),
@@ -1562,6 +1572,7 @@ mod tests {
 
     fn run_completed(id: &SessionId, result: &str, extraction_required: bool) -> AgentEvent {
         AgentEvent::RunCompleted {
+            identity: Default::default(),
             session_id: id.clone(),
             result: result.into(),
             structured_output: None,
@@ -1741,6 +1752,7 @@ mod tests {
             ];
             if fails_inside_extraction {
                 events.push(AgentEvent::RunFailed {
+                    identity: Default::default(),
                     session_id: id.clone(),
                     error_report: meerkat_core::AgentErrorReport::from_agent_error(
                         &meerkat_core::AgentError::InternalError(

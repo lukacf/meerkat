@@ -2424,7 +2424,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "ResolveRuntimeCompletionResult",
-                "ResolveCheckpointCompletionResult"
+                "ResolveCheckpointCompletionResult",
+                "ResolveAbandonedCompletionResult"
             ]
         );
         assert_eq!(
@@ -2432,6 +2433,7 @@ mod tests {
             vec![
                 EffectVariantId::parse("RuntimeCompletionResultResolved").unwrap(),
                 EffectVariantId::parse("CheckpointCompletionResultResolved").unwrap(),
+                EffectVariantId::parse("AbandonedCompletionResultResolved").unwrap(),
             ]
         );
         assert_eq!(
@@ -2442,7 +2444,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "RuntimeCompletionResultResolved",
-                "CheckpointCompletionResultResolved"
+                "CheckpointCompletionResultResolved",
+                "AbandonedCompletionResultResolved"
             ]
         );
         for closure in &completion_closure_plan.effect_closures {

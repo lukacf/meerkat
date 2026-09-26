@@ -338,19 +338,12 @@ async with session.stream("Summarize logs") as events:
 normalized accounting for that call; skip the row instead of treating it as
 zero.
 
-<Warning>
-The generated 0.8.24 inventory has eight event types with no handwritten
-parser case, so they arrive as `UnknownEvent`. Current Rust
-`server_tool_content` and `transcript_rewrite_audit_receipt_committed` are
-missing from that inventory and are rejected as `UNKNOWN_EVENT_TYPE`.
-`RunStarted`, `RunFailed`, `Retrying`, and `HookFailed` also retain legacy
-parser field shapes and can arrive malformed. See the reference page for the
-exact list; do not treat these SDK fallbacks as alternate wire contracts.
-
-In the current **0.8.40** SDK, `model_fallback_skipped`,
-`model_fallback_staged`, `model_fallback_committed`, and
-`model_fallback_target_failed` are also absent from the generated inventory.
-If a runtime emits one during model fallback, receiving it raises
-`UNKNOWN_EVENT_TYPE` rather than yielding `UnknownEvent`. Streams that do not
-receive these events are not affected by this particular gap.
-</Warning>
+<Note>
+Known event types without a handwritten parser class arrive as `UnknownEvent`
+with their wire payload preserved in `event.data`. This includes server-tool
+content, model-fallback, rewrite-receipt, and boundary-append events; they are
+in the generated inventory. `RunStarted.input` preserves the typed content or
+pending-tool-results input. The `Retrying` and `HookFailed` parsers still have
+payload-shape gaps. See the [event compatibility
+reference](/sdks/python/reference#event-compatibility-note) for exact behavior.
+</Note>

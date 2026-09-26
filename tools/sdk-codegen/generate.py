@@ -4811,6 +4811,10 @@ def _web_events_ts_type(root: dict[str, Any], schema: Any) -> str:
         return "unknown"
     if "const" in schema:
         return json.dumps(schema["const"])
+    if "$ref" in schema and ("properties" in schema or "required" in schema):
+        # Schemars attaches event discriminators beside a payload reference.
+        # Resolve that overlay while keeping ordinary named references intact.
+        schema = _merge_ref_variant(root, schema)
     if "$ref" in schema:
         ref_name = _resolve_schema_ref_name(str(schema["$ref"]))
         if ref_name:
@@ -5181,6 +5185,7 @@ def generate_web_event_types(schemas: dict, output_dir: Path) -> None:
     for variant in variants:
         if not isinstance(variant, dict):
             continue
+        variant = _merge_ref_variant(agent_schema, variant)
         properties = variant.get("properties", {})
         event_type = (
             properties.get("type", {}).get("const")

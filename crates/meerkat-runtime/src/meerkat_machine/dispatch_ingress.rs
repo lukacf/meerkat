@@ -406,17 +406,16 @@ impl MeerkatMachine {
     /// terminal before surfacing failure.
     pub(crate) async fn finalize_live_boundary_completion_owned(
         driver: &SharedDriver,
-        completions: &SharedCompletionRegistry,
+        completions: Option<&SharedCompletionRegistry>,
         input_id: InputId,
         run_id: RunId,
         finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
         finalization_error: Option<meerkat_core::TurnErrorMetadata>,
     ) -> Result<(), RuntimeDriverError> {
         let driver = Arc::clone(driver);
-        let completions = Arc::clone(completions);
+        let completions = completions.cloned();
         crate::tokio::spawn(async move {
             let mut driver_guard = driver.lock_owned().await;
-            let completion_guard = completions.lock_owned().await;
             let terminal_completion_witness = driver_guard
                 .input_terminal_completion_authorization_witness(std::slice::from_ref(&input_id))?;
             let authority =
@@ -444,8 +443,12 @@ impl MeerkatMachine {
                 .finalize_input_terminal_completion_batch(bundle.terminal_completion())
                 .await?;
             let _driver_guard = driver_guard;
-            let mut completion_guard = completion_guard;
-            completion_guard.resolve_authorized_runtime_terminal_bundle([input_id], bundle);
+            if let Some(completions) = completions {
+                completions
+                    .lock_owned()
+                    .await
+                    .resolve_authorized_runtime_terminal_bundle([input_id], bundle);
+            }
             Ok::<(), RuntimeDriverError>(())
         })
         .await
@@ -870,7 +873,7 @@ impl MeerkatMachine {
                 meerkat_core::TurnErrorMetadata::runtime_apply_failure(detail.clone());
             return match Self::finalize_live_boundary_completion_owned(
                 &witness.driver,
-                completions,
+                Some(completions),
                 input_id.clone(),
                 run_id,
                 crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
@@ -888,7 +891,7 @@ impl MeerkatMachine {
 
         Self::finalize_live_boundary_completion_owned(
             &witness.driver,
-            completions,
+            Some(completions),
             input_id.clone(),
             run_id,
             crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,

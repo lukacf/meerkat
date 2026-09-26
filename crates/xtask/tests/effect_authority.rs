@@ -32,6 +32,7 @@ trait CoreExecutor {
     fn abort_uncommitted_compaction_projections(&mut self) {}
     fn abort_rejected_run_projections(&mut self) {}
     fn publish_interaction_terminals(&mut self) {}
+    fn publish_boundary_appends_discarded(&mut self) {}
     fn cancel_after_boundary(&mut self) {}
     fn stop_runtime_executor(&mut self) {}
     fn cleanup_after_runtime_stop_terminalized(&mut self) {}
@@ -58,6 +59,7 @@ impl CoreExecutor for MachineManagedPostStopExecutor {
     fn abort_uncommitted_compaction_projections(&mut self) { self.inner.abort_uncommitted_compaction_projections() }
     fn abort_rejected_run_projections(&mut self) { self.inner.abort_rejected_run_projections() }
     fn publish_interaction_terminals(&mut self) { self.inner.publish_interaction_terminals() }
+    fn publish_boundary_appends_discarded(&mut self) { self.inner.publish_boundary_appends_discarded() }
     fn cancel_after_boundary(&mut self) { self.inner.cancel_after_boundary() }
     fn stop_runtime_executor(&mut self) {
         self.inner.stop_runtime_executor();

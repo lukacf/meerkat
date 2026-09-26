@@ -63,6 +63,7 @@ impl SessionAgent for MockAgent {
 
         let _ = event_tx
             .send(AgentEvent::RunStarted {
+                identity: Default::default(),
                 session_id: self.session_id.clone(),
                 input: meerkat_core::types::RunInput::Content {
                     content: meerkat_core::ContentInput::Text("test".to_string()),

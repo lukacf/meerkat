@@ -27,6 +27,7 @@ pub fn message_timestamp_now() -> MessageTimestamp {
 /// These fields are optional so older persisted sessions deserialize without a
 /// migration, while new runtime-backed turns can expose the same identity that
 /// live event streams carry.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct TranscriptMessageIdentity {
@@ -45,11 +46,13 @@ pub struct TranscriptMessageIdentity {
 
 /// Opaque provenance identifier. Its namespace is data, not admission or
 /// temporal authority; only the runtime's generated registry grants a claim.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LiveContextObservationId {
     namespace: String,
     channel_id: crate::LiveChannelId,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     nonce: uuid::Uuid,
 }
 
@@ -83,6 +86,7 @@ impl std::fmt::Display for LiveContextObservationId {
     }
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RealtimeMessageOrigin {
     session_id: crate::types::SessionId,
@@ -2647,19 +2651,45 @@ fn format_notice_payload(payload: &Value) -> String {
     serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string())
 }
 
+/// Exact runtime application provenance for one canonical notice.
+///
+/// Input and ordinal identify the logical append; session and run identify
+/// its application attempt. This record grants no execution or commit authority.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeAppendOrigin {
+    pub session_id: SessionId,
+    pub run_id: crate::lifecycle::RunId,
+    pub input_id: crate::lifecycle::InputId,
+    /// Zero-based position in the input's complete projected append list.
+    pub append_ordinal: u64,
+}
+
 /// System notice message stored in the canonical transcript.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SystemNoticeMessage {
     pub kind: SystemNoticeKind,
+    /// Runtime-owned provenance, absent for legacy and direct notices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_origin: Option<RuntimeAppendOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<SystemNoticeBlock>,
-    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", transform = omit_dynamic_timestamp_default)
+    )]
     #[serde(default = "message_timestamp_now")]
     pub created_at: MessageTimestamp,
+}
+
+#[cfg(feature = "schema")]
+fn omit_dynamic_timestamp_default(schema: &mut schemars::Schema) {
+    // The runtime fills an omitted timestamp with now, not a fixed schema value.
+    schema.remove("default");
 }
 
 impl SystemNoticeMessage {
@@ -2667,6 +2697,7 @@ impl SystemNoticeMessage {
         let body = body.into();
         Self {
             kind,
+            runtime_origin: None,
             body: if body.is_empty() { None } else { Some(body) },
             blocks: Vec::new(),
             created_at: message_timestamp_now(),
@@ -2680,6 +2711,7 @@ impl SystemNoticeMessage {
     ) -> Self {
         Self {
             kind,
+            runtime_origin: None,
             body,
             blocks,
             created_at: message_timestamp_now(),

@@ -1910,6 +1910,21 @@ pub trait CoreExecutor: Send + Sync {
         ))
     }
 
+    /// Publish the existing durable-join owner's exact discarded applications.
+    ///
+    /// Called only after any required requeue persistence succeeds. This is
+    /// a projection fact, not an interaction terminal or a new input decision.
+    /// Implementations must publish through the original live actor witness;
+    /// they must never resolve a predecessor SessionId to a successor actor.
+    async fn publish_boundary_appends_discarded(
+        &mut self,
+        _discarded: &crate::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), CoreExecutorError> {
+        Err(CoreExecutorError::Internal(
+            "exact boundary discard publication is unsupported by this executor".to_string(),
+        ))
+    }
+
     /// Request cancellation at the next cooperative boundary.
     async fn cancel_after_boundary(&mut self, reason: String) -> Result<(), CoreExecutorError>;
 

@@ -138,6 +138,12 @@ export interface BlobRef {
   media_type: string;
 }
 
+export interface BoundaryAppendsDiscarded {
+  input_ids: InputId[];
+  run_id: RunId;
+  session_id: SessionId;
+}
+
 export type BudgetType = "tokens" | "time" | "tool_calls";
 
 export type CacheBreakpointBoundary = {
@@ -335,6 +341,14 @@ export type InteractionId = string;
 
 export type InteractionStreamAbandonReason = "send_failed" | "admission_rejected" | "response_rejected" | "terminal_delivery_failed";
 
+export type LiveChannelId = string;
+
+export interface LiveContextObservationId {
+  channel_id: LiveChannelId;
+  namespace: string;
+  nonce: string;
+}
+
 export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response" | "authorization_route_changed" | "request_too_large" | "quota_exhausted" | "policy_stop";
 
 export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
@@ -381,6 +395,8 @@ export type ModelFallbackSkippedTarget = {
   identity: SessionLlmIdentity;
   reason: ModelFallbackSkipReason;
 };
+
+export type ObjectiveId = string;
 
 export type OpaqueProviderBody = string;
 
@@ -435,7 +451,17 @@ export type Provider = "anthropic" | "openai" | "gemini" | "self_hosted" | "othe
 
 export type ProviderImageMetadata = {
   provider: "not_emitted";
-} | OpenAiImageMetadata | GeminiImageMetadata;
+} | {
+  image_generation_call_id?: string | null;
+  response_id?: string | null;
+  target_model: string;
+  provider: "openai";
+} | {
+  continuity_ref?: string | null;
+  response_id?: string | null;
+  target_model: string;
+  provider: "gemini";
+};
 
 export type ProviderParamsOverride = {
   max_output_tokens?: number | null;
@@ -507,6 +533,14 @@ export interface ProviderTokenAccounting {
 
 export type RealmId = string;
 
+export type RealtimeMessageOrigin = {
+  canonical_row_sequence: number;
+  channel_id: LiveChannelId;
+  context_observation_id?: LiveContextObservationId | null;
+  provider_item_ids?: string[];
+  session_id: SessionId;
+};
+
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ReasoningMode = "emit" | "silent" | "off";
@@ -533,6 +567,13 @@ export type RunInput = {
 } | {
   kind: "pending_tool_results";
 };
+
+export interface RuntimeAppendOrigin {
+  append_ordinal: number;
+  input_id: InputId;
+  run_id: RunId;
+  session_id: SessionId;
+}
 
 export type SchemaCompat = "lossy" | "strict";
 
@@ -656,6 +697,72 @@ export interface StructuredProviderExtension {
   namespace: string;
 }
 
+export type SystemNoticeBlock = {
+  content?: ContentBlock[];
+  direction: SystemNoticeDirection;
+  intent?: string | null;
+  kind: CommsNoticeKind;
+  payload?: unknown;
+  peer?: SystemNoticePeer | null;
+  request_id?: string | null;
+  sender_taint?: SenderContentTaint | null;
+  status?: string | null;
+  summary?: string | null;
+  type: "comms";
+} | {
+  body?: string | null;
+  content?: ContentBlock[];
+  event_type: string;
+  payload?: unknown;
+  source: string;
+  summary?: string | null;
+  type: "external_event";
+} | {
+  payload: ToolConfigChangedPayload;
+  type: "tool_config";
+} | {
+  detail?: string | null;
+  operation?: ToolConfigChangeOperation | null;
+  pending_sources?: string[];
+  persisted?: boolean;
+  phase?: ExternalToolDeltaPhase | null;
+  server_id?: string | null;
+  type: "mcp";
+} | {
+  detail?: string | null;
+  display_name?: string | null;
+  job_id: string;
+  persisted?: boolean;
+  status: BackgroundJobTerminalStatus;
+  type: "background_job";
+} | {
+  binding?: string | null;
+  detail?: string | null;
+  state: string;
+  type: "auth";
+} | {
+  category: string;
+  detail?: string | null;
+  payload?: unknown;
+  type: "runtime_notice";
+} | {
+  payload?: unknown;
+  summary?: string | null;
+  type: "unknown";
+};
+
+export type SystemNoticeDirection = "incoming" | "outgoing" | "internal";
+
+export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required";
+
+export type SystemNoticeMessage = {
+  blocks?: SystemNoticeBlock[];
+  body?: string | null;
+  created_at?: string;
+  kind: SystemNoticeKind;
+  runtime_origin?: RuntimeAppendOrigin | null;
+};
+
 export type SystemNoticePeer = {
   display_name?: string | null;
   id: PeerId;
@@ -709,6 +816,13 @@ export interface TranscriptEditRewriteRange {
   end: number;
   start: number;
 }
+
+export type TranscriptMessageIdentity = {
+  interaction_id?: InteractionId | null;
+  objective_id?: ObjectiveId | null;
+  realtime_origin?: RealtimeMessageOrigin | null;
+  run_id?: RunId | null;
+};
 
 export type TranscriptRevisionBody = {
   created_at: SystemTime;
@@ -795,6 +909,7 @@ export type Usage = {
 };
 
 export interface RunStartedEvent {
+  identity?: TranscriptMessageIdentity;
   input: RunInput;
   session_id: SessionId;
   type: "run_started";
@@ -802,6 +917,7 @@ export interface RunStartedEvent {
 
 export interface RunCompletedEvent {
   extraction_required?: boolean;
+  identity?: TranscriptMessageIdentity;
   result: string;
   session_id: SessionId;
   structured_output?: unknown;
@@ -830,6 +946,7 @@ export interface ExtractionFailedEvent {
 
 export interface RunFailedEvent {
   error_report: AgentErrorReport;
+  identity?: TranscriptMessageIdentity;
   session_id: SessionId;
   terminal_cause_kind?: TurnTerminalCauseKind | null;
   type: "run_failed";
@@ -1098,8 +1215,17 @@ export interface BoundaryAppendAppliedEvent {
   append_count: number;
   content: ContentInput;
   input_id: InputId;
+  notices?: SystemNoticeMessage[];
   run_id: RunId;
+  transcript_start?: number | null;
   type: "boundary_append_applied";
+}
+
+export interface BoundaryAppendsDiscardedEvent {
+  input_ids: InputId[];
+  run_id: RunId;
+  session_id: SessionId;
+  type: "boundary_appends_discarded";
 }
 
 export const KNOWN_AGENT_EVENT_TYPES = [
@@ -1120,6 +1246,7 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "assistant_image_appended",
   "tool_call_requested",
   "tool_result_received",
+  "server_tool_content",
   "turn_completed",
   "turn_usage_accounting_unmeasured",
   "turn_usage_accounting_identity_disputed",
@@ -1131,6 +1258,10 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "compaction_failed",
   "budget_warning",
   "retrying",
+  "model_fallback_staged",
+  "model_fallback_committed",
+  "model_fallback_skipped",
+  "model_fallback_target_failed",
   "skills_resolved",
   "skill_resolution_failed",
   "interaction_complete",
@@ -1140,9 +1271,11 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "tool_config_changed",
   "background_job_completed",
   "transcript_rewrite_committed",
+  "transcript_rewrite_audit_receipt_committed",
   "peer_content_ingested",
   "provider_cache_breakpoints_discarded",
-  "boundary_append_applied"
+  "boundary_append_applied",
+  "boundary_appends_discarded"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
@@ -1193,4 +1326,5 @@ export type AgentEvent =
   ModelFallbackStagedEvent |
   ModelFallbackCommittedEvent |
   ModelFallbackTargetFailedEvent |
-  BoundaryAppendAppliedEvent;
+  BoundaryAppendAppliedEvent |
+  BoundaryAppendsDiscardedEvent;

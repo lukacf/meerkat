@@ -363,20 +363,25 @@ individual properties.
 - `Session` and `DeferredSession` are the canonical runtime-backed wrappers for session lifecycle.
 - `EventStream` yields typed events such as `text_delta`, `turn_completed`, and `tool_execution_completed`.
 
-`TurnCompletedEvent.usage` is optional; absent means unmeasured, not zero. The
-0.8.24 handwritten parser returns eight inventory-known event types as
-`UnknownEvent`, rejects current Rust `server_tool_content` and
-`transcript_rewrite_audit_receipt_committed` because the generated inventory
-omits them, and can preserve current `run_started`, `run_failed`, `retrying`,
-and `hook_failed` frames as `MalformedEvent` because their parser field shapes
-are stale. These are SDK/code-generation gaps.
+`TurnCompletedEvent.usage` is optional; absent means unmeasured, not zero.
+`RunStartedEvent.input` preserves the typed `RunInput`: content (text or blocks)
+or a `pending_tool_results` continuation without a fabricated prompt.
+`RunFailedEvent` accepts the current `error_report` and derives its display
+fields from that report.
 
-In the current **0.8.40** SDK, `model_fallback_skipped`,
-`model_fallback_staged`, `model_fallback_committed`, and
-`model_fallback_target_failed` are also absent from the generated inventory.
-If a runtime emits one during model fallback, receiving it raises
-`UNKNOWN_EVENT_TYPE` rather than yielding `UnknownEvent`. Streams that do not
-receive these events are not affected by this particular gap.
+Inventory-known events without a handwritten parser case arrive as
+`UnknownEvent`, preserving `event.type` and the complete wire payload as fields
+on the event. This includes `server_tool_content`, all four `model_fallback_*`
+events, `transcript_rewrite_audit_receipt_committed`, `boundary_append_applied`,
+and `boundary_appends_discarded`. A present type outside the generated inventory
+raises `MeerkatError` with code `UNKNOWN_EVENT_TYPE`.
+
+A missing type or malformed payload for a handwritten parser case arrives as
+`MalformedEvent` (`type: "malformed_event"`), with the original payload in
+`event.raw`. The `RetryingEvent` and `HookFailedEvent` parsers still expect
+legacy flat fields; current payloads carry `retry` and `reason`, respectively,
+so they take this malformed path. See the [event compatibility
+reference](../../docs/sdks/typescript/reference.mdx#typed-events) for details.
 
 Use the built-in client helpers directly for capability and skill flows:
 

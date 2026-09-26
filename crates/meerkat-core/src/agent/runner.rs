@@ -150,6 +150,7 @@ fn lower_skill_context_into_turn_appends(
         // authored sequence intact and add only the derived user context.
         // In particular, do not turn activation into a nonleading System.
         appends.push(ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::User,
             content: CoreRenderable::Blocks {
                 blocks: skill_blocks,
@@ -1530,7 +1531,18 @@ where
             peer_ingested_events,
         } = appends.into_parts();
         let append_count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
-        for message in messages {
+        let transcript_start = self.session.messages().len() as u64;
+        let mut notices = Vec::new();
+        for (append_ordinal, mut message) in messages.into_iter().enumerate() {
+            if let Message::SystemNotice(notice) = &mut message {
+                notice.runtime_origin = Some(crate::types::RuntimeAppendOrigin {
+                    session_id: self.session.id().clone(),
+                    run_id: run_id.clone(),
+                    input_id: input_id.clone(),
+                    append_ordinal: append_ordinal as u64,
+                });
+                notices.push(notice.clone());
+            }
             self.session.push(message);
         }
         let mut events = Vec::with_capacity(1 + peer_ingested_events.len());
@@ -1539,6 +1551,8 @@ where
             input_id,
             content: model_projection,
             append_count,
+            notices,
+            transcript_start: Some(transcript_start),
         });
         events.extend(peer_ingested_events);
         Some(events)
@@ -1699,6 +1713,16 @@ where
         Ok(())
     }
 
+    /// Project the same interaction/objective lineage used by the transcript,
+    /// with only the run id already selected by the execution authority.
+    fn live_run_identity(&self) -> TranscriptMessageIdentity {
+        let mut identity = self.active_transcript_identity.clone().unwrap_or_default();
+        // Before a run starts (for example a hook denial), retain its admitted
+        // interaction but do not claim a caller-supplied or previous run id.
+        identity.run_id = self.runtime_started_run_id.clone();
+        identity
+    }
+
     pub(super) async fn emit_run_completed_event(
         &self,
         result: &RunResult,
@@ -1710,6 +1734,7 @@ where
             event_tx,
             AgentEvent::RunCompleted {
                 session_id: self.session.id().clone(),
+                identity: self.live_run_identity(),
                 result: result.text.clone(),
                 structured_output: result.structured_output.clone(),
                 extraction_required,
@@ -1760,7 +1785,7 @@ where
         .await;
     }
 
-    async fn emit_run_started_event(
+    pub(super) async fn emit_run_started_event(
         &self,
         input: RunInput,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
@@ -1770,6 +1795,7 @@ where
             event_tx,
             AgentEvent::RunStarted {
                 session_id: self.session.id().clone(),
+                identity: self.live_run_identity(),
                 input,
             },
         )
@@ -1811,6 +1837,7 @@ where
             event_tx,
             AgentEvent::RunFailed {
                 session_id: self.session.id().clone(),
+                identity: self.live_run_identity(),
                 error_report,
                 terminal_cause_kind,
             },
@@ -2237,7 +2264,27 @@ where
                 self.session.push(Message::User(message));
             }
             ConversationAppendRole::SystemNotice => {
-                let notice = append.content.into_system_notice_message();
+                let mut notice = append.content.into_system_notice_message();
+                if let Some(source) = append.runtime_source {
+                    // Queued appends are written before run_loop caches its run.
+                    // The runtime has already started this exact primitive in
+                    // generated authority; neither caller metadata nor the
+                    // predecessor's cached run may name this application.
+                    let run_id = self
+                        .started_primitive_run_from_authority()?
+                        .ok_or_else(|| {
+                            AgentError::InternalError(
+                                "runtime notice source requires an already-started primitive"
+                                    .to_string(),
+                            )
+                        })?;
+                    notice.runtime_origin = Some(crate::types::RuntimeAppendOrigin {
+                        session_id: self.session.id().clone(),
+                        run_id,
+                        input_id: source.input_id,
+                        append_ordinal: source.append_ordinal,
+                    });
+                }
                 self.session.push(Message::SystemNotice(notice));
             }
             ConversationAppendRole::InjectedContext => {
@@ -2391,9 +2438,6 @@ where
             }
         }
 
-        self.emit_run_started_event(run_prompt_input.clone(), event_tx.as_ref())
-            .await;
-
         let mut dispatch_metadata = self.turn_tool_dispatch_metadata.clone();
         if let Some(objective_id) = self
             .active_transcript_identity
@@ -2419,7 +2463,9 @@ where
                 .clone()
                 .with_live_bridge_admission(admission);
         }
-        let loop_result = self.run_loop(event_tx.clone()).await;
+        let loop_result = self
+            .run_loop(Some(run_prompt_input), event_tx.clone())
+            .await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
         match loop_result {
@@ -2562,9 +2608,6 @@ where
             return Err(err);
         }
 
-        self.emit_run_started_event(prompt.clone(), event_tx.as_ref())
-            .await;
-
         let mut dispatch_metadata = self.turn_tool_dispatch_metadata.clone();
         if let Some(objective_id) = self
             .active_transcript_identity
@@ -2584,7 +2627,7 @@ where
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
             );
-        let loop_result = self.run_loop(event_tx.clone()).await;
+        let loop_result = self.run_loop(Some(prompt), event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
         match loop_result {
@@ -3490,6 +3533,7 @@ mod skill_activation_effect_tests {
 
     fn skill_append(role: ConversationAppendRole, content: CoreRenderable) -> ConversationAppend {
         ConversationAppend {
+            runtime_source: None,
             role,
             content,
             identity: None,
@@ -3998,20 +4042,34 @@ mod skill_activation_effect_tests {
     async fn runtime_transcript_identity_is_persisted_on_user_and_assistant_messages() {
         let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
         let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_beef));
+        let objective_id = crate::interaction::ObjectiveId(uuid::Uuid::from_u128(0xfeed_bee0));
+        let realtime_origin = crate::types::RealtimeMessageOrigin::new(
+            agent.session().id().clone(),
+            crate::LiveChannelId::new("lineage-test-channel"),
+            7,
+        )
+        .with_context_observation(crate::types::LiveContextObservationId::new(
+            "lineage-test",
+            crate::LiveChannelId::new("lineage-test-channel"),
+        ))
+        .with_provider_item_ids(vec![
+            "provider-item-a".to_string(),
+            "provider-item-b".to_string(),
+        ]);
         let transcript_identity = crate::types::TranscriptMessageIdentity {
-            realtime_origin: None,
+            realtime_origin: Some(realtime_origin),
             interaction_id: Some(interaction_id),
             run_id: None,
-            objective_id: None,
+            objective_id: Some(objective_id),
         };
 
-        let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
         agent
             .run_with_events_and_typed_turn_appends(
                 "Still here.".to_string().into(),
                 Vec::new(),
                 Vec::new(),
-                Some(transcript_identity),
+                Some(transcript_identity.clone()),
                 tx,
             )
             .await
@@ -4032,6 +4090,7 @@ mod skill_activation_effect_tests {
             "runtime-stamped interaction id must survive into persisted user history"
         );
         assert_eq!(user.identity.run_id, None);
+        assert_eq!(user.identity, transcript_identity);
 
         let assistant = agent
             .session()
@@ -4052,6 +4111,200 @@ mod skill_activation_effect_tests {
             assistant.identity.run_id.is_some(),
             "assistant transcript identity must include the concrete run id for exact run-scoped joins"
         );
+        assert_eq!(
+            assistant.identity.objective_id,
+            transcript_identity.objective_id
+        );
+        assert_eq!(
+            assistant.identity.realtime_origin,
+            transcript_identity.realtime_origin
+        );
+        let expected = serde_json::to_value(&assistant.identity).unwrap();
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(serde_json::to_value(event).unwrap());
+        }
+        let starts = events
+            .iter()
+            .filter(|event| event["type"] == "run_started")
+            .collect::<Vec<_>>();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0]["identity"], expected);
+        let complete = events
+            .iter()
+            .find(|event| event["type"] == "run_completed")
+            .unwrap();
+        assert_eq!(complete["identity"], expected);
+        let start_index = events
+            .iter()
+            .position(|event| event["type"] == "run_started")
+            .unwrap();
+        let first_output = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event["type"].as_str(),
+                    Some(
+                        "text_delta"
+                            | "text_complete"
+                            | "reasoning_delta"
+                            | "tool_call_requested"
+                            | "assistant_image_appended"
+                    )
+                )
+            })
+            .unwrap();
+        assert!(start_index < first_output);
+    }
+
+    #[tokio::test]
+    async fn peer_notice_ids_do_not_override_runtime_owned_run_lineage() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let owner_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_2001));
+        let notice_id = uuid::Uuid::from_u128(0xfeed_2002).to_string();
+        let comms: crate::types::SystemNoticeBlock = serde_json::from_value(serde_json::json!({
+            "type": "comms", "kind": "request", "direction": "incoming",
+            "request_id": notice_id, "content": [{"type": "text", "text": "same text"}],
+        }))
+        .unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "same text".into(),
+                vec![ConversationAppend {
+                    runtime_source: None,
+                    role: ConversationAppendRole::SystemNotice,
+                    content: CoreRenderable::SystemNotice {
+                        kind: crate::types::SystemNoticeKind::Comms,
+                        body: Some("Peer request".into()),
+                        blocks: vec![comms],
+                    },
+                    identity: None,
+                }],
+                Vec::new(),
+                Some(TranscriptMessageIdentity {
+                    interaction_id: Some(owner_id),
+                    ..Default::default()
+                }),
+                tx,
+            )
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(serde_json::to_value(event).unwrap());
+        }
+        let ingestion = events
+            .iter()
+            .find(|event| event["type"] == "peer_content_ingested")
+            .unwrap();
+        assert_eq!(ingestion["request_id"], notice_id);
+        let start = events
+            .iter()
+            .find(|event| event["type"] == "run_started")
+            .unwrap();
+        assert_eq!(start["identity"]["interaction_id"], owner_id.to_string());
+        assert_ne!(start["identity"]["interaction_id"], ingestion["request_id"]);
+        let assistant = agent
+            .session()
+            .messages()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::BlockAssistant(message) => Some(message),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            start["identity"],
+            serde_json::to_value(&assistant.identity).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn equal_content_in_distinct_interactions_retains_distinct_live_lineage() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let mut run_ids = Vec::new();
+        for value in [0xfeed_3001, 0xfeed_3002] {
+            let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(value));
+            let (tx, mut rx) = mpsc::channel(64);
+            agent
+                .run_with_events_and_typed_turn_appends(
+                    "same text".into(),
+                    Vec::new(),
+                    Vec::new(),
+                    Some(TranscriptMessageIdentity {
+                        interaction_id: Some(interaction_id),
+                        ..Default::default()
+                    }),
+                    tx,
+                )
+                .await
+                .unwrap();
+            let mut events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                events.push(serde_json::to_value(event).unwrap());
+            }
+            let start = events
+                .iter()
+                .find(|event| event["type"] == "run_started")
+                .unwrap();
+            let end = events
+                .iter()
+                .find(|event| event["type"] == "run_completed")
+                .unwrap();
+            assert_eq!(
+                start["identity"]["interaction_id"],
+                interaction_id.to_string()
+            );
+            assert_eq!(start["identity"], end["identity"]);
+            assert!(start["identity"]["run_id"].is_string());
+            run_ids.push(start["identity"]["run_id"].clone());
+        }
+        assert_ne!(run_ids[0], run_ids[1]);
+    }
+
+    #[tokio::test]
+    async fn run_failure_carries_the_exact_started_identity() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_4001));
+        let run_id = crate::lifecycle::RunId::new();
+        agent.set_active_transcript_identity(Some(TranscriptMessageIdentity {
+            interaction_id: Some(interaction_id),
+            ..Default::default()
+        }));
+        agent.runtime_started_run_id = Some(run_id.clone());
+        let (tx, mut rx) = mpsc::channel(8);
+        agent
+            .emit_run_failed_event(&AgentError::ConfigError("after start".into()), Some(&tx))
+            .await;
+        let event = serde_json::to_value(rx.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            event["identity"]["interaction_id"],
+            interaction_id.to_string()
+        );
+        assert_eq!(event["identity"]["run_id"], run_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn failure_before_execution_keeps_interaction_without_inventing_a_run() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_1001));
+        agent.set_active_transcript_identity(Some(TranscriptMessageIdentity {
+            interaction_id: Some(interaction_id),
+            run_id: Some(crate::lifecycle::RunId::new()),
+            ..Default::default()
+        }));
+        let (tx, mut rx) = mpsc::channel(8);
+        agent
+            .emit_run_failed_event(&AgentError::ConfigError("before start".into()), Some(&tx))
+            .await;
+        let event = serde_json::to_value(rx.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            event["identity"]["interaction_id"],
+            interaction_id.to_string()
+        );
+        assert!(event["identity"].get("run_id").is_none());
     }
 
     /// Ask-15 addendum pin: a committed turn's interaction id survives the
@@ -4382,6 +4635,7 @@ mod skill_activation_effect_tests {
             .run_with_events_and_typed_turn_appends(
                 "prompt".to_string().into(),
                 vec![crate::lifecycle::run_primitive::ConversationAppend {
+                    runtime_source: None,
                     role: ConversationAppendRole::User,
                     identity: None,
                     content: CoreRenderable::Text {
@@ -4432,12 +4686,14 @@ mod skill_activation_effect_tests {
             )
             .await;
 
-        let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_7001));
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
         let error = agent
             .run_with_events_and_typed_turn_appends(
                 "projected prompt".to_string().into(),
                 vec![
                     crate::lifecycle::run_primitive::ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::System,
                         identity: None,
                         content: CoreRenderable::Text {
@@ -4445,6 +4701,7 @@ mod skill_activation_effect_tests {
                         },
                     },
                     crate::lifecycle::run_primitive::ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::User,
                         identity: None,
                         content: CoreRenderable::Text {
@@ -4453,11 +4710,41 @@ mod skill_activation_effect_tests {
                     },
                 ],
                 Vec::new(),
-                None,
+                Some(TranscriptMessageIdentity {
+                    interaction_id: Some(interaction_id),
+                    ..Default::default()
+                }),
                 tx,
             )
             .await
             .expect_err("limited provider projection must fail typed");
+
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let (start_index, started_identity) = events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| match event {
+                AgentEvent::RunStarted { identity, .. } => Some((index, identity)),
+                _ => None,
+            })
+            .expect("the provider request follows a typed run boundary");
+        let (failure_index, failed_identity) = events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| match event {
+                AgentEvent::RunFailed { identity, .. } => Some((index, identity)),
+                _ => None,
+            })
+            .expect("the actual provider failure has a typed terminal");
+        assert_eq!(started_identity.interaction_id, Some(interaction_id));
+        assert!(started_identity.run_id.is_some());
+        assert_eq!(failed_identity, started_identity);
+        assert!(start_index < failure_index);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::RunCompleted { .. }))
+        );
 
         assert!(
             provider_called.load(Ordering::SeqCst),
@@ -4494,6 +4781,7 @@ mod skill_activation_effect_tests {
                 "projected prompt".to_string().into(),
                 vec![
                     crate::lifecycle::run_primitive::ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::InjectedContext,
                         identity: None,
                         content: CoreRenderable::Text {
@@ -4501,6 +4789,7 @@ mod skill_activation_effect_tests {
                         },
                     },
                     crate::lifecycle::run_primitive::ConversationAppend {
+                        runtime_source: None,
                         role: ConversationAppendRole::User,
                         identity: None,
                         content: CoreRenderable::Text {
@@ -4545,6 +4834,7 @@ mod skill_activation_effect_tests {
             .run_with_events_and_typed_turn_appends(
                 "prompt".to_string().into(),
                 vec![crate::lifecycle::run_primitive::ConversationAppend {
+                    runtime_source: None,
                     role: ConversationAppendRole::InjectedContext,
                     identity: None,
                     content: CoreRenderable::Json {
@@ -4564,9 +4854,117 @@ mod skill_activation_effect_tests {
     }
 
     #[tokio::test]
+    async fn queued_notice_retry_preserves_origin_and_stamps_actual_run() {
+        use crate::lifecycle::run_primitive::RuntimeAppendSource;
+        use crate::turn_execution_authority::{
+            ContentShape, TurnExecutionInput, TurnPrimitiveKind,
+        };
+
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let input_id = crate::lifecycle::InputId::new();
+        let old_run = crate::lifecycle::RunId::new();
+        let actual_run = crate::lifecycle::RunId::new();
+        agent.runtime_started_run_id = Some(old_run.clone());
+        agent.set_active_transcript_identity(Some(TranscriptMessageIdentity {
+            run_id: Some(old_run),
+            ..Default::default()
+        }));
+        agent
+            .apply_turn_input(TurnExecutionInput::StartConversationRun {
+                run_id: actual_run.clone(),
+                primitive_kind: TurnPrimitiveKind::ConversationTurn,
+                admitted_content_shape: ContentShape::Conversation,
+                vision_enabled: false,
+                image_tool_results_enabled: false,
+                max_extraction_retries: 0,
+            })
+            .expect("generated runtime starts this exact queued attempt");
+        let append = ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::text("  exact queued notice  "),
+            identity: None,
+            runtime_source: Some(RuntimeAppendSource {
+                input_id: input_id.clone(),
+                append_ordinal: 3,
+            }),
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "  exact queued notice  ".into(),
+                vec![append],
+                Vec::new(),
+                Some(TranscriptMessageIdentity {
+                    run_id: Some(crate::lifecycle::RunId::new()),
+                    ..Default::default()
+                }),
+                tx,
+            )
+            .await
+            .expect("queued runtime turn");
+        let notice = agent
+            .session()
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::SystemNotice(notice)
+                    if notice.body.as_deref() == Some("  exact queued notice  ") =>
+                {
+                    Some(notice)
+                }
+                _ => None,
+            })
+            .expect("queued notice persisted");
+        assert_eq!(
+            notice.runtime_origin,
+            Some(crate::types::RuntimeAppendOrigin {
+                session_id: agent.session().id().clone(),
+                run_id: actual_run,
+                input_id,
+                append_ordinal: 3,
+            })
+        );
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event, AgentEvent::BoundaryAppendApplied { .. }),
+                "ordinary queued delivery does not claim an in-turn apply event"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_notice_seed_requires_started_runtime_authority() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let before = agent.session().messages().to_vec();
+        let mut append = skill_append(
+            ConversationAppendRole::SystemNotice,
+            CoreRenderable::text("notice"),
+        );
+        append.runtime_source = Some(crate::lifecycle::run_primitive::RuntimeAppendSource {
+            input_id: crate::lifecycle::InputId::new(),
+            append_ordinal: 0,
+        });
+        agent
+            .push_transcript_append(append)
+            .expect_err("a seed cannot mint its own run");
+        assert_eq!(agent.session().messages(), before);
+        agent
+            .push_transcript_append(skill_append(
+                ConversationAppendRole::SystemNotice,
+                CoreRenderable::text("unseeded notice"),
+            ))
+            .expect("unseeded direct notices retain their current behavior");
+        let Message::SystemNotice(notice) = agent.session().messages().last().unwrap() else {
+            panic!("notice");
+        };
+        assert!(notice.runtime_origin.is_none());
+    }
+
+    #[tokio::test]
     async fn keyed_system_append_converges_mirrors_and_conflicts_fail_closed() {
         let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
         let keyed = |text: &str| crate::lifecycle::run_primitive::ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::System,
             identity: Some(crate::types::SystemMessageIdentity {
                 source: Some("released-0.8.10".to_string()),
@@ -4623,6 +5021,7 @@ mod skill_activation_effect_tests {
         for text in ["", " \t ", " \t "] {
             agent
                 .push_transcript_append(crate::lifecycle::run_primitive::ConversationAppend {
+                    runtime_source: None,
                     role: ConversationAppendRole::System,
                     identity: None,
                     content: CoreRenderable::Text {

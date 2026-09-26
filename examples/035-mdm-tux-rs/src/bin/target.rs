@@ -2432,6 +2432,7 @@ mod tests {
                             text: "terminal answer from analyst".to_string(),
                         },
                         identity: None,
+                        runtime_source: None,
                     },
                 ],
                 contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],

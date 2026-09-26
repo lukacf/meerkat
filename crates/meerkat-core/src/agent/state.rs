@@ -2641,7 +2641,7 @@ where
             })
     }
 
-    fn started_primitive_run_from_authority(&self) -> Result<Option<RunId>, AgentError> {
+    pub(super) fn started_primitive_run_from_authority(&self) -> Result<Option<RunId>, AgentError> {
         let snapshot = self.runtime_turn_authority_snapshot()?;
         if snapshot.turn_phase != TurnPhase::ApplyingPrimitive {
             return Ok(None);
@@ -4204,6 +4204,7 @@ where
     #[allow(unused_assignments)]
     pub(super) async fn run_loop(
         &mut self,
+        run_input: Option<crate::types::RunInput>,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
         let mut turn_count = 0u32;
@@ -4311,6 +4312,12 @@ where
             .transient_turn_context_state
             .begin_boundary_run(run_id.clone())
             .map_err(|error| AgentError::InternalError(error.to_string()))?;
+        // The existing authority has now selected the exact run id that will
+        // be stamped onto assistant history. Publish it before this run's
+        // model output, without minting an observability id.
+        if let Some(input) = run_input {
+            self.emit_run_started_event(input, event_tx.as_ref()).await;
+        }
         // PrimitiveApplied transitions ApplyingPrimitive -> CallingLlm
         let t = self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
             run_id: run_id.clone(),
@@ -11365,6 +11372,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
         let appends = vec![
             crate::lifecycle::run_primitive::ConversationAppend {
+                runtime_source: None,
                 role: crate::lifecycle::run_primitive::ConversationAppendRole::SystemNotice,
                 identity: None,
                 content: incoming_peer_comms_renderable(Some(
@@ -11372,6 +11380,7 @@ mod tests {
                 )),
             },
             crate::lifecycle::run_primitive::ConversationAppend {
+                runtime_source: None,
                 role: crate::lifecycle::run_primitive::ConversationAppendRole::User,
                 identity: None,
                 content: crate::lifecycle::run_primitive::CoreRenderable::text(
@@ -15980,10 +15989,57 @@ mod tests {
                 false,
             )])
             .expect("the callback result applies");
+        let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_5002));
+        agent.set_active_transcript_identity(Some(crate::types::TranscriptMessageIdentity {
+            interaction_id: Some(interaction_id),
+            ..Default::default()
+        }));
+        let (tx, mut rx) = mpsc::channel(64);
         let result = agent
-            .run_pending()
+            .run_pending_with_events(tx)
             .await
             .expect("the resumed run completes");
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let (start_index, started_identity) = events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| match event {
+                crate::event::AgentEvent::RunStarted { identity, .. } => Some((index, identity)),
+                _ => None,
+            })
+            .expect("the resumed run publishes its actual lineage");
+        let completed_identity = events
+            .iter()
+            .find_map(|event| match event {
+                crate::event::AgentEvent::RunCompleted { identity, .. } => Some(identity),
+                _ => None,
+            })
+            .expect("the resumed run publishes its completion identity");
+        assert_eq!(started_identity.interaction_id, Some(interaction_id));
+        assert!(started_identity.run_id.is_some());
+        assert_eq!(started_identity, completed_identity);
+        let first_output = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    crate::event::AgentEvent::TextDelta { .. }
+                        | crate::event::AgentEvent::TextComplete { .. }
+                )
+            })
+            .expect("the resumed model emits text");
+        assert!(start_index < first_output);
+        let persisted_identity = agent
+            .session()
+            .messages()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::BlockAssistant(assistant) => Some(&assistant.identity),
+                _ => None,
+            })
+            .expect("the resumed model appends assistant history");
+        assert_eq!(started_identity, persisted_identity);
 
         assert_eq!(
             result.request_usage.len(),
@@ -16188,8 +16244,16 @@ mod tests {
             .await
             .expect_err("the callback continuation should remain externally pending");
         assert!(matches!(error, AgentError::CallbackPending { .. }));
+        let initial_events = std::iter::from_fn(|| initial_rx.try_recv().ok()).collect::<Vec<_>>();
+        let original_run_id = initial_events
+            .iter()
+            .find_map(|event| match event {
+                crate::event::AgentEvent::RunStarted { identity, .. } => identity.run_id.clone(),
+                _ => None,
+            })
+            .expect("the suspended run publishes its actual run identity");
         assert!(
-            !std::iter::from_fn(|| initial_rx.try_recv().ok()).any(|event| matches!(
+            !initial_events.iter().any(|event| matches!(
                 event,
                 crate::event::AgentEvent::AssistantImageAppended { image }
                     if image.image_id
@@ -16376,6 +16440,12 @@ mod tests {
             "a wrong runtime execution kind must fail before staged image publication"
         );
 
+        let resume_interaction =
+            crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_5001));
+        agent.set_active_transcript_identity(Some(crate::types::TranscriptMessageIdentity {
+            interaction_id: Some(resume_interaction),
+            ..Default::default()
+        }));
         agent.set_runtime_execution_kind(Some(
             crate::lifecycle::RuntimeExecutionKind::ResumePending,
         ));
@@ -16393,8 +16463,64 @@ mod tests {
             1,
             "the callback continuation must not call the provider before its sibling barrier"
         );
+        let resume_events = std::iter::from_fn(|| resume_rx.try_recv().ok()).collect::<Vec<_>>();
+        let (resume_start_index, resume_identity) = resume_events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| match event {
+                crate::event::AgentEvent::RunStarted { identity, .. } => Some((index, identity)),
+                _ => None,
+            })
+            .expect("the resumed run publishes its exact lineage");
+        assert_eq!(resume_identity.interaction_id, Some(resume_interaction));
+        let resumed_run_id = resume_identity
+            .run_id
+            .as_ref()
+            .expect("actual resumed run id");
+        assert_ne!(resumed_run_id, &original_run_id);
+        let (failure_index, failure_identity) = resume_events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| match event {
+                crate::event::AgentEvent::RunFailed { identity, .. } => Some((index, identity)),
+                _ => None,
+            })
+            .expect("the rejected barrier emits a terminal for the resumed run");
+        assert_eq!(failure_identity, resume_identity);
+        assert!(resume_start_index < failure_index);
+        let image_index = resume_events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    crate::event::AgentEvent::AssistantImageAppended { .. }
+                )
+            })
+            .expect("the original callback image is published");
+        assert!(
+            image_index < resume_start_index,
+            "a prior batch's image publication must not be moved under the resumed run boundary"
+        );
+        let image_owner = agent
+            .session()
+            .messages()
+            .iter()
+            .find_map(|message| {
+                let Message::BlockAssistant(assistant) = message else {
+                    return None;
+                };
+                let owns_image = assistant.blocks.iter().any(|block| {
+                    matches!(block, AssistantBlock::Image { image_id, .. }
+                        if *image_id == crate::AssistantImageId::new(uuid::Uuid::from_u128(777)))
+                });
+                owns_image.then_some(&assistant.identity)
+            })
+            .expect("the committed callback image keeps its canonical message identity");
+        assert_eq!(image_owner.run_id.as_ref(), Some(&original_run_id));
+        assert_ne!(image_owner.run_id.as_ref(), Some(resumed_run_id));
         assert_eq!(
-            std::iter::from_fn(|| resume_rx.try_recv().ok())
+            resume_events
+                .iter()
                 .filter(|event| matches!(
                     event,
                     crate::event::AgentEvent::AssistantImageAppended { image }
@@ -18771,7 +18897,7 @@ mod tests {
         });
 
         // Must be Ok (Success via BudgetExhausted), not Err(TokenBudgetExceeded).
-        let result = agent.run_loop(None).await.expect(
+        let result = agent.run_loop(None, None).await.expect(
             "token budget exhaustion must route through BudgetExhausted (Success), \
              not escape as raw AgentError",
         );
@@ -18798,7 +18924,7 @@ mod tests {
             max_tool_calls: Some(0),
         });
 
-        let result = agent.run_loop(None).await.expect(
+        let result = agent.run_loop(None, None).await.expect(
             "tool-call budget exhaustion must route through BudgetExhausted (Success), \
              not escape as raw AgentError",
         );

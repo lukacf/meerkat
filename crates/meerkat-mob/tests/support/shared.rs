@@ -2285,6 +2285,8 @@ pub struct ScriptedHostPeer {
     pub endpoint: Arc<PeerCommsEndpoint>,
     /// Honest descriptor for this scripted host (fixed token, real address).
     pub descriptor: WireHostBindingDescriptor,
+    /// The fixed boot token returned by this scripted host's status replies.
+    pub runtime_incarnation: BridgeHostRuntimeIncarnation,
     fail_next_bind: Arc<AtomicBool>,
     garble_next_bind_reply: Arc<AtomicBool>,
     override_next_bind_peer_id: Arc<std::sync::Mutex<Option<String>>>,
@@ -3415,6 +3417,7 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
     ScriptedHostPeer {
         endpoint,
         descriptor,
+        runtime_incarnation: responder_runtime_incarnation,
         fail_next_bind,
         garble_next_bind_reply,
         override_next_bind_peer_id,

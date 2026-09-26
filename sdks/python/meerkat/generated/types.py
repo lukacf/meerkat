@@ -8292,6 +8292,7 @@ class WireSessionMessageSystemNotice(TypedDict, total=False):
     created_at: Required[str]
     kind: Required[SystemNoticeKind]
     role: Required[Literal['system_notice']]
+    runtime_origin: NotRequired[Optional[dict[str, Any]]]
 
 class WireSessionMessageUser(TypedDict, total=False):
     content: Required[WireContentInput]

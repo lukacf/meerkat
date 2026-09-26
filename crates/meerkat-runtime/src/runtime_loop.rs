@@ -23,6 +23,10 @@ use crate::input::input_prompt_text;
 use crate::input::runtime_input_projection_for_machine_batch;
 use crate::tokio;
 
+#[cfg(all(test, feature = "sqlite-store"))]
+#[path = "runtime_loop/terminal_completion_tests.rs"]
+mod terminal_completion_tests;
+
 /// Extract a prompt string from an `Input`.
 #[cfg(test)]
 pub(crate) fn input_to_prompt(input: &Input) -> String {
@@ -998,7 +1002,6 @@ enum OwnedRuntimeLoopTerminalization {
     Cancelled,
     Failed {
         failure: CoreApplyFailureCause,
-        completion_reason: String,
         /// What the machine does with this run's staged contributors. Only the
         /// loop knows whether the executor answered or whether the loop gave up
         /// on it while an `apply` it can no longer observe may still land.
@@ -1072,19 +1075,21 @@ async fn realize_runtime_loop_terminal_owned(
             ),
             OwnedRuntimeLoopTerminalization::Failed {
                 failure,
-                completion_reason,
                 contributor_disposition,
-            } => (
-                crate::meerkat_machine::fail_runtime_loop_run(
-                    &driver,
-                    run_id.clone(),
-                    failure,
-                    contributor_disposition,
+            } => {
+                let completion_reason = failure.message().to_owned();
+                (
+                    crate::meerkat_machine::fail_runtime_loop_run(
+                        &driver,
+                        run_id.clone(),
+                        failure,
+                        contributor_disposition,
+                    )
+                    .await
+                    .map_err(|error| error.to_string()),
+                    completion_reason,
                 )
-                .await
-                .map_err(|error| error.to_string()),
-                completion_reason,
-            ),
+            }
         };
 
         let outcome = match realization {
@@ -2080,14 +2085,7 @@ async fn recover_committed_runtime_projections_before_teardown(
                 ),
             });
         }
-        let completions = recovery.completions.as_ref().ok_or_else(|| {
-            crate::RuntimeDriverError::RecoveryCorruption {
-                reason: format!(
-                    "persisted non-directed run {} lost its completion registry",
-                    pending.run_id
-                ),
-            }
-        })?;
+        let completions = recovery.completions.as_ref();
         let failed_execution_attempt = pending.terminal.is_none()
             && pending.terminal_observation
                 == crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::MachineTerminal
@@ -2123,7 +2121,9 @@ async fn recover_committed_runtime_projections_before_teardown(
                 &pending.run_id,
                 reason,
             )
-            .await;
+            .await.map_err(|error| crate::RuntimeDriverError::Internal(format!(
+                "failed-attempt completion recovery remains pending: {error}"
+            )))?;
         } else {
             let batch_key = crate::input_state::InteractionTerminalBatchKey::Run {
                 run_id: pending.run_id.clone(),
@@ -2131,7 +2131,7 @@ async fn recover_committed_runtime_projections_before_teardown(
             publish_authorized_runtime_terminal_batch(
                 driver,
                 &post_commit_hooks,
-                Some(completions),
+                completions,
                 Some(authority_guard.take().ok_or_else(|| {
                     crate::RuntimeDriverError::RecoveryCorruption {
                         reason: format!(
@@ -2186,190 +2186,166 @@ fn resolve_process_local_failed_run_waiters(
     input_ids: Vec<InputId>,
     run_id: &RunId,
     reason: String,
-) {
+) -> Result<(), crate::completion::CompletionWaitError> {
     let finalization = machine_failed_completion_finalization(driver);
-    let authorized = machine_terminal_completion_error(driver, reason)
-        .and_then(|error_metadata| {
-            crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
-                driver,
-                Some(run_id),
-                crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::MachineTerminal,
-                finalization,
-            )
-            .map(|authority| (authority, error_metadata))
-        })
-        .map_err(|error| {
-            crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
-                "runtime process-local completion authority missing: {error}"
-            ))
-        });
-    match authorized {
-        Ok((authority, error_metadata)) => {
-            completions.resolve_process_local_runtime_completion_authorized(
-                input_ids,
-                None,
-                authority,
-                error_metadata,
-            );
-        }
-        Err(error) => completions.fail_inputs(input_ids, error),
-    }
+    let error_metadata = machine_terminal_completion_error(driver, reason).map_err(|error| {
+        crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+            "runtime process-local completion metadata missing: {error}"
+        ))
+    })?;
+    let authority = crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
+        driver,
+        Some(run_id),
+        crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::MachineTerminal,
+        finalization,
+    )
+    .map_err(|error| {
+        crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+            "runtime process-local completion authority missing: {error}"
+        ))
+    })?;
+    completions.resolve_process_local_runtime_completion_authorized(
+        input_ids,
+        None,
+        authority,
+        error_metadata,
+    );
+    Ok(())
 }
 
 async fn resolve_machine_terminal_completion_waiters_under_authority(
     driver: &crate::meerkat_machine::SharedDriver,
-    completions: &crate::meerkat_machine::SharedCompletionRegistry,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
     authority_guard: crate::tokio::sync::OwnedMutexGuard<()>,
     teardown_slot: &RuntimeLoopTeardownSlot,
     input_ids: &[InputId],
     run_id: &RunId,
     reason: String,
-) {
-    let owned_input_ids = input_ids.to_vec();
-    let owned_run_id = run_id.clone();
+) -> Result<(), crate::completion::CompletionWaitError> {
     let _authority_guard = authority_guard;
     let mut driver_guard = driver.lock().await;
-    let (durable_input_ids, process_local_input_ids, already_finalized) = match driver_guard
-        .input_terminal_completion_batch_for_run(&owned_run_id, &owned_input_ids)
-    {
-        Ok(Some((durable_input_ids, already_finalized))) => {
+    let durable_batch = driver_guard
+        .input_terminal_completion_batch_for_run(run_id, input_ids)
+        .map_err(|error| {
+            crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                "terminal completion receipt recovery failed: {error}"
+            ))
+        })?;
+    let (durable_input_ids, process_local_input_ids, already_finalized) = match durable_batch {
+        Some((durable_input_ids, already_finalized)) => {
             let durable = durable_input_ids
                 .iter()
                 .collect::<std::collections::HashSet<_>>();
-            let process_local_input_ids = owned_input_ids
+            let local = input_ids
                 .iter()
-                .filter(|input_id| !durable.contains(input_id))
+                .filter(|id| !durable.contains(id))
                 .cloned()
                 .collect::<Vec<_>>();
-            (
-                Some(durable_input_ids),
-                process_local_input_ids,
-                already_finalized,
-            )
+            (Some(durable_input_ids), local, already_finalized)
         }
-        Ok(None) => (None, owned_input_ids.clone(), false),
-        Err(error) => {
-            let _driver_guard = driver_guard;
-            let mut completion_guard = completions.lock().await;
-            completion_guard.fail_inputs(
-                owned_input_ids,
-                crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
-                    "terminal completion receipt recovery failed: {error}"
-                )),
-            );
-            teardown_slot.clear_pending_nondirected_run_terminal(&owned_run_id);
-            return;
-        }
+        None => (None, input_ids.to_vec(), false),
     };
-    if already_finalized {
-        // Directed publication already consumed the durable batch
-        // authority and delivered its durable non-directed recipients.
-        // Any remaining IDs were requeued and therefore have no receipt;
-        // resolve only their process-local attempt observers.
-        if process_local_input_ids.is_empty() {
-            teardown_slot.clear_pending_nondirected_run_terminal(&owned_run_id);
-            return;
-        }
-        let mut completion_guard = completions.lock().await;
-        resolve_process_local_failed_run_waiters(
-            &driver_guard,
-            &mut completion_guard,
-            process_local_input_ids,
-            &owned_run_id,
-            reason,
-        );
-        teardown_slot.clear_pending_nondirected_run_terminal(&owned_run_id);
-        return;
-    }
-    let Some(durable_input_ids) = durable_input_ids else {
-        // A recoverable failed run can requeue every contributor. RunFailed
-        // is already durable here, but there is intentionally no input
-        // terminal receipt. Resolve the exact attempt observers from
-        // generated authority without changing the requeued input rows.
-        let mut completion_guard = completions.lock().await;
-        resolve_process_local_failed_run_waiters(
-            &driver_guard,
-            &mut completion_guard,
-            process_local_input_ids,
-            &owned_run_id,
-            reason,
-        );
-        teardown_slot.clear_pending_nondirected_run_terminal(&owned_run_id);
-        return;
-    };
-    let terminal_completion_witness =
-        match driver_guard.input_terminal_completion_authorization_witness(&durable_input_ids) {
-            Ok(witness) => witness,
-            Err(error) => {
-                let _driver_guard = driver_guard;
-                let mut completion_guard = completions.lock().await;
-                completion_guard.fail_inputs(
-                    owned_input_ids,
-                    crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
-                        "terminal completion batch authorization failed: {error}"
-                    )),
-                );
-                teardown_slot.clear_pending_nondirected_run_terminal(&owned_run_id);
-                return;
-            }
-        };
-    let finalization = machine_failed_completion_finalization(&driver_guard);
-    let bundle = machine_terminal_completion_error(&driver_guard, reason)
-        .and_then(|error_metadata| {
-            crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
+    if already_finalized || durable_input_ids.is_none() {
+        // Requeued contributors have no durable input-terminal receipt. Only
+        // their process-local attempt observers need the run result.
+        if !process_local_input_ids.is_empty()
+            && let Some(completions) = completions
+        {
+            resolve_process_local_failed_run_waiters(
                 &driver_guard,
-                Some(&owned_run_id),
-                crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::MachineTerminal,
-                finalization,
+                &mut *completions.lock().await,
+                process_local_input_ids,
+                run_id,
+                reason,
+            )?;
+        }
+        teardown_slot.clear_pending_nondirected_run_terminal(run_id);
+        return Ok(());
+    }
+    let durable_input_ids = durable_input_ids.unwrap_or_default();
+    let witness = driver_guard
+        .input_terminal_completion_authorization_witness(&durable_input_ids)
+        .map_err(|error| {
+            crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                "terminal completion batch authorization failed: {error}"
+            ))
+        })?;
+    let receipt_error =
+        crate::meerkat_machine::driver::machine_abandoned_completion_error_for_batch(
+            &driver_guard,
+            &witness,
+        )
+        .map_err(|error| {
+            crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                "runtime abandoned completion metadata missing: {error}"
+            ))
+        })?;
+    let (finalization, error_metadata) =
+        if let Some(receipt_error) = receipt_error {
+            if receipt_error.detail.as_deref() != Some(reason.as_str()) {
+                return Err(crate::completion::CompletionWaitError::AuthorityUnavailable(
+                "runtime retry detail differs from its exact abandoned completion candidate"
+                    .to_string(),
+            ));
+            }
+            // The generated input-owned receipt has no session checkpoint. Its
+            // canonical failure metadata survives independently of later run facts.
+            (
+                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+                Some(receipt_error),
             )
-            .map(|authority| (authority, error_metadata))
-        })
+        } else {
+            (
+                machine_failed_completion_finalization(&driver_guard),
+                machine_terminal_completion_error(&driver_guard, reason).map_err(|error| {
+                    crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                        "runtime terminal completion metadata missing: {error}"
+                    ))
+                })?,
+            )
+        };
+    let authority =
+        crate::meerkat_machine::driver::machine_resolve_runtime_completion_result_for_batch(
+            &driver_guard,
+            &witness,
+            Some(run_id),
+            crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::MachineTerminal,
+            finalization,
+        )
         .map_err(|error| {
             crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
                 "runtime terminal completion authority missing: {error}"
             ))
-        })
-        .and_then(|(authority, error_metadata)| {
-            let terminal = error_metadata
-                .clone()
-                .map(|error| CoreApplyTerminal::MachineTerminalFailure { error });
-            crate::completion::authorize_runtime_terminal_bundle(
-                &[],
-                terminal.as_ref(),
-                authority,
-                terminal_completion_witness,
-                error_metadata,
-                None,
-            )
-        });
-    let bundle = match bundle {
-        Ok(bundle) => match driver_guard
-            .finalize_input_terminal_completion_batch(bundle.terminal_completion())
+        })?;
+    let terminal = error_metadata
+        .clone()
+        .map(|error| CoreApplyTerminal::MachineTerminalFailure { error });
+    let bundle = crate::completion::authorize_runtime_terminal_bundle(
+        &[],
+        terminal.as_ref(),
+        authority,
+        witness,
+        error_metadata,
+        None,
+    )?;
+    driver_guard
+        .finalize_input_terminal_completion_batch(bundle.terminal_completion())
+        .await
+        .map_err(|error| {
+            crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                "terminal completion receipt persistence failed: {error}"
+            ))
+        })?;
+    // Retain the exact carrier on every error above. A waiter registry is an
+    // optional delivery projection, never authority to skip the durable receipt.
+    if let Some(completions) = completions {
+        completions
+            .lock()
             .await
-        {
-            Ok(()) => Ok(bundle),
-            Err(error) => Err(
-                crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
-                    "terminal completion receipt persistence failed: {error}"
-                )),
-            ),
-        },
-        Err(error) => Err(error),
-    };
-    let _driver_guard = driver_guard;
-    let completion_guard = completions.lock().await;
-    let mut completion_guard = completion_guard;
-    match bundle {
-        Ok(bundle) => {
-            // The generated result belongs to the whole failed run. Persist
-            // its terminal receipt only for the machine-terminal subset,
-            // then deliver the same non-cloneable decision to every
-            // non-directed waiter, including requeued contributors.
-            completion_guard.resolve_authorized_runtime_terminal_bundle(owned_input_ids, bundle);
-        }
-        Err(error) => completion_guard.fail_inputs(owned_input_ids, error),
+            .resolve_authorized_runtime_terminal_bundle(input_ids.to_vec(), bundle);
     }
-    teardown_slot.clear_pending_nondirected_run_terminal(&owned_run_id);
+    teardown_slot.clear_pending_nondirected_run_terminal(run_id);
+    Ok(())
 }
 
 async fn resolve_machine_terminal_completion_waiters(
@@ -2380,33 +2356,30 @@ async fn resolve_machine_terminal_completion_waiters(
     input_ids: &[InputId],
     run_id: &RunId,
     reason: String,
-) {
-    let Some(completions) = completions else {
-        return;
-    };
+) -> Result<(), crate::completion::CompletionWaitError> {
     let driver = std::sync::Arc::clone(driver);
-    let completions = std::sync::Arc::clone(completions);
+    let completions = completions.cloned();
     let teardown_slot = std::sync::Arc::clone(teardown_slot);
     let owned_input_ids = input_ids.to_vec();
     let owned_run_id = run_id.clone();
-    let handoff = tokio::spawn(async move {
+    tokio::spawn(async move {
         resolve_machine_terminal_completion_waiters_under_authority(
             &driver,
-            &completions,
+            completions.as_ref(),
             authority_guard,
             &teardown_slot,
             &owned_input_ids,
             &owned_run_id,
             reason,
         )
-        .await;
-    });
-    if let Err(error) = handoff.await {
-        tracing::error!(
-            %error,
-            "owned machine-terminal completion waiter handoff failed"
-        );
-    }
+        .await
+    })
+    .await
+    .map_err(|error| {
+        crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+            "owned machine-terminal completion handoff failed: {error}"
+        ))
+    })?
 }
 
 fn fail_closed_completion_waiters(
@@ -4333,11 +4306,27 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
     // Injected-context appends chain BEFORE the input's own append: the
     // delivery invariant is that host-attached injected context lands in the
     // transcript immediately before the turn's user/peer message, in order.
-    let appends = projections
+    let appends = inputs
         .iter()
+        .zip(projections)
         .zip(semantics.iter().copied())
-        .flat_map(|(projection, semantics)| {
+        .flat_map(|(((input_id, _), projection), semantics)| {
             crate::input::projection_conversation_appends(projection, semantics)
+                .into_iter()
+                .enumerate()
+                .map(move |(append_ordinal, mut append)| {
+                    // Assign before flattening loses the per-input boundary.
+                    // Count all roles, and replace any caller-carried seed.
+                    append.runtime_source = (append.role
+                        == meerkat_core::lifecycle::ConversationAppendRole::SystemNotice)
+                        .then(
+                            || meerkat_core::lifecycle::run_primitive::RuntimeAppendSource {
+                                input_id: input_id.clone(),
+                                append_ordinal: append_ordinal as u64,
+                            },
+                        );
+                    append
+                })
         })
         .collect::<Vec<_>>();
     let contributing_input_ids = inputs
@@ -5802,13 +5791,33 @@ async fn resolve_failed_batch_backlog(
 /// their lane for exactly one follow-up turn.
 async fn resolve_live_boundary_joins_for_terminal(
     driver: &crate::meerkat_machine::SharedDriver,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    session_id: &meerkat_core::types::SessionId,
     run_id: &RunId,
 ) -> Result<crate::meerkat_machine::driver::LiveBoundaryJoinResolution, crate::RuntimeDriverError> {
-    driver
+    let resolution = driver
         .lock()
         .await
         .machine_resolve_live_boundary_joins_for_terminal(run_id)
-        .await
+        .await?;
+    // The persistent driver has committed every requeue before returning.
+    // Release its mutex before invoking actor publication. A publication
+    // failure cannot reverse that truth or admit a second application.
+    if !resolution.discarded.is_empty() {
+        let discarded = meerkat_core::event::BoundaryAppendsDiscarded {
+            session_id: session_id.clone(),
+            run_id: run_id.clone(),
+            input_ids: resolution.discarded.clone(),
+        };
+        if let Err(error) = executor
+            .publish_boundary_appends_discarded(&discarded)
+            .await
+        {
+            tracing::error!(%session_id, %run_id, %error,
+                "durable boundary requeue committed but discard projection publication failed");
+        }
+    }
+    Ok(resolution)
 }
 
 /// A run that ends without a committed boundary (failed or cancelled) still
@@ -5833,17 +5842,15 @@ async fn consume_retained_live_boundary_joins_without_commit(
                 owner_session_id,
             )
             .await?;
-        if let Some(completions) = completions {
-            crate::meerkat_machine::MeerkatMachine::finalize_live_boundary_completion_owned(
-                driver,
-                completions,
-                input_id.clone(),
-                run_id.clone(),
-                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
-                None,
-            )
-            .await?;
-        }
+        crate::meerkat_machine::MeerkatMachine::finalize_live_boundary_completion_owned(
+            driver,
+            completions,
+            input_id.clone(),
+            run_id.clone(),
+            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+            None,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -6288,15 +6295,13 @@ async fn process_queue(
                             reason = conflict.reason,
                             "batch turn-metadata merge conflict"
                         );
-                        let completion_reason = format!("runtime primitive rejected: {conflict}");
-                        let nondirected_input_ids = if completions.is_some() {
-                            nondirected_completion_input_ids(
-                                &input_ids,
-                                &staged_directed_interaction_ids,
-                            )
-                        } else {
-                            Vec::new()
-                        };
+                        let failure =
+                            CoreApplyFailureCause::primitive_rejected(conflict.to_string());
+                        let completion_reason = failure.message().to_owned();
+                        let nondirected_input_ids = nondirected_completion_input_ids(
+                            &input_ids,
+                            &staged_directed_interaction_ids,
+                        );
                         let (queue_authority_guard, terminalization_outcome) =
                             match realize_runtime_loop_terminal_owned(
                                 queue_authority_guard,
@@ -6306,10 +6311,7 @@ async fn process_queue(
                                 nondirected_input_ids.clone(),
                                 !staged_directed_interaction_ids.is_empty(),
                                 OwnedRuntimeLoopTerminalization::Failed {
-                                    failure: CoreApplyFailureCause::primitive_rejected(
-                                        conflict.to_string(),
-                                    ),
-                                    completion_reason: completion_reason.clone(),
+                                    failure,
                                     // The executor was never called, so nothing
                                     // is in flight and replay repeats nothing.
                                     contributor_disposition:
@@ -6390,7 +6392,7 @@ async fn process_queue(
                                 return true;
                             }
                         }
-                        resolve_machine_terminal_completion_waiters(
+                        if let Err(error) = resolve_machine_terminal_completion_waiters(
                             driver,
                             completions,
                             queue_authority_guard,
@@ -6399,7 +6401,11 @@ async fn process_queue(
                             &run_id,
                             completion_reason,
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::error!(%run_id, %error, "failed completion remains pending for recovery");
+                            return true;
+                        }
                         // Same backlog semantics as a failed apply: other
                         // queued work must not strand behind the rolled-back
                         // batch until an unrelated external wake.
@@ -6431,16 +6437,12 @@ async fn process_queue(
                 }
                 if let Err(error) = turn_start {
                     tracing::error!(%run_id, error = %error, "failed to start runtime turn state");
-                    let completion_reason =
-                        format!("runtime turn-state preparation failed: {error}");
-                    let nondirected_input_ids = if completions.is_some() {
-                        nondirected_completion_input_ids(
-                            &input_ids,
-                            &staged_directed_interaction_ids,
-                        )
-                    } else {
-                        Vec::new()
-                    };
+                    let failure = CoreApplyFailureCause::executor_internal(error.to_string());
+                    let completion_reason = failure.message().to_owned();
+                    let nondirected_input_ids = nondirected_completion_input_ids(
+                        &input_ids,
+                        &staged_directed_interaction_ids,
+                    );
                     let (queue_authority_guard, terminalization_outcome) =
                         match realize_runtime_loop_terminal_owned(
                             queue_authority_guard,
@@ -6450,10 +6452,7 @@ async fn process_queue(
                             nondirected_input_ids.clone(),
                             !staged_directed_interaction_ids.is_empty(),
                             OwnedRuntimeLoopTerminalization::Failed {
-                                failure: CoreApplyFailureCause::executor_internal(
-                                    error.to_string(),
-                                ),
-                                completion_reason: completion_reason.clone(),
+                                failure,
                                 // Turn-state preparation failed before the
                                 // executor was called, so nothing is in flight.
                                 contributor_disposition:
@@ -6536,7 +6535,7 @@ async fn process_queue(
                             return true;
                         }
                     }
-                    resolve_machine_terminal_completion_waiters(
+                    if let Err(error) = resolve_machine_terminal_completion_waiters(
                         driver,
                         completions,
                         queue_authority_guard,
@@ -6545,7 +6544,11 @@ async fn process_queue(
                         &run_id,
                         completion_reason,
                     )
-                    .await;
+                    .await
+                    {
+                        tracing::error!(%run_id, %error, "failed completion remains pending for recovery");
+                        return true;
+                    }
                     // Same backlog semantics as a failed apply: other queued
                     // work must not strand behind the rolled-back batch until
                     // an unrelated external wake.
@@ -6627,7 +6630,10 @@ async fn process_queue(
                         // commit (they are receipt contributors, like the
                         // batch); the others are already back in their lane.
                         let join_resolution = match resolve_live_boundary_joins_for_terminal(
-                            driver, &run_id,
+                            driver,
+                            executor,
+                            &authority_binding.session_id,
+                            &run_id,
                         )
                         .await
                         {
@@ -7146,7 +7152,10 @@ async fn process_queue(
                         // a retained one is consumed now, because this run
                         // commits no boundary but its image keeps the append.
                         let join_resolution = match resolve_live_boundary_joins_for_terminal(
-                            driver, &run_id,
+                            driver,
+                            executor,
+                            &authority_binding.session_id,
+                            &run_id,
                         )
                         .await
                         {
@@ -7199,9 +7208,7 @@ async fn process_queue(
                             .await;
                         }
                         let has_directed_inputs = !directed_interaction_ids.is_empty();
-                        let nondirected_input_ids = if completions.is_none()
-                            || (cancelled && has_directed_inputs)
-                        {
+                        let nondirected_input_ids = if cancelled && has_directed_inputs {
                             Vec::new()
                         } else {
                             nondirected_completion_input_ids(&input_ids, &directed_interaction_ids)
@@ -7211,7 +7218,6 @@ async fn process_queue(
                         } else {
                             OwnedRuntimeLoopTerminalization::Failed {
                                 failure: e.apply_failure_cause(),
-                                completion_reason: completion_detail.clone(),
                                 contributor_disposition,
                             }
                         };
@@ -7400,7 +7406,7 @@ async fn process_queue(
                                     );
                                     return true;
                                 };
-                                resolve_machine_terminal_completion_waiters(
+                                if let Err(error) = resolve_machine_terminal_completion_waiters(
                                     driver,
                                     completions,
                                     completion_authority_guard,
@@ -7409,7 +7415,11 @@ async fn process_queue(
                                     &run_id,
                                     completion_detail.clone(),
                                 )
-                                .await;
+                                .await
+                                {
+                                    tracing::error!(%run_id, %error, "failed completion remains pending for recovery");
+                                    return true;
+                                }
                             }
                         }
                         if teardown_required {
@@ -8808,7 +8818,8 @@ mod tests {
 
     #[test]
     fn input_to_primitive_preserves_typed_prompt_appends_without_user_text() -> Result<(), String> {
-        let typed_append = ConversationAppend {
+        let mut typed_append = ConversationAppend {
+            runtime_source: None,
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::SystemNotice {
                 kind: meerkat_core::types::SystemNoticeKind::Comms,
@@ -8840,7 +8851,13 @@ mod tests {
         let RunPrimitive::StagedInput(staged) = primitive else {
             return Err("expected staged input".to_string());
         };
-        assert_eq!(staged.contributing_input_ids, vec![input_id]);
+        assert_eq!(staged.contributing_input_ids, vec![input_id.clone()]);
+        typed_append.runtime_source = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeAppendSource {
+                input_id,
+                append_ordinal: 0,
+            },
+        );
         assert_eq!(staged.appends, vec![typed_append]);
         Ok(())
     }
@@ -9736,6 +9753,7 @@ mod tests {
     #[tokio::test]
     async fn max_attempts_abandonment_does_not_wedge_the_backlog() {
         let driver = make_shared_ephemeral_driver("defer-wedge-class");
+        bind_runtime_for_progress_test(&driver, "defer-wedge-class").await;
         let poison_id =
             accept_queued_input_id(&driver, make_peer_message("lead-rt", "poison steer")).await;
         let innocent_id = accept_queued_input_id(
@@ -9917,6 +9935,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_requeued_head_restages_and_the_backlog_drains() {
         let driver = make_shared_ephemeral_driver("stage-refusal-wedge-class");
+        bind_runtime_for_progress_test(&driver, "stage-refusal-wedge-class").await;
         let head_id =
             accept_queued_input_id(&driver, make_peer_message("lead-rt", "stuck head")).await;
         let follower_id = accept_queued_input_id(
@@ -10781,6 +10800,238 @@ mod tests {
             )),
             FailedRunContributorDisposition::Replayed
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_peer_responses_authorize_distinct_valid_primitives() {
+        struct RecordingExecutor {
+            authority: crate::driver::ephemeral::SharedIngressDslAuthority,
+            applied: Vec<(RunId, RunPrimitive)>,
+        }
+
+        #[async_trait::async_trait]
+        impl meerkat_core::lifecycle::CoreExecutor for RecordingExecutor {
+            async fn apply(
+                &mut self,
+                run_id: RunId,
+                primitive: RunPrimitive,
+            ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, CoreExecutorError>
+            {
+                assert_eq!(
+                    primitive.peer_response_terminal_apply_intent_violation(),
+                    None
+                );
+                let input_ids = primitive.contributing_input_ids().to_vec();
+                self.applied.push((run_id.clone(), primitive));
+                {
+                    let mut authority = self
+                        .authority
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                        &mut *authority,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::PrimitiveApplied {
+                            run_id: crate::meerkat_machine::dsl::RunId::from_domain(&run_id),
+                        },
+                    )
+                    .expect("the executor starts the authorized primitive");
+                }
+                Ok(
+                    meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_untyped_snapshot(
+                        meerkat_core::RunBoundaryReceiptDraft {
+                            run_id,
+                            boundary: RunApplyBoundary::RunStart,
+                            contributing_input_ids: input_ids,
+                            conversation_digest: None,
+                            message_count: 0,
+                        },
+                        None,
+                        None,
+                    ),
+                )
+            }
+
+            async fn cancel_after_boundary(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                panic!("valid terminal responses must not require cancellation");
+            }
+
+            async fn stop_runtime_executor(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                panic!("valid terminal responses must not require executor teardown");
+            }
+        }
+
+        let driver = make_shared_ephemeral_driver("distinct-terminal-responses");
+        bind_runtime_for_progress_test(&driver, "distinct-terminal-responses").await;
+        let first_id = accept_queued_input_id(
+            &driver,
+            make_terminal_peer_response(TEST_PEER_RESPONSE_ROUTE_ID, TEST_PEER_RESPONSE_REQUEST_ID),
+        )
+        .await;
+        let second_id = accept_queued_input_id(
+            &driver,
+            make_terminal_peer_response(
+                TEST_PEER_RESPONSE_ROUTE_ID,
+                TEST_PEER_RESPONSE_REQUEST_ID_2,
+            ),
+        )
+        .await;
+        {
+            let guard = driver.lock().await;
+            let batch =
+                crate::meerkat_machine::driver::machine_authorize_runtime_loop_batch(&guard)
+                    .expect("real terminal-response ingress produces a generated queue batch");
+            assert_eq!(batch.input_ids(), std::slice::from_ref(&first_id));
+        }
+
+        let mut executor = RecordingExecutor {
+            authority: shared_authority_for_test(&driver).await,
+            applied: Vec::new(),
+        };
+        let (_effect_tx, mut effect_rx) = tokio::sync::mpsc::channel(1);
+        let authority_binding = RuntimeLoopAuthorityBinding::detached_for_test();
+        let teardown_slot = RuntimeLoopTeardownSlot::pending();
+        let mut terminal_handoff = RuntimeLoopTerminalHandoff::default();
+        let should_stop = tokio::time::timeout(
+            Duration::from_secs(5),
+            process_queue(
+                &driver,
+                &mut executor,
+                &mut effect_rx,
+                None,
+                &authority_binding,
+                &teardown_slot,
+                &mut terminal_handoff,
+            ),
+        )
+        .await
+        .expect("both terminal responses must drain without retries");
+        assert!(!should_stop);
+        assert_eq!(executor.applied.len(), 2);
+        assert_ne!(executor.applied[0].0, executor.applied[1].0);
+        for ((_, primitive), expected_id) in executor.applied.iter().zip([&first_id, &second_id]) {
+            assert_eq!(
+                primitive.contributing_input_ids(),
+                std::slice::from_ref(expected_id)
+            );
+            assert!(primitive.is_peer_response_terminal_notice_and_run());
+            assert_eq!(
+                primitive.peer_response_terminal_apply_intent_violation(),
+                None
+            );
+            let RunPrimitive::StagedInput(staged) = primitive else {
+                panic!("terminal response must be a staged primitive");
+            };
+            assert_eq!(
+                staged
+                    .appends
+                    .iter()
+                    .filter(|append| append.role == ConversationAppendRole::SystemNotice)
+                    .count(),
+                1,
+            );
+        }
+        let guard = driver.lock().await;
+        assert!(
+            crate::meerkat_machine::driver::machine_authorize_runtime_loop_batch(&guard).is_none()
+        );
+        let crate::meerkat_machine::DriverEntry::Ephemeral(driver) = &*guard else {
+            panic!("expected ephemeral driver");
+        };
+        for input_id in [&first_id, &second_id] {
+            assert_eq!(
+                driver.input_phase(input_id),
+                Some(crate::input_state::InputLifecycleState::Consumed)
+            );
+            assert_eq!(driver.input_attempt_count(input_id), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_peer_response_runtime_capabilities_preserve_cardinality() {
+        use crate::meerkat_machine::dsl::{
+            InputLane,
+            command_capabilities::{
+                AuthorizedRuntimeLoopBatch, AuthorizedStageForRun, RuntimeLoopBatchSource,
+            },
+        };
+
+        let driver = make_shared_ephemeral_driver("terminal-runtime-capabilities");
+        let first_id = accept_queued_input_id(
+            &driver,
+            make_terminal_peer_response(TEST_PEER_RESPONSE_ROUTE_ID, TEST_PEER_RESPONSE_REQUEST_ID),
+        )
+        .await;
+        let second_id = accept_queued_input_id(
+            &driver,
+            make_terminal_peer_response(
+                TEST_PEER_RESPONSE_ROUTE_ID,
+                TEST_PEER_RESPONSE_REQUEST_ID_2,
+            ),
+        )
+        .await;
+        let ordinary_id =
+            accept_queued_input_id(&driver, make_peer_message("analyst-rt", "backlog")).await;
+        let authority = shared_authority_for_test(&driver).await;
+        let admitted = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .clone();
+        let input_ids = [
+            first_id.to_string(),
+            second_id.to_string(),
+            ordinary_id.to_string(),
+        ];
+        let run_id = crate::meerkat_machine::dsl::RunId::from_domain(&RunId::new());
+
+        for (lane, source) in [
+            (InputLane::Queue, RuntimeLoopBatchSource::Queue),
+            (InputLane::Steer, RuntimeLoopBatchSource::Steer),
+        ] {
+            // Fresh terminal ingress chooses Queue. A cloned state covers the
+            // recovered Steer capability without inventing public admission.
+            let mut state = admitted.clone();
+            state.current_run_id = Some(run_id.clone());
+            for input_id in &input_ids {
+                state.input_lane.insert(input_id.clone(), lane);
+                state.input_recovery_lanes.insert(input_id.clone(), lane);
+            }
+            let (_, selected, selected_source) =
+                AuthorizedRuntimeLoopBatch::authorize_runtime_loop_batch_from_state(&state)
+                    .expect("runtime DSL must authorize the first terminal input")
+                    .into_parts();
+            assert_eq!(selected, [input_ids[0].clone()]);
+            assert_eq!(selected_source, source);
+
+            for indexes in [[0, 1], [0, 2], [2, 0]] {
+                let ids = indexes.map(|index| input_ids[index].clone());
+                assert!(
+                    AuthorizedStageForRun::authorize_stage_for_run_from_state(
+                        &state, &ids, &run_id, source,
+                    )
+                    .is_none(),
+                    "runtime DSL must reject a multi-input stage with a terminal response"
+                );
+            }
+            for input_id in &input_ids {
+                assert!(
+                    AuthorizedStageForRun::authorize_stage_for_run_from_state(
+                        &state,
+                        std::slice::from_ref(input_id),
+                        &run_id,
+                        source,
+                    )
+                    .is_some(),
+                    "runtime DSL must accept each valid singleton"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -12454,6 +12705,87 @@ mod tests {
 
     /// Delivery-order invariant: injected-context appends land in the staged
     /// primitive immediately BEFORE the turn's user append, in order.
+
+    #[test]
+    fn durable_notice_origins_survive_mixed_input_flattening() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationAppend, ConversationAppendRole as Role, CoreRenderable, RuntimeAppendSource,
+        };
+        let first = make_prompt("first");
+        let second = make_prompt("second");
+        let first_id = first.id().clone();
+        let second_id = second.id().clone();
+        let foreign = InputId::new();
+        let append = |role| ConversationAppend {
+            role,
+            content: CoreRenderable::text("identical"),
+            identity: None,
+            runtime_source: Some(RuntimeAppendSource {
+                input_id: foreign.clone(),
+                append_ordinal: 99,
+            }),
+        };
+        let projections = [
+            crate::ingress_types::RuntimeInputProjection {
+                injected_context_appends: vec![append(Role::InjectedContext)],
+                append: Some(append(Role::User)),
+                additional_appends: vec![append(Role::SystemNotice), append(Role::SystemNotice)],
+            },
+            crate::ingress_types::RuntimeInputProjection {
+                injected_context_appends: Vec::new(),
+                append: Some(append(Role::SystemNotice)),
+                additional_appends: Vec::new(),
+            },
+        ];
+        let inputs = vec![(first_id.clone(), first), (second_id.clone(), second)];
+        let semantics = fallback_batch_semantics(&inputs);
+        let primitive = try_projected_inputs_to_primitive_with_boundary(
+            &inputs,
+            &projections,
+            RunApplyBoundary::RunStart,
+            &semantics,
+        )
+        .unwrap();
+        let RunPrimitive::StagedInput(staged) = primitive else {
+            panic!("staged input");
+        };
+        assert_eq!(
+            staged
+                .appends
+                .iter()
+                .map(|row| row.role)
+                .collect::<Vec<_>>(),
+            vec![
+                Role::InjectedContext,
+                Role::User,
+                Role::SystemNotice,
+                Role::SystemNotice,
+                Role::SystemNotice
+            ]
+        );
+        assert_eq!(
+            staged.contributing_input_ids,
+            vec![first_id.clone(), second_id.clone()]
+        );
+        assert!(
+            staged.appends[..2]
+                .iter()
+                .all(|row| row.runtime_source.is_none()),
+            "non-notice rows cannot retain foreign notice provenance"
+        );
+        let expected = [(first_id.clone(), 2), (first_id, 3), (second_id, 0)];
+        for (row, (input_id, append_ordinal)) in staged.appends[2..].iter().zip(expected) {
+            assert_eq!(
+                row.runtime_source,
+                Some(RuntimeAppendSource {
+                    input_id,
+                    append_ordinal
+                })
+            );
+            assert_eq!(row.content.render_text(), "identical");
+        }
+    }
+
     #[test]
     fn primitive_places_injected_context_appends_before_user_append() {
         let mut input = make_prompt("the prompt");

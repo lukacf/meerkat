@@ -519,7 +519,7 @@ class TestStdoutDispatcher:
 
     @pytest.mark.asyncio
     async def test_pending_stream_buffers_then_flushes(self):
-        ev1 = {"type": "run_started", "session_id": "new-id", "prompt": "hi"}
+        ev1 = {"type": "run_started", "session_id": "new-id", "input": {"kind": "content", "content": "hi"}}
         ev2 = {"type": "text_delta", "delta": "hello"}
         reader = make_reader([
             event_notification("new-id", ev1),

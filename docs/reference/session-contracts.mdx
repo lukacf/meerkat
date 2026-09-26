@@ -654,9 +654,17 @@ them:
   or cancelled run on a persistent session discards its image (the next turn
   resyncs from the store); an ephemeral session keeps it; a compaction
   rollback discards every append written after the rollback point.
-- `boundary_append_applied` is emitted when the runner writes the rows.
-  Reconcile it with the run terminal: a later discard redelivers the input
-  once.
+- `boundary_append_applied` is emitted when the runner writes the rows. It
+  identifies the run and input, carries the model-projected content and append
+  count, and can include the exact canonical notice rows and the first
+  appended row's transcript offset at application time.
+- Reconcile applications using `boundary_appends_discarded` and canonical
+  transcript history. The discard event identifies the exact session, run,
+  and input IDs whose applications were discarded, and is published after
+  any required requeue persistence succeeds. A run terminal alone is not
+  proof of discard. This event does not terminalize the input or invalidate
+  a later application in another run; canonical retained history remains
+  authoritative.
 
 Request-only steers are unaffected by a waiting durable steer: each class has
 its own boundary slot, so a request-only steer still lands in the running turn

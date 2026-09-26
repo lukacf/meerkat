@@ -394,6 +394,7 @@ fn durable_notice_steer() -> meerkat_runtime::Input {
             blocks: Vec::new(),
         },
         identity: None,
+        runtime_source: None,
     }];
     meerkat_runtime::Input::Prompt(prompt)
 }

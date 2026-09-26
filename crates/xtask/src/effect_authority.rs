@@ -199,6 +199,7 @@ const CORE_EXECUTOR_PURE_FORWARD_METHODS: &[&str] = &[
     "abort_uncommitted_compaction_projections",
     "abort_rejected_run_projections",
     "publish_interaction_terminals",
+    "publish_boundary_appends_discarded",
     "cancel_after_boundary",
 ];
 

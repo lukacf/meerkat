@@ -1249,6 +1249,19 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    async fn publish_boundary_appends_discarded_for_actor(
+        &self,
+        actor_witness: &meerkat::LiveSessionActorWitness,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::publish_boundary_appends_discarded_for_actor(
+            &self.service,
+            actor_witness,
+            discarded,
+        )
+        .await
+    }
+
     async fn publish_interaction_terminals_for_actor(
         &self,
         actor_witness: &meerkat::LiveSessionActorWitness,
@@ -20890,6 +20903,70 @@ mod tests {
             mob_state.handle_for(&mob_id).await.is_err(),
             "post-NotFound direct archive cleanup must remove the retained mob cleanup anchor"
         );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_forwards_boundary_discard_to_exact_actor() {
+        use futures::{FutureExt, StreamExt};
+        use meerkat_core::event::BoundaryAppendsDiscarded;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 2);
+        let service = runtime.session_service();
+        let created = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create RPC mob actor");
+        let session_id = created.session_id;
+        let witness = runtime
+            .mob_actor_witness(&session_id)
+            .expect("capture exact RPC mob actor");
+        let mut events =
+            meerkat_mob::MobSessionService::subscribe_session_events(service.as_ref(), &session_id)
+                .await
+                .unwrap();
+        let discarded = BoundaryAppendsDiscarded {
+            session_id: session_id.clone(),
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+        };
+        service
+            .publish_boundary_appends_discarded_for_actor(&witness, &discarded)
+            .await
+            .expect("wrapper must reach the persistent publication owner");
+        let published = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.source_session_id(), Some(&session_id));
+        assert!(matches!(published.payload,
+            AgentEvent::BoundaryAppendsDiscarded(value) if value == discarded));
+
+        let registry = meerkat_session::LiveSessionActorRegistry::default();
+        let other = registry
+            .insert_and_publish(
+                &meerkat::LiveSessionActorWitnessSlot::default(),
+                session_id.clone(),
+                meerkat_core::TransientTurnContextStateHandle::new(),
+            )
+            .unwrap();
+        assert!(matches!(
+            service.publish_boundary_appends_discarded_for_actor(&other, &discarded).await,
+            Err(SessionError::NotFound { id }) if id == session_id
+        ));
+        let mut mismatch = discarded;
+        mismatch.session_id = SessionId::new();
+        assert!(matches!(
+            service
+                .publish_boundary_appends_discarded_for_actor(&witness, &mismatch)
+                .await,
+            Err(SessionError::Agent(_))
+        ));
+        assert!(events.next().now_or_never().is_none());
     }
 
     #[cfg(feature = "mob")]

@@ -423,12 +423,14 @@ fn agent_event_all_variants_roundtrip() {
     // Variants that can be constructed without chrono or uuid (direct construction).
     let direct_variants: Vec<AgentEvent> = vec![
         AgentEvent::RunStarted {
+            identity: Default::default(),
             session_id: session_id.clone(),
             input: meerkat_core::types::RunInput::Content {
                 content: ContentInput::Text("hello".to_string()),
             },
         },
         AgentEvent::RunCompleted {
+            identity: Default::default(),
             session_id: session_id.clone(),
             result: "done".to_string(),
             structured_output: Some(serde_json::json!({"ok": true})),
@@ -445,6 +447,7 @@ fn agent_event_all_variants_roundtrip() {
             terminal_cause_kind: None,
         },
         AgentEvent::RunFailed {
+            identity: Default::default(),
             session_id,
             error_report: meerkat_core::event::AgentErrorReport {
                 class: AgentErrorClass::Internal,
@@ -685,12 +688,14 @@ fn agent_event_all_variants_roundtrip() {
 fn documented_event_catalog_covers_core_agent_event_discriminators() {
     let events = vec![
         AgentEvent::RunStarted {
+            identity: Default::default(),
             session_id: SessionId::new(),
             input: meerkat_core::types::RunInput::Content {
                 content: ContentInput::Text("hello".to_string()),
             },
         },
         AgentEvent::RunCompleted {
+            identity: Default::default(),
             session_id: SessionId::new(),
             result: "done".to_string(),
             structured_output: None,
@@ -699,6 +704,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             terminal_cause_kind: None,
         },
         AgentEvent::RunFailed {
+            identity: Default::default(),
             session_id: SessionId::new(),
             error_report: meerkat_core::event::AgentErrorReport {
                 class: AgentErrorClass::Internal,
@@ -882,13 +888,64 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             session_id: SessionId::new(),
             record: rewrite_record_fixture(),
         },
+        AgentEvent::BoundaryAppendApplied {
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            input_id: meerkat_core::lifecycle::InputId::new(),
+            content: ContentInput::Text("background job finished".to_string()),
+            append_count: 1,
+            notices: vec![],
+            transcript_start: Some(3),
+        },
+        AgentEvent::BoundaryAppendsDiscarded(meerkat_core::event::BoundaryAppendsDiscarded {
+            session_id: SessionId::new(),
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+        }),
     ];
 
     for event in events {
         let kind = meerkat_core::agent_event_type(&event);
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["type"], kind, "core mapping must match serialization");
         assert!(
             KNOWN_AGENT_EVENT_TYPES.contains(&kind),
             "documented event catalog missing {kind}"
+        );
+    }
+
+    let documented: std::collections::BTreeSet<_> =
+        KNOWN_AGENT_EVENT_TYPES.iter().copied().collect();
+    assert_eq!(
+        documented.len(),
+        KNOWN_AGENT_EVENT_TYPES.len(),
+        "documented event catalog contains duplicate discriminators"
+    );
+
+    // Compare the entire core-derived union, including variants without a
+    // hand-authored value above. New core variants must reach every SDK's
+    // fail-closed inventory, even when the fixture list has not grown yet.
+    #[cfg(feature = "schema")]
+    {
+        let schema = serde_json::to_value(schemars::schema_for!(AgentEvent)).unwrap();
+        let variants = schema["oneOf"]
+            .as_array()
+            .expect("AgentEvent must have a tagged schema union");
+        let core_discriminators: std::collections::BTreeSet<_> = variants
+            .iter()
+            .map(|variant| {
+                variant["properties"]["type"]["const"]
+                    .as_str()
+                    .expect("every core event variant must have a wire discriminator")
+            })
+            .collect();
+        assert_eq!(
+            core_discriminators.len(),
+            variants.len(),
+            "core event variants must have distinct wire discriminators"
+        );
+        assert_eq!(
+            documented, core_discriminators,
+            "documented event catalog must equal the complete core event schema"
         );
     }
 }

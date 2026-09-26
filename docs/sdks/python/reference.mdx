@@ -392,28 +392,35 @@ peer's remote description before sending live input.
 
 ## Event compatibility note
 
-The generated event inventory in 0.8.24 knows `reasoning_delta`,
+The parser raises `MeerkatError` with code `UNKNOWN_EVENT_TYPE` only when a
+present event type is outside the generated known-event inventory. An
+inventory-known type without a handwritten parser class arrives as
+`UnknownEvent`, preserving the wire type in `event.type` and the complete
+payload in `event.data`. A missing event type or a malformed payload for a
+handwritten parser class is preserved as `UnknownEvent` with
+`type="malformed_event"`.
+
+The current inventory includes `server_tool_content`, all four
+`model_fallback_*` events, `transcript_rewrite_audit_receipt_committed`,
+`boundary_append_applied`, and `boundary_appends_discarded`. These currently
+use the raw-preserving `UnknownEvent` path, as do `reasoning_delta`,
 `reasoning_complete`, `assistant_image_appended`,
 `turn_usage_accounting_unmeasured`,
 `turn_usage_accounting_identity_disputed`, `interaction_callback_pending`,
-`peer_content_ingested`, `provider_cache_breakpoints_discarded`, and
-`boundary_append_applied`. The handwritten parser has no typed case for these
-nine rows, so they arrive as `UnknownEvent`.
+`peer_content_ingested`, and `provider_cache_breakpoints_discarded`. See the
+[RPC event reference](/api/rpc#notifications) for their wire contracts.
 
-Current Rust `server_tool_content` and
-`transcript_rewrite_audit_receipt_committed` are absent from that generated
-inventory. Receiving either through this parser raises `UNKNOWN_EVENT_TYPE`.
-Current `run_started`, `run_failed`, `retrying`, and `hook_failed` use newer
-field shapes than the handwritten parser and can arrive as malformed events.
-Treat all of these as SDK/code-generation gaps, not stable alternate wire
-contracts.
+`RunStarted.input` preserves the typed `RunInput`: either
+`{"kind": "content", "content": ...}` or
+`{"kind": "pending_tool_results"}`. Content may be text or content blocks;
+the continuation variant does not fabricate a prompt. `RunFailed` accepts
+the current `error_report` and derives its `error_class` and `error` display
+fields from that report.
 
-In the current **0.8.40** SDK, `model_fallback_skipped`,
-`model_fallback_staged`, `model_fallback_committed`, and
-`model_fallback_target_failed` are also absent from the generated inventory.
-If a runtime emits one during model fallback, receiving it raises
-`UNKNOWN_EVENT_TYPE` rather than yielding `UnknownEvent`. Streams that do not
-receive these events are not affected by this particular gap.
+The handwritten `Retrying` and `HookFailed` parsers still expect legacy flat
+fields. Current wire events carry `retry` and `reason`, respectively, so those
+payloads arrive as `UnknownEvent(type="malformed_event")` with raw data
+preserved. These are remaining SDK parser gaps, not alternate wire contracts.
 
 ## Capability and error model
 

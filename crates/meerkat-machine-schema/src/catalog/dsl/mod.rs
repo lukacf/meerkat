@@ -326,6 +326,7 @@ fn meerkat_queue_to_run_command_plans() -> Vec<CommandPlanSchema> {
         "ResolveRuntimeCompletionResultRuntimeTerminated",
         "ResolveCheckpointCompletionResultSucceeded",
         "ResolveCheckpointCompletionResultFailed",
+        "ResolveAbandonedCompletionResultRuntimeApplyFailed",
     ];
     let mut completion_result_transitions = completion_result_families
         .iter()
@@ -505,16 +506,19 @@ fn meerkat_queue_to_run_command_plans() -> Vec<CommandPlanSchema> {
             source_inputs: vec![
                 input_variant_id("ResolveRuntimeCompletionResult"),
                 input_variant_id("ResolveCheckpointCompletionResult"),
+                input_variant_id("ResolveAbandonedCompletionResult"),
             ],
             source_signals: vec![],
             transitions: completion_result_transitions,
             effects: vec![
                 effect_variant_id("RuntimeCompletionResultResolved"),
                 effect_variant_id("CheckpointCompletionResultResolved"),
+                effect_variant_id("AbandonedCompletionResultResolved"),
             ],
             effect_closures: [
                 "RuntimeCompletionResultResolved",
                 "CheckpointCompletionResultResolved",
+                "AbandonedCompletionResultResolved",
             ]
             .into_iter()
             .map(|effect| EffectClosureSchema {
@@ -2407,7 +2411,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "TerminalCompletionCorrelation",
-                &["Run", "CheckpointInput"],
+                &["Run", "CheckpointInput", "AbandonedInput"],
             ),
             NamedTypeBinding::string_enum(
                 "UserInterruptObservationKind",
@@ -2786,6 +2790,7 @@ runtime_internal_inputs!(
         ClassifyTerminalCompletionCorrelation,
         RecoverInputCompletionBoundary,
         ResolveCheckpointCompletionResult,
+        ResolveAbandonedCompletionResult,
         DeclareRecoveredTerminalCompletionUnrecoverable,
         BeginUnregisterSession,
         BeginUnregisterUnservedAttachment,

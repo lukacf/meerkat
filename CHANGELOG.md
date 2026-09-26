@@ -35,6 +35,150 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `AgentEvent::RunStarted`, `RunCompleted`, and `RunFailed` gain an
+  `identity: TranscriptMessageIdentity` field. Rust constructors must supply
+  it, and exhaustive matches must bind it or use `..`. The JSON field is
+  optional and omitted when empty, so older event records remain readable.
+- `meerkat_core::SystemNoticeMessage` gains the public field
+  `runtime_origin: Option<RuntimeAppendOrigin>`, and
+  `meerkat_contracts::WireSessionMessage::SystemNotice` gains the same field.
+  Struct literals and exhaustive variant patterns must supply or account for
+  it. It is serde-defaulted and omitted when absent, so legacy notices retain
+  their wire shape. The new `meerkat_core::types::RuntimeAppendOrigin` carries
+  `session_id`, `run_id`, `input_id` and `append_ordinal`.
+- `meerkat_core::lifecycle::ConversationAppend` gains the public field
+  `runtime_source: Option<RuntimeAppendSource>`; struct literals must add it.
+  The new `meerkat_core::lifecycle::run_primitive::RuntimeAppendSource` carries
+  `input_id` and `append_ordinal`. The field is `#[serde(skip)]`: ordinary
+  callers use `None`; serialized input cannot supply runtime provenance.
+- `meerkat_core::AgentEvent::BoundaryAppendApplied` gains
+  `notices: Vec<SystemNoticeMessage>` and `transcript_start: Option<u64>`.
+  Rust constructors and exhaustive patterns must account for both fields;
+  JSON defaults them to an empty list and absence. `AgentEvent` also gains
+  `BoundaryAppendsDiscarded(meerkat_core::event::BoundaryAppendsDiscarded)`;
+  the new payload has `session_id`, `run_id` and `input_ids` and serializes as
+  the flat `boundary_appends_discarded` event. The enum remains
+  `#[non_exhaustive]`.
+- Generated abandoned-completion vocabulary (meerkat-machine-schema,
+  meerkat-machine-kernels and meerkat-runtime `meerkat_machine::dsl`):
+  `TerminalCompletionCorrelation` gains `AbandonedInput`;
+  `MeerkatMachineInput::ClassifyTerminalCompletionCorrelation` and kernel
+  `inputs::ClassifyTerminalCompletionCorrelation` gain
+  `terminal_outcome: Option<TurnTerminalOutcome>`,
+  `terminal_cause_kind: Option<TurnTerminalCauseKind>`,
+  `requires_session_checkpoint: bool` and
+  `has_interaction_terminal_outbox: bool`. Constructors must supply all four.
+  `MeerkatMachineInput`, `MeerkatMachineInputVariant`, kernel `Input` and
+  `InputKind` gain `ResolveAbandonedCompletionResult`, with the new kernel
+  `inputs::ResolveAbandonedCompletionResult` payload.
+  `MeerkatMachineEffect`, `MeerkatMachineEffectVariant` (in both
+  meerkat-runtime and meerkat-machine-schema), kernel `Effect` and `EffectKind` gain
+  `AbandonedCompletionResultResolved`, with the new kernel
+  `effects::AbandonedCompletionResultResolved` payload. Exhaustive matches
+  must handle the new variants. `TransitionId` gains
+  `ClassifyTerminalCompletionCorrelationAbandonedInitializing`,
+  `ClassifyTerminalCompletionCorrelationAbandonedIdle`,
+  `ClassifyTerminalCompletionCorrelationAbandonedAttached`,
+  `ClassifyTerminalCompletionCorrelationAbandonedRunning`,
+  `ClassifyTerminalCompletionCorrelationAbandonedRetired`,
+  `ClassifyTerminalCompletionCorrelationAbandonedStopped`,
+  `ResolveAbandonedCompletionResultRuntimeApplyFailedInitializing`,
+  `ResolveAbandonedCompletionResultRuntimeApplyFailedIdle`,
+  `ResolveAbandonedCompletionResultRuntimeApplyFailedAttached`,
+  `ResolveAbandonedCompletionResultRuntimeApplyFailedRunning`,
+  `ResolveAbandonedCompletionResultRuntimeApplyFailedRetired` and
+  `ResolveAbandonedCompletionResultRuntimeApplyFailedStopped`;
+  subsequent `TransitionId::*` discriminants move.
+- Behaviour-only: generated
+  `command_capabilities::AuthorizedRuntimeLoopBatch::authorize_runtime_loop_batch_from_state`
+  selects an
+  `AppendContentAndRun` terminal peer response alone, and
+  `command_capabilities::AuthorizedStageForRun::authorize_stage_for_run_from_state`
+  refuses a multi-input stage
+  containing one. Failed abandoned-input completion recovery now requires the
+  exact recipient set and original run association; it cannot borrow a newer
+  run's terminal or change that run's correlation.
+
+- Python `RunStarted` now exposes required `session_id` and typed `input:
+  RunInput` fields matching the runtime wire contract, replacing the obsolete
+  `prompt` field. Match `input["kind"]` for caller content or pending tool
+  results; a continuation has no prompt. Direct constructors must supply both
+  fields. Legacy prompt-only payloads are reported as malformed events.
+- TypeScript `RunStartedEvent.prompt: ContentInput` is replaced by required
+  `input: RunInput`; `sessionId` remains required. Consumers must inspect
+  `input.kind` to distinguish caller content from pending tool results.
+  Prompt-only wire payloads are malformed events.
+
+### Added
+
+- `meerkat_core::lifecycle::CoreExecutor::publish_boundary_appends_discarded(&mut self, &BoundaryAppendsDiscarded) -> Result<(), CoreExecutorError>`
+  and `meerkat_mob::MobSessionService::publish_boundary_appends_discarded_for_actor(&self, &LiveSessionActorWitness, &BoundaryAppendsDiscarded) -> Result<(), SessionError>`
+  are new async trait methods with default unsupported errors. Custom
+  executors and service decorators must implement or forward them to expose
+  persisted discard events. `meerkat_session::EphemeralSessionService` and
+  `PersistentSessionService` add the same async
+  `publish_boundary_appends_discarded_for_actor` method, bound to the original
+  live actor witness rather than a replacement actor with the same session ID.
+- Python, TypeScript and Web SDK run-boundary events expose optional generated
+  `TranscriptMessageIdentity` values, preserving the owner's snake_case nested
+  fields and absent facts. The Python and TypeScript parsers validate supplied
+  identity records without manufacturing missing run or interaction IDs.
+- `TranscriptMessageIdentity`, `LiveContextObservationId` and
+  `RealtimeMessageOrigin` implement `schemars::JsonSchema` when the `schema`
+  feature is enabled. `SystemNoticeMessage.created_at` remains defaulted to
+  the current time at deserialization, without freezing a generation-time
+  timestamp into emitted schemas.
+
+### Fixed
+
+- Agent event inventories now include discarded boundary appends and every
+  core event discriminator, so version-matched SDK streams retain these events.
+  RPC and CLI session wrappers forward discard publication to the exact actor.
+  CLI mob subscriptions observe the canonical session stream independently of
+  peer-comms configuration. The local mob-MCP service publishes discard events
+  with ordered per-actor event sequences.
+- Member-host shutdown cancels outstanding event polls and refuses late
+  pages from the stopped observation. A current host-status failure clears
+  the cached boot observation so authenticated recovery reinstalls canonical
+  peer trust even when the boot token is unchanged. Failed installs remain
+  pending until acknowledged; stale binding failures cannot invalidate the
+  current binding.
+- Durable notice history and live boundary events carry the same canonical
+  notice rows, exact session/run/input provenance and ordinal in the input's
+  complete append list. `transcript_start` reports the application-time image
+  position; compaction can change its later history position. A run terminal
+  alone does not prove those rows were discarded.
+- `boundary_appends_discarded` is published only after the durable join owner
+  resolves the exact application and any required requeue write succeeds.
+  A failed persistence write emits no discard event, and a discard from one
+  run cannot invalidate a later application of the same input in another run.
+- Canonical history/revision exports and retained session snapshots preserve
+  notice provenance. Ordinary transcript rewrites strip caller-supplied
+  `runtime_origin`, and content digests exclude it, so provenance neither
+  grants caller authority nor changes content identity.
+- Terminal peer responses are selected individually so each run receives one
+  valid terminal notice. Ordinary peer batching retains its existing order.
+- Failed input receipts retain their retry carrier until exact durable
+  finalization succeeds. Recovery checks the abandoned batch's own run and
+  failure evidence without replacing a newer run's correlation.
+- Finalizing an abandoned failure resolves its matching run correlation
+  only after the exact receipt is durable. A failed receipt save leaves the
+  live slot and retry carrier unchanged. A subsequent staging refusal can
+  deliver its terminal receipt without replacing a later run's facts or
+  requiring a restart.
+- Retained in-turn appends finalize their durable completion receipt even
+  when no process-local completion observer is registered.
+- Run boundary events carry the same interaction, run, objective, and realtime
+  lineage as persisted assistant history. The start is published after the
+  existing execution authority selects the run ID and before its model output;
+  pre-start failures cannot claim a previous or caller-supplied run ID.
+- Responses function tools explicitly opt out of automatic strict schema
+  normalization. Optional nonnullable fields retain their authored contract
+  instead of becoming required provider arguments, including optional WorkGraph
+  scheduling dates. Dispatcher argument validation is unchanged.
+
 ## [0.8.43] - 2026-09-26
 
 ### Breaking

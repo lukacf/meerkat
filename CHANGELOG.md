@@ -35,6 +35,21 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Full-fresh BuildBuddy validation no longer runs out of its 50-minute SLO
+  on integration-fast. The Native submitter waited for the `//...` prebuild
+  (18 minutes on the v0.8.44 tag run) and then ran clippy, unit and
+  integration-fast behind two submitter slots, so integration-fast started
+  about 28 minutes into the SLO. It needs 22-25 minutes cold, so it was still
+  running at the watchdog deadline (exit 124) on the v0.8.43 and v0.8.44 tag
+  runs (36245259590, 36266335185). Only a warm-cache rerun passed. The
+  Cargo-equivalent unit and integration-fast lanes read nothing the prebuild
+  produces, so they now run in a new Native Cargo-equivalent submitter job
+  that starts with the executors, both lanes concurrently. The Native
+  submitter keeps the Bazel-native all-features clippy lane, which reads the
+  prebuild cache. The SLO stays 3000 seconds.
+
 ## [0.8.44] - 2026-09-26
 
 ### Breaking

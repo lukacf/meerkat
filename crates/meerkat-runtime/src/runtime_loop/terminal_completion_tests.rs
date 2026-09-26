@@ -723,6 +723,134 @@ async fn abandoned_completion_generated_authority_refuses_mixed_recipient_phases
 }
 
 #[tokio::test]
+async fn stage_refusal_completion_rejects_mixed_recipient_evidence() {
+    let fixture = Fixture::failed_batch().await;
+    let before = fixture.later_attached().await;
+    let entry = fixture.driver.lock().await;
+    let owner_id = entry
+        .as_driver()
+        .stored_input_state(&fixture.inputs[0])
+        .unwrap()
+        .state
+        .terminal_completion
+        .unwrap()
+        .owner_input_id;
+    let other = fixture
+        .inputs
+        .iter()
+        .find(|id| **id != owner_id)
+        .unwrap()
+        .to_string();
+    let receipt_run = mm::RunId::from_domain(&fixture.run_id);
+    let prior_run = mm::RunId::from_domain(&RunId::new());
+    // Exercise the ordinary-run fallback: the owner itself is never bound
+    // to the receipt run, so another recipient must not bypass validation.
+    for owner_prior_run in [None, Some(prior_run.clone())] {
+        for consumed_recipient in [false, true] {
+            let mut state = before.clone();
+            for input_id in &fixture.inputs {
+                state.input_run_associations.remove(&input_id.to_string());
+            }
+            if let Some(run_id) = owner_prior_run.as_ref() {
+                state
+                    .input_run_associations
+                    .insert(owner_id.to_string(), run_id.clone());
+            }
+            if consumed_recipient {
+                state
+                    .input_phases
+                    .insert(other.clone(), mm::InputPhase::Consumed);
+                state
+                    .input_terminal_kind
+                    .insert(other.clone(), mm::InputTerminalKind::Consumed);
+            } else {
+                state
+                    .input_run_associations
+                    .insert(other.clone(), receipt_run.clone());
+            }
+            let mut machine = mm::MeerkatMachineAuthority::recover_from_state(state).unwrap();
+            let classification = mm::MeerkatMachineInput::ClassifyTerminalCompletionCorrelation {
+                owner_input_id: owner_id.to_string(),
+                run_id: Some(receipt_run.clone()),
+                terminal: Some(mm::RuntimeCompletionTerminalObservation::MachineTerminal),
+                recipient_input_ids: fixture.inputs.iter().map(ToString::to_string).collect(),
+                terminal_outcome: Some(mm::TurnTerminalOutcome::Failed),
+                terminal_cause_kind: Some(mm::TurnTerminalCauseKind::RuntimeApplyFailure),
+                requires_session_checkpoint: false,
+                has_interaction_terminal_outbox: false,
+            };
+            assert!(
+                mm::MeerkatMachineMutator::apply(&mut machine, classification).is_err(),
+                "fallback accepted owner attribution {owner_prior_run:?}, consumed recipient {consumed_recipient}"
+            );
+            assert_live_run_unchanged(&before, machine.state());
+        }
+    }
+}
+
+#[tokio::test]
+async fn stage_refusal_completion_accepts_independent_historical_attribution() {
+    let fixture = Fixture::failed_batch().await;
+    let before = fixture.later_attached().await;
+    let entry = fixture.driver.lock().await;
+    let owner_id = entry
+        .as_driver()
+        .stored_input_state(&fixture.inputs[0])
+        .unwrap()
+        .state
+        .terminal_completion
+        .unwrap()
+        .owner_input_id;
+    let other = fixture
+        .inputs
+        .iter()
+        .find(|id| **id != owner_id)
+        .unwrap()
+        .to_string();
+    let receipt_run = mm::RunId::from_domain(&fixture.run_id);
+    let owner_prior_run = mm::RunId::from_domain(&RunId::new());
+    let other_prior_run = mm::RunId::from_domain(&RunId::new());
+    for owner_attribution in [None, Some(owner_prior_run)] {
+        for other_attribution in [None, Some(other_prior_run.clone())] {
+            let mut state = before.clone();
+            for (input_id, attribution) in [
+                (owner_id.to_string(), owner_attribution.as_ref()),
+                (other.clone(), other_attribution.as_ref()),
+            ] {
+                state.input_run_associations.remove(&input_id);
+                if let Some(run_id) = attribution {
+                    state
+                        .input_run_associations
+                        .insert(input_id, run_id.clone());
+                }
+            }
+            let mut machine = mm::MeerkatMachineAuthority::recover_from_state(state).unwrap();
+            let classification = mm::MeerkatMachineInput::ClassifyTerminalCompletionCorrelation {
+                owner_input_id: owner_id.to_string(),
+                run_id: Some(receipt_run.clone()),
+                terminal: Some(mm::RuntimeCompletionTerminalObservation::MachineTerminal),
+                recipient_input_ids: fixture.inputs.iter().map(ToString::to_string).collect(),
+                terminal_outcome: Some(mm::TurnTerminalOutcome::Failed),
+                terminal_cause_kind: Some(mm::TurnTerminalCauseKind::RuntimeApplyFailure),
+                requires_session_checkpoint: false,
+                has_interaction_terminal_outbox: false,
+            };
+            let transition =
+                mm::MeerkatMachineMutator::apply(&mut machine, classification).unwrap();
+            assert!(matches!(
+                transition.effects(),
+                [mm::MeerkatMachineEffect::TerminalCompletionCorrelationClassified {
+                    owner_input_id,
+                    run_id: Some(run_id),
+                    correlation: mm::TerminalCompletionCorrelation::Run,
+                }] if owner_input_id == &owner_id.to_string() && run_id == &receipt_run
+            ));
+            assert_live_run_unchanged(&before, machine.state());
+        }
+    }
+}
+
+#[tokio::test]
 async fn multiple_abandoned_batches_recover_without_replacing_newer_run() {
     let mut fixture = Fixture::failed_batch().await;
     let first_inputs = fixture.inputs.clone();

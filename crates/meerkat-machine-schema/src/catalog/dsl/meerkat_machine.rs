@@ -34120,6 +34120,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // These already-abandoned inputs own an exact failed-attempt receipt.
         // Resolving it cannot replace a later live run's terminal/correlation.
+        // A refused staging attempt never binds its inputs to that run. Those
+        // receipts retain ordinary run recovery, even if the input still has
+        // attribution to an older run it previously contributed to.
         transition ClassifyTerminalCompletionCorrelationAbandoned {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
             on input ClassifyTerminalCompletionCorrelation { owner_input_id, run_id, terminal, recipient_input_ids, terminal_outcome, terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox }
@@ -34132,6 +34135,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && !has_interaction_terminal_outbox
                 && run_id != None
                 && self.input_phases.get(owner_input_id).get("value") == InputPhase::Abandoned
+                && self.input_run_associations.contains_key(owner_input_id)
+                && self.input_run_associations.get(owner_input_id).get("value") == run_id.get("value")
             }
             guard "exact_batch" {
                 recipient_input_ids.len() > 0
@@ -34169,6 +34174,35 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && !has_interaction_terminal_outbox
                 && run_id != None
                 && self.input_phases.get(owner_input_id).get("value") == InputPhase::Abandoned
+                && self.input_run_associations.contains_key(owner_input_id)
+                && self.input_run_associations.get(owner_input_id).get("value") == run_id.get("value")
+                )
+            }
+            guard "refused_staging_batch" {
+                // A refusal cannot mix unstaged recipients with recipients
+                // bound to this run, even when its owner has older attribution.
+                !(
+                    terminal == Some(RuntimeCompletionTerminalObservation::MachineTerminal)
+                    && terminal_outcome == Some(TurnTerminalOutcome::Failed)
+                    && terminal_cause_kind == Some(TurnTerminalCauseKind::RuntimeApplyFailure)
+                    && !requires_session_checkpoint
+                    && !has_interaction_terminal_outbox
+                    && run_id != None
+                    && self.input_phases.get(owner_input_id).get("value") == InputPhase::Abandoned
+                )
+                || (
+                    recipient_input_ids.len() > 0
+                    && recipient_input_ids.len() <= 256
+                    && recipient_input_ids.contains(owner_input_id)
+                    && for_all(recipient in recipient_input_ids,
+                        self.input_phases.contains_key(recipient)
+                        && self.input_phases.get(recipient).get("value") == InputPhase::Abandoned
+                        && self.input_terminal_kind.contains_key(recipient)
+                        && self.input_terminal_kind.get(recipient).get("value") == InputTerminalKind::Abandoned
+                        && (
+                            !self.input_run_associations.contains_key(recipient)
+                            || self.input_run_associations.get(recipient).get("value") != run_id.get("value")
+                        ))
                 )
             }
             guard "ordinary_run_completion" {

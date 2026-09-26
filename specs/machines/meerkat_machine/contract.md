@@ -25788,6 +25788,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `not_abandoned_input_completion`
+  - `refused_staging_batch`
   - `ordinary_run_completion`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Initializing`
@@ -25798,6 +25799,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `not_abandoned_input_completion`
+  - `refused_staging_batch`
   - `ordinary_run_completion`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Idle`
@@ -25808,6 +25810,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `not_abandoned_input_completion`
+  - `refused_staging_batch`
   - `ordinary_run_completion`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Attached`
@@ -25818,6 +25821,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `not_abandoned_input_completion`
+  - `refused_staging_batch`
   - `ordinary_run_completion`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Running`
@@ -25828,6 +25832,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `not_abandoned_input_completion`
+  - `refused_staging_batch`
   - `ordinary_run_completion`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Retired`
@@ -25838,6 +25843,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `not_abandoned_input_completion`
+  - `refused_staging_batch`
   - `ordinary_run_completion`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Stopped`
@@ -25848,6 +25854,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `not_abandoned_input_completion`
+  - `refused_staging_batch`
   - `ordinary_run_completion`
 - Emits: `TerminalCompletionCorrelationClassified`
 - To: `Destroyed`

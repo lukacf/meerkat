@@ -8818,7 +8818,7 @@ mod tests {
 
     #[test]
     fn input_to_primitive_preserves_typed_prompt_appends_without_user_text() -> Result<(), String> {
-        let typed_append = ConversationAppend {
+        let mut typed_append = ConversationAppend {
             runtime_source: None,
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::SystemNotice {
@@ -8851,7 +8851,13 @@ mod tests {
         let RunPrimitive::StagedInput(staged) = primitive else {
             return Err("expected staged input".to_string());
         };
-        assert_eq!(staged.contributing_input_ids, vec![input_id]);
+        assert_eq!(staged.contributing_input_ids, vec![input_id.clone()]);
+        typed_append.runtime_source = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeAppendSource {
+                input_id,
+                append_ordinal: 0,
+            },
+        );
         assert_eq!(staged.appends, vec![typed_append]);
         Ok(())
     }
@@ -9747,6 +9753,7 @@ mod tests {
     #[tokio::test]
     async fn max_attempts_abandonment_does_not_wedge_the_backlog() {
         let driver = make_shared_ephemeral_driver("defer-wedge-class");
+        bind_runtime_for_progress_test(&driver, "defer-wedge-class").await;
         let poison_id =
             accept_queued_input_id(&driver, make_peer_message("lead-rt", "poison steer")).await;
         let innocent_id = accept_queued_input_id(
@@ -9928,6 +9935,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_requeued_head_restages_and_the_backlog_drains() {
         let driver = make_shared_ephemeral_driver("stage-refusal-wedge-class");
+        bind_runtime_for_progress_test(&driver, "stage-refusal-wedge-class").await;
         let head_id =
             accept_queued_input_id(&driver, make_peer_message("lead-rt", "stuck head")).await;
         let follower_id = accept_queued_input_id(

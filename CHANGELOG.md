@@ -908,9 +908,11 @@ them.
 - Config documents that set `use_catalog_default_chain` under
   `[model_fallback]` (documented through 0.8.36) no longer fail every command
   and REST/RPC/MCP startup with "unknown field". Loads ignore the key and
-  report `ConfigWarning::LegacyModelFallbackCatalogChain`. Without other
-  settings the table counts as no fallback policy, so the realm inherits its
-  parent's explicit policy, off if there is none. The key is never written
+  report `ConfigWarning::LegacyModelFallbackCatalogChain`. With the key set to
+  `true` the whole table counts as no fallback policy (in 0.8.36 it replaced
+  the table, so its sibling values never applied), and the realm inherits its
+  parent's explicit policy, off if there is none. With `false` only the key is
+  dropped. The key is never written
   back, and writes that introduce it are still rejected.
 - Config patches merge onto the document as persisted. Adding a
   `[[model_fallback.chain]]` target by `rkat config patch` (or a REST/RPC/MCP

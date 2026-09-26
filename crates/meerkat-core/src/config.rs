@@ -2906,6 +2906,14 @@ impl LegacyModelFallbackKeys {
             .map(toml::Value::try_into::<bool>)
             .transpose()
             .map_err(ConfigError::Parse)?;
+        // Through 0.8.36 `use_catalog_default_chain = true` replaced the
+        // whole table with the catalog default, so its sibling values never
+        // took effect. The catalog chain no longer exists; the faithful
+        // reading is the absent table, which inherits the parent's explicit
+        // policy (off if there is none).
+        if use_catalog_default_chain == Some(true) {
+            model_fallback.clear();
+        }
         Ok(Self {
             use_catalog_default_chain,
         })
@@ -5024,9 +5032,24 @@ enabled = false
                 "[model_fallback]\nenabled = true\nuse_catalog_default_chain = true\n",
                 None,
                 0,
-                true,
+                false,
             ),
-            (with_chain, Some(true), 1, false),
+            // `true` replaced the whole table in 0.8.36, so sibling values
+            // (an explicit chain or `enabled = false`) never took effect.
+            (with_chain, None, 0, false),
+            (
+                "[model_fallback]\nenabled = false\nuse_catalog_default_chain = true\n",
+                None,
+                0,
+                false,
+            ),
+            // `false` never reset the table, so an explicit sibling stands.
+            (
+                "[model_fallback]\nenabled = false\nuse_catalog_default_chain = false\n",
+                Some(false),
+                0,
+                false,
+            ),
         ] {
             let (config, warnings) =
                 Config::from_persisted_toml(text).expect("a persisted legacy key must load");

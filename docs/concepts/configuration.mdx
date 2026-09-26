@@ -358,7 +358,7 @@ Writes and loads treat two legacy shapes differently:
 | Persisted shape | Loaded as | Warning |
 | --- | --- | --- |
 | `[model_fallback] enabled = true` with no `[[model_fallback.chain]]` (the template default through 0.8.36, then meaning the catalog default chain) | ignored: no fallback policy, so it inherits the parent's explicit policy, off if none | `LegacyModelFallbackDefault` |
-| `use_catalog_default_chain` under `[model_fallback]` (documented through 0.8.36) | ignored: without other settings in the table, no fallback policy, so it inherits the parent's explicit policy, off if none | `LegacyModelFallbackCatalogChain` |
+| `use_catalog_default_chain` under `[model_fallback]` (documented through 0.8.36) | `= true`: the whole table is ignored (as in 0.8.36, where it replaced the table), so it inherits the parent's explicit policy, off if none. `= false`: only the key is ignored and the table's other settings stand | `LegacyModelFallbackCatalogChain` |
 
 A legacy table loads as if it were absent. That matches 0.8.36, where a child
 realm's `enabled = true` table with no chain equalled the default and inherited

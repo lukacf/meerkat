@@ -104,9 +104,9 @@ struct RecordingSchemaClient {
 impl RecordingSchemaClient {
     fn new(provider: Provider, responses: Vec<LlmStreamResult>) -> Self {
         let model = match provider {
-            Provider::Anthropic => "claude-opus-5",
-            Provider::OpenAI => "gpt-5.6-luna",
-            Provider::Gemini => "gemini-3.5-flash",
+            Provider::Anthropic => "claude-test",
+            Provider::OpenAI => "gpt-test",
+            Provider::Gemini => "gemini-test",
             Provider::SelfHosted => "self-hosted-model",
             _ => "mock-model",
         };

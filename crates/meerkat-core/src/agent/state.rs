@@ -22714,7 +22714,7 @@ mod tests {
                     cache_read_tokens: Some(cached),
                     ..Default::default()
                 },
-                crate::ProviderTokenAccounting::openai("gpt-5.6-luna", input),
+                crate::ProviderTokenAccounting::openai("gpt-test", input),
             )
             .into_inner(),
         )

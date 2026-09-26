@@ -1538,6 +1538,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_composition_materialization_releases_only_its_endpoint() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let id = SessionId::new();
+        machine
+            .register_session(id.clone())
+            .await
+            .expect("preexisting entry");
+        let old_surface = Arc::new(RecordingSignalSurface::default());
+        let old_dispatcher = recording_dispatcher(Arc::clone(&old_surface));
+        let mut old_prepared = prepare_composed_session(&machine, &id, &old_dispatcher).await;
+        assert!(
+            !old_prepared
+                .rollback_now()
+                .await
+                .expect("abort exact prepared attempt")
+        );
+        let old_consumer =
+            MeerkatConsumerSurface::new(Arc::clone(&machine), Arc::clone(&old_dispatcher));
+        let error = old_consumer
+            .apply_routed_input(iv("PrepareBindings"), composed_binding_fields(&id, "old:0"))
+            .await
+            .expect_err("aborted materializer cannot retain composition custody");
+        assert_eq!(error.error_code(), "composition_endpoint_unbound");
+        assert!(old_surface.log.lock().await.is_empty());
+        let new_surface = Arc::new(RecordingSignalSurface::default());
+        let new_dispatcher = recording_dispatcher(Arc::clone(&new_surface));
+        let _new_prepared = prepare_composed_session(&machine, &id, &new_dispatcher).await;
+        bind_composed_session(&machine, &id, &new_dispatcher, "new:0").await;
+        assert_eq!(new_surface.log.lock().await.len(), 1);
+        old_prepared
+            .rollback_now()
+            .await
+            .expect("completed old rollback is inert");
+        assert_eq!(new_surface.log.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn routed_prepare_bindings_dispatches_runtime_bound_signal() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();

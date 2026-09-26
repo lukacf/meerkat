@@ -1501,11 +1501,13 @@ struct RuntimeSessionEntry {
     /// could fall out of sync across a registration/unregistration
     /// boundary.
     drain_slot: CommsDrainSlot,
-    /// Reverse composition endpoint installed by the successful routed binding
-    /// on this exact registration. Direct sessions have no mob consumer.
+    /// Reverse composition endpoint installed by the exact materialization
+    /// claim on this registration. Direct sessions have no mob consumer.
     /// Registration removal drops the endpoint; effect batches retain their
     /// captured endpoint across awaits instead of looking up a successor.
     composition_signal_dispatcher: Option<composition::MeerkatCompositionSignalDispatcher>,
+    /// Exact installer custody for failed materialization compensation.
+    composition_materialization_claim_id: Option<uuid::Uuid>,
 }
 
 /// Fully recovered persistent session entry that has not yet been published
@@ -3568,7 +3570,11 @@ impl PreparedSessionMaterialization {
                     .to_string(),
             });
         }
+        if let Some(error) = entry.dsl_mutation_blocked_by_unregister(self.session_id()) {
+            return Err(error);
+        }
         entry.composition_signal_dispatcher = Some(dispatcher);
+        entry.composition_materialization_claim_id = Some(self.claim_id);
         Ok(())
     }
 

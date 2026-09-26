@@ -2136,6 +2136,7 @@ impl MeerkatMachine {
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
             composition_signal_dispatcher: None,
+            composition_materialization_claim_id: None,
         };
         Ok((runtime_id, session_entry))
     }
@@ -2319,6 +2320,7 @@ impl MeerkatMachine {
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
             composition_signal_dispatcher: None,
+            composition_materialization_claim_id: None,
         };
         #[cfg(target_arch = "wasm32")]
         {
@@ -2535,6 +2537,7 @@ impl MeerkatMachine {
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
             composition_signal_dispatcher: None,
+            composition_materialization_claim_id: None,
         };
         if let Some(rehydration_authority) = rehydration_authority {
             rehydration_authority.mark_ready().map_err(|required| {
@@ -3475,8 +3478,8 @@ impl MeerkatMachine {
             return Ok(false);
         };
         let (rollback_registration, provisional_cleanup_attachment_id) = {
-            let sessions = self.sessions.read().await;
-            let Some(entry) = sessions.get(session_id) else {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
                 return Ok(false);
             };
             if expected_epoch.is_some_and(|epoch| &entry.epoch_id != epoch)
@@ -3501,6 +3504,10 @@ impl MeerkatMachine {
                     return Ok(false);
                 }
                 state.phase = crate::RuntimeActorMaterializationClaimPhase::Aborting;
+            }
+            if entry.composition_materialization_claim_id == Some(claim_id) {
+                entry.composition_signal_dispatcher = None;
+                entry.composition_materialization_claim_id = None;
             }
             (
                 state.rollback_registration_available,
@@ -4306,6 +4313,7 @@ impl MeerkatMachine {
                         dsl_authority: Arc::clone(&dsl_authority),
                         drain_slot: CommsDrainSlot::new(),
                         composition_signal_dispatcher: None,
+                        composition_materialization_claim_id: None,
                     },
                 );
                 let Some(entry) = sessions.get_mut(&session_id) else {

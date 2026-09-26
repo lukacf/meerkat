@@ -48064,6 +48064,405 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
     );
 }
 
+#[cfg(feature = "runtime-adapter")]
+const WHOLE_CREW_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One worker spawned under a coordinator's canonical ops owner context
+/// (the agent-tool `spawn_member` shape): its mob-child operation lives in
+/// the coordinator's registry, never in the worker's own.
+#[cfg(feature = "runtime-adapter")]
+struct ParentOwnedCrewWorker {
+    identity: AgentIdentity,
+    session_id: SessionId,
+    operation_id: meerkat_core::ops_lifecycle::OperationId,
+    owner_session_id: SessionId,
+    owner_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+    attachment: meerkat_runtime::RuntimeExecutorAttachmentWitness,
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn spawn_parent_owned_crew_worker(
+    handle: &MobHandle,
+    adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    identity: &str,
+    runtime_mode: crate::MobRuntimeMode,
+    owner: super::handle::CanonicalOpsOwnerContext,
+) -> ParentOwnedCrewWorker {
+    let owner_session_id = owner.owner_bridge_session_id.clone();
+    let owner_registry = Arc::clone(&owner.ops_registry);
+    let mut spec = SpawnMemberSpec::new("worker", identity);
+    spec.runtime_mode = Some(runtime_mode);
+    let receipt = handle
+        .spawn_spec_receipt_with_owner_context(spec, owner)
+        .await
+        .unwrap_or_else(|error| panic!("spawn parent-owned worker '{identity}': {error:?}"));
+    let session_id = receipt
+        .member_ref
+        .bridge_session_id()
+        .cloned()
+        .unwrap_or_else(|| panic!("parent-owned worker '{identity}' is session-backed"));
+    let attachment = adapter
+        .current_executor_attachment_witness(&session_id)
+        .await
+        .unwrap_or_else(|| panic!("parent-owned worker '{identity}' has an exact attachment"));
+    let worker = ParentOwnedCrewWorker {
+        identity: AgentIdentity::from(identity),
+        session_id,
+        operation_id: receipt.operation_id,
+        owner_session_id,
+        owner_registry,
+        attachment,
+    };
+    assert_parent_owned_crew_worker_retained(adapter, &worker, "after spawn", true).await;
+    worker
+}
+
+/// The worker keeps its exact attachment, its operation stays in its
+/// coordinator's registry under the coordinator's owner tuple, and its own
+/// registry never gains a competing self-owned mob-child operation.
+#[cfg(feature = "runtime-adapter")]
+async fn assert_parent_owned_crew_worker_retained(
+    adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    worker: &ParentOwnedCrewWorker,
+    context: &str,
+    expect_live_operation: bool,
+) {
+    use meerkat_core::ops_lifecycle::{OperationKind, OperationSource};
+
+    let identity = &worker.identity;
+    assert_eq!(
+        adapter
+            .current_executor_attachment_witness(&worker.session_id)
+            .await,
+        Some(worker.attachment.clone()),
+        "{context}: parent-owned worker '{identity}' must keep its exact attachment"
+    );
+    let source = OperationSource::session_child(worker.session_id.clone());
+    let snapshot = worker
+        .owner_registry
+        .snapshot(&worker.operation_id)
+        .expect("read parent-owned operation")
+        .unwrap_or_else(|| {
+            panic!("{context}: operation for '{identity}' must stay in its owner registry")
+        });
+    assert_eq!(snapshot.kind, OperationKind::MobMemberChild, "{context}");
+    assert_eq!(
+        snapshot.operation_source,
+        Some(source.clone()),
+        "{context}: operation for '{identity}' keeps its child-session source"
+    );
+    assert_eq!(
+        snapshot.owner_session_id, worker.owner_session_id,
+        "{context}: operation for '{identity}' keeps its coordinator owner"
+    );
+    assert_eq!(
+        !snapshot.terminal, expect_live_operation,
+        "{context}: operation for '{identity}' terminality: {snapshot:?}"
+    );
+    let own_bindings = adapter
+        .prepare_local_session_bindings(worker.session_id.clone())
+        .await
+        .expect("worker's own runtime bindings");
+    let self_owned = own_bindings
+        .ops_lifecycle()
+        .list_operations()
+        .expect("list worker's own operations")
+        .into_iter()
+        .filter(|operation| {
+            operation.kind == OperationKind::MobMemberChild
+                && operation.operation_source.as_ref() == Some(&source)
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        self_owned.is_empty(),
+        "{context}: ownership of '{identity}' must not flip to the worker itself: {self_owned:?}"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn retire_parent_owned_crew_worker(handle: &MobHandle, worker: &ParentOwnedCrewWorker) {
+    tokio::time::timeout(
+        WHOLE_CREW_LIFECYCLE_TIMEOUT,
+        handle.retire(worker.identity.clone()),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("retire '{}' timed out", worker.identity))
+    .unwrap_or_else(|error| panic!("retire '{}' failed: {error:?}", worker.identity));
+    let snapshot = worker
+        .owner_registry
+        .snapshot(&worker.operation_id)
+        .expect("read retired operation")
+        .expect("retired operation stays observable in its owner registry");
+    assert!(snapshot.terminal, "retired operation: {snapshot:?}");
+    assert_eq!(
+        snapshot.status,
+        meerkat_core::ops_lifecycle::OperationStatus::Retired,
+        "retiring '{}' must retire its coordinator-owned operation",
+        worker.identity
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn whole_crew_stop(handle: &MobHandle, context: &str) {
+    tokio::time::timeout(WHOLE_CREW_LIFECYCLE_TIMEOUT, handle.stop())
+        .await
+        .unwrap_or_else(|_| panic!("{context}: whole-crew stop timed out"))
+        .unwrap_or_else(|error| panic!("{context}: whole-crew stop failed: {error:?}"));
+    assert_eq!(
+        handle.status().await.expect("status after stop"),
+        MobState::Stopped,
+        "{context}"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn whole_crew_resume(handle: &MobHandle, context: &str) {
+    tokio::time::timeout(WHOLE_CREW_LIFECYCLE_TIMEOUT, handle.resume())
+        .await
+        .unwrap_or_else(|_| panic!("{context}: whole-crew resume timed out"))
+        .unwrap_or_else(|error| panic!("{context}: whole-crew resume failed: {error:?}"));
+    assert_eq!(
+        handle.status().await.expect("status after resume"),
+        MobState::Running,
+        "{context}"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn spawn_self_owned_crew_lead(
+    handle: &MobHandle,
+    adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+) -> (SessionId, meerkat_runtime::RuntimeExecutorAttachmentWitness) {
+    let lead_session_id = handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn self-owned autonomous lead")
+        .bridge_session_id()
+        .cloned()
+        .expect("autonomous lead is session-backed");
+    let attachment = adapter
+        .current_executor_attachment_witness(&lead_session_id)
+        .await
+        .expect("autonomous lead has an exact attachment");
+    (lead_session_id, attachment)
+}
+
+/// Downstream regression: a coordinator spawns an autonomous worker into a
+/// child crew under its own ops owner context, then the WHOLE crew is
+/// stopped and explicitly resumed on the same handle. The retained worker
+/// keeps its coordinator-owned binding; resume must not try to re-own it.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn whole_crew_stop_resume_keeps_parent_owned_worker_operation_binding() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    let (lead_session_id, lead_attachment) = spawn_self_owned_crew_lead(&handle, &adapter).await;
+
+    let coordinator = handle
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("external coordinator owner context");
+    let worker = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-parent-owned",
+        crate::MobRuntimeMode::AutonomousHost,
+        coordinator,
+    )
+    .await;
+
+    whole_crew_stop(&handle, "stop crew").await;
+    whole_crew_resume(&handle, "resume crew").await;
+
+    assert_eq!(
+        adapter
+            .current_executor_attachment_witness(&lead_session_id)
+            .await,
+        Some(lead_attachment),
+        "self-owned control keeps its exact attachment"
+    );
+    assert_parent_owned_crew_worker_retained(&adapter, &worker, "after resume", true).await;
+    retire_parent_owned_crew_worker(&handle, &worker).await;
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn whole_crew_stop_resume_keeps_parent_owned_bindings_across_modes_owners_and_cycles() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    let (lead_session_id, lead_attachment) = spawn_self_owned_crew_lead(&handle, &adapter).await;
+
+    let external = handle
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("external coordinator owner context");
+    let ext_auto = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-ext-auto",
+        crate::MobRuntimeMode::AutonomousHost,
+        external.clone(),
+    )
+    .await;
+    let ext_td = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-ext-td",
+        crate::MobRuntimeMode::TurnDriven,
+        external,
+    )
+    .await;
+    let lead_owner = handle
+        .generated_ops_owner_context_for_test(lead_session_id.clone())
+        .await
+        .expect("in-crew lead owner context");
+    let lead_owned = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-lead",
+        crate::MobRuntimeMode::TurnDriven,
+        lead_owner,
+    )
+    .await;
+    let workers = [&ext_auto, &ext_td, &lead_owned];
+
+    for cycle in 1..=2 {
+        let context = format!("stop/resume cycle {cycle}");
+        whole_crew_stop(&handle, &context).await;
+        whole_crew_resume(&handle, &context).await;
+        assert_eq!(
+            adapter
+                .current_executor_attachment_witness(&lead_session_id)
+                .await,
+            Some(lead_attachment.clone()),
+            "{context}: lead keeps its exact attachment"
+        );
+        for worker in workers {
+            assert_parent_owned_crew_worker_retained(&adapter, worker, &context, true).await;
+        }
+    }
+
+    for worker in workers {
+        retire_parent_owned_crew_worker(&handle, worker).await;
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn whole_crew_stop_resume_keeps_nested_cross_mob_owner_bindings() {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let mut crew_b_definition = sample_definition();
+    crew_b_definition.id = MobId::from("crew-b-nested-owner");
+    let crew_b = MobBuilder::new(crew_b_definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create crew B");
+    let mut crew_c_definition = sample_definition();
+    crew_c_definition.id = MobId::from("crew-c-nested-owner");
+    let crew_c = MobBuilder::new(crew_c_definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create crew C");
+    spawn_self_owned_crew_lead(&crew_b, &adapter).await;
+    spawn_self_owned_crew_lead(&crew_c, &adapter).await;
+
+    let coordinator = crew_b
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("external coordinator owner context");
+    let w = spawn_parent_owned_crew_worker(
+        &crew_b,
+        &adapter,
+        "w-coordinator-owned",
+        crate::MobRuntimeMode::AutonomousHost,
+        coordinator,
+    )
+    .await;
+    let w_owner = crew_c
+        .generated_ops_owner_context_for_test(w.session_id.clone())
+        .await
+        .expect("crew B worker owns a nested crew C worker");
+    let x = spawn_parent_owned_crew_worker(
+        &crew_c,
+        &adapter,
+        "x-nested",
+        crate::MobRuntimeMode::AutonomousHost,
+        w_owner,
+    )
+    .await;
+
+    whole_crew_stop(&crew_c, "stop nested crew C").await;
+    whole_crew_resume(&crew_c, "resume nested crew C").await;
+    whole_crew_stop(&crew_b, "stop parent crew B").await;
+    whole_crew_resume(&crew_b, "resume parent crew B").await;
+    whole_crew_stop(&crew_c, "stop nested crew C again").await;
+    whole_crew_resume(&crew_c, "resume nested crew C again").await;
+
+    assert_parent_owned_crew_worker_retained(&adapter, &w, "crew B worker", true).await;
+    assert_parent_owned_crew_worker_retained(&adapter, &x, "crew C worker", true).await;
+    retire_parent_owned_crew_worker(&crew_c, &x).await;
+    retire_parent_owned_crew_worker(&crew_b, &w).await;
+}
+
+/// The coordinator retires or abandons the child operation while the crew is
+/// stopped. Keeping the binding is still correct, resume succeeds, and a
+/// later retire releases the binding through the zero-active branch.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn whole_crew_stop_resume_keeps_binding_after_parent_terminalized_worker_operation() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    spawn_self_owned_crew_lead(&handle, &adapter).await;
+    let coordinator = handle
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("external coordinator owner context");
+    let worker = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-parent-owned",
+        crate::MobRuntimeMode::AutonomousHost,
+        coordinator,
+    )
+    .await;
+
+    whole_crew_stop(&handle, "stop crew").await;
+    worker
+        .owner_registry
+        .request_retire(&worker.operation_id)
+        .expect("coordinator requests child operation retirement while crew is stopped");
+    worker
+        .owner_registry
+        .mark_retired(&worker.operation_id)
+        .expect("coordinator terminalizes child operation while crew is stopped");
+    whole_crew_resume(
+        &handle,
+        "resume crew after parent terminalized the operation",
+    )
+    .await;
+
+    assert_parent_owned_crew_worker_retained(&adapter, &worker, "after resume", false).await;
+    tokio::time::timeout(
+        WHOLE_CREW_LIFECYCLE_TIMEOUT,
+        handle.retire(worker.identity.clone()),
+    )
+    .await
+    .expect("retire after parent terminalization timed out")
+    .expect("retire after parent terminalization");
+    assert_eq!(
+        worker
+            .owner_registry
+            .snapshot(&worker.operation_id)
+            .expect("read terminal operation")
+            .map(|snapshot| snapshot.status),
+        Some(meerkat_core::ops_lifecycle::OperationStatus::Retired),
+        "the coordinator's terminal verdict is preserved"
+    );
+}
+
 #[tokio::test]
 async fn test_stop_notifies_every_active_orchestrator_profile_member() {
     let (handle, service) = create_test_mob(sample_definition()).await;

@@ -6506,6 +6506,18 @@ struct RestoredMemberOperationBinding {
     )>,
 }
 
+/// Which seam realizes a restored member operation binding. Actor startup
+/// runs against a fresh ops adapter, so any surviving binding is an invariant
+/// violation and the strict bind applies. The explicit same-handle resume
+/// post-commit step runs against the live adapter, where a parent-owned
+/// member legitimately still holds its coordinator-owned binding.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestoredOperationBindingSeam {
+    ActorStartup,
+    ExplicitResumePostCommit,
+}
+
 #[cfg(feature = "runtime-adapter")]
 #[derive(Clone)]
 struct ResumeOperationBindingIo {
@@ -27505,6 +27517,7 @@ impl MobActor {
     async fn realize_restored_member_operation_binding(
         io: ResumeOperationBindingIo,
         plan: RestoredMemberOperationBinding,
+        seam: RestoredOperationBindingSeam,
     ) -> Result<(), MobError> {
         let RestoredMemberOperationBinding {
             entry,
@@ -27570,13 +27583,26 @@ impl MobActor {
                 )
                 .await?;
         } else {
-            io.provisioner
-                .bind_member_owner_context(
-                    &entry.member_ref,
-                    generated_owner_session_id,
-                    Arc::clone(bindings.ops_lifecycle()),
-                )
-                .await?;
+            match seam {
+                RestoredOperationBindingSeam::ActorStartup => {
+                    io.provisioner
+                        .bind_member_owner_context(
+                            &entry.member_ref,
+                            generated_owner_session_id,
+                            Arc::clone(bindings.ops_lifecycle()),
+                        )
+                        .await?;
+                }
+                RestoredOperationBindingSeam::ExplicitResumePostCommit => {
+                    io.provisioner
+                        .restore_member_owner_context_for_explicit_resume(
+                            &entry.member_ref,
+                            generated_owner_session_id,
+                            Arc::clone(bindings.ops_lifecycle()),
+                        )
+                        .await?;
+                }
+            }
         }
         Ok(())
     }
@@ -27589,7 +27615,12 @@ impl MobActor {
         let entries = self.roster.read().await.list().cloned().collect::<Vec<_>>();
         for entry in entries {
             if let Some(plan) = self.prepare_restored_member_operation_binding(entry)? {
-                Self::realize_restored_member_operation_binding(io.clone(), plan).await?;
+                Self::realize_restored_member_operation_binding(
+                    io.clone(),
+                    plan,
+                    RestoredOperationBindingSeam::ActorStartup,
+                )
+                .await?;
             }
         }
         Ok(())

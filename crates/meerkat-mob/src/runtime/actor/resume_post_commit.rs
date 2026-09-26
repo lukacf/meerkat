@@ -35,7 +35,12 @@ impl MobActor {
                             ResumePostCommitStep::OperationBindings,
                             identity,
                             boxed_arm_future(|| async move {
-                                Self::realize_restored_member_operation_binding(io, plan).await
+                                Self::realize_restored_member_operation_binding(
+                                    io,
+                                    plan,
+                                    RestoredOperationBindingSeam::ExplicitResumePostCommit,
+                                )
+                                .await
                             }),
                         );
                     }

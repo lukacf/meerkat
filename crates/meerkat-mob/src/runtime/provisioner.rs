@@ -1700,6 +1700,24 @@ pub trait MobProvisioner: Send + Sync {
         ops_registry: Arc<dyn OpsLifecycleRegistry>,
     ) -> Result<(), MobError>;
 
+    /// Re-establish the generated owner binding MobMachine authorized for a
+    /// committed member after an explicit same-handle resume commit.
+    ///
+    /// Unlike [`Self::bind_member_owner_context`], a session member that is
+    /// still bound under a coordinator's spawn-time owner context keeps that
+    /// published binding: resume never re-owns a parent-owned operation.
+    /// Every other binding shape keeps the strict bind semantics. The default
+    /// delegates to the strict bind.
+    async fn restore_member_owner_context_for_explicit_resume(
+        &self,
+        member_ref: &MemberRef,
+        owner_bridge_session_id: SessionId,
+        ops_registry: Arc<dyn OpsLifecycleRegistry>,
+    ) -> Result<(), MobError> {
+        self.bind_member_owner_context(member_ref, owner_bridge_session_id, ops_registry)
+            .await
+    }
+
     /// Rebind a recovered committed placed member to its exact pre-minted
     /// operation.  Unlike the ordinary endpoint-source path this must never
     /// discover or create another operation.
@@ -12206,6 +12224,37 @@ impl MobProvisioner for SessionBackend {
         Ok(())
     }
 
+    async fn restore_member_owner_context_for_explicit_resume(
+        &self,
+        member_ref: &MemberRef,
+        owner_bridge_session_id: SessionId,
+        ops_registry: Arc<dyn OpsLifecycleRegistry>,
+    ) -> Result<(), MobError> {
+        let Some(bridge_session_id) = member_ref.bridge_session_id().cloned() else {
+            return Err(MobError::Internal(
+                "member has no session bridge for canonical ops binding".into(),
+            ));
+        };
+        let restored = self
+            .ops_adapter
+            .restore_session_binding_for_explicit_resume(
+                bridge_session_id.clone(),
+                owner_bridge_session_id,
+                ops_registry,
+            )?;
+        if let super::ops_adapter::ExplicitResumeSessionBindingRestore::RetainedOwnerContext {
+            owner_bridge_session_id,
+        } = &restored
+        {
+            tracing::debug!(
+                member_session_id = %bridge_session_id,
+                owner_bridge_session_id = %owner_bridge_session_id,
+                "explicit resume retained the coordinator-owned operation binding of a parent-owned member"
+            );
+        }
+        Ok(())
+    }
+
     async fn cancel_all_checkpointers(&self) {
         self.session_service.cancel_all_checkpointers().await;
     }
@@ -15706,6 +15755,33 @@ impl MobProvisioner for MultiBackendProvisioner {
             _ => {
                 self.session
                     .bind_member_owner_context(member_ref, owner_bridge_session_id, ops_registry)
+                    .await
+            }
+        }
+    }
+
+    async fn restore_member_owner_context_for_explicit_resume(
+        &self,
+        member_ref: &MemberRef,
+        owner_bridge_session_id: SessionId,
+        ops_registry: Arc<dyn OpsLifecycleRegistry>,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            // Peer-only members have no local session binding to retain;
+            // they keep the exact peer-only bind path.
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => {
+                self.bind_member_owner_context(member_ref, owner_bridge_session_id, ops_registry)
+                    .await
+            }
+            _ => {
+                self.session
+                    .restore_member_owner_context_for_explicit_resume(
+                        member_ref,
+                        owner_bridge_session_id,
+                        ops_registry,
+                    )
                     .await
             }
         }

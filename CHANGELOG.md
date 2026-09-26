@@ -756,6 +756,14 @@ them.
 
 ### Fixed
 
+- Stopping and then resuming a whole mob no longer fails with "already has a
+  different operation-registry binding incarnation" when a member was spawned
+  under a coordinator's operation owner context (a coordinator spawning a
+  worker into a child crew). Resume kept the worker's coordinator-owned
+  binding but then tried to re-bind it under the worker's own session. It now
+  keeps the published coordinator-owned binding, and the worker's operation
+  stays in the coordinator's registry. Self-owned bindings, unpublished or
+  claimed bindings, and actor startup are still checked strictly.
 - The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
   and 033 (the office demo) pass again and run in pull-request CI. A new
   "Example web suites" lane builds the `sdks/web` wasm runtime once with the

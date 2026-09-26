@@ -155,11 +155,19 @@ fn snapshot_from_store(config: Config, config_store: &Arc<dyn ConfigStore>) -> C
     }
 }
 
-fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, String> {
-    // RFC-7386 merge-patch acceptance/rejection has a single owner —
-    // meerkat-core. The surface only maps the typed `ConfigError` to its wire
-    // shape; it does not re-implement the merge.
-    meerkat_core::apply_config_patch_preview(config, patch).map_err(|e| e.to_string())
+/// Map a patch-preview failure: a malformed delta is the caller's fault,
+/// anything else (for example an unreadable persisted document) is internal.
+fn patch_preview_error_response(id: Option<RpcId>, err: ConfigRuntimeError) -> RpcResponse {
+    match err {
+        ConfigRuntimeError::Config(error @ meerkat_core::config::ConfigError::Json(_)) => {
+            RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("Failed to apply config patch preview: {error}"),
+            )
+        }
+        other => runtime_error_to_response(id, other),
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -396,15 +404,14 @@ pub async fn handle_patch(
             Ok(snapshot) => snapshot.config,
             Err(e) => return runtime_error_to_response(id, e),
         };
-        let preview = match apply_patch_preview(&current, patch.clone()) {
+        // RFC-7386 merge semantics have a single owner, meerkat-core: the
+        // preview is exactly what the store's patch commits.
+        let preview = match config_runtime
+            .patch_preview(&ConfigDelta(patch.clone()))
+            .await
+        {
             Ok(config) => config,
-            Err(err) => {
-                return RpcResponse::error(
-                    id,
-                    error::INVALID_PARAMS,
-                    format!("Failed to apply config patch preview: {err}"),
-                );
-            }
+            Err(err) => return patch_preview_error_response(id, err),
         };
         if let Err(response) = validate_config_for_runtime(id.clone(), &preview, runtime) {
             return response;
@@ -480,15 +487,12 @@ pub async fn handle_patch(
             Ok(config) => config,
             Err(e) => return RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
         };
-        let preview = match apply_patch_preview(&current, patch.clone()) {
-            Ok(config) => config,
-            Err(err) => {
-                return RpcResponse::error(
-                    id,
-                    error::INVALID_PARAMS,
-                    format!("Failed to apply config patch preview: {err}"),
-                );
-            }
+        let preview = match config_store
+            .patch_preview(&ConfigDelta(patch.clone()))
+            .await
+        {
+            Ok((config, _)) => config,
+            Err(err) => return patch_preview_error_response(id, ConfigRuntimeError::Config(err)),
         };
         if let Err(response) = validate_config_for_runtime(id.clone(), &preview, runtime) {
             return response;

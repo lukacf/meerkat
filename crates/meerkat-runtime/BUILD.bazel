@@ -44,6 +44,20 @@ filegroup(
 
 
 
+exports_files(
+
+    [
+        "tests/fixtures/v0_8_10_released_realm/corpus/realm/config.toml",
+    ],
+
+    visibility = [
+        "//crates/meerkat-cli:__pkg__",
+    ],
+
+)
+
+
+
 rust_library(
     name = "meerkat_runtime",
     aliases = aliases(package_name = "crates/meerkat-runtime"),

@@ -475,6 +475,24 @@ them.
 - `fork_off` accepts `max_run_secs`: an optional autokill that cancels the
   child's run and retires the child once it has run that long. Omitted means no
   limit.
+- Typed config load warnings (meerkat-core): `ConfigWarning`,
+- Typed config load warnings (meerkat-core): `ConfigWarning`
+  (`LegacyModelFallbackDefault`, `LegacyModelFallbackCatalogChain`),
+  `RealmConfigWarning`, `Config::from_persisted_toml`,
+  `Config::normalize_persisted`, `Config::merge_toml_str_with_warnings`,
+  `ModelFallbackConfig::normalize_persisted`,
+  `EffectiveConfigReader::effective_config_with_warnings` and
+  `effective_config_over_head_with_warnings` (both report only realms on the
+  resolved chain), `ConfigRuntime::patch_preview`, the defaulted trait method
+  `RealmConfigSource::config_for_realm_with_warnings`
+  (`FilesystemRealmConfigSource` implements it), and the defaulted
+  `ConfigStore` methods `get_with_warnings`, `patch_preview` and
+  `patch_with_warnings` (`FileConfigStore` and `TaggedConfigStore` implement
+  them). `FileConfigStore::get`, `Config::merge_toml_str`,
+  `Config::load_layered_hooks_from` and `compose_effective_config` apply the
+  same load normalization. REST, RPC and MCP config patch previews now use the
+  store's `patch_preview`, so they validate exactly what the store's patch
+  writes.
 - Cumulative usage reports cached input, cache writes and reasoning. The run
   result's `usage` (what `rkat run --output json` prints), `run_completed.usage`,
   the RPC and REST run results and mob run accounting now carry
@@ -905,6 +923,43 @@ them.
   forward `has_live_session`, `fork_persisted_session` and the other
   live-session, checkpointer and fork methods of `SessionService` and
   `MobSessionService` instead of falling back to the trait defaults.
+- Config documents written by rkat 0.8.36 and earlier load again. Their template
+  wrote `[model_fallback] enabled = true` with no chain (then meaning the
+  catalog default chain, removed in 0.8.37), so after upgrading every `rkat`
+  command failed with "model_fallback.enabled = true requires a nonempty
+  explicit chain", and REST/RPC/MCP startup refused the realm. Loading a
+  persisted document now ignores that table (it counts as no fallback policy,
+  as the equal-to-default table did in 0.8.36), so the realm inherits its
+  parent's explicit fallback policy and fallback is off if there is none. No
+  unreviewed backup model is ever used. The load reports the typed
+  `ConfigWarning::LegacyModelFallbackDefault`. Loading never rewrites the
+  file; the next config write drops the legacy `enabled` key. Writes that
+  introduce `enabled = true` with an empty chain on a document that did not
+  already have it are still rejected.
+- Config documents that set `use_catalog_default_chain` under
+  `[model_fallback]` (documented through 0.8.36) no longer fail every command
+  and REST/RPC/MCP startup with "unknown field". Loads ignore the key and
+  report `ConfigWarning::LegacyModelFallbackCatalogChain`. With the key set to
+  `true` the whole table counts as no fallback policy (in 0.8.36 it replaced
+  the table, so its sibling values never applied), and the realm inherits its
+  parent's explicit policy, off if there is none. With `false` only the key is
+  dropped. The key is never written
+  back, and writes that introduce it are still rejected.
+- Config patches merge onto the document as persisted. Adding a
+  `[[model_fallback.chain]]` target by `rkat config patch` (or a REST/RPC/MCP
+  patch) to a pre-0.8.37 `enabled = true` document now keeps `enabled = true`
+  and turns fallback on. Any other patch of such a document drops the legacy
+  `enabled` key and reports the warning.
+- `rkat` prints each typed config warning on stderr once per file, naming the
+  file, without changing the exit status, on every path that reads a persisted
+  config: `load_config` commands, `rkat mob run/deploy`,
+  `rkat config get/patch`, `rkat auth login`, and the credential bootstrap
+  when it rewrites `~/.rkat/config.toml` before the config loads.
+  `rkat config set` replaces the file without reading it and prints nothing.
+  When a config is composed, `~/.rkat/config.toml` is reported only if it is
+  on the realm's inheritance chain; operations on it directly
+  (`rkat auth login`, `rkat config get --realm global`, the bootstrap rewrite)
+  report it regardless.
 - The `shell` schema no longer advertises values the tool rejects:
   `timeout_secs` declares a minimum of 1, and `background` is offered only when
   durable background jobs are available, instead of failing with "requested

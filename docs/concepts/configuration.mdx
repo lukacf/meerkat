@@ -338,9 +338,46 @@ Use `enabled = false` to disable an inherited policy. A nondefault child
 fallback table replaces the inherited table as a whole. Omitted tables and
 empty/default-valued tables inherit; explicit `enabled = false` is nondefault
 and therefore replaces the parent.
-A chain alone never enables fallback. `enabled = true` with an empty chain is
-invalid. Unknown fallback keys, including the removed `use_catalog_default_chain`
-and unsupported scope/expiry/revert options, are rejected.
+A chain alone never enables fallback.
+
+Writes and loads treat two legacy shapes differently:
+
+- **Writes are strict.** A config set or patch (CLI, REST, RPC, MCP, SDK stores)
+  that introduces `enabled = true` with an empty chain on a document that did
+  not already have that shape is rejected, and so is any unknown fallback key,
+  including the removed `use_catalog_default_chain` and unsupported
+  scope/expiry/revert options. A patch that restates `enabled = true` with an
+  empty chain on a document that already has it is not rejected: it is
+  normalized like a load (see below) and reports the warning.
+- **Loads of persisted documents are lenient** for the two shapes that config
+  files written by rkat 0.8.36 and earlier can contain. The document still
+  loads, the legacy setting is ignored, and the surface reports a typed warning
+  (`ConfigWarning`) naming the file. `rkat` prints it once per file on stderr
+  without changing the exit status; servers log it once per file.
+
+| Persisted shape | Loaded as | Warning |
+| --- | --- | --- |
+| `[model_fallback] enabled = true` with no `[[model_fallback.chain]]` (the template default through 0.8.36, then meaning the catalog default chain) | ignored: no fallback policy, so it inherits the parent's explicit policy, off if none | `LegacyModelFallbackDefault` |
+| `use_catalog_default_chain` under `[model_fallback]` (documented through 0.8.36) | `= true`: the whole table is ignored (as in 0.8.36, where it replaced the table), so it inherits the parent's explicit policy, off if none. `= false`: only the key is ignored and the table's other settings stand | `LegacyModelFallbackCatalogChain` |
+
+A legacy table loads as if it were absent. That matches 0.8.36, where a child
+realm's `enabled = true` table with no chain equalled the default and inherited
+its parent's policy, so a reviewed chain on a parent realm keeps applying to
+children written by 0.8.36. Fallback only ever uses explicit
+`[[model_fallback.chain]]` entries; the removed catalog chain is never used. A
+load never rewrites the file. The next write to that document drops the legacy
+setting (the `enabled` key of the first shape, and `use_catalog_default_chain`).
+A patch merges onto the document as persisted, so a patch that adds a
+`[[model_fallback.chain]]` target to an `enabled = true` document keeps
+`enabled = true` and turns fallback on; any other patch drops the legacy
+setting and reports the warning. To silence a warning, delete the
+`[model_fallback]` table, or add an explicit `[[model_fallback.chain]]`.
+
+Only realms on the resolved inheritance chain are reported when a config is
+composed, so `~/.rkat/config.toml` is reported there only when it is on that
+chain. Operations on the global document itself report it too: `rkat auth
+login`, `rkat config get --realm global`, and the `rkat` credential setup that
+rewrites it.
 
 Explicit `brain_swap` requests are independent of automatic fallback settings.
 Target discovery uses the effective model catalog, configured realm routes,

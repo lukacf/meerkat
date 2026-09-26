@@ -2237,6 +2237,23 @@ impl FilesystemRealmConfigSource {
             realm_paths_in(&self.state_root, realm.as_str()).config_path
         }
     }
+
+    /// File store for `realm`'s document when it exists, `None` when absent.
+    async fn present_doc_store(
+        &self,
+        realm: &meerkat_core::connection::RealmId,
+    ) -> Result<Option<meerkat_core::FileConfigStore>, meerkat_core::config::ConfigError> {
+        let path = self.config_doc_path(realm);
+        // Fail closed on an undeterminable existence probe (EACCES/ELOOP/ENOTDIR
+        // on the path or an ancestor): a present-but-unstat-able config doc must
+        // NOT silently drop its inherited credentials/limits from the fold — only
+        // a confirmed `Ok(false)` means the doc is genuinely absent.
+        match tokio::fs::try_exists(&path).await {
+            Ok(true) => Ok(Some(meerkat_core::FileConfigStore::new(path, self.catalog))),
+            Ok(false) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2247,20 +2264,27 @@ impl meerkat_core::RealmConfigSource for FilesystemRealmConfigSource {
         realm: &meerkat_core::connection::RealmId,
     ) -> Result<Option<meerkat_core::Config>, meerkat_core::config::ConfigError> {
         use meerkat_core::ConfigStore;
-        let path = self.config_doc_path(realm);
-        // Fail closed on an undeterminable existence probe (EACCES/ELOOP/ENOTDIR
-        // on the path or an ancestor): a present-but-unstat-able config doc must
-        // NOT silently drop its inherited credentials/limits from the fold — only
-        // a confirmed `Ok(false)` means the doc is genuinely absent.
-        match tokio::fs::try_exists(&path).await {
-            Ok(true) => {}
-            Ok(false) => return Ok(None),
-            Err(err) => return Err(err.into()),
+        // FileConfigStore::get parses the toml (logging any load warning); the
+        // existence check means a present-but-absent doc never collapses to
+        // Config::default().
+        match self.present_doc_store(realm).await? {
+            Some(store) => store.get().await.map(Some),
+            None => Ok(None),
         }
-        // FileConfigStore::get parses the toml; the existence check above means a
-        // present-but-absent doc never collapses to Config::default().
-        let store = meerkat_core::FileConfigStore::new(path, self.catalog);
-        store.get().await.map(Some)
+    }
+
+    async fn config_for_realm_with_warnings(
+        &self,
+        realm: &meerkat_core::connection::RealmId,
+    ) -> Result<
+        Option<(meerkat_core::Config, Vec<meerkat_core::ConfigWarning>)>,
+        meerkat_core::config::ConfigError,
+    > {
+        use meerkat_core::ConfigStore;
+        match self.present_doc_store(realm).await? {
+            Some(store) => store.get_with_warnings().await.map(Some),
+            None => Ok(None),
+        }
     }
 
     async fn raw_config_for_realm(

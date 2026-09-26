@@ -690,3 +690,371 @@ fn rkat_auth_logout_clears_scripted_login_token_key() {
         "repeat logout must not panic; stderr={stderr}"
     );
 }
+
+/// P0 regression (0.8.42): the config template shipped through 0.8.36 wrote
+/// `[model_fallback] enabled = true` with no chain into `~/.rkat/config.toml`.
+/// After 0.8.37 removed the catalog chain, every `rkat` command failed with
+/// "Invalid runtime config: ... requires a nonempty explicit chain". Such a
+/// document must load with fallback off: the command proceeds to its next
+/// step (here: no credentials) and stderr carries the typed warning once.
+#[test]
+fn rkat_prompt_loads_legacy_model_fallback_default_with_warning() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let home = tmp.path().join("home");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(home.join(".rkat")).expect("mkdir ~/.rkat");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    // Shape of a pre-0.8.37 user-global doc: the template's fallback table
+    // plus the `[realm.global]` section `rkat auth login` adds, which puts the
+    // doc on every workspace realm's inheritance chain.
+    let legacy_doc = "[model_fallback]\nenabled = true\n\n[realm.global]\n";
+    let global_doc = home.join(".rkat").join("config.toml");
+    std::fs::write(&global_doc, legacy_doc).expect("write legacy global config");
+
+    let mut command = Command::new(&rkat);
+    command
+        .arg("Hello")
+        .current_dir(&workspace)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env_remove("RKAT_TEST_CLIENT")
+        .stdin(Stdio::null());
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "RKAT_ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "RKAT_OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "RKAT_GEMINI_API_KEY",
+    ] {
+        command.env_remove(key);
+    }
+    let out = command.output().expect("rkat must spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        !stderr.contains("requires a nonempty explicit chain"),
+        "a pre-0.8.37 config must not brick rkat; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Invalid runtime config"),
+        "config must load; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "rkat must not panic; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("missing_secret"),
+        "rkat must proceed past config loading to credential resolution; stderr:\n{stderr}"
+    );
+    let warning_lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("model_fallback.enabled = true"))
+        .collect();
+    assert_eq!(
+        warning_lines.len(),
+        1,
+        "the legacy-default warning prints exactly once; stderr:\n{stderr}"
+    );
+    let warning = warning_lines[0];
+    for needle in [
+        "0.8.37",
+        "ignored",
+        "inherits",
+        "delete the [model_fallback] table",
+        "[[model_fallback.chain]]",
+    ] {
+        assert!(
+            warning.contains(needle),
+            "warning must mention {needle}; line: {warning}"
+        );
+    }
+    assert!(
+        !warning.contains("enabled = false"),
+        "an explicit `enabled = false` would block inheritance; line: {warning}"
+    );
+    assert!(
+        warning.contains(&global_doc.display().to_string()),
+        "warning names the document to fix; line: {warning}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&global_doc).expect("read global config"),
+        legacy_doc,
+        "loading must not rewrite the operator's document"
+    );
+}
+
+const LEGACY_FALLBACK_WARNING_NEEDLE: &str = "model_fallback.enabled = true with no";
+
+fn legacy_fallback_warning_lines(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter(|line| line.contains(LEGACY_FALLBACK_WARNING_NEEDLE))
+        .collect()
+}
+
+/// `rkat` command with an isolated HOME / XDG tree under `root` and no ambient
+/// provider credentials.
+fn isolated_rkat_command(rkat: &std::path::Path, root: &std::path::Path) -> Command {
+    let mut command = Command::new(rkat);
+    command
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env_remove("RKAT_TEST_CLIENT")
+        .stdin(Stdio::null());
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "RKAT_ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "RKAT_OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "RKAT_GEMINI_API_KEY",
+    ] {
+        command.env_remove(key);
+    }
+    command
+}
+
+/// `rkat config get` and `rkat config patch` load the persisted realm document
+/// without `load_config`; they must still print the typed legacy warning on
+/// stderr (rkat's tracing filter is off by default). A patch that adds a chain
+/// keeps fallback on and warns nothing.
+#[test]
+fn rkat_config_get_and_patch_print_legacy_model_fallback_warning() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let state_root = tmp.path().join("realms");
+    let realm_doc = state_root.join("dev").join("config.toml");
+    std::fs::create_dir_all(realm_doc.parent().expect("realm dir")).expect("mkdir realm");
+    let legacy_doc = "[model_fallback]\nenabled = true\n";
+    std::fs::write(&realm_doc, legacy_doc).expect("write legacy realm doc");
+    let state_root_arg = state_root.to_str().expect("utf8 path");
+
+    let get = isolated_rkat_command(&rkat, tmp.path())
+        .args([
+            "--state-root",
+            state_root_arg,
+            "--realm",
+            "dev",
+            "config",
+            "get",
+        ])
+        .output()
+        .expect("rkat config get must spawn");
+    let stderr = String::from_utf8_lossy(&get.stderr);
+    assert!(
+        get.status.success(),
+        "config get must succeed; stderr:\n{stderr}"
+    );
+    let lines = legacy_fallback_warning_lines(&stderr);
+    assert_eq!(lines.len(), 1, "warning prints once; stderr:\n{stderr}");
+    assert!(
+        lines[0].contains(&realm_doc.display().to_string()),
+        "warning names the document; line: {}",
+        lines[0]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&realm_doc).expect("reread"),
+        legacy_doc,
+        "config get never rewrites the document"
+    );
+
+    let patch = isolated_rkat_command(&rkat, tmp.path())
+        .args([
+            "--state-root",
+            state_root_arg,
+            "--realm",
+            "dev",
+            "config",
+            "patch",
+            "--json",
+            r#"{"max_tokens":1234}"#,
+        ])
+        .output()
+        .expect("rkat config patch must spawn");
+    let stderr = String::from_utf8_lossy(&patch.stderr);
+    assert!(
+        patch.status.success(),
+        "config patch must succeed; stderr:\n{stderr}"
+    );
+    assert_eq!(
+        legacy_fallback_warning_lines(&stderr).len(),
+        1,
+        "an unrelated patch over a legacy doc warns once; stderr:\n{stderr}"
+    );
+    let persisted: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&realm_doc).expect("reread")).expect("toml");
+    assert_eq!(
+        persisted["max_tokens"].as_integer(),
+        Some(1234),
+        "{persisted}"
+    );
+    assert!(
+        persisted
+            .get("model_fallback")
+            .and_then(|table| table.get("enabled"))
+            .is_none(),
+        "an unrelated patch persists the normalized no-policy form; {persisted}"
+    );
+
+    std::fs::write(&realm_doc, legacy_doc).expect("restore legacy realm doc");
+    let add_chain = isolated_rkat_command(&rkat, tmp.path())
+        .args([
+            "--state-root",
+            state_root_arg,
+            "--realm",
+            "dev",
+            "config",
+            "patch",
+            "--json",
+            r#"{"model_fallback":{"chain":[{"model":"gpt-5.5","provider":"openai"}]}}"#,
+        ])
+        .output()
+        .expect("rkat config patch must spawn");
+    let stderr = String::from_utf8_lossy(&add_chain.stderr);
+    assert!(
+        add_chain.status.success(),
+        "adding a chain must succeed; stderr:\n{stderr}"
+    );
+    assert!(
+        legacy_fallback_warning_lines(&stderr).is_empty(),
+        "the merged result is no longer legacy; stderr:\n{stderr}"
+    );
+    let persisted: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&realm_doc).expect("reread")).expect("toml");
+    assert_eq!(
+        persisted["model_fallback"]["enabled"].as_bool(),
+        Some(true),
+        "{persisted}"
+    );
+    assert_eq!(
+        persisted["model_fallback"]["chain"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "{persisted}"
+    );
+}
+
+/// The credential-read bootstrap runs BEFORE `load_config` and rewrites the
+/// global doc when a migrated `global` OAuth token still needs its binding
+/// section. On a legacy global doc that write persists the normalized
+/// no-policy form (the `enabled` key dropped), so
+/// the bootstrap itself must print the warning; `load_config` no longer sees
+/// the legacy shape afterwards.
+#[test]
+fn rkat_prompt_prints_legacy_warning_when_credential_bootstrap_rewrites_global_doc() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    let global_doc = tmp.path().join(".rkat").join("config.toml");
+    std::fs::create_dir_all(global_doc.parent().expect("rkat dir")).expect("mkdir ~/.rkat");
+    std::fs::write(
+        &global_doc,
+        "[model_fallback]\nenabled = true\n\n[realm.global]\n",
+    )
+    .expect("write legacy global doc");
+    let token_file = token_file_path_in_realm(tmp.path(), "global", "openai_oauth");
+    std::fs::create_dir_all(token_file.parent().expect("token dir")).expect("mkdir token dir");
+    std::fs::write(
+        &token_file,
+        r#"{
+  "auth_mode": "chatgpt_oauth",
+  "primary_secret": "access-token",
+  "refresh_token": "refresh-token",
+  "expires_at": 1800000000,
+  "last_refresh": 1700000000,
+  "scopes": ["openid"]
+}"#,
+    )
+    .expect("seed global oauth token");
+
+    let out = isolated_rkat_command(&rkat, tmp.path())
+        .arg("Hello")
+        .current_dir(&workspace)
+        .env("RKAT_TEST_CLIENT", "1")
+        .output()
+        .expect("rkat must spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+        eprintln!("SKIP: auth provider features unavailable");
+        return;
+    }
+    assert!(
+        !stderr.contains("panicked"),
+        "rkat must not panic; stderr:\n{stderr}"
+    );
+
+    let rewritten = std::fs::read_to_string(&global_doc).expect("read global doc");
+    let persisted: toml::Value = toml::from_str(&rewritten).expect("toml");
+    assert!(
+        persisted
+            .get("model_fallback")
+            .and_then(|table| table.get("enabled"))
+            .is_none(),
+        "the bootstrap provisioning write must have run and persisted the \
+         normalized no-policy form; doc:\n{rewritten}\nstderr:\n{stderr}"
+    );
+    let lines = legacy_fallback_warning_lines(&stderr);
+    assert_eq!(
+        lines.len(),
+        1,
+        "the bootstrap prints the warning once; stderr:\n{stderr}"
+    );
+    assert!(
+        lines[0].contains(&global_doc.display().to_string()),
+        "warning names the global doc; line: {}",
+        lines[0]
+    );
+}
+
+/// A legacy `~/.rkat/config.toml` WITHOUT `[realm.global]` is not on any
+/// workspace realm's chain (it never bricked anything), so it must not warn.
+#[test]
+fn rkat_prompt_skips_legacy_warning_for_global_doc_outside_chain() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    let global_doc = tmp.path().join(".rkat").join("config.toml");
+    std::fs::create_dir_all(global_doc.parent().expect("rkat dir")).expect("mkdir ~/.rkat");
+    std::fs::write(&global_doc, "[model_fallback]\nenabled = true\n")
+        .expect("write legacy global doc");
+
+    let out = isolated_rkat_command(&rkat, tmp.path())
+        .arg("Hello")
+        .current_dir(&workspace)
+        .output()
+        .expect("rkat must spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("missing_secret"),
+        "rkat reaches credential resolution; stderr:\n{stderr}"
+    );
+    assert!(
+        legacy_fallback_warning_lines(&stderr).is_empty(),
+        "a global doc outside the chain is not reported; stderr:\n{stderr}"
+    );
+}

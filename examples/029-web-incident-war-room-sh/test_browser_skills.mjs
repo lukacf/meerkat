@@ -238,7 +238,10 @@ test("029/030 emit exact inline skills and spawn every role in actual WASM", {
       { profile: firstProfile, agent_identity: firstProfile },
     ])));
     assert.equal(rejected[0].status, "failed");
-    assert.match(rejected[0].result.message, /file-based skill path.*not supported on wasm32/);
+    assert.equal(rejected[0].result.code, "CAPABILITY_UNAVAILABLE");
+    assert.deepEqual(rejected[0].result.structured_data, {
+      profile: "browser", capability: "runtime_skills", clearing_action: "use_skill_runtime",
+    });
     assert.equal(JSON.parse(await wasm.mob_lifecycle(pathMob, "destroy")).ok, true);
     await wasm.destroy_runtime();
 

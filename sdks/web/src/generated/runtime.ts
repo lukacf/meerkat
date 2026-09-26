@@ -1,5 +1,6 @@
 // Generated runtime bootstrap contracts for @rkat/web
 // Source: tools/sdk-codegen/generate.py (generate_web_runtime_types)
+import type { RuntimeProfileCapability } from './session.js';
 
 /** Mobpack trust verification policy. 'strict' (the default) rejects
  * unsigned and unknown-signer packs; 'permissive' is an explicit host
@@ -41,11 +42,15 @@ export interface RuntimeConfig {
   geminiBaseUrl?: string;
   /** Mobpack trust store + policy for this runtime. */
   mobpackTrust?: MobpackTrustConfig;
+  /** Capabilities the host requires before installing this runtime. */
+  requiredCapabilities?: RuntimeProfileCapability[];
 }
 
 /** Result from runtime initialization. */
 export interface InitResult {
   status: 'initialized';
+  /** Opaque browser instance handle used for exact teardown. */
+  runtime_handle: string;
   model: string;
   providers: string[];
   max_sessions?: number;
@@ -75,6 +80,10 @@ export interface SessionConfig {
   maxTokens?: number;
   /** Enable comms for this session. */
   commsName?: string;
+  /** Keep the session available for runtime-admitted work between turns. */
+  keepAlive?: boolean;
+  /** Capabilities required before this session is materialized. */
+  requiredCapabilities?: RuntimeProfileCapability[];
   /** Application-defined labels. */
   labels?: Record<string, string>;
   /** Additional instruction sections appended to the system prompt. */
@@ -102,6 +111,9 @@ export function parseInitResult(json: string): InitResult {
   if (record.status !== 'initialized') {
     throw new Error(`invalid InitResult: status must be 'initialized': ${json}`);
   }
+  if (typeof record.runtime_handle !== 'string' || record.runtime_handle.length === 0) {
+    throw new Error(`invalid InitResult: runtime_handle must be a nonempty string: ${json}`);
+  }
   if (typeof record.model !== 'string') {
     throw new Error(`invalid InitResult: model must be a string: ${json}`);
   }
@@ -116,6 +128,7 @@ export function parseInitResult(json: string): InitResult {
   }
   return {
     status: 'initialized',
+    runtime_handle: record.runtime_handle,
     model: record.model,
     providers: record.providers as string[],
     max_sessions: record.max_sessions as number | undefined,

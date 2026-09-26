@@ -1169,7 +1169,10 @@ pub struct CoreApplyOutput {
     pub terminal: Option<CoreApplyTerminal>,
 }
 
-/// Durable receipt for one exact interaction-terminal publication.
+/// Receipt for one exact interaction-terminal publication committed by the
+/// session's event journal. Retention follows the runtime persistence profile:
+/// persistent journals survive restart; in-memory journals live with their
+/// owning actor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreInteractionTerminalPublicationReceipt {
     interaction_id: InteractionId,
@@ -1181,7 +1184,7 @@ impl CoreInteractionTerminalPublicationReceipt {
     pub fn try_new(event: &AgentEvent, terminal_seq: u64) -> Result<Self, CoreExecutorError> {
         if terminal_seq == 0 {
             return Err(CoreExecutorError::Internal(
-                "interaction terminal durable sequence must be non-zero".to_string(),
+                "interaction terminal publication sequence must be non-zero".to_string(),
             ));
         }
         let interaction_id = match event {

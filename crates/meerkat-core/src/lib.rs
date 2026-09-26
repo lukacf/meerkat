@@ -76,6 +76,7 @@ pub mod realtime_transcript_sidecar;
 pub mod retry;
 pub mod runtime_bootstrap;
 pub mod runtime_epoch;
+pub mod runtime_profile;
 pub mod schema;
 pub mod self_hosted_binding;
 pub mod service;

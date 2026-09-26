@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import http from "node:http";
+import { createRequire } from "node:module";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -11,6 +13,78 @@ import { Mob } from "../../sdks/web/dist/index.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "../..");
 const wasmDir = path.join(repo, "sdks/web/wasm");
+const { chromium } = createRequire(new URL("../../sdks/web/package.json", import.meta.url))("playwright");
+
+async function verifyBrowserBootstrap(bundle, version) {
+  const source = readFileSync(path.join(bundle, "meerkat-bootstrap.js"), "utf8");
+  const glue = source.match(/from '\.\/(.+\.js)'/)?.[1];
+  assert.ok(glue, "generated bootstrap must import its emitted WASM glue");
+  const server = http.createServer((request, response) => {
+    try {
+      const pathname = new URL(request.url, "http://localhost").pathname;
+      const filename = path.resolve(bundle, `.${pathname === "/" ? "/index.html" : pathname}`);
+      assert.ok(filename.startsWith(bundle + path.sep));
+      const bytes = readFileSync(filename);
+      const contentType = filename.endsWith(".html") ? "text/html"
+        : filename.endsWith(".js") ? "text/javascript"
+        : filename.endsWith(".wasm") ? "application/wasm" : "application/octet-stream";
+      response.writeHead(200, { "content-type": contentType, "cache-control": "no-store" });
+      response.end(bytes);
+    } catch {
+      response.writeHead(404); response.end("not found");
+    }
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const browser = await chromium.launch({ headless: true });
+  const providerCalls = [];
+  const pageErrors = [];
+  try {
+    const page = await browser.newPage();
+    page.on("pageerror", error => pageErrors.push(error.message));
+    await page.route("**/*", route => {
+      const request = route.request();
+      if (request.url().startsWith(origin + "/")) return route.continue();
+      assert.equal(request.url(), "https://api.anthropic.com/v1/messages");
+      const body = request.postDataJSON(); providerCalls.push(body);
+      assert.equal(providerCalls.length, 1, "only the explicit synthetic browser turn may run");
+      const events = [
+        { type: "message_start", message: { id: "browser-pack", type: "message", role: "assistant", model: body.model,
+          content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "BROWSER_PACK_OK" } },
+        { type: "content_block_stop", index: 0 },
+        { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+        { type: "message_stop" },
+      ];
+      return route.fulfill({ contentType: "text/event-stream", body: events.map(event =>
+        `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("") });
+    });
+    await page.goto(origin);
+    await page.locator("#anthropic").fill("synthetic-no-network");
+    await page.locator("#start").click();
+    await page.waitForFunction(() => document.querySelector("#status").textContent.includes("trust-verified and loaded"), undefined, { timeout: 10_000 });
+    assert.equal(providerCalls.length, 0, "generated bootstrap must remain deferred");
+    const result = await page.evaluate(async glue => {
+      const wasm = await import(`/${glue}`);
+      const handle = await wasm.create_session_simple(JSON.stringify({ model: "claude-sonnet-4-6", comms_name: "pack-browser", keep_alive: true }));
+      const turn = JSON.parse(await wasm.start_turn(handle, JSON.stringify({ text: "Return the synthetic browser pack answer." })));
+      const state = JSON.parse(await wasm.get_session_state(handle));
+      await wasm.destroy_session(handle);
+      await wasm.destroy_runtime();
+      return { version: wasm.runtime_version(), turn, state };
+    }, glue);
+    assert.equal(result.version, version);
+    assert.equal(result.turn.text, "BROWSER_PACK_OK");
+    assert.equal(result.turn.session_id, result.state.session_id);
+    assert.equal(result.state.mob_id, undefined);
+    assert.equal(providerCalls.length, 1);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+}
 
 function run(command, args, env) {
   const result = spawnSync(command, args, {
@@ -115,8 +189,8 @@ test("029/030 emit exact inline skills and spawn every role in actual WASM", {
       status: 200, headers: { "content-type": "text/event-stream" },
     });
   };
-  t.after(() => {
-    wasm.destroy_runtime();
+  t.after(async () => {
+    await wasm.destroy_runtime();
     globalThis.fetch = originalFetch;
   });
 
@@ -140,6 +214,8 @@ test("029/030 emit exact inline skills and spawn every role in actual WASM", {
     const bundle = path.join(destination, ".work", `${packName}-web`);
     const source = JSON.parse(readFileSync(path.join(sourceRoot, "definition.json"), "utf8"));
     const definition = JSON.parse(readFileSync(path.join(bundle, "definition.inline.json"), "utf8"));
+    await verifyBrowserBootstrap(bundle, wasm.runtime_version());
+    t.diagnostic(`${exampleName}: generated HTML bootstrap and direct runtime turn passed in Chromium`);
     assert.deepEqual({ ...definition, skills: source.skills }, source);
     for (const [name, skill] of Object.entries(source.skills)) {
       assert.equal(skill.source, "path", "Source definition must remain portable");
@@ -155,7 +231,7 @@ test("029/030 emit exact inline skills and spawn every role in actual WASM", {
       model: "claude-sonnet-4-6",
       mobpack_trust: { policy: "permissive" },
     }));
-    bootstrap();
+    await bootstrap();
     const firstProfile = Object.keys(source.profiles)[0];
     const pathMob = await wasm.mob_create(JSON.stringify({ ...source, id: `${source.id}-paths` }));
     const rejected = JSON.parse(await wasm.mob_spawn(pathMob, JSON.stringify([
@@ -164,12 +240,12 @@ test("029/030 emit exact inline skills and spawn every role in actual WASM", {
     assert.equal(rejected[0].status, "failed");
     assert.match(rejected[0].result.message, /file-based skill path.*not supported on wasm32/);
     assert.equal(JSON.parse(await wasm.mob_lifecycle(pathMob, "destroy")).ok, true);
-    wasm.destroy_runtime();
+    await wasm.destroy_runtime();
 
     // Each role gets a fresh runtime: this is a skill-bootstrap contract test,
     // not a test of multi-member wiring or an autonomous incident drill.
     for (const [profile, config] of Object.entries(definition.profiles)) {
-      bootstrap();
+      await bootstrap();
       const mob = await wasm.mob_create(JSON.stringify(definition));
       try {
         const before = requests.length;
@@ -198,7 +274,7 @@ test("029/030 emit exact inline skills and spawn every role in actual WASM", {
         t.diagnostic(`${exampleName}/${profile}: spawned; exact inline skill in provider request; output observed`);
       } finally {
         assert.equal(JSON.parse(await wasm.mob_lifecycle(mob, "destroy")).ok, true);
-        wasm.destroy_runtime();
+        await wasm.destroy_runtime();
       }
     }
   }

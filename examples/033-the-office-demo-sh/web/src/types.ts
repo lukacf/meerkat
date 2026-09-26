@@ -96,7 +96,7 @@ export interface Incident {
 // ── WASM Runtime ──
 export interface RuntimeModule {
   default: () => Promise<unknown>;
-  init_runtime_from_config: (configJson: string) => unknown;
+  init_runtime_from_config: (configJson: string) => Promise<unknown>;
   register_js_tool: (name: string, description: string, schemaJson: string) => void;
   mob_create: (definitionJson: string) => Promise<unknown>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<unknown>;
@@ -107,7 +107,7 @@ export interface RuntimeModule {
   mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<string>;
   mob_member_peer_target: (mobId: string, agentIdentity: string) => Promise<string>;
   mob_lifecycle: (mobId: string, action: "stop" | "resume" | "destroy") => Promise<string>;
-  destroy_runtime: () => void;
+  destroy_runtime: () => Promise<void>;
   poll_subscription: (handle: string) => string;
   close_subscription: (handle: string) => void;
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<unknown>;

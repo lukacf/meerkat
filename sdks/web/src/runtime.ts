@@ -1,5 +1,5 @@
 import { Mob, parseMobStatusResult } from './mob.js';
-import { Session } from './session.js';
+import { MeerkatError, Session } from './session.js';
 import type {
   RuntimeConfig,
   SessionConfig,
@@ -26,6 +26,7 @@ function toWasmConfig(config: RuntimeConfig): Record<string, unknown> {
     gemini_api_key: config.geminiApiKey,
     model: config.model,
     max_sessions: config.maxSessions,
+    required_capabilities: config.requiredCapabilities,
     anthropic_base_url: config.anthropicBaseUrl,
     openai_base_url: config.openaiBaseUrl,
     gemini_base_url: config.geminiBaseUrl,
@@ -52,6 +53,8 @@ function sessionToWasm(config: SessionConfig): Record<string, unknown> {
     system_prompt: config.systemPrompt,
     max_tokens: config.maxTokens,
     comms_name: config.commsName,
+    keep_alive: config.keepAlive,
+    required_capabilities: config.requiredCapabilities,
     labels: config.labels,
     additional_instructions: config.additionalInstructions,
     app_context: config.appContext,
@@ -96,8 +99,8 @@ function parseMobListResult(raw: unknown): MobStatus[] {
 export interface WasmModule {
   default: () => Promise<unknown>;
   runtime_version: () => string;
-  init_runtime: (mobpackBytes: Uint8Array, credentialsJson: string) => string;
-  init_runtime_from_config: (configJson: string) => string;
+  init_runtime: (mobpackBytes: Uint8Array, credentialsJson: string) => Promise<string>;
+  init_runtime_from_config: (configJson: string) => Promise<string>;
   register_tool_callback: (
     name: string,
     description: string,
@@ -110,12 +113,14 @@ export interface WasmModule {
     schemaJson: string,
   ) => void;
   clear_tool_callbacks: () => void;
-  destroy_runtime: () => void;
-  create_session_simple: (configJson: string) => number;
-  create_session: (mobpackBytes: Uint8Array, configJson: string) => number;
-  start_turn: (handle: number, prompt: string) => Promise<string>;
-  get_session_state: (handle: number) => string;
-  destroy_session: (handle: number) => void;
+  destroy_runtime: (expectedHandle?: string) => Promise<void>;
+  create_session_simple: (configJson: string) => Promise<number>;
+  create_session: (mobpackBytes: Uint8Array, configJson: string) => Promise<number>;
+  start_turn: (handle: number, prompt: string, optionsJson?: string) => Promise<string>;
+  get_session_state: (handle: number) => Promise<string>;
+  interrupt_session: (handle: number) => Promise<void>;
+  session_wire_peer: (handle: number, peerHandle: number) => Promise<void>;
+  destroy_session: (handle: number) => Promise<void>;
   poll_events: (handle: number) => string;
   append_system_context: (handle: number, requestJson: string) => Promise<string>;
   inspect_mobpack: (mobpackBytes: Uint8Array) => string;
@@ -155,9 +160,8 @@ export interface WasmModule {
 /** Entry point for the Meerkat WASM runtime in the browser. */
 export class MeerkatRuntime {
   private wasm: WasmModule;
-  private destroyed = false;
 
-  private constructor(wasm: WasmModule) {
+  private constructor(wasm: WasmModule, private readonly runtimeHandle: string) {
     this.wasm = wasm;
   }
 
@@ -195,7 +199,7 @@ export class MeerkatRuntime {
     }
 
     const configJson = JSON.stringify(toWasmConfig(config));
-    const resultJson = wasm.init_runtime_from_config(configJson);
+    const resultJson = await wasm.init_runtime_from_config(configJson);
     // K19: parse via the generated fail-closed guard — no blind cast.
     const result = parseInitResult(resultJson);
 
@@ -203,7 +207,7 @@ export class MeerkatRuntime {
       throw new Error(`Runtime initialization failed: ${resultJson}`);
     }
 
-    return new MeerkatRuntime(wasm);
+    return new MeerkatRuntime(wasm, result.runtime_handle);
   }
 
   /**
@@ -229,7 +233,7 @@ export class MeerkatRuntime {
     }
 
     const credentialsJson = JSON.stringify(toWasmConfig(config));
-    const resultJson = wasm.init_runtime(mobpackBytes, credentialsJson);
+    const resultJson = await wasm.init_runtime(mobpackBytes, credentialsJson);
     // K19: parse via the generated fail-closed guard — no blind cast.
     const result = parseInitResult(resultJson);
 
@@ -237,7 +241,7 @@ export class MeerkatRuntime {
       throw new Error(`Runtime initialization failed: ${resultJson}`);
     }
 
-    return new MeerkatRuntime(wasm);
+    return new MeerkatRuntime(wasm, result.runtime_handle);
   }
 
   /**
@@ -310,10 +314,12 @@ export class MeerkatRuntime {
    * stale auth callback. Resolver state lives solely in the WASM module
    * (no TS-side flag to reset), keeping TS and Rust consistent.
    */
-  destroy(): void {
-    if (this.destroyed) return;
-    this.wasm.destroy_runtime();
-    this.destroyed = true;
+  async destroy(): Promise<void> {
+    try {
+      await this.wasm.destroy_runtime(this.runtimeHandle);
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
   }
 
   /** Register a tool callback on this initialized runtime instance. */
@@ -383,11 +389,16 @@ export class MeerkatRuntime {
     return parseMobListResult(parseJsonPayload(json, 'Invalid mob/list response'));
   }
 
-  /** Create a direct session façade backed by a standalone ephemeral session. */
-  createSession(config: SessionConfig): Session {
-    const handle = this.wasm.create_session_simple(
-      JSON.stringify(sessionToWasm(config)),
-    );
+  /** Create a direct session backed by the canonical runtime. */
+  async createSession(config: SessionConfig): Promise<Session> {
+    let handle: number;
+    try {
+      handle = await this.wasm.create_session_simple(
+        JSON.stringify(sessionToWasm(config)),
+      );
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
     return new Session(
       handle,
       this.wasm.start_turn,
@@ -395,6 +406,8 @@ export class MeerkatRuntime {
       this.wasm.destroy_session,
       this.wasm.poll_events,
       this.wasm.append_system_context,
+      this.wasm.interrupt_session,
+      this.wasm.session_wire_peer,
     );
   }
 

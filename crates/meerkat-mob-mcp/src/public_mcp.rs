@@ -794,9 +794,10 @@ pub async fn handle_public_tools_call(
                                     WireMemberRef::encode(mob_id.as_str(), &identity),
                                 )
                             }
-                            Err(error) => meerkat_contracts::MobSpawnManyResultEntry::failed_with_structured_data(
+                            Err(error) => meerkat_contracts::MobSpawnManyResultEntry::failed_with_error_details(
                                 error.cause(),
                                 error.to_string(),
+                                error.error().wire_error_code(),
                                 error.error().structured_data(),
                             ),
                         },

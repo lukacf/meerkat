@@ -480,7 +480,7 @@ impl std::fmt::Debug for SessionRuntimeBindings {
 /// bundle of Arc-wrapped DSL handles and registries. Every value passes
 /// through the factory exactly once, never lands in a collection, so paying
 /// for an extra heap indirection on every construction would regress the hot
-/// path. The `StandaloneEphemeral` path only appears in WASM, tests, and
+/// path. The `StandaloneEphemeral` path only appears in tests and
 /// standalone embedded runs that do not need semantic peer request/response
 /// authority.
 #[allow(clippy::large_enum_variant)]

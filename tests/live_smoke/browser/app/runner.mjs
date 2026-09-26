@@ -62,10 +62,8 @@ const FIXTURE_TRUSTED_SIGNERS = {
 
 function makeRuntimeConfig() {
   return {
-    api_key: 'sk-browser-smoke',
     anthropic_api_key: 'sk-browser-smoke',
     model: 'claude-sonnet-4-5',
-    base_url: `${window.location.origin}/anthropic`,
     anthropic_base_url: `${window.location.origin}/anthropic`,
     mobpack_trust: {
       policy: 'strict',
@@ -115,16 +113,13 @@ function collectEventTypes(items) {
 
 async function scenarioRawSession001({ wasm }) {
   write('BROWSER-RAW-SESSION-001: init runtime from config');
-  const init = JSON.parse(wasm.init_runtime_from_config(JSON.stringify(makeRuntimeConfig())));
+  const init = JSON.parse(await wasm.init_runtime_from_config(JSON.stringify(makeRuntimeConfig())));
   assert(init.status === 'initialized', `unexpected init status: ${JSON.stringify(init)}`);
   assert(typeof wasm.runtime_version() === 'string' && wasm.runtime_version().length > 0, 'runtime_version missing');
 
-  const handle = wasm.create_session_simple(
+  const handle = await wasm.create_session_simple(
     JSON.stringify({
       model: 'claude-sonnet-4-5',
-      api_key: 'sk-browser-smoke',
-      base_url: `${window.location.origin}/anthropic`,
-      anthropic_base_url: `${window.location.origin}/anthropic`,
     }),
   );
   assert(Number.isInteger(handle) && handle > 0, `unexpected session handle: ${handle}`);
@@ -139,7 +134,7 @@ async function scenarioRawSession001({ wasm }) {
       }),
     ),
   );
-  assert(staged.status === 'staged', `append_system_context failed: ${JSON.stringify(staged)}`);
+  assert(staged.status === 'applied', `append_system_context failed: ${JSON.stringify(staged)}`);
 
   const turn = JSON.parse(await wasm.start_turn(handle, taggedPrompt('Say raw browser smoke ok.')));
   assertCompletedTurn(turn, 'raw session turn');
@@ -148,20 +143,18 @@ async function scenarioRawSession001({ wasm }) {
   const eventTypes = collectEventTypes(events);
   assert(eventTypes.some((type) => type === 'text_complete'), `expected text_complete event, got ${eventTypes.join(', ')}`);
 
-  const state = JSON.parse(wasm.get_session_state(handle));
+  const state = JSON.parse(await wasm.get_session_state(handle));
   assert(state.model === 'claude-sonnet-4-5', `unexpected session model: ${JSON.stringify(state)}`);
-  if (Object.hasOwn(state, 'run_counter')) {
-    assert(Number.isInteger(state.run_counter) && state.run_counter >= 0, `unexpected canonical run_counter: ${JSON.stringify(state)}`);
-  }
+  assert(!Object.hasOwn(state, 'handle') && !Object.hasOwn(state, 'mob_id'), 'session state must use the canonical session/read contract');
   assert(state.message_count >= 1, `expected canonical message_count >= 1, got ${JSON.stringify(state)}`);
 
   // destroy_session retires the browser-local handle (fail-closed): later
   // calls on the stale handle must fail with invalid_session_handle rather
   // than resolving an addressable archived projection.
-  wasm.destroy_session(handle);
+  await wasm.destroy_session(handle);
   let stateRetired = false;
   try {
-    wasm.get_session_state(handle);
+    await wasm.get_session_state(handle);
   } catch (error) {
     stateRetired = String(error).includes('invalid_session_handle');
   }
@@ -178,15 +171,12 @@ async function scenarioRawSession001({ wasm }) {
 
 async function scenarioRawRecall002({ wasm }) {
   write('BROWSER-RAW-RECALL-002: follow-up recall through a live browser session');
-  const init = JSON.parse(wasm.init_runtime_from_config(JSON.stringify(makeRuntimeConfig())));
+  const init = JSON.parse(await wasm.init_runtime_from_config(JSON.stringify(makeRuntimeConfig())));
   assert(init.status === 'initialized', `unexpected init status: ${JSON.stringify(init)}`);
 
-  const handle = wasm.create_session_simple(
+  const handle = await wasm.create_session_simple(
     JSON.stringify({
       model: 'claude-sonnet-4-5',
-      api_key: 'sk-browser-smoke',
-      base_url: `${window.location.origin}/anthropic`,
-      anthropic_base_url: `${window.location.origin}/anthropic`,
     }),
   );
   const staged = JSON.parse(
@@ -199,7 +189,7 @@ async function scenarioRawRecall002({ wasm }) {
       }),
     ),
   );
-  assert(staged.status === 'staged', `append_system_context failed: ${JSON.stringify(staged)}`);
+  assert(staged.status === 'applied', `append_system_context failed: ${JSON.stringify(staged)}`);
 
   const firstTurn = JSON.parse(
     await wasm.start_turn(handle, taggedPrompt('Remember the codename BrowserNebula and reply briefly.')),
@@ -217,7 +207,7 @@ async function scenarioRawRecall002({ wasm }) {
   assert(textLower.includes('browsernebula') || textLower.includes('browser nebula'), `unexpected recall text: ${secondTurn.text}`);
   assert(textLower.includes('browser_ctx_ok'), `expected browser context marker in ${secondTurn.text}`);
 
-  wasm.destroy_session(handle);
+  await wasm.destroy_session(handle);
 }
 
 async function scenarioMobpackSession003({ wasm }) {
@@ -229,30 +219,27 @@ async function scenarioMobpackSession003({ wasm }) {
   assert(Array.isArray(inspect.skills) && inspect.skills.length === 1, `unexpected skills: ${JSON.stringify(inspect.skills)}`);
   assert(!inspect.capabilities || inspect.capabilities.includes('comms'), `unexpected capabilities: ${JSON.stringify(inspect.capabilities)}`);
 
-  const init = JSON.parse(wasm.init_runtime(mobpackBytes, JSON.stringify(makeRuntimeConfig())));
+  const init = JSON.parse(await wasm.init_runtime(mobpackBytes, JSON.stringify(makeRuntimeConfig())));
   assert(init.status === 'initialized', `mobpack init failed: ${JSON.stringify(init)}`);
 
-  const handle = wasm.create_session(
+  const handle = await wasm.create_session(
     mobpackBytes,
     JSON.stringify({
       model: 'claude-sonnet-4-5',
-      api_key: 'sk-browser-smoke',
-      base_url: `${window.location.origin}/anthropic`,
-      anthropic_base_url: `${window.location.origin}/anthropic`,
       system_prompt: 'Append a browser-safe verification line.',
     }),
   );
   const turn = JSON.parse(await wasm.start_turn(handle, taggedPrompt('Summarize the browser-safe mobpack.')));
   assertCompletedTurn(turn, 'mobpack session turn');
 
-  const state = JSON.parse(wasm.get_session_state(handle));
-  assert(state.mob_id === 'browser-smoke-pack', `unexpected mobpack session state: ${JSON.stringify(state)}`);
-  wasm.destroy_session(handle);
+  const state = JSON.parse(await wasm.get_session_state(handle));
+  assert(state.session_id === turn.session_id && !Object.hasOwn(state, 'mob_id'), `unexpected mobpack session state: ${JSON.stringify(state)}`);
+  await wasm.destroy_session(handle);
 }
 
 async function scenarioRawMob004({ wasm }) {
   write('BROWSER-RAW-MOB-004: create mob and drive runtime-backed member lifecycle');
-  const init = JSON.parse(wasm.init_runtime_from_config(JSON.stringify(makeRuntimeConfig())));
+  const init = JSON.parse(await wasm.init_runtime_from_config(JSON.stringify(makeRuntimeConfig())));
   assert(init.status === 'initialized', `unexpected init status for mob scenario: ${JSON.stringify(init)}`);
 
   const mobId = await wasm.mob_create(

@@ -17,7 +17,7 @@ agent loop through `SessionService` and `AgentFactory`.
 
 ```mermaid
 flowchart TD
-    USER["User or host app"] --> SURFACE["CLI / REST / RPC / MCP / SDK"]
+    USER["User or host app"] --> SURFACE["CLI / REST / RPC / MCP / SDK / WASM"]
     SURFACE --> REALM["Realm host"]
     REALM --> STORAGE["RealmStorageProvider"]
     REALM --> RUNTIME["MeerkatMachine"]
@@ -54,6 +54,7 @@ authority when the bundle is present.
 | `rkat-rpc` | JSON-RPC 2.0 over stdio or TCP. Python and TypeScript SDKs can connect to it. |
 | `rkat-rest` | HTTP/JSON and SSE adapter over the same session, auth, config, schedule, and blob state. |
 | `rkat-mcp` | Meerkat-as-MCP server exposing public `meerkat_*` tools. |
+| `meerkat-web-runtime` / `@rkat/web` | Browser surface over the same `MeerkatMachine`, with in-memory stores, browser fetch, JS tool callbacks, and host-provided auth. |
 | Rust SDK | Can use runtime-backed bindings or explicit standalone mode. |
 
 Runtime-backed surfaces are the normal product path when you need durable
@@ -62,17 +63,16 @@ observability, or shared realm state.
 
 ## Standalone Surfaces
 
-Standalone mode is explicit. It is used by tests, narrow Rust embeddings, and
-the browser/WASM runtime.
+Standalone mode is explicit. It is used by tests and narrow Rust embeddings.
 
 | Surface | Standalone contract |
 | --- | --- |
 | `RuntimeBuildMode::StandaloneEphemeral` | Factory-created local-only ephemeral runtime bindings. It does not select or limit the session store. |
-| `meerkat-web-runtime` / `@rkat/web` | Browser runtime with in-memory sessions, mobs, JS tool callbacks, and host-provided auth. |
 
 Standalone describes runtime-authority composition, not storage durability. An
 embedded Rust host may pair standalone runtime bindings with an explicit
-persistent session store, while browser/WASM uses its own in-memory substrate.
+persistent session store. Browser/WASM instead pairs canonical runtime-owned
+bindings with in-memory stores.
 The mode is intended for hosts that do not need shared runtime control-plane
 semantics such as keep-alive and recovery.
 

@@ -57,9 +57,8 @@ test("MeerkatRuntime drives direct-session lifecycle through shipped wasm export
     model: "claude-sonnet-4-5",
   });
   try {
-    const session = runtime.createSession({
+    const session = await runtime.createSession({
       model: "claude-sonnet-4-5",
-      apiKey: "sk-test",
     });
     const staged = await session.appendSystemContext({
       text: "Remember the browser-side coordinator.",
@@ -68,29 +67,31 @@ test("MeerkatRuntime drives direct-session lifecycle through shipped wasm export
     });
 
     assert.equal(staged.status, "applied");
-    assert.equal(staged.handle, session.handle);
+    assert.deepEqual(staged, { status: "applied" });
 
-    const state = session.getState();
-    assert.equal(session.sessionId, state.session_id);
-    assert.equal(state.handle, session.handle);
+    const state = await session.getState();
+    assert.equal(await session.sessionId, state.session_id);
+    assert.equal(state.handle, undefined);
+    assert.equal(state.mob_id, undefined);
+    assert.equal(state.provider, "anthropic");
     assert.equal(typeof state.session_id, "string");
     assert.notEqual(state.session_id, String(session.handle));
     assert.equal(state.model, "claude-sonnet-4-5");
     assert.equal(state.run_counter, undefined);
 
-    session.destroy();
+    await session.destroy();
     // Row #215: a destroyed handle is retired and fails closed — it is no
     // longer an addressable archived projection. getState() throws the typed
     // invalid_session_handle envelope (a JSON string from err_js).
-    assert.throws(() => session.getState(), /invalid_session_handle/);
+    await assert.rejects(() => session.getState(), error => error.code === "invalid_session_handle");
     // turn() wraps the rejection into a typed MeerkatError carrying the code.
     await assert.rejects(
       () => session.turn("stale handles must not restart archived sessions"),
       (error) => error?.code === "invalid_session_handle",
     );
-    assert.throws(() => session.isDestroyed, /deprecated/i);
+    assert.equal("isDestroyed" in session, false);
   } finally {
-    runtime.destroy();
+    await runtime.destroy();
   }
 });
 
@@ -105,11 +106,8 @@ test("Session.destroy does not cache destroyed state when the underlying wasm de
     () => {
       stateReads += 1;
       return JSON.stringify({
-        handle: 7,
         session_id: "sess_busy",
-        mob_id: "",
         model: "claude-sonnet-4-5",
-        usage: { input_tokens: 0, output_tokens: 0 },
         message_count: 0,
         is_active: true,
         last_assistant_text: null,
@@ -122,24 +120,26 @@ test("Session.destroy does not cache destroyed state when the underlying wasm de
       }
     },
     () => "[]",
-    async () => JSON.stringify({ handle: 7, status: "applied" }),
+    async () => JSON.stringify({ status: "applied" }),
+    async () => {},
+    async () => {},
   );
 
-  assert.throws(() => session.destroy(), /SESSION_BUSY/);
-  assert.equal(session.sessionId, "sess_busy");
+  await assert.rejects(() => session.destroy(), /SESSION_BUSY/);
+  assert.equal(await session.sessionId, "sess_busy");
   assert.equal(stateReads, 1);
 
-  session.destroy();
-  assert.equal(session.getState().session_id, "sess_busy");
+  await session.destroy();
+  assert.equal((await session.getState()).session_id, "sess_busy");
   assert.equal(stateReads, 2);
   await assert.rejects(
     () => session.turn("after canonical destroy"),
     /SESSION_NOT_FOUND|session not found/,
   );
-  assert.throws(() => session.isDestroyed, /deprecated/i);
+  assert.equal("isDestroyed" in session, false);
 });
 
-test("Session.destroy treats runtime teardown as canonical absence without poisoning the handle", () => {
+test("Session.destroy treats runtime teardown as canonical absence without poisoning the handle", async () => {
   let destroyAttempts = 0;
   let stateReads = 0;
   // The real WASM runtime rejects with its typed `{ code, message }` JSON
@@ -163,27 +163,26 @@ test("Session.destroy treats runtime teardown as canonical absence without poiso
     },
     () => "[]",
     async () => JSON.stringify({ handle: 8, status: "applied" }),
+    async () => {},
+    async () => {},
   );
 
-  assert.doesNotThrow(() => session.destroy());
+  await assert.doesNotReject(() => session.destroy());
   assert.equal(destroyAttempts, 1);
-  assert.doesNotThrow(() => session.destroy());
+  await assert.doesNotReject(() => session.destroy());
   assert.equal(destroyAttempts, 2);
-  assert.throws(() => session.getState(), /not_initialized/i);
+  await assert.rejects(() => session.getState(), error => error.code === "not_initialized");
   assert.equal(stateReads, 1);
 });
 
-test("Session.destroy swallows typed not_initialized without caching lifecycle state", () => {
+test("Session.destroy swallows typed not_initialized without caching lifecycle state", async () => {
   let destroyAttempts = 0;
   const session = new Session(
     9,
     async () => "{}",
     () => JSON.stringify({
-      handle: 9,
       session_id: "sess_runtime_code_gone",
-      mob_id: "",
       model: "claude-sonnet-4-5",
-      usage: { input_tokens: 0, output_tokens: 0 },
       message_count: 0,
       is_active: false,
       last_assistant_text: null,
@@ -195,15 +194,17 @@ test("Session.destroy swallows typed not_initialized without caching lifecycle s
       throw error;
     },
     () => "[]",
-    () => JSON.stringify({ handle: 9, status: "applied" }),
+    () => JSON.stringify({ status: "applied" }),
+    async () => {},
+    async () => {},
   );
 
-  assert.doesNotThrow(() => session.destroy());
+  await assert.doesNotReject(() => session.destroy());
   assert.equal(destroyAttempts, 1);
-  assert.doesNotThrow(() => session.destroy());
+  await assert.doesNotReject(() => session.destroy());
   assert.equal(destroyAttempts, 2);
-  assert.equal(session.getState().session_id, "sess_runtime_code_gone");
-  assert.throws(() => session.isDestroyed, /deprecated/i);
+  assert.equal((await session.getState()).session_id, "sess_runtime_code_gone");
+  assert.equal("isDestroyed" in session, false);
 });
 
 test("Session observation remains a canonical wasm call after destroy", async () => {
@@ -213,11 +214,8 @@ test("Session observation remains a canonical wasm call after destroy", async ()
     10,
     async () => "{}",
     () => JSON.stringify({
-      handle: 10,
       session_id: "sess_projection",
-      mob_id: "",
       model: "claude-sonnet-4-5",
-      usage: { input_tokens: 0, output_tokens: 0 },
       message_count: 0,
       is_active: false,
       last_assistant_text: null,
@@ -231,9 +229,11 @@ test("Session observation remains a canonical wasm call after destroy", async ()
       appendAttempts += 1;
       throw new Error("SESSION_NOT_FOUND: session not found");
     },
+    async () => {},
+    async () => {},
   );
 
-  session.destroy();
+  await session.destroy();
 
   assert.deepEqual(session.pollEvents(), [{ type: "text_complete", text: "from wasm" }]);
   assert.equal(pollAttempts, 1);
@@ -333,7 +333,7 @@ test("MeerkatRuntime opens and closes a public mob subscription through the ship
       /unknown subscription handle/i,
     );
   } finally {
-    runtime.destroy();
+    await runtime.destroy();
   }
 });
 
@@ -345,7 +345,7 @@ test("MeerkatRuntime exposes runtime-scoped tool registration on the instance su
       return CURRENT_WASM_VERSION;
     },
     init_runtime_from_config() {
-      return JSON.stringify({ status: "initialized", model: "claude-sonnet-4-5", providers: ["anthropic"] });
+      return JSON.stringify({ status: "initialized", runtime_handle: "mock-runtime-handle", model: "claude-sonnet-4-5", providers: ["anthropic"] });
     },
     register_tool_callback(name, description, schemaJson, callback) {
       calls.push(["callback", name, description, JSON.parse(schemaJson), typeof callback]);
@@ -416,7 +416,7 @@ test("MeerkatRuntime exposes runtime-scoped tool registration on the instance su
     ]);
     assert.deepEqual(calls[2], ["clear"]);
   } finally {
-    runtime.destroy();
+    await runtime.destroy();
   }
 });
 
@@ -474,7 +474,7 @@ test("MeerkatRuntime surfaces lagged subscription signals through the shipped pa
       assert.ok(survivingEvent, "expected a surviving text_delta event after lag");
       subscription.close();
     } finally {
-      runtime.destroy();
+      await runtime.destroy();
     }
   });
 });
@@ -487,7 +487,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return CURRENT_WASM_VERSION;
     },
     init_runtime_from_config() {
-      return JSON.stringify({ status: "initialized", model: "claude-sonnet-4-5", providers: ["anthropic"] });
+      return JSON.stringify({ status: "initialized", runtime_handle: "mock-runtime-handle", model: "claude-sonnet-4-5", providers: ["anthropic"] });
     },
     register_tool_callback() {},
     register_js_tool() {},
@@ -787,6 +787,6 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       ],
     );
   } finally {
-    runtime.destroy();
+    await runtime.destroy();
   }
 });

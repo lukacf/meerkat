@@ -17876,7 +17876,7 @@ export async function bootMobpack(opts = {}) {
     // signed/strict production deployments (pass trusted_signers too).
     mobpack_trust: opts.mobpackTrust ?? { policy: '__POLICY__' },
   };
-  const resultJson = init_runtime(mobpackBytes, JSON.stringify(credentials));
+  const resultJson = await init_runtime(mobpackBytes, JSON.stringify(credentials));
   const result = JSON.parse(resultJson);
   if (result.status !== 'initialized') {
     throw new Error(`runtime initialization failed: ${resultJson}`);

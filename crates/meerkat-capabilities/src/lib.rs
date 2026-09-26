@@ -1,5 +1,12 @@
 //! Feature-owned capability declarations and registry for Meerkat.
 
+mod browser_profile;
+
+pub use browser_profile::{
+    BrowserRuntimeProfile, RuntimeProfileCapability, RuntimeProfileClearingAction,
+    RuntimeProfileId, RuntimeProfileRefusal, RuntimeProfileRefusalCode, RuntimeProfileRefusalData,
+};
+
 use std::{borrow::Cow, str::FromStr};
 
 use meerkat_core::Config;
@@ -207,13 +214,9 @@ impl BrowserMobpackCapabilityDecision {
 pub fn browser_mobpack_capability_decision(
     capability: MobpackCapabilityId,
 ) -> BrowserMobpackCapabilityDecision {
-    match capability {
-        MobpackCapabilityId::Known(CapabilityId::Shell) | MobpackCapabilityId::HostProcess(_) => {
-            BrowserMobpackCapabilityDecision::Forbidden { capability }
-        }
-        MobpackCapabilityId::Known(_)
-        | MobpackCapabilityId::DeploySurface(_)
-        | MobpackCapabilityId::Unknown => BrowserMobpackCapabilityDecision::Allowed,
+    match BrowserRuntimeProfile.require_mobpack(capability) {
+        Ok(()) => BrowserMobpackCapabilityDecision::Allowed,
+        Err(_) => BrowserMobpackCapabilityDecision::Forbidden { capability },
     }
 }
 

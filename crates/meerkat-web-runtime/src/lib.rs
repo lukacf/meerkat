@@ -12,7 +12,7 @@
 //! - `init_runtime_from_config(config_json)` — bare-bones bootstrap without mobpack
 //! - `runtime_version()` → crate version string (for JS/WASM version mismatch detection)
 //!
-//! ### Session (standalone ephemeral session-handle façades)
+//! ### Session (canonical runtime-backed sessions)
 //! - `create_session(mobpack_bytes, config_json)` → handle
 //! - `start_turn(handle, prompt)` → JSON result
 //! - `get_session_state(handle)` → JSON
@@ -63,15 +63,16 @@ pub use ::tokio;
 pub mod external_auth;
 
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
 use meerkat_core::{Config, SessionService};
-use meerkat_mob::{AgentIdentity, FlowId, MobDefinition, MobId, RunId};
+use meerkat_mob::{AgentIdentity, FlowId, MobDefinition, MobId, MobSessionService, RunId};
 use meerkat_mob_mcp::{MobMcpDestroyError, MobMcpState};
+use meerkat_runtime::{MeerkatMachine, RuntimeSessionRegistrationWitness};
 
 // ═══════════════════════════════════════════════════════════
 // Tracing → browser console (wasm32 only)
@@ -153,7 +154,11 @@ struct MobDefinitionHeader {
 // ═══════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SessionConfig {
+    /// Explicit requirements are checked by the shared capability owner.
+    #[serde(default)]
+    required_capabilities: Vec<meerkat_contracts::capability::RuntimeProfileCapability>,
     model: String,
     /// Optional structural auth binding reference. When set, overrides the
     /// default provider-match from bootstrap-populated `config.realm`.
@@ -166,9 +171,7 @@ struct SessionConfig {
     /// Enable comms for this session (registers in InprocRegistry).
     #[serde(default)]
     comms_name: Option<String>,
-    /// Rejection-only capture for the retired raw Web option. Presence is
-    /// rejected even when the supplied value is `false`: direct Web sessions
-    /// use the standalone ephemeral substrate and cannot own keep-alive.
+    /// Runtime-owned keep-alive ingress and comms drain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     keep_alive: Option<bool>,
     /// Application-defined labels (flow through mob spawn, not used at create_session level).
@@ -208,7 +211,11 @@ struct MobpackTrustConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Credentials {
+    /// Explicit host requirements checked by the canonical runtime profile.
+    #[serde(default)]
+    required_capabilities: Vec<meerkat_contracts::capability::RuntimeProfileCapability>,
     /// Per-provider API keys. At least one must be set.
     #[serde(default)]
     anthropic_api_key: Option<String>,
@@ -237,7 +244,11 @@ struct Credentials {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RuntimeConfig {
+    /// Explicit host requirements checked by the canonical runtime profile.
+    #[serde(default)]
+    required_capabilities: Vec<meerkat_contracts::capability::RuntimeProfileCapability>,
     /// Per-provider API keys. At least one must be set.
     #[serde(default)]
     anthropic_api_key: Option<String>,
@@ -298,16 +309,16 @@ fn build_bootstrap_config(
 // ═══════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════
-// Standalone ephemeral browser session-handle façade
+// Browser session handle registry
 // ═══════════════════════════════════════════════════════════
 
 type WasmSessionEventReceiver = crate::tokio::sync::broadcast::Receiver<
     meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
 >;
 
-struct StandaloneHandleSession {
+struct HandleSession {
     session_id: meerkat_core::SessionId,
-    mob_id: String,
+    registration: RuntimeSessionRegistrationWitness,
     event_rx: WasmSessionEventReceiver,
 }
 
@@ -315,17 +326,19 @@ struct StandaloneHandleSession {
 // RuntimeState — service-based infrastructure
 // ═══════════════════════════════════════════════════════════
 
-type WasmStandaloneSessionService = meerkat::EphemeralSessionService<meerkat::FactoryAgentBuilder>;
+type WasmSessionService = meerkat::EphemeralSessionService<meerkat::FactoryAgentBuilder>;
 
 struct RuntimeState {
+    /// Opaque identity for this installed browser module instance.
+    instance_handle: String,
     mob_state: Arc<MobMcpState>,
+    machine: Arc<MeerkatMachine>,
     /// Concrete session service — needed for subscribe_session_events_raw.
-    session_service: Arc<WasmStandaloneSessionService>,
-    /// Opaque browser-local handles mapped to standalone ephemeral sessions.
-    sessions: BTreeMap<u32, StandaloneHandleSession>,
-    next_handle: u32,
+    session_service: Arc<WasmSessionService>,
+    /// Opaque browser-local handles mapped to canonical session identity.
+    sessions: BTreeMap<u32, HandleSession>,
     /// Trust-verified bootstrap mobpack (definition id + skills), consumed when
-    /// `create_session_simple` builds a standalone session so the verified pack
+    /// `create_session_simple` builds a session so the verified pack
     /// contributes its system prompt rather than being discarded at init.
     bootstrap_mobpack: Option<BootstrapMobpack>,
     /// Host-supplied mobpack trust store, installed at bootstrap and consumed
@@ -336,7 +349,7 @@ struct RuntimeState {
     js_tools: Vec<JsToolEntry>,
 }
 
-/// Verified bootstrap mobpack retained for standalone session system-prompt
+/// Verified bootstrap mobpack retained for session system-prompt
 /// assembly. Built only after `verify_extracted_pack_trust` succeeds.
 struct BootstrapMobpack {
     definition_id: String,
@@ -524,7 +537,7 @@ fn build_provider_base_urls(
 fn build_service_infrastructure(
     config: Config,
     max_sessions: usize,
-) -> Result<(Arc<WasmStandaloneSessionService>, Arc<MobMcpState>), JsValue> {
+) -> Result<(Arc<WasmSessionService>, Arc<MobMcpState>), JsValue> {
     build_service_infrastructure_with_default_llm_client(config, max_sessions, None)
 }
 
@@ -536,7 +549,7 @@ fn build_service_infrastructure_with_default_llm_client(
     config: Config,
     max_sessions: usize,
     default_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
-) -> Result<(Arc<WasmStandaloneSessionService>, Arc<MobMcpState>), JsValue> {
+) -> Result<(Arc<WasmSessionService>, Arc<MobMcpState>), JsValue> {
     // Plan §4d.wasm.1 closure — wire the JS external-auth callback into
     // the provider runtime registry. The resolver itself handles the
     // "no callback registered" case by returning `MissingSecret`; we
@@ -550,7 +563,8 @@ fn build_service_infrastructure_with_default_llm_client(
     );
     #[cfg(not(target_arch = "wasm32"))]
     let factory = meerkat::AgentFactory::minimal();
-    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+    let mut builder =
+        meerkat::FactoryAgentBuilder::new(factory.with_browser_runtime_profile(), config);
 
     // NO default_llm_client in production - build_agent() resolves the correct
     // provider per-model from realm config bindings. This is architecturally
@@ -578,6 +592,8 @@ fn build_service_infrastructure_with_default_llm_client(
 
 thread_local! {
     static RUNTIME_STATE: RefCell<Option<RuntimeState>> = const { RefCell::new(None) };
+    static RUNTIME_LIFECYCLE: Arc<crate::tokio::sync::Mutex<()>> = Arc::new(crate::tokio::sync::Mutex::new(()));
+    static NEXT_SESSION_HANDLE: Cell<u32> = const { Cell::new(1) };
 }
 
 fn clear_subscription_registry() {
@@ -586,26 +602,19 @@ fn clear_subscription_registry() {
     });
 }
 
-fn install_runtime_state(state: RuntimeState) {
-    clear_subscription_registry();
-    // Runtime lifecycle owns external-auth-resolver lifecycle: a fresh runtime
-    // in the same WASM module must never inherit the PREVIOUS runtime's host
-    // auth callback. Clear it ONLY when we are REPLACING an existing runtime
-    // (re-init). On a first init the resolver may have been registered before
-    // init — the documented register-then-init flow (see the meerkat-wasm
-    // skill / docs/examples/wasm.mdx) — so clearing here would silently wipe a
-    // legitimately-registered resolver and break external-resolver auth.
-    // Teardown (`destroy_runtime`) clears unconditionally.
-    #[cfg(target_arch = "wasm32")]
-    {
-        let replacing_existing_runtime = RUNTIME_STATE.with(|cell| cell.borrow().is_some());
-        if replacing_existing_runtime {
-            crate::external_auth::clear_external_auth_resolver();
-        }
+async fn install_runtime_state(state: RuntimeState) -> Result<(), JsValue> {
+    let lifecycle = RUNTIME_LIFECYCLE.with(Arc::clone);
+    let _lifecycle = lifecycle.lock().await;
+    if RUNTIME_STATE.with(|cell| cell.borrow().is_some()) {
+        destroy_runtime_inner().await?;
     }
+    clear_subscription_registry();
+    // Teardown clears the prior resolver. A first init preserves a callback
+    // registered before initialization, as required by the auth binding API.
     RUNTIME_STATE.with(|cell| {
         *cell.borrow_mut() = Some(state);
     });
+    Ok(())
 }
 
 /// Tear down the embedded runtime and release all local handles/subscriptions.
@@ -614,7 +623,55 @@ fn install_runtime_state(state: RuntimeState) {
 /// this call. Also clears any registered external-auth resolver so a later
 /// runtime never inherits a stale host auth callback.
 #[wasm_bindgen]
-pub fn destroy_runtime() -> Result<(), JsValue> {
+pub async fn destroy_runtime(expected_handle: Option<String>) -> Result<(), JsValue> {
+    let lifecycle = RUNTIME_LIFECYCLE.with(Arc::clone);
+    let _lifecycle = lifecycle.lock().await;
+    if let Some(expected) = expected_handle {
+        let current = RUNTIME_STATE.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|state| state.instance_handle == expected)
+        });
+        if !current {
+            return Ok(());
+        }
+    }
+    destroy_runtime_inner().await
+}
+
+async fn destroy_runtime_inner() -> Result<(), JsValue> {
+    let runtime = RUNTIME_STATE.with(|cell| {
+        cell.borrow().as_ref().map(|state| {
+            (
+                state.machine.clone(),
+                state.session_service.clone(),
+                state.mob_state.clone(),
+                state
+                    .sessions
+                    .values()
+                    .map(|session| session.registration.clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
+    });
+    if let Some((machine, service, mobs, sessions)) = runtime {
+        for registration in sessions {
+            destroy_session_with_services(service.clone(), mobs.clone(), &registration)
+                .await
+                .map_err(err_web_destroy_session)?;
+            with_runtime_state_mut(|state| {
+                state
+                    .sessions
+                    .retain(|_, session| session.session_id != *registration.session_id());
+                Ok(())
+            })?;
+        }
+        for (mob_id, _) in mobs.mob_list().await.map_err(err_mob)? {
+            mobs.mob_destroy(&mob_id).await.map_err(err_mob_destroy)?;
+        }
+        machine.abort_comms_drains().await.map_err(err_runtime)?;
+        service.try_shutdown().await.map_err(err_session)?;
+    }
     clear_subscription_registry();
     #[cfg(target_arch = "wasm32")]
     crate::external_auth::clear_external_auth_resolver();
@@ -724,6 +781,9 @@ fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
 
 fn mob_error_value(error: &meerkat_mob::MobError) -> serde_json::Value {
     let mut value = err_value("mob_error", error);
+    if let Some(code) = error.wire_error_code() {
+        value["code"] = serde_json::json!(code);
+    }
     if let Some(data) = error.structured_data() {
         value["data"] = data;
     }
@@ -761,6 +821,7 @@ fn err_mob_destroy(e: MobMcpDestroyError) -> JsValue {
 /// `internal_error` and never laundered into an Ok-with-status payload.
 fn session_error_envelope(e: meerkat_core::SessionError) -> serde_json::Value {
     match e {
+        meerkat_core::SessionError::CapabilityUnavailable(refusal) => serde_json::json!(refusal),
         meerkat_core::SessionError::NotFound { .. } => {
             serde_json::json!({ "code": "SESSION_NOT_FOUND", "message": "session not found" })
         }
@@ -902,9 +963,8 @@ struct ParsedMobpack {
     skills: BTreeMap<String, String>,
 }
 
-fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
-    let files =
-        extract_targz_safe(bytes).map_err(|e| format!("failed to parse mobpack archive: {e}"))?;
+fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, serde_json::Value> {
+    let files = extract_targz_safe(bytes).map_err(|e| err_value("invalid_mobpack", e))?;
     parse_mobpack_from_files(&files)
 }
 
@@ -929,10 +989,27 @@ fn extract_verify_and_parse_mobpack(
     })?;
     meerkat_mob_pack::trust::verify_extracted_pack_trust(&files, trust_policy, trusted_signers)
         .map_err(|e| err_value("untrusted_mobpack", e))?;
-    parse_mobpack_from_files(&files).map_err(|e| err_value("invalid_mobpack", e))
+    parse_mobpack_from_files(&files)
 }
 
-fn parse_mobpack_from_files(files: &BTreeMap<String, Vec<u8>>) -> Result<ParsedMobpack, String> {
+fn parse_mobpack_from_files(
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<ParsedMobpack, serde_json::Value> {
+    let parsed =
+        parse_mobpack_contents(files).map_err(|error| err_value("invalid_mobpack", error))?;
+    if let Some(requires) = &parsed.manifest.requires {
+        for capability in &requires.capabilities {
+            meerkat_contracts::capability::BrowserRuntimeProfile
+                .require_mobpack(capability.id())
+                .map_err(|error| {
+                    serde_json::to_value(error).expect("profile refusal serializes")
+                })?;
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_mobpack_contents(files: &BTreeMap<String, Vec<u8>>) -> Result<ParsedMobpack, String> {
     let manifest_text = std::str::from_utf8(
         files
             .get("manifest.toml")
@@ -949,19 +1026,6 @@ fn parse_mobpack_from_files(files: &BTreeMap<String, Vec<u8>>) -> Result<ParsedM
             .ok_or_else(|| "definition.json is missing".to_string())?,
     )
     .map_err(|e| format!("invalid definition.json: {e}"))?;
-
-    if let Some(requires) = &manifest.requires {
-        for capability in &requires.capabilities {
-            if meerkat_contracts::capability::browser_mobpack_capability_decision(capability.id())
-                .is_forbidden()
-            {
-                return Err(format!(
-                    "forbidden capability '{}' is not allowed in browser-safe mode",
-                    capability.token()
-                ));
-            }
-        }
-    }
 
     let mut skills = BTreeMap::new();
     for (path, content) in files {
@@ -1394,11 +1458,19 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 /// Stores an `EphemeralSessionService<FactoryAgentBuilder>` and a `MobMcpState`
 /// in a `thread_local! RuntimeState` for subsequent mob/comms calls.
 #[wasm_bindgen]
-pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsValue, JsValue> {
+pub async fn init_runtime(
+    mobpack_bytes: &[u8],
+    credentials_json: &str,
+) -> Result<JsValue, JsValue> {
     init_tracing();
     patch_fetch_response_url();
     let creds: Credentials =
         serde_json::from_str(credentials_json).map_err(|e| err_str("invalid_credentials", e))?;
+    for capability in &creds.required_capabilities {
+        meerkat_contracts::capability::BrowserRuntimeProfile
+            .require(*capability)
+            .map_err(|refusal| js_from_value(serde_json::json!(refusal)))?;
+    }
     // Browser bootstrap must run canonical trust verification (Strict by
     // default) over the host-supplied trust store, not a local parser. The
     // verified pack is consumed below.
@@ -1435,19 +1507,28 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
     let mobpack_name = bootstrap_mobpack.name.clone();
     let skill_count = bootstrap_mobpack.skills.len();
 
+    let instance_handle = uuid::Uuid::new_v4().to_string();
     install_runtime_state(RuntimeState {
+        instance_handle: instance_handle.clone(),
+        machine: session_service.runtime_adapter().ok_or_else(|| {
+            err_js(
+                "RUNTIME_UNAVAILABLE",
+                "ephemeral service has no canonical runtime",
+            )
+        })?,
         mob_state,
         session_service,
         sessions: BTreeMap::new(),
-        next_handle: 1,
         bootstrap_mobpack: Some(bootstrap_mobpack),
         mobpack_trust: creds.mobpack_trust,
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
-    });
+    })
+    .await?;
 
     let result = serde_json::json!({
         "status": "initialized",
+        "runtime_handle": instance_handle,
         "model": model,
         "providers": providers,
         "max_sessions": max_sessions,
@@ -1466,11 +1547,16 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 /// "gemini_api_key"?: "...", "model"?: "<catalog default for configured provider>",
 /// "max_sessions"?: 100000 }`
 #[wasm_bindgen]
-pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
+pub async fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();
     patch_fetch_response_url();
     let rt_config: RuntimeConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
+    for capability in &rt_config.required_capabilities {
+        meerkat_contracts::capability::BrowserRuntimeProfile
+            .require(*capability)
+            .map_err(|refusal| js_from_value(serde_json::json!(refusal)))?;
+    }
 
     let api_keys = build_provider_api_keys(
         rt_config.anthropic_api_key.as_deref(),
@@ -1494,19 +1580,28 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
 
     let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
 
+    let instance_handle = uuid::Uuid::new_v4().to_string();
     install_runtime_state(RuntimeState {
+        instance_handle: instance_handle.clone(),
+        machine: session_service.runtime_adapter().ok_or_else(|| {
+            err_js(
+                "RUNTIME_UNAVAILABLE",
+                "ephemeral service has no canonical runtime",
+            )
+        })?,
         mob_state,
         session_service,
         sessions: BTreeMap::new(),
-        next_handle: 1,
         bootstrap_mobpack: None,
         mobpack_trust: rt_config.mobpack_trust,
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
-    });
+    })
+    .await?;
 
     let result = serde_json::json!({
         "status": "initialized",
+        "runtime_handle": instance_handle,
         "model": model,
         "max_sessions": max_sessions,
         "providers": providers,
@@ -1515,31 +1610,32 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Exported WASM API — Session (standalone ephemeral session-handle façades)
+// Exported WASM API - Session (canonical runtime-backed sessions)
 // ═══════════════════════════════════════════════════════════
 
-const UNSUPPORTED_KEEP_ALIVE_CODE: &str = "unsupported_session_option";
-const UNSUPPORTED_KEEP_ALIVE_MESSAGE: &str = "`keep_alive` is unavailable for direct Web sessions because @rkat/web uses the standalone ephemeral substrate and has no runtime-owned keep-alive ingress or comms drain; omit `keep_alive` and drive turns explicitly";
-
-fn parse_standalone_session_config(config_json: &str) -> Result<SessionConfig, serde_json::Value> {
+fn parse_session_config(config_json: &str) -> Result<SessionConfig, serde_json::Value> {
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|error| err_value("invalid_config", error))?;
-    if config.keep_alive.is_some() {
-        return Err(err_value(
-            UNSUPPORTED_KEEP_ALIVE_CODE,
-            UNSUPPORTED_KEEP_ALIVE_MESSAGE,
-        ));
+    for capability in &config.required_capabilities {
+        meerkat_contracts::capability::BrowserRuntimeProfile
+            .require(*capability)
+            .map_err(|refusal| serde_json::json!(refusal))?;
     }
     Ok(config)
 }
 
-fn next_standalone_handle(state: &mut RuntimeState) -> u32 {
-    let handle = state.next_handle.max(1);
-    state.next_handle = handle.wrapping_add(1);
-    while state.next_handle == 0 || state.sessions.contains_key(&state.next_handle) {
-        state.next_handle = state.next_handle.wrapping_add(1);
-    }
-    handle
+fn next_session_handle() -> Result<u32, JsValue> {
+    NEXT_SESSION_HANDLE.with(|next| {
+        let handle = next.get();
+        let successor = handle.checked_add(1).ok_or_else(|| {
+            err_js(
+                "session_handle_exhausted",
+                "reload the page to allocate more session handles",
+            )
+        })?;
+        next.set(successor);
+        Ok(handle)
+    })
 }
 
 fn build_session_request_with_auth_binding(
@@ -1587,40 +1683,57 @@ fn build_session_request_with_auth_binding(
     })
 }
 
-fn create_standalone_session(
+async fn create_runtime_session(
     config: SessionConfig,
     system_prompt: Option<String>,
-    mob_id: String,
 ) -> Result<u32, JsValue> {
-    let session_service = with_runtime_state(|state| Ok(state.session_service.clone()))?;
-    let model = config.model.clone();
+    let handle = next_session_handle()?;
+    let (session_service, machine) =
+        with_runtime_state(|state| Ok((state.session_service.clone(), state.machine.clone())))?;
     let request = build_session_request_with_auth_binding(
         config.auth_binding.as_ref(),
-        &model,
+        &config.model,
         &config,
         system_prompt,
     )?;
-
-    let created = futures::executor::block_on(session_service.create_session(request))
-        .map_err(err_session)?;
+    let created = meerkat::surface::materialize_ephemeral_runtime_session(
+        &session_service,
+        &machine,
+        request,
+        config.keep_alive.unwrap_or(false),
+    )
+    .await
+    .map_err(err_ephemeral_runtime)?;
     let session_id = created.session_id;
-    let event_rx = match futures::executor::block_on(
-        session_service.subscribe_session_events_raw(&session_id),
-    ) {
+    let registration = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .ok_or_else(|| {
+            err_runtime(
+                meerkat_runtime::RuntimeDriverError::MaterializationRegistrationNotCurrent {
+                    session_id: session_id.clone(),
+                },
+            )
+        })?;
+    let event_rx = match session_service
+        .subscribe_session_events_raw(&session_id)
+        .await
+    {
         Ok(rx) => rx,
-        Err(err) => {
-            let _ = futures::executor::block_on(session_service.archive(&session_id));
-            return Err(err_str("session_event_stream_error", err));
+        Err(error) => {
+            machine
+                .unregister_session_registration_until_terminal_if_current(&registration)
+                .await
+                .map_err(err_runtime)?;
+            return Err(err_str("session_event_stream_error", error));
         }
     };
-
     with_runtime_state_mut(|state| {
-        let handle = next_standalone_handle(state);
         state.sessions.insert(
             handle,
-            StandaloneHandleSession {
+            HandleSession {
                 session_id,
-                mob_id,
+                registration,
                 event_rx,
             },
         );
@@ -1630,7 +1743,7 @@ fn create_standalone_session(
 
 /// Create a session from a mobpack + config.
 ///
-/// Allocates a session through the initialized standalone ephemeral session
+/// Allocates a session through the initialized canonical runtime-backed session
 /// service, then returns a browser-local session handle for convenience.
 ///
 /// The pack's skills/definition become session prompt truth here, so this
@@ -1639,40 +1752,41 @@ fn create_standalone_session(
 /// the one the host installed at bootstrap (Strict + empty when none was
 /// supplied, so unsigned/unknown-signer packs fail closed).
 #[wasm_bindgen]
-pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, JsValue> {
+pub async fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, JsValue> {
+    let lifecycle = RUNTIME_LIFECYCLE.with(Arc::clone);
+    let _lifecycle = lifecycle.lock().await;
     let trust = with_runtime_state(|state| Ok(state.mobpack_trust.clone()))?;
     let parsed =
         extract_verify_and_parse_mobpack(mobpack_bytes, trust.policy, &trust.trusted_signers)
             .map_err(js_from_value)?;
-    let config = parse_standalone_session_config(config_json).map_err(js_from_value)?;
+    let config = parse_session_config(config_json).map_err(js_from_value)?;
     let system_prompt = compile_system_prompt(
         &parsed.definition.id,
         &parsed.manifest.mobpack.name,
         &parsed.skills,
         config.system_prompt.as_deref(),
     );
-    create_standalone_session(config, Some(system_prompt), parsed.definition.id)
+    create_runtime_session(config, Some(system_prompt)).await
 }
 
-/// Create a standalone session through initialized runtime state.
+/// Create a session through initialized canonical runtime state.
 ///
 /// When the runtime was bootstrapped from a trust-verified mobpack
 /// (`init_runtime`), that pack's skills and definition are folded into the
 /// system prompt so the verified bootstrap pack is actually consumed rather
 /// than discarded.
 #[wasm_bindgen]
-pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
-    let config = parse_standalone_session_config(config_json).map_err(js_from_value)?;
-    let (system_prompt, mob_id) = with_runtime_state(|state| {
+pub async fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
+    let lifecycle = RUNTIME_LIFECYCLE.with(Arc::clone);
+    let _lifecycle = lifecycle.lock().await;
+    let config = parse_session_config(config_json).map_err(js_from_value)?;
+    let system_prompt = with_runtime_state(|state| {
         Ok(match &state.bootstrap_mobpack {
-            Some(pack) => (
-                Some(pack.compile_system_prompt(config.system_prompt.as_deref())),
-                pack.definition_id.clone(),
-            ),
-            None => (config.system_prompt.clone(), String::new()),
+            Some(pack) => Some(pack.compile_system_prompt(config.system_prompt.as_deref())),
+            None => config.system_prompt.clone(),
         })
     })?;
-    create_standalone_session(config, system_prompt, mob_id)
+    create_runtime_session(config, system_prompt).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -1711,16 +1825,34 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
         .status;
 
     Ok(JsValue::from_str(
-        &serde_json::json!({
-            "handle": handle,
-            "session_id": session_id.to_string(),
-            "status": status,
-        })
-        .to_string(),
+        &serde_json::json!(meerkat_contracts::wire::InjectSystemContextResult { status })
+            .to_string(),
     ))
 }
 
-/// Run a turn through the standalone ephemeral session service.
+/// Public intent accepted by the embedded turn ingress. Internal execution,
+/// response-terminal, provider, and tool authority is never caller supplied.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmbeddedTurnOptions {
+    #[serde(default)]
+    handling_mode: Option<meerkat_contracts::WireHandlingMode>,
+    #[serde(default)]
+    transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+}
+
+impl From<EmbeddedTurnOptions> for meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+    fn from(options: EmbeddedTurnOptions) -> Self {
+        meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata {
+            handling_mode: options.handling_mode,
+            transient_turn_context: options.transient_turn_context,
+            ..Default::default()
+        }
+        .into()
+    }
+}
+
+/// Run a turn through generated runtime input admission.
 ///
 /// On success, resolves (Ok) with a JSON-serialized [`meerkat_contracts::WireRunResult`]
 /// — the same canonical wire shape RPC's `turn/start` returns — exposing
@@ -1733,7 +1865,91 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
 /// `AGENT_ERROR`; they are NOT laundered into an Ok value with a `status`
 /// string.
 #[wasm_bindgen]
-pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
+pub async fn start_turn(
+    handle: u32,
+    prompt: &str,
+    options_json: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let (machine, session_id) = with_runtime_state(|state| {
+        let session = state
+            .sessions
+            .get(&handle)
+            .ok_or_else(|| err_invalid_session_handle(handle))?;
+        Ok((state.machine.clone(), session.session_id.clone()))
+    })?;
+    let content = parse_prompt_content_input(prompt).map_err(js_from_value)?;
+    let metadata = options_json
+        .as_deref()
+        .map(serde_json::from_str::<EmbeddedTurnOptions>)
+        .transpose()
+        .map_err(|error| err_str("invalid_request", error))?;
+    let result = meerkat::surface::run_ephemeral_runtime_turn(
+        &machine,
+        &session_id,
+        content,
+        metadata.map(Into::into),
+    )
+    .await
+    .map_err(err_ephemeral_runtime)?;
+    let result =
+        meerkat::surface::ephemeral_runtime_completion_result(result).map_err(err_session)?;
+    let wire: meerkat_contracts::WireRunResult = result.into();
+    serde_json::to_string(&wire)
+        .map(|json| JsValue::from_str(&json))
+        .map_err(|error| err_str("internal_error", error))
+}
+
+fn err_runtime(error: meerkat_runtime::RuntimeDriverError) -> JsValue {
+    err_ephemeral_runtime(error.into())
+}
+fn err_ephemeral_runtime(error: meerkat::surface::EphemeralRuntimeError) -> JsValue {
+    err_session(error.into_session_error())
+}
+
+/// Interrupt the current run through the canonical machine authority.
+#[wasm_bindgen]
+pub async fn interrupt_session(handle: u32) -> Result<(), JsValue> {
+    let (machine, session_id) = with_runtime_state(|state| {
+        let session = state
+            .sessions
+            .get(&handle)
+            .ok_or_else(|| err_invalid_session_handle(handle))?;
+        Ok((state.machine.clone(), session.session_id.clone()))
+    })?;
+    meerkat::surface::interrupt_ephemeral_runtime_session(&machine, &session_id)
+        .await
+        .map_err(err_ephemeral_runtime)
+}
+
+/// Install directional trust from one direct session to another local session.
+#[wasm_bindgen]
+pub async fn session_wire_peer(handle: u32, peer_handle: u32) -> Result<(), JsValue> {
+    let lifecycle = RUNTIME_LIFECYCLE.with(Arc::clone);
+    let _lifecycle = lifecycle.lock().await;
+    let (service, machine, session_id, peer_session_id) = with_runtime_state(|state| {
+        let session = state
+            .sessions
+            .get(&handle)
+            .ok_or_else(|| err_invalid_session_handle(handle))?;
+        let peer = state
+            .sessions
+            .get(&peer_handle)
+            .ok_or_else(|| err_invalid_session_handle(peer_handle))?;
+        Ok((
+            state.session_service.clone(),
+            state.machine.clone(),
+            session.session_id.clone(),
+            peer.session_id.clone(),
+        ))
+    })?;
+    meerkat::surface::wire_ephemeral_runtime_peer(&service, &machine, &session_id, &peer_session_id)
+        .await
+        .map_err(err_ephemeral_runtime)
+}
+
+/// Get current session state.
+#[wasm_bindgen]
+pub async fn get_session_state(handle: u32) -> Result<String, JsValue> {
     let (session_service, session_id) = with_runtime_state(|state| {
         let session = state
             .sessions
@@ -1741,67 +1957,12 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
             .ok_or_else(|| err_invalid_session_handle(handle))?;
         Ok((state.session_service.clone(), session.session_id.clone()))
     })?;
-
-    // Parse the prompt as structured ContentInput (supports both plain strings
-    // and JSON-serialized content blocks from the Web SDK). Structured-but-
-    // malformed block JSON fails closed with INVALID_PARAMS instead of being
-    // silently misread as plain text.
-    let content_input = parse_prompt_content_input(prompt).map_err(js_from_value)?;
-
-    let run_result = session_service
-        .start_turn(
-            &session_id,
-            meerkat_core::service::StartTurnRequest {
-                injected_context: Vec::new(),
-                prompt: content_input,
-                system_prompt: None,
-                event_tx: None,
-                runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
-            },
-        )
-        .await;
-
-    match run_result {
-        Ok(result) => {
-            let wire: meerkat_contracts::WireRunResult = result.into();
-            let result_json =
-                serde_json::to_string(&wire).map_err(|e| err_str("internal_error", e))?;
-            Ok(JsValue::from_str(&result_json))
-        }
-        // Agent-level failures (LLM failure, timeout, budget) reject on the Err
-        // channel carrying the typed `SessionError::code()`, mirroring how RPC's
-        // `turn/start` surfaces terminal faults. No Ok-with-status laundering.
-        Err(err) => Err(err_session(err)),
-    }
-}
-
-/// Get current session state.
-#[wasm_bindgen]
-pub fn get_session_state(handle: u32) -> Result<String, JsValue> {
-    let (session_service, session_id, mob_id) = with_runtime_state(|state| {
-        let session = state
-            .sessions
-            .get(&handle)
-            .ok_or_else(|| err_invalid_session_handle(handle))?;
-        Ok((
-            state.session_service.clone(),
-            session.session_id.clone(),
-            session.mob_id.clone(),
-        ))
-    })?;
-    let view =
-        futures::executor::block_on(session_service.read(&session_id)).map_err(err_session)?;
-    let state = serde_json::json!({
-        "handle": handle,
-        "session_id": session_id.to_string(),
-        "mob_id": mob_id,
-        "model": view.state.model,
-        "usage": view.billing.usage,
-        "message_count": view.state.message_count,
-        "is_active": view.state.is_active,
-        "last_assistant_text": view.state.last_assistant_text,
-    });
-    Ok(state.to_string())
+    let view = session_service
+        .read(&session_id)
+        .await
+        .map_err(err_session)?;
+    let state: meerkat_contracts::WireSessionInfo = view.state.into();
+    serde_json::to_string(&state).map_err(|error| err_str("internal_error", error))
 }
 
 /// Inspect a mobpack without creating a session.
@@ -1812,7 +1973,7 @@ pub fn get_session_state(handle: u32) -> Result<String, JsValue> {
 /// Every consuming ingress (`init_runtime`, `create_session`) verifies trust.
 #[wasm_bindgen]
 pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
-    let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
+    let parsed = parse_mobpack(mobpack_bytes).map_err(js_from_value)?;
     let skills: Vec<serde_json::Value> = parsed
         .skills
         .iter()
@@ -1844,8 +2005,10 @@ pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
 /// projection. The handle is only removed after cleanup succeeds, so a failed
 /// destroy leaves the handle live for retry.
 #[wasm_bindgen]
-pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
-    let (session_service, mob_state, session_id) = with_runtime_state(|state| {
+pub async fn destroy_session(handle: u32) -> Result<(), JsValue> {
+    let lifecycle = RUNTIME_LIFECYCLE.with(Arc::clone);
+    let _lifecycle = lifecycle.lock().await;
+    let (session_service, mob_state, registration) = with_runtime_state(|state| {
         let session = state
             .sessions
             .get(&handle)
@@ -1853,15 +2016,12 @@ pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
         Ok((
             state.session_service.clone(),
             state.mob_state.clone(),
-            session.session_id.clone(),
+            session.registration.clone(),
         ))
     })?;
-    futures::executor::block_on(destroy_session_with_services(
-        session_service,
-        mob_state,
-        session_id,
-    ))
-    .map_err(err_web_destroy_session)?;
+    destroy_session_with_services(session_service, mob_state, &registration)
+        .await
+        .map_err(err_web_destroy_session)?;
     // Fail-closed: retire the handle so it is no longer addressable.
     with_runtime_state_mut(|state| {
         state.sessions.remove(&handle);
@@ -1883,29 +2043,33 @@ fn err_web_destroy_session(error: WebDestroySessionError) -> JsValue {
 }
 
 async fn destroy_session_with_services(
-    session_service: Arc<WasmStandaloneSessionService>,
+    session_service: Arc<WasmSessionService>,
     mob_state: Arc<MobMcpState>,
-    session_id: meerkat_core::SessionId,
+    registration: &RuntimeSessionRegistrationWitness,
 ) -> Result<(), WebDestroySessionError> {
-    let archive_not_found = match session_service.archive(&session_id).await {
-        Ok(()) => None,
-        Err(error @ meerkat_core::SessionError::NotFound { .. }) => Some(error),
-        Err(error) => return Err(WebDestroySessionError::Session(error)),
-    };
-    let retained_mob_cleanup = if archive_not_found.is_some() {
-        mob_state
-            .has_bridge_session_scoped_mobs(&session_id.to_string())
-            .await
-    } else {
-        false
-    };
+    let machine = session_service.runtime_adapter().ok_or_else(|| {
+        WebDestroySessionError::Session(meerkat_core::SessionError::Unsupported(
+            "session service has no runtime authority".into(),
+        ))
+    })?;
+    // The handle retains the machine's exact registration witness. Its
+    // absence is idempotent completed cleanup, including when a prior caller
+    // dropped its future while the owned teardown saga continued. Never
+    // transfer this cleanup authority to a same-session replacement.
+    machine
+        .unregister_session_registration_until_terminal_if_current(registration)
+        .await
+        .map_err(|error| {
+            WebDestroySessionError::Session(
+                meerkat::surface::EphemeralRuntimeError::from(error).into_session_error(),
+            )
+        })?;
+    // A failed mob cleanup keeps its own exact retry authority after the
+    // session's runtime unregister has completed.
     mob_state
-        .destroy_bridge_session_mobs(&session_id.to_string())
+        .destroy_bridge_session_mobs(&registration.session_id().to_string())
         .await
         .map_err(WebDestroySessionError::Mob)?;
-    if !retained_mob_cleanup && let Some(error) = archive_not_found {
-        return Err(WebDestroySessionError::Session(error));
-    }
     Ok(())
 }
 
@@ -1956,6 +2120,8 @@ pub fn poll_events(handle: u32) -> Result<String, JsValue> {
 /// Returns the mob_id as a string.
 #[wasm_bindgen]
 pub async fn mob_create(definition_json: &str) -> Result<JsValue, JsValue> {
+    let lifecycle = RUNTIME_LIFECYCLE.with(Arc::clone);
+    let _lifecycle = lifecycle.lock().await;
     let definition: MobDefinition =
         serde_json::from_str(definition_json).map_err(|e| err_str("invalid_definition", e))?;
     let mob_state = with_mob_state(Ok)?;
@@ -2092,6 +2258,8 @@ fn parse_mob_event_cursor(after_cursor: &str) -> Result<u64, serde_json::Value> 
 /// Returns JSON array of typed result entries per spec.
 #[wasm_bindgen]
 pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValue> {
+    let lifecycle = RUNTIME_LIFECYCLE.with(Arc::clone);
+    let _lifecycle = lifecycle.lock().await;
     let id = MobId::from(mob_id);
     let specs: Vec<SpawnSpecInput> =
         serde_json::from_str(specs_json).map_err(|e| err_str("invalid_specs", e))?;
@@ -2114,9 +2282,10 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
         .into_iter()
         .map(|r| match r {
             Ok(spawn_result) => spawn_member_result_payload(&id, &spawn_result),
-            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed_with_structured_data(
+            Err(e) => meerkat_contracts::MobSpawnManyResultEntry::failed_with_error_details(
                 e.cause(),
                 e.to_string(),
+                e.error().wire_error_code(),
                 e.error().structured_data(),
             ),
         })
@@ -2169,15 +2338,12 @@ fn lower_browser_spawn_spec(s: SpawnSpecInput) -> meerkat_mob::SpawnMemberSpec {
 }
 
 fn browser_placement_error_value(
-    placement: &meerkat_contracts::wire::WireHostRef,
+    _placement: &meerkat_contracts::wire::WireHostRef,
 ) -> serde_json::Value {
-    err_value(
-        "CAPABILITY_UNAVAILABLE",
-        format!(
-            "member placement on host '{}' is unavailable in the browser runtime",
-            placement.0
-        ),
-    )
+    let error = meerkat_contracts::capability::BrowserRuntimeProfile
+        .require(meerkat_contracts::capability::RuntimeProfileCapability::RemoteMemberPlacement)
+        .expect_err("browser profile excludes remote placement");
+    serde_json::to_value(error).expect("profile refusal serializes")
 }
 
 /// Retire a member from a mob.
@@ -2530,6 +2696,8 @@ pub async fn mob_respawn(
     agent_identity: &str,
     initial_message: Option<String>,
 ) -> Result<JsValue, JsValue> {
+    let lifecycle = RUNTIME_LIFECYCLE.with(Arc::clone);
+    let _lifecycle = lifecycle.lock().await;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let mid = AgentIdentity::from(agent_identity);
@@ -3020,7 +3188,7 @@ mod tests {
         MobForkHelperOptions, MobSpawnHelperOptions, StreamRef, SubscriptionInner,
         close_subscription, parse_js_tool_result, parse_mob_event_cursor,
         parse_mob_lifecycle_action_arg, parse_mobpack, parse_prompt_content_input,
-        parse_standalone_session_config, poll_subscription, serialize_subscription_item,
+        parse_session_config, poll_subscription, serialize_subscription_item,
         session_error_envelope, stream_lagged_envelope,
     };
     #[cfg(target_arch = "wasm32")]
@@ -3049,45 +3217,31 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn raw_keep_alive_true_without_comms_is_rejected_at_parse_boundary() {
-        let error =
-            parse_standalone_session_config(r#"{"model":"claude-sonnet-4-5","keep_alive":true}"#)
-                .expect_err("raw keep_alive presence must be rejected");
-
-        assert_eq!(error["code"], "unsupported_session_option");
-        assert!(
-            error["message"]
-                .as_str()
-                .expect("typed error must include a message")
-                .contains("standalone ephemeral")
-        );
+    fn raw_keep_alive_intent_reaches_runtime_composition() {
+        for keep_alive in [false, true] {
+            let config = parse_session_config(
+                &json!({"model": "test", "keep_alive": keep_alive}).to_string(),
+            )
+            .expect("typed runtime intent");
+            assert_eq!(config.keep_alive, Some(keep_alive));
+        }
     }
 
     #[test]
-    fn raw_keep_alive_false_with_comms_is_rejected_at_parse_boundary() {
-        let error = parse_standalone_session_config(
-            r#"{"model":"claude-sonnet-4-5","comms_name":"browser-agent","keep_alive":false}"#,
+    fn session_config_refuses_unknown_fields_and_excluded_requirements() {
+        let unknown = parse_session_config(r#"{"model":"test","backend":"sqlite"}"#)
+            .expect_err("unknown backend cannot be silently ignored");
+        assert_eq!(unknown["code"], "invalid_config");
+        let excluded = parse_session_config(
+            r#"{"model":"test","required_capabilities":["durable_persistence"]}"#,
         )
-        .expect_err("raw keep_alive presence must be rejected regardless of value");
-
-        assert_eq!(error["code"], "unsupported_session_option");
-        assert!(
-            error["message"]
-                .as_str()
-                .expect("typed error must include a message")
-                .contains("runtime-owned keep-alive ingress or comms drain")
+        .expect_err("typed requirement must reach the profile owner");
+        assert_eq!(excluded["code"], "CAPABILITY_UNAVAILABLE");
+        assert_eq!(excluded["data"]["capability"], "durable_persistence");
+        assert_eq!(
+            excluded["data"]["clearing_action"],
+            "use_persistent_runtime"
         );
-    }
-
-    #[test]
-    fn raw_keep_alive_omission_preserves_standalone_comms_config() {
-        let config = parse_standalone_session_config(
-            r#"{"model":"claude-sonnet-4-5","comms_name":"browser-agent"}"#,
-        )
-        .expect("comms without keep_alive remains supported");
-
-        assert_eq!(config.comms_name.as_deref(), Some("browser-agent"));
-        assert_eq!(config.keep_alive, None);
     }
 
     fn test_mobpack_bytes(capabilities: &[&str]) -> Vec<u8> {
@@ -3206,7 +3360,7 @@ capabilities = [{capability_values}]
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn init_test_runtime() {
+    async fn init_test_runtime() {
         let init = init_runtime_from_config(
             &json!({
                 "anthropic_api_key": "sk-test",
@@ -3214,7 +3368,7 @@ capabilities = [{capability_values}]
             })
             .to_string(),
         );
-        assert!(init.is_ok());
+        assert!(init.await.is_ok());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3293,7 +3447,7 @@ capabilities = [{capability_values}]
             let error = parse_mobpack(&bytes).expect_err("browser-forbidden capability rejected");
 
             assert!(
-                error.contains(&format!("forbidden capability '{capability}'")),
+                error["code"] == "CAPABILITY_UNAVAILABLE",
                 "unexpected error for {capability}: {error}"
             );
         }
@@ -3470,12 +3624,8 @@ capabilities = [{capability_values}]
             .expect("placement survives typed deserialization");
         let error = super::browser_placement_error_value(placement);
         assert_eq!(error["code"], "CAPABILITY_UNAVAILABLE");
-        assert!(
-            error["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("host-b-peer")),
-            "typed capability error should identify the unsupported host"
-        );
+        assert_eq!(error["data"]["capability"], "remote_member_placement");
+        assert!(error["data"]["clearing_action"].is_string());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3717,8 +3867,216 @@ capabilities = [{capability_values}]
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    struct GatedTeardownExecutor {
+        cleanup_started: Arc<tokio::sync::Notify>,
+        release_cleanup: Arc<tokio::sync::Notify>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutor for GatedTeardownExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: meerkat_core::RunId,
+            _primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::lifecycle::CoreExecutorError,
+        > {
+            Err(
+                meerkat_core::lifecycle::CoreExecutorError::archived_session_requires_teardown(
+                    "test actor requires machine-owned teardown",
+                ),
+            )
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn cleanup_after_runtime_stop_terminalized(
+            &mut self,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            self.cleanup_started.notify_one();
+            self.release_cleanup.notified().await;
+            Ok(())
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test(flavor = "current_thread")]
-    async fn destroy_session_without_retained_mob_cleanup_returns_not_found_on_retry() {
+    async fn destroy_session_joins_unregister_after_caller_grace() {
+        let (service, mob_state) =
+            build_service_infrastructure(Config::default(), 8).expect("runtime services");
+        let machine = meerkat_mob::MobSessionService::runtime_adapter(service.as_ref())
+            .expect("runtime machine");
+        let session_id = meerkat_core::SessionId::new();
+        let cleanup_started = Arc::new(tokio::sync::Notify::new());
+        let release_cleanup = Arc::new(tokio::sync::Notify::new());
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedTeardownExecutor {
+                    cleanup_started: cleanup_started.clone(),
+                    release_cleanup: release_cleanup.clone(),
+                }),
+            )
+            .await
+            .expect("register gated cleanup");
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("exact registration");
+        let error = machine
+            .unregister_session_registration_if_current(&registration)
+            .await
+            .expect_err("physical cleanup must outlive the caller grace");
+        assert!(matches!(
+            &error,
+            meerkat_runtime::RuntimeDriverError::UnregisterInProgress { .. }
+        ));
+        let envelope = super::session_error_envelope(
+            meerkat::surface::EphemeralRuntimeError::from(error).into_session_error(),
+        );
+        assert_eq!(envelope["code"], "UNREGISTER_IN_PROGRESS");
+        assert!(envelope["data"]["runtime_id"].is_string());
+        cleanup_started.notified().await;
+
+        let cleanup =
+            destroy_session_with_services(service.clone(), mob_state.clone(), &registration);
+        tokio::pin!(cleanup);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut cleanup)
+                .await
+                .is_err(),
+            "destroy must join the still-owned physical cleanup"
+        );
+        release_cleanup.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut cleanup)
+            .await
+            .expect("cleanup must finish after releasing the exact executor")
+            .expect("owned cleanup succeeds");
+        assert!(!machine.contains_session(&session_id).await);
+        destroy_session_with_services(service, mob_state, &registration)
+            .await
+            .expect("completed teardown must remain successful for a retained handle");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn destroy_session_accepts_machine_terminalized_registration() {
+        let (service, mob_state) =
+            build_service_infrastructure(Config::default(), 8).expect("runtime services");
+        let machine = meerkat_mob::MobSessionService::runtime_adapter(service.as_ref())
+            .expect("runtime machine");
+        let session_id = meerkat_core::SessionId::new();
+        let cleanup_started = Arc::new(tokio::sync::Notify::new());
+        let release_cleanup = Arc::new(tokio::sync::Notify::new());
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedTeardownExecutor {
+                    cleanup_started: cleanup_started.clone(),
+                    release_cleanup: release_cleanup.clone(),
+                }),
+            )
+            .await
+            .expect("register terminalizing actor");
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("exact registration");
+        machine
+            .accept_input_with_completion(
+                &session_id,
+                meerkat_runtime::input::Input::Prompt(meerkat_runtime::input::PromptInput::new(
+                    "trigger actor-owned teardown",
+                    None,
+                )),
+            )
+            .await
+            .expect("admit terminalizing input");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            cleanup_started.notified(),
+        )
+        .await
+        .expect("machine must own teardown after the actor terminal");
+        release_cleanup.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while machine.contains_session(&session_id).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("machine must complete its exact unregister saga");
+        let handle = super::next_session_handle().expect("browser handle");
+        let (_event_tx, event_rx) = tokio::sync::broadcast::channel(1);
+        super::install_runtime_state(super::RuntimeState {
+            instance_handle: uuid::Uuid::new_v4().to_string(),
+            mob_state,
+            machine,
+            session_service: service,
+            sessions: std::collections::BTreeMap::from([(
+                handle,
+                super::HandleSession {
+                    session_id,
+                    registration,
+                    event_rx,
+                },
+            )]),
+            bootstrap_mobpack: None,
+            mobpack_trust: super::MobpackTrustConfig::default(),
+        })
+        .await
+        .expect("install retained browser handle");
+        super::destroy_session(handle)
+            .await
+            .expect("known handle may acknowledge the owner's completed terminal teardown");
+        assert!(super::RUNTIME_STATE.with(|cell| {
+            !cell
+                .borrow()
+                .as_ref()
+                .expect("installed runtime")
+                .sessions
+                .contains_key(&handle)
+        }));
+        super::destroy_runtime(None)
+            .await
+            .expect("terminalized session must not strand whole-runtime teardown");
+        let (service, mob_state) =
+            build_service_infrastructure(Config::default(), 8).expect("replacement services");
+        let machine = meerkat_mob::MobSessionService::runtime_adapter(service.as_ref())
+            .expect("replacement machine");
+        super::install_runtime_state(super::RuntimeState {
+            instance_handle: uuid::Uuid::new_v4().to_string(),
+            mob_state,
+            machine,
+            session_service: service,
+            sessions: std::collections::BTreeMap::new(),
+            bootstrap_mobpack: None,
+            mobpack_trust: super::MobpackTrustConfig::default(),
+        })
+        .await
+        .expect("runtime replacement after terminal cleanup");
+        super::destroy_runtime(None)
+            .await
+            .expect("replacement cleanup");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn destroy_session_exact_registration_cleanup_is_idempotent() {
         let mut config = Config::default();
         populate_realm_from_api_keys(
             &mut config,
@@ -3727,8 +4085,12 @@ capabilities = [{capability_values}]
         );
         let (service, mob_state) =
             build_service_infrastructure(config, 8).expect("build runtime services");
-        let created = service
-            .create_session(meerkat_core::service::CreateSessionRequest {
+        let machine = meerkat_mob::MobSessionService::runtime_adapter(service.as_ref())
+            .expect("runtime machine");
+        let created = meerkat::surface::materialize_ephemeral_runtime_session(
+            &service,
+            &machine,
+            meerkat_core::service::CreateSessionRequest {
                 injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "".into(),
@@ -3739,24 +4101,38 @@ capabilities = [{capability_values}]
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
                 labels: None,
-            })
-            .await
-            .expect("create deferred web session");
+            },
+            false,
+        )
+        .await
+        .expect("create deferred web session");
         let session_id = created.session_id;
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("materialized registration");
 
-        destroy_session_with_services(service.clone(), mob_state.clone(), session_id.clone())
+        destroy_session_with_services(service.clone(), mob_state.clone(), &registration)
             .await
-            .expect("first destroy without mob cleanup should archive session");
-        let retry = destroy_session_with_services(service, mob_state, session_id)
+            .expect("first destroy should complete the owned unregister saga");
+        destroy_session_with_services(service.clone(), mob_state.clone(), &registration)
             .await
-            .expect_err("stale destroy without retained mob cleanup should stay NotFound");
+            .expect("already completed exact cleanup must let the handle retire");
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("same-session replacement registration");
+        destroy_session_with_services(service, mob_state, &registration)
+            .await
+            .expect("stale cleanup is idempotent without targeting replacement");
         assert!(
-            matches!(
-                retry,
-                super::WebDestroySessionError::Session(meerkat_core::SessionError::NotFound { .. })
-            ),
-            "retry without retained mob cleanup should not be success-classified: {retry:?}"
+            machine.contains_session(&session_id).await,
+            "an old handle must not unregister the replacement registration"
         );
+        machine
+            .unregister_session(&session_id)
+            .await
+            .expect("clean replacement fixture");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3770,8 +4146,12 @@ capabilities = [{capability_values}]
         );
         let (service, mob_state) =
             build_service_infrastructure(config, 8).expect("build runtime services");
-        let created = service
-            .create_session(meerkat_core::service::CreateSessionRequest {
+        let machine = meerkat_mob::MobSessionService::runtime_adapter(service.as_ref())
+            .expect("runtime machine");
+        let created = meerkat::surface::materialize_ephemeral_runtime_session(
+            &service,
+            &machine,
+            meerkat_core::service::CreateSessionRequest {
                 injected_context: Vec::new(),
                 model: "claude-sonnet-4-5".to_string(),
                 prompt: "".into(),
@@ -3782,10 +4162,16 @@ capabilities = [{capability_values}]
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
                 labels: None,
-            })
-            .await
-            .expect("create deferred web session");
+            },
+            false,
+        )
+        .await
+        .expect("create deferred web session");
         let session_id = created.session_id;
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("materialized registration");
         let events = Arc::new(meerkat_mob::store::InMemoryMobEventStore::new());
         events.fail_clear_until_allowed();
         let mob_id =
@@ -3793,7 +4179,7 @@ capabilities = [{capability_values}]
                 .await;
 
         let first =
-            destroy_session_with_services(service.clone(), mob_state.clone(), session_id.clone())
+            destroy_session_with_services(service.clone(), mob_state.clone(), &registration)
                 .await
                 .expect_err("first cleanup should surface incomplete mob destroy");
         assert!(
@@ -3807,7 +4193,7 @@ capabilities = [{capability_values}]
         );
 
         let retry =
-            destroy_session_with_services(service.clone(), mob_state.clone(), session_id.clone())
+            destroy_session_with_services(service.clone(), mob_state.clone(), &registration)
                 .await
                 .expect_err(
                     "retry should report retained mob cleanup state, not session not found",
@@ -3823,7 +4209,7 @@ capabilities = [{capability_values}]
         );
 
         events.allow_clear();
-        destroy_session_with_services(service, mob_state.clone(), session_id)
+        destroy_session_with_services(service, mob_state.clone(), &registration)
             .await
             .expect("retry after event store recovery should complete cleanup");
         assert!(
@@ -3835,14 +4221,14 @@ capabilities = [{capability_values}]
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test(async)]
     async fn append_system_context_applies_to_direct_session_handle() {
-        init_test_runtime();
+        init_test_runtime().await;
         let handle = create_session_simple(
             &json!({
-                "model": "claude-sonnet-4-5",
-                "api_key": "sk-test"
+                "model": "claude-sonnet-4-5"
             })
             .to_string(),
         )
+        .await
         .expect("create session");
 
         let result = append_system_context(
@@ -3860,34 +4246,37 @@ capabilities = [{capability_values}]
         let parsed: serde_json::Value =
             serde_json::from_str(&result_json).expect("append result json");
 
-        assert_eq!(parsed["handle"], handle);
+        assert!(parsed.get("handle").is_none());
         assert_eq!(parsed["status"], "applied");
     }
 
     #[cfg(target_arch = "wasm32")]
-    #[test]
-    fn destroy_session_retires_handle_and_fails_closed() {
-        init_test_runtime();
+    #[wasm_bindgen_test::wasm_bindgen_test(async)]
+    async fn destroy_session_retires_handle_and_fails_closed() {
+        init_test_runtime().await;
         let handle = create_session_simple(
             &json!({
-                "model": "claude-sonnet-4-5",
-                "api_key": "sk-test"
+                "model": "claude-sonnet-4-5"
             })
             .to_string(),
         )
+        .await
         .expect("create session");
 
-        let before = get_session_state(handle).expect("session state before destroy");
+        let before = get_session_state(handle)
+            .await
+            .expect("session state before destroy");
         let before: serde_json::Value = serde_json::from_str(&before).expect("state json");
-        assert_eq!(before["handle"], handle);
+        assert!(before.get("handle").is_none());
         assert!(before["session_id"].as_str().is_some());
 
-        destroy_session(handle).expect("destroy session");
+        destroy_session(handle).await.expect("destroy session");
 
         // Row #215: a destroyed handle is retired, not left as an addressable
         // archived projection. Subsequent reads fail closed with the typed
         // invalid_session_handle code.
         let after = get_session_state(handle)
+            .await
             .expect_err("destroyed handle must fail closed, not return archived JSON");
         let after: serde_json::Value =
             serde_json::from_str(&after.as_string().expect("typed error envelope string"))
@@ -3896,6 +4285,7 @@ capabilities = [{capability_values}]
 
         // Re-destroy is idempotent at the typed-code level (still invalid_session_handle).
         let redestroy = destroy_session(handle)
+            .await
             .expect_err("re-destroying a retired handle must surface invalid_session_handle");
         let redestroy: serde_json::Value =
             serde_json::from_str(&redestroy.as_string().expect("typed error envelope string"))
@@ -4702,7 +5092,7 @@ capabilities = [{capability_values}]
     async fn fire_and_forget_dispatch_emits_detached_async_op_not_synchronous_success() {
         use meerkat_core::AgentToolDispatcher;
 
-        init_test_runtime();
+        init_test_runtime().await;
         register_js_tool(
             "request_approval".to_string(),
             "fire-and-forget approval".to_string(),

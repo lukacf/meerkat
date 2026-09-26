@@ -1017,9 +1017,9 @@ impl LiveProjectionError {
             SessionError::Unsupported(reason) => Self::Rejected(reason),
             SessionError::Busy { id } => Self::SessionBusy(id),
             SessionError::NotRunning { id } => Self::SessionNotRunning(id),
-            SessionError::PersistenceDisabled | SessionError::CompactionDisabled => {
-                Self::CapabilityDisabled { code, message }
-            }
+            SessionError::PersistenceDisabled
+            | SessionError::CompactionDisabled
+            | SessionError::CapabilityUnavailable(_) => Self::CapabilityDisabled { code, message },
             // Exhaustive over the remaining `SessionError` kinds (no `_`
             // catch-all): a store error, an agent-level failure, or a
             // structured `FailedWithData` all carry the stable typed `code`
@@ -1806,9 +1806,9 @@ impl LiveToolDispatchError {
             SessionError::Unsupported(reason) => Self::Rejected(reason),
             SessionError::Busy { id } => Self::SessionBusy(id),
             SessionError::NotRunning { id } => Self::SessionNotRunning(id),
-            SessionError::PersistenceDisabled | SessionError::CompactionDisabled => {
-                Self::CapabilityDisabled { code, message }
-            }
+            SessionError::PersistenceDisabled
+            | SessionError::CompactionDisabled
+            | SessionError::CapabilityUnavailable(_) => Self::CapabilityDisabled { code, message },
             // Exhaustive over the remaining `SessionError` kinds (no `_`
             // catch-all): a store error, an agent-level failure, or a
             // structured `FailedWithData` all carry the stable typed `code`

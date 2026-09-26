@@ -561,6 +561,7 @@ mod image_generation_substrate {
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 render_metadata: None,
                 typed_turn_appends: Vec::new(),
+                request_contexts: Vec::new(),
                 transcript_identity: None,
                 execution_kind: Some(RuntimeExecutionKind::ContentTurn),
             },

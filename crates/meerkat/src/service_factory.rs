@@ -66,6 +66,7 @@ fn build_agent_error_to_session_error(
     auth_binding: Option<&meerkat_core::AuthBindingRef>,
 ) -> SessionError {
     match error {
+        BuildAgentError::RuntimeProfile(refusal) => SessionError::CapabilityUnavailable(refusal),
         #[cfg(feature = "comms")]
         BuildAgentError::SessionIdentityInUse(session_id) => SessionError::Agent(
             meerkat_core::error::AgentError::SessionIdentityInUse(session_id),
@@ -263,6 +264,8 @@ impl SessionAgent for FactoryAgent {
             ));
         }
         self.agent.set_runtime_execution_kind(input.execution_kind);
+        self.agent
+            .set_active_turn_request_contexts(input.request_contexts);
         if input.typed_turn_appends.is_empty()
             && input.transcript_identity.is_none()
             && input.injected_context.is_empty()
@@ -285,11 +288,14 @@ impl SessionAgent for FactoryAgent {
         &mut self,
         transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
         execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        request_contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.set_runtime_execution_kind(execution_kind);
         self.agent
             .set_active_transcript_identity(transcript_identity);
+        self.agent
+            .set_active_turn_request_contexts(request_contexts);
         self.agent.run_pending_with_events(event_tx).await
     }
 
@@ -1648,6 +1654,43 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn browser_factory_builder_preserves_typed_capability_refusal() {
+        use meerkat_capabilities::{BrowserRuntimeProfile, RuntimeProfileCapability};
+        let expected = BrowserRuntimeProfile
+            .require(RuntimeProfileCapability::Shell)
+            .unwrap_err();
+        let builder = FactoryAgentBuilder::new(
+            AgentFactory::minimal().with_browser_runtime_profile(),
+            Config::default(),
+        );
+        let request = CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "excluded-before-provider".into(),
+            prompt: "".into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                override_shell: meerkat_core::ToolCategoryOverride::Enable,
+                ..Default::default()
+            }),
+            labels: None,
+        };
+        let (tx, _rx) = mpsc::channel(1);
+        let error = match builder.build_agent(&request, tx).await {
+            Ok(_) => panic!("excluded shell unexpectedly built"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "CAPABILITY_UNAVAILABLE");
+        let SessionError::CapabilityUnavailable(actual) = error else {
+            panic!("factory lost typed profile refusal");
+        };
+        assert_eq!(expected, actual);
+    }
+
     #[test]
     fn llm_client_build_failure_keeps_typed_session_cause() {
         let error = build_agent_error_to_session_error(
@@ -2458,6 +2501,7 @@ mod tests {
                 handling_mode: meerkat_core::HandlingMode::Queue,
                 render_metadata: None,
                 typed_turn_appends: Vec::new(),
+                request_contexts: Vec::new(),
                 transcript_identity: None,
                 execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
             },
@@ -2622,6 +2666,7 @@ mod tests {
                 handling_mode: meerkat_core::HandlingMode::Queue,
                 render_metadata: None,
                 typed_turn_appends: Vec::new(),
+                request_contexts: Vec::new(),
                 transcript_identity: None,
                 execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
             },
@@ -2743,6 +2788,7 @@ mod tests {
                     handling_mode: meerkat_core::HandlingMode::Queue,
                     render_metadata: None,
                     typed_turn_appends: Vec::new(),
+                    request_contexts: Vec::new(),
                     transcript_identity: None,
                     execution_kind: Some(
                         meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
@@ -2856,6 +2902,7 @@ mod tests {
                 handling_mode: meerkat_core::HandlingMode::Queue,
                 render_metadata: None,
                 typed_turn_appends: Vec::new(),
+                request_contexts: Vec::new(),
                 transcript_identity: None,
                 execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
             },
@@ -3788,6 +3835,7 @@ mod tests {
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,
                 typed_turn_appends: Vec::new(),
+                request_contexts: Vec::new(),
                 transcript_identity: None,
                 execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
             },
@@ -3860,6 +3908,7 @@ mod tests {
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,
                 typed_turn_appends: Vec::new(),
+                request_contexts: Vec::new(),
                 transcript_identity: None,
                 execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
             },

@@ -2,6 +2,7 @@ import { EventSubscription } from './events.js';
 import { isKnownEvent } from './types.js';
 import type {
   ContentBlock,
+  HandlingMode,
   TurnResult,
   SessionEvent,
   SessionState,
@@ -10,9 +11,11 @@ import type {
 } from './types.js';
 
 // WASM function signatures (bound at construction)
-type StartTurnFn = (handle: number, prompt: string) => Promise<string>;
-type GetSessionStateFn = (handle: number) => string;
-type DestroySessionFn = (handle: number) => void;
+type StartTurnFn = (handle: number, prompt: string, optionsJson?: string) => Promise<string>;
+type GetSessionStateFn = (handle: number) => Promise<string>;
+type DestroySessionFn = (handle: number) => Promise<void>;
+type InterruptSessionFn = (handle: number) => Promise<void>;
+type WirePeerFn = (handle: number, peerHandle: number) => Promise<void>;
 type PollEventsFn = (handle: number) => string;
 type AppendSystemContextFn = (
   handle: number,
@@ -20,13 +23,11 @@ type AppendSystemContextFn = (
 ) => Promise<string>;
 
 /**
- * Browser/WASM sessions are standalone live sessions, not durable
- * runtime-input sessions. The `never` field makes the unsupported
- * request-only context contract explicit at compile time; the runtime guard
- * below also fails closed for untyped JavaScript callers.
+ * Metadata carried by the canonical runtime input for this turn.
  */
 export interface BrowserTurnOptions {
-  readonly transientTurnContext?: never;
+  readonly handlingMode?: HandlingMode;
+  readonly transientTurnContext?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -151,6 +152,8 @@ export class Session {
   private destroyFn: DestroySessionFn;
   private pollFn: PollEventsFn;
   private appendSystemContextFn: AppendSystemContextFn;
+  private interruptFn: InterruptSessionFn;
+  private wirePeerFn: WirePeerFn;
 
   /** @internal — use MeerkatRuntime.createSession() instead. */
   constructor(
@@ -160,6 +163,8 @@ export class Session {
     destroyFn: DestroySessionFn,
     pollFn: PollEventsFn,
     appendSystemContextFn: AppendSystemContextFn,
+    interruptFn: InterruptSessionFn,
+    wirePeerFn: WirePeerFn,
   ) {
     this.handle = handle;
     this.startTurnFn = startTurnFn;
@@ -167,6 +172,8 @@ export class Session {
     this.destroyFn = destroyFn;
     this.pollFn = pollFn;
     this.appendSystemContextFn = appendSystemContextFn;
+    this.interruptFn = interruptFn;
+    this.wirePeerFn = wirePeerFn;
   }
 
   /**
@@ -182,19 +189,17 @@ export class Session {
     prompt: string | ContentBlock[],
     options?: BrowserTurnOptions,
   ): Promise<TurnResult> {
-    if (
-      options != null
-      && Object.prototype.hasOwnProperty.call(options, 'transientTurnContext')
-    ) {
-      throw new MeerkatError(
-        'UNSUPPORTED_FEATURE',
-        'transientTurnContext requires a durable runtime-input surface and is not supported by browser/WASM live sessions',
-      );
-    }
     const promptStr = serializePromptContentInput(prompt);
     let json: string;
     try {
-      json = await this.startTurnFn(this.handle, promptStr);
+      json = await this.startTurnFn(
+        this.handle,
+        promptStr,
+        options === undefined ? undefined : JSON.stringify({
+          handling_mode: options.handlingMode,
+          transient_turn_context: options.transientTurnContext,
+        }),
+      );
     } catch (error) {
       throw MeerkatError.fromWasm(error);
     }
@@ -205,23 +210,21 @@ export class Session {
         'turn result is missing canonical text field',
       );
     }
-    return {
-      ...parsed,
-      text: parsed.text,
-      // `response` is a backward-compatible alias for the canonical text; it is
-      // not a separate truth source and must not synthesize empty content.
-      response: parsed.text,
-    } as TurnResult;
+    return parsed as TurnResult;
   }
 
-  /** Get the current standalone session state. */
-  getState(): SessionState {
-    return JSON.parse(this.getStateFn(this.handle)) as SessionState;
+  /** Get the current canonical session state. */
+  async getState(): Promise<SessionState> {
+    try {
+      return JSON.parse(await this.getStateFn(this.handle)) as SessionState;
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
   }
 
-  /** The authoritative standalone session ID behind this local browser handle. */
-  get sessionId(): string {
-    return this.getState().session_id;
+  /** The canonical session ID behind this local browser handle. */
+  get sessionId(): Promise<string> {
+    return this.getState().then((state) => state.session_id);
   }
 
   /** Poll buffered agent events from the last turn. */
@@ -234,7 +237,7 @@ export class Session {
   /**
    * Observe session events through the direct handle's buffered event source.
    *
-   * This is the standalone observation API for direct WASM sessions. It uses
+   * This projects the runtime event stream for direct WASM sessions. It uses
    * the same underlying event buffer as `pollEvents()`, so callers should use
    * either `pollEvents()` or the returned subscription, not both at once.
    */
@@ -267,28 +270,36 @@ export class Session {
    * runtime's typed error `code` (`not_initialized` / `invalid_session_handle`),
    * not by sniffing the message string.
    */
-  destroy(): void {
+  async destroy(): Promise<void> {
     try {
-      this.destroyFn(this.handle);
+      await this.destroyFn(this.handle);
     } catch (error) {
       if (isAlreadyGoneError(error)) {
         return;
       }
-      throw error;
+      throw MeerkatError.fromWasm(error);
     }
   }
 
-  /**
-   * Deprecated compatibility surface.
-   *
-   * Browser-local sessions no longer report lifecycle state from cached handle
-   * flags. Use `getState()` and canonical runtime/session errors instead.
-   */
-  get isDestroyed(): boolean {
-    throw new Error(
-      'Session.isDestroyed is deprecated: lifecycle state is owned by the runtime; use getState() or canonical operation errors.',
-    );
+  /** Trust another direct session for incoming in-process comms. */
+  async wirePeer(peer: Session): Promise<void> {
+    try {
+      await this.wirePeerFn(this.handle, peer.handle);
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
   }
+
+  /** Interrupt active work through the runtime's cancellation owner. */
+  async interrupt(): Promise<void> {
+    try {
+      await this.interruptFn(this.handle);
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
+  }
+
+
 }
 
 /**

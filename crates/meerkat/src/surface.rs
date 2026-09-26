@@ -3,6 +3,12 @@
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
 mod embedded;
+mod ephemeral_runtime;
+pub use ephemeral_runtime::{
+    EphemeralRuntimeError, ephemeral_runtime_completion_result,
+    interrupt_ephemeral_runtime_session, materialize_ephemeral_runtime_session,
+    run_ephemeral_runtime_turn, wire_ephemeral_runtime_peer,
+};
 #[cfg(not(target_arch = "wasm32"))]
 mod fatal_error;
 #[cfg(all(

@@ -1825,6 +1825,7 @@ class MobSpawnManyFailedResult:
     """Failed per-member `mob/spawn_many` result payload."""
     cause: MobSpawnManyFailureCause
     message: str
+    code: Optional[Any] = None
     structured_data: Optional[Any] = None
 
 

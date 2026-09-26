@@ -507,7 +507,7 @@ async function main() {
     const lifecycle = await p.eval(`(async()=>{
       const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
       await wasm.default();
-      wasm.init_runtime_from_config(JSON.stringify({model:"claude-sonnet-4-6",anthropic_api_key:"synthetic-not-a-key"}));
+      await wasm.init_runtime_from_config(JSON.stringify({model:"claude-sonnet-4-6",anthropic_api_key:"synthetic-not-a-key"}));
       const id=String(await wasm.mob_create(JSON.stringify({id:"lifecycle-probe",profiles:{worker:{model:"claude-sonnet-4-6",runtime_mode:"autonomous_host",tools:{comms:true},external_addressable:true}},wiring:{},flows:{}})));
       const spawned=JSON.parse(await wasm.mob_spawn(id,JSON.stringify([{profile:"worker",agent_identity:"worker",runtime_mode:"autonomous_host"}])));
       const stop=JSON.parse(await wasm.mob_lifecycle(id,"stop"));
@@ -515,7 +515,7 @@ async function main() {
       let rejected=false;try{await wasm.mob_member_send(id,"worker",JSON.stringify({content:"Synthetic stopped-admission probe",handling_mode:"queue"}));}catch{rejected=true;}
       const resume=JSON.parse(await wasm.mob_lifecycle(id,"resume"));
       const resumedStatus=JSON.parse(await wasm.mob_status(id));
-      await wasm.mob_lifecycle(id,"destroy");wasm.destroy_runtime();
+      await wasm.mob_lifecycle(id,"destroy");await wasm.destroy_runtime();
       return {spawned:spawned[0].status,stop:stop.ok,stopped:stoppedStatus.status,rejected,resume:resume.ok,resumed:resumedStatus.status};
     })()`);
     assert.deepEqual(lifecycle, { spawned: "spawned", stop: true, stopped: "Stopped", rejected: true, resume: true, resumed: "Running" });
@@ -686,7 +686,7 @@ async function main() {
       const members=JSON.parse(await wasm.mob_list_members("the-office"));
       const subscriptions=[];
       for(const member of members){const handle=await wasm.mob_member_subscribe("the-office",member.agent_identity);wasm.close_subscription(handle);subscriptions.push(member.agent_identity);}
-      await wasm.mob_lifecycle("the-office","destroy");wasm.destroy_runtime();
+      await wasm.mob_lifecycle("the-office","destroy");await wasm.destroy_runtime();
       let destroyed=false;try{await wasm.mob_list_members("the-office");}catch{destroyed=true;}
       return {status:status.status,subscriptions:subscriptions.length,destroyed};
     })()`);

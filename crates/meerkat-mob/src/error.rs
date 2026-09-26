@@ -1501,6 +1501,9 @@ impl MobError {
                 Self::SharedRetirementFailure(error) | Self::SharedLifecycleFailure(error) => {
                     error.wire_error_code()
                 }
+                Self::SessionError(meerkat_core::SessionError::CapabilityUnavailable(_)) => {
+                    Some(meerkat_contracts::ErrorCode::CapabilityUnavailable)
+                }
                 Self::RetirementInProgress { .. }
                 | Self::MemberRetirementInProgress { .. }
                 | Self::MemberRetirementAdmissionPending { .. }

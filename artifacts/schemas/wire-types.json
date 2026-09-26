@@ -113272,12 +113272,74 @@
   },
   "MobSpawnManyResult": {
     "$defs": {
+      "ErrorCode": {
+        "description": "Stable error codes for wire protocol.",
+        "oneOf": [
+          {
+            "enum": [
+              "SESSION_NOT_FOUND",
+              "SCHEDULE_NOT_FOUND",
+              "SESSION_BUSY",
+              "SESSION_NOT_RUNNING",
+              "REQUEST_CANCELLED",
+              "PROVIDER_ERROR",
+              "BUDGET_EXHAUSTED",
+              "HOOK_DENIED",
+              "AGENT_ERROR",
+              "CAPABILITY_UNAVAILABLE",
+              "SKILL_NOT_FOUND",
+              "SKILL_RESOLUTION_FAILED",
+              "INVALID_PARAMS",
+              "INTERNAL_ERROR",
+              "DUPLICATE_INPUT",
+              "SUPERVISOR_ROTATION_INCOMPLETE"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "SCOPE_DENIED",
+            "description": "Plane-(b) control-scope denial; wire detail carries\n`{ required, presented }`.",
+            "type": "string"
+          },
+          {
+            "const": "HOST_UNAVAILABLE",
+            "description": "Member host unreachable/timeout; observation degrades typed, never\nquiet.",
+            "type": "string"
+          },
+          {
+            "const": "STALE_CURSOR",
+            "description": "Event cursor overran an ephemeral host's buffer; reply carries the\ncurrent watermark.",
+            "type": "string"
+          },
+          {
+            "const": "STALE_FENCE",
+            "description": "Command carried a superseded `(generation, fence)` tuple.",
+            "type": "string"
+          },
+          {
+            "const": "MEMBER_RELOAD_REQUIRED",
+            "description": "A mob member's runtime registration is durability-degraded and\nrefuses ordinary work until an explicit registration-authorized cold\nreload replaces it (`MobError::MemberReloadRequired`). Deliberately\nits own code rather than [`Self::SessionBusy`]: the condition never\nclears on its own, so ordinary busy/backoff retry is never correct —\nonly the named `reload_member_registration` repair resolves it.",
+            "type": "string"
+          }
+        ]
+      },
       "MobSpawnManyFailedResult": {
         "additionalProperties": false,
         "description": "Failed per-member `mob/spawn_many` result payload.",
         "properties": {
           "cause": {
             "$ref": "#/$defs/MobSpawnManyFailureCause"
+          },
+          "code": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ErrorCode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Stable classification supplied by the canonical failure owner."
           },
           "message": {
             "type": "string"
@@ -121473,6 +121535,258 @@
       "outcome_type"
     ],
     "title": "RuntimeAcceptResult",
+    "type": "object"
+  },
+  "RuntimeProfileCapability": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Capabilities whose availability differs between runtime compositions.",
+    "enum": [
+      "in_memory_persistence",
+      "durable_persistence",
+      "foreground_execution",
+      "background_execution",
+      "keep_alive",
+      "comms",
+      "transient_turn_context",
+      "shell",
+      "process_spawn",
+      "mcp_stdio",
+      "remote_member_placement",
+      "hooks",
+      "runtime_skills",
+      "embedded_skills",
+      "schedule",
+      "work_graph",
+      "semantic_memory",
+      "image_generation",
+      "fallback_web_search",
+      "mcp_client",
+      "tcp_comms",
+      "uds_comms"
+    ],
+    "title": "RuntimeProfileCapability",
+    "type": "string"
+  },
+  "RuntimeProfileClearingAction": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Caller action that clears a profile refusal.",
+    "enum": [
+      "use_persistent_runtime",
+      "use_background_runtime",
+      "use_host_process_runtime",
+      "use_local_member_placement",
+      "use_hook_runtime",
+      "use_skill_runtime",
+      "use_schedule_runtime",
+      "use_work_graph_runtime",
+      "use_semantic_memory_runtime",
+      "use_image_generation_runtime",
+      "use_web_search_runtime",
+      "use_mcp_runtime",
+      "use_in_process_comms"
+    ],
+    "title": "RuntimeProfileClearingAction",
+    "type": "string"
+  },
+  "RuntimeProfileId": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical identity of a runtime capability profile.",
+    "enum": [
+      "browser"
+    ],
+    "title": "RuntimeProfileId",
+    "type": "string"
+  },
+  "RuntimeProfileRefusal": {
+    "$defs": {
+      "RuntimeProfileCapability": {
+        "description": "Capabilities whose availability differs between runtime compositions.",
+        "enum": [
+          "in_memory_persistence",
+          "durable_persistence",
+          "foreground_execution",
+          "background_execution",
+          "keep_alive",
+          "comms",
+          "transient_turn_context",
+          "shell",
+          "process_spawn",
+          "mcp_stdio",
+          "remote_member_placement",
+          "hooks",
+          "runtime_skills",
+          "embedded_skills",
+          "schedule",
+          "work_graph",
+          "semantic_memory",
+          "image_generation",
+          "fallback_web_search",
+          "mcp_client",
+          "tcp_comms",
+          "uds_comms"
+        ],
+        "type": "string"
+      },
+      "RuntimeProfileClearingAction": {
+        "description": "Caller action that clears a profile refusal.",
+        "enum": [
+          "use_persistent_runtime",
+          "use_background_runtime",
+          "use_host_process_runtime",
+          "use_local_member_placement",
+          "use_hook_runtime",
+          "use_skill_runtime",
+          "use_schedule_runtime",
+          "use_work_graph_runtime",
+          "use_semantic_memory_runtime",
+          "use_image_generation_runtime",
+          "use_web_search_runtime",
+          "use_mcp_runtime",
+          "use_in_process_comms"
+        ],
+        "type": "string"
+      },
+      "RuntimeProfileId": {
+        "description": "Canonical identity of a runtime capability profile.",
+        "enum": [
+          "browser"
+        ],
+        "type": "string"
+      },
+      "RuntimeProfileRefusalCode": {
+        "description": "Stable failure classification for an excluded runtime capability.",
+        "enum": [
+          "CAPABILITY_UNAVAILABLE"
+        ],
+        "type": "string"
+      },
+      "RuntimeProfileRefusalData": {
+        "description": "Remediation facts attached to a runtime profile refusal.",
+        "properties": {
+          "capability": {
+            "$ref": "#/$defs/RuntimeProfileCapability"
+          },
+          "clearing_action": {
+            "$ref": "#/$defs/RuntimeProfileClearingAction"
+          },
+          "profile": {
+            "$ref": "#/$defs/RuntimeProfileId"
+          }
+        },
+        "required": [
+          "profile",
+          "capability",
+          "clearing_action"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Profile-owned refusal for mechanical transport serialization.",
+    "properties": {
+      "code": {
+        "$ref": "#/$defs/RuntimeProfileRefusalCode"
+      },
+      "data": {
+        "$ref": "#/$defs/RuntimeProfileRefusalData"
+      },
+      "message": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "code",
+      "message",
+      "data"
+    ],
+    "title": "RuntimeProfileRefusal",
+    "type": "object"
+  },
+  "RuntimeProfileRefusalCode": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Stable failure classification for an excluded runtime capability.",
+    "enum": [
+      "CAPABILITY_UNAVAILABLE"
+    ],
+    "title": "RuntimeProfileRefusalCode",
+    "type": "string"
+  },
+  "RuntimeProfileRefusalData": {
+    "$defs": {
+      "RuntimeProfileCapability": {
+        "description": "Capabilities whose availability differs between runtime compositions.",
+        "enum": [
+          "in_memory_persistence",
+          "durable_persistence",
+          "foreground_execution",
+          "background_execution",
+          "keep_alive",
+          "comms",
+          "transient_turn_context",
+          "shell",
+          "process_spawn",
+          "mcp_stdio",
+          "remote_member_placement",
+          "hooks",
+          "runtime_skills",
+          "embedded_skills",
+          "schedule",
+          "work_graph",
+          "semantic_memory",
+          "image_generation",
+          "fallback_web_search",
+          "mcp_client",
+          "tcp_comms",
+          "uds_comms"
+        ],
+        "type": "string"
+      },
+      "RuntimeProfileClearingAction": {
+        "description": "Caller action that clears a profile refusal.",
+        "enum": [
+          "use_persistent_runtime",
+          "use_background_runtime",
+          "use_host_process_runtime",
+          "use_local_member_placement",
+          "use_hook_runtime",
+          "use_skill_runtime",
+          "use_schedule_runtime",
+          "use_work_graph_runtime",
+          "use_semantic_memory_runtime",
+          "use_image_generation_runtime",
+          "use_web_search_runtime",
+          "use_mcp_runtime",
+          "use_in_process_comms"
+        ],
+        "type": "string"
+      },
+      "RuntimeProfileId": {
+        "description": "Canonical identity of a runtime capability profile.",
+        "enum": [
+          "browser"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Remediation facts attached to a runtime profile refusal.",
+    "properties": {
+      "capability": {
+        "$ref": "#/$defs/RuntimeProfileCapability"
+      },
+      "clearing_action": {
+        "$ref": "#/$defs/RuntimeProfileClearingAction"
+      },
+      "profile": {
+        "$ref": "#/$defs/RuntimeProfileId"
+      }
+    },
+    "required": [
+      "profile",
+      "capability",
+      "clearing_action"
+    ],
+    "title": "RuntimeProfileRefusalData",
     "type": "object"
   },
   "RuntimeReleaseCause": {

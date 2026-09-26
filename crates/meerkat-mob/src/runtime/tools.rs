@@ -26,9 +26,10 @@ pub(crate) fn mob_error_to_tool_error(tool_name: &str, error: MobError) -> ToolE
 pub(crate) fn mob_spawn_many_failure_entry(
     error: &MobSpawnManyFailure,
 ) -> meerkat_contracts::MobSpawnManyResultEntry {
-    meerkat_contracts::MobSpawnManyResultEntry::failed_with_structured_data(
+    meerkat_contracts::MobSpawnManyResultEntry::failed_with_error_details(
         error.cause(),
         error.to_string(),
+        error.error().wire_error_code(),
         error.error().structured_data(),
     )
 }

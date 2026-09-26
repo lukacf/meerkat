@@ -2352,6 +2352,22 @@ where
             .await
     }
 
+    async fn publish_interaction_terminals_for_actor(
+        &self,
+        actor_witness: &meerkat_session::LiveSessionActorWitness,
+        events: &[meerkat_core::event::AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        SessionError,
+    > {
+        meerkat_session::EphemeralSessionService::<B>::publish_runtime_interaction_terminals_for_actor(
+            self,
+            actor_witness,
+            events,
+        )
+        .await
+    }
+
     async fn discard_live_session_actor_after_durability_reload_required(
         &self,
         witness: &meerkat_session::LiveSessionActorWitness,

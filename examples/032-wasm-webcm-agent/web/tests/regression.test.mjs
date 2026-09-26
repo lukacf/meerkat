@@ -219,7 +219,7 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
         const { buildMobDefinition, resolveModels } = await import("/src/mob.ts");
         let accepted = 0, legacyRejected = 0;
         for (const keys of [{ anthropic: "unused" }, { openai: "unused" }, { gemini: "unused" }, { anthropic: "unused", openai: "unused", gemini: "unused" }]) {
-          wasm.init_runtime_from_config(JSON.stringify({ anthropic_api_key: "unused", openai_api_key: "unused", gemini_api_key: "unused" }));
+          await wasm.init_runtime_from_config(JSON.stringify({ anthropic_api_key: "unused", openai_api_key: "unused", gemini_api_key: "unused" }));
           const def = buildMobDefinition(resolveModels(keys));
           def.id = `offline-${accepted}`;
           for (const skill of Object.values(def.skills)) {
@@ -229,7 +229,7 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
           for (const profile of Object.values(legacy.profiles)) profile.provider_params = { reasoning_effort: "low" };
           await wasm.mob_create(JSON.stringify(legacy)).then(() => { throw Error("legacy should fail"); }, () => { legacyRejected++; });
           await wasm.mob_create(JSON.stringify(def)); accepted++;
-          wasm.destroy_runtime();
+          await wasm.destroy_runtime();
         }
         return { version: wasm.runtime_version(), accepted, legacyRejected };
       }, repo);
@@ -244,7 +244,7 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
       });
       const control = await page.evaluate(async ({ repoPath, origin }) => {
         const wasm = await import(`/@fs/${repoPath}/sdks/web/wasm/meerkat_web_runtime.js`);
-        wasm.init_runtime_from_config(JSON.stringify({ anthropic_api_key: "synthetic-unused", anthropic_base_url: `${origin}/fixtures/anthropic`, model: "claude-sonnet-4-6" }));
+        await wasm.init_runtime_from_config(JSON.stringify({ anthropic_api_key: "synthetic-unused", anthropic_base_url: `${origin}/fixtures/anthropic`, model: "claude-sonnet-4-6" }));
         let sub;
         try {
           const id = await wasm.mob_create(JSON.stringify({
@@ -262,7 +262,7 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
           return payloads.filter(p => p.type === "run_completed" || p.type === "run_failed");
         } finally {
           if (sub) wasm.close_subscription(sub);
-          wasm.destroy_runtime();
+          await wasm.destroy_runtime();
         }
       }, { repoPath: repo, origin });
       assert.ok(control.some(p => p.type === "run_completed" && p.result.includes("Synthetic specialist ready.")), `successful fixture control: ${JSON.stringify(control)}`);
@@ -316,7 +316,7 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
           return { version: wasm.runtime_version(), results };
         } finally {
           mob.stopPolling();
-          wasm.destroy_runtime();
+          await wasm.destroy_runtime();
         }
       }, { repoPath: repo, origin }).catch(error => { throw Error(`${error.message}; successful single-member control requests=${controlRequests}; mob startup HTTP requests=${requests - controlRequests}`); });
       assert.equal(result.version, runtimeVersion);

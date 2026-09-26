@@ -25,6 +25,7 @@ import type {
   RuntimeConfig,
   SessionConfig,
   SessionState,
+  Session,
   AppendSystemContextOptions,
   AppendSystemContextResult,
   MobAppendSystemContextResult,
@@ -110,7 +111,14 @@ const fullConfig: RuntimeConfig = {
   anthropicBaseUrl: 'https://proxy.example.com/anthropic',
   openaiBaseUrl: 'https://proxy.example.com/openai',
   geminiBaseUrl: 'https://proxy.example.com/gemini',
+  requiredCapabilities: ['in_memory_persistence', 'keep_alive', 'transient_turn_context'],
 };
+
+const unsupportedProfileConfig: RuntimeConfig = {
+  // @ts-expect-error Runtime requirements use canonical capability identifiers.
+  requiredCapabilities: ['unrecognized_capability'],
+};
+void unsupportedProfileConfig;
 
 // ─── SessionConfig ──────────────────────────────────────────────
 
@@ -123,12 +131,11 @@ const sessionConfig: SessionConfig = {
   additionalInstructions: ['Be concise.'],
 };
 
-const unsupportedKeepAliveSessionConfig: SessionConfig = {
+const keepAliveSessionConfig: SessionConfig = {
   model: 'claude-sonnet-4-5',
-  // @ts-expect-error direct Web sessions are standalone and expose no keep-alive mode.
   keepAlive: true,
 };
-void unsupportedKeepAliveSessionConfig;
+void keepAliveSessionConfig;
 
 // ─── Auth RPC helpers ───────────────────────────────────────────
 
@@ -292,16 +299,15 @@ const sourceIdOnlyEventEnvelope: EventEnvelope = {
 };
 
 const appendSystemContextResult: AppendSystemContextResult = {
-  handle: 1,
   status: 'applied',
 };
 
 const sessionState: SessionState = {
-  handle: 1,
+  created_at: 0,
+  updated_at: 0,
+  provider: 'anthropic',
   session_id: '00000000-0000-0000-0000-000000000001',
-  mob_id: '',
   model: 'claude-sonnet-4-5',
-  usage: { input_tokens: 1, output_tokens: 2 },
   message_count: 0,
   is_active: true,
   last_assistant_text: null,
@@ -645,3 +651,14 @@ function turnResultUsageViews(result: UsageTurnResult): number {
   return run + rows.length + reasoning;
 }
 void turnResultUsageViews;
+
+// Browser handles do not invent a lifecycle state or duplicate session truth.
+declare const canonicalSession: Session;
+const canonicalIdentity: Promise<string> = canonicalSession.sessionId;
+const canonicalState: Promise<SessionState> = canonicalSession.getState();
+const peerWiring: Promise<void> = canonicalSession.wirePeer(canonicalSession);
+// @ts-expect-error Lifecycle state belongs to the runtime session projection.
+canonicalSession.isDestroyed;
+void canonicalIdentity;
+void canonicalState;
+void peerWiring;

@@ -147,6 +147,7 @@ rust_library(
         "//crates/meerkat-runtime:__pkg__",
         "//crates/meerkat-session:__pkg__",
         "//crates/meerkat-tools:__pkg__",
+        "//crates/meerkat-web-runtime:__pkg__",
         "//tests/integration:__pkg__",
     ],
     rustc_env = {

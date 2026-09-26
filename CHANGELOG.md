@@ -35,6 +35,37 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Browser direct sessions now use the canonical `MeerkatMachine` runtime.
+  The WASM exports `init_runtime`, `init_runtime_from_config`, `create_session`,
+  `create_session_simple`, `get_session_state`, `destroy_session`, and
+  `destroy_runtime` are async. `start_turn` accepts an optional third argument
+  containing canonical runtime turn metadata. Callers must await lifecycle
+  operations; direct `keep_alive` sessions now support runtime peer ingress.
+  Initialization returns an opaque `runtime_handle`; `destroy_runtime` accepts
+  that optional handle for exact instance teardown. Session and bootstrap
+  configuration reject unknown fields instead of silently ignoring them.
+- In `@rkat/web`, `MeerkatRuntime.createSession`, `MeerkatRuntime.destroy`,
+  `Session.getState`, `Session.destroy`, and the `Session.sessionId` getter
+  return promises. `Session.isDestroyed` and `TurnResult.response` are removed.
+  `SessionState` projects canonical `WireSessionInfo`, without browser handle,
+  mob identity, or usage fields. `AppendSystemContextResult` exposes only the
+  canonical `status`. Use `Session.interrupt` for runtime cancellation and
+  `Session.wirePeer` for direct in-process peer trust.
+- `meerkat_core::SessionError` gains `CapabilityUnavailable(RuntimeProfileRefusal)`
+  and `meerkat::BuildAgentError` gains `RuntimeProfile(RuntimeProfileRefusal)`.
+  Exhaustive matches must handle the typed browser capability refusal.
+
+- `meerkat_session::SessionAgentTurnInput` gains `request_contexts`, and
+  `SessionAgent::run_pending_with_events` gains the same request-context
+  argument to forward request-only context into the agent.
+  Struct literals must supply it; custom session agents must handle contexts
+  explicitly instead of dropping them.
+
+- `meerkat_contracts::MobSpawnManyFailedResult` gains optional `code`, preserving
+  canonical error codes alongside structured remediation data in batch results.
+
 ### Changed
 
 - The `@rkat/web` wasm runtime is built at opt-level `"s"` instead of `0`
@@ -57,6 +88,10 @@ them.
   generated machine catalog then made rustc's optimizer run out of memory,
   since fixed by chunking the catalog.
 
+- Browser direct and mob sessions share runtime admission, keepalive, comms
+  drain, terminal publication, cancellation, and teardown. Browser exclusions
+  are enforced by the shared capability profile before resource allocation.
+
 ### Fixed
 
 - The release doctor's dispatch-binding check covers more of the ways a
@@ -74,6 +109,7 @@ them.
   the ref without `refs/heads/` or `refs/tags/`, so `refs/tags/alpha/v<version>`
   is `alpha/v<version>`, not its last path segment. Every new scenario has a
   doctor fixture that goes red when that scenario is removed.
+
 
 ## [0.8.45] - 2026-09-27
 

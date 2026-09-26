@@ -409,9 +409,9 @@ fn identity_session_load_error_class(
     use meerkat_core::service::SessionError;
 
     match error {
-        SessionError::PersistenceDisabled | SessionError::Unsupported(_) => {
-            IdentitySessionLoadErrorClass::Malformed
-        }
+        SessionError::PersistenceDisabled
+        | SessionError::CapabilityUnavailable(_)
+        | SessionError::Unsupported(_) => IdentitySessionLoadErrorClass::Malformed,
         SessionError::Store(source) => match source.downcast_ref::<SessionStoreError>() {
             Some(SessionStoreError::Serialization(_) | SessionStoreError::Corrupted(_)) => {
                 IdentitySessionLoadErrorClass::Malformed

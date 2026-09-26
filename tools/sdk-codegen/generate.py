@@ -5491,6 +5491,7 @@ def generate_web_runtime_types(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     content = """// Generated runtime bootstrap contracts for @rkat/web
 // Source: tools/sdk-codegen/generate.py (generate_web_runtime_types)
+import type { RuntimeProfileCapability } from './session.js';
 
 /** Mobpack trust verification policy. 'strict' (the default) rejects
  * unsigned and unknown-signer packs; 'permissive' is an explicit host
@@ -5532,11 +5533,15 @@ export interface RuntimeConfig {
   geminiBaseUrl?: string;
   /** Mobpack trust store + policy for this runtime. */
   mobpackTrust?: MobpackTrustConfig;
+  /** Capabilities the host requires before installing this runtime. */
+  requiredCapabilities?: RuntimeProfileCapability[];
 }
 
 /** Result from runtime initialization. */
 export interface InitResult {
   status: 'initialized';
+  /** Opaque browser instance handle used for exact teardown. */
+  runtime_handle: string;
   model: string;
   providers: string[];
   max_sessions?: number;
@@ -5566,6 +5571,10 @@ export interface SessionConfig {
   maxTokens?: number;
   /** Enable comms for this session. */
   commsName?: string;
+  /** Keep the session available for runtime-admitted work between turns. */
+  keepAlive?: boolean;
+  /** Capabilities required before this session is materialized. */
+  requiredCapabilities?: RuntimeProfileCapability[];
   /** Application-defined labels. */
   labels?: Record<string, string>;
   /** Additional instruction sections appended to the system prompt. */
@@ -5593,6 +5602,9 @@ export function parseInitResult(json: string): InitResult {
   if (record.status !== 'initialized') {
     throw new Error(`invalid InitResult: status must be 'initialized': ${json}`);
   }
+  if (typeof record.runtime_handle !== 'string' || record.runtime_handle.length === 0) {
+    throw new Error(`invalid InitResult: runtime_handle must be a nonempty string: ${json}`);
+  }
   if (typeof record.model !== 'string') {
     throw new Error(`invalid InitResult: model must be a string: ${json}`);
   }
@@ -5607,6 +5619,7 @@ export function parseInitResult(json: string): InitResult {
   }
   return {
     status: 'initialized',
+    runtime_handle: record.runtime_handle,
     model: record.model,
     providers: record.providers as string[],
     max_sessions: record.max_sessions as number | undefined,
@@ -5616,65 +5629,34 @@ export function parseInitResult(json: string): InitResult {
     (output_dir / "runtime.ts").write_text(content)
 
 
-WEB_SESSION_TYPES_CONTENT = """// Generated session façade contracts for @rkat/web
-// Source: tools/sdk-codegen/generate.py (generate_web_session_types)
-import type { SchemaWarning, SessionId, TurnTerminalCauseKind, TurnUsage, Usage } from './events.js';
-
-/**
- * Canonical run-result wire envelope (mirrors `meerkat_contracts::WireRunResult`,
- * the same shape RPC's `turn/start` returns and the WASM `start_turn` export
- * resolves with).
- */
-export interface WireRunResult {
-  session_id: SessionId;
-  session_ref?: string | null;
-  text: string;
-  turns: number;
-  tool_calls: number;
-  /** Session-cumulative usage; take the latest value, never sum across turns. */
-  usage: Usage;
-  /** Usage of this turn's run alone. */
-  run_usage?: Usage | null;
-  /** One row per provider request this run made, in order. */
-  request_usage?: TurnUsage[] | null;
-  structured_output?: unknown;
-  extraction_error?: { last_output: string; attempts: number; reason: string } | null;
-  schema_warnings?: SchemaWarning[] | null;
-  skill_diagnostics?: unknown;
-  /**
-   * Runtime-owned terminal cause for this turn (e.g. `budget_exhausted`).
-   * Present only when the turn terminated on a typed terminal condition.
-   */
-  terminal_cause_kind?: TurnTerminalCauseKind | null;
-}
-
-/**
- * Runtime-backed state for a direct browser session façade. Mirrors the JSON
- * envelope produced by the WASM `get_session_state` export.
- */
-export interface SessionState {
-  handle: number;
-  session_id: SessionId;
-  mob_id: string;
-  model: string;
-  usage: Usage;
-  message_count: number;
-  is_active: boolean;
-  last_assistant_text?: string | null;
-}
-"""
-
-
-def generate_web_session_types(output_dir: Path) -> None:
-    """Emit the @rkat/web direct-session façade contracts (K21).
-
-    `WireRunResult` mirrors the canonical contracts run-result envelope the
-    WASM `start_turn` export resolves with; `SessionState` mirrors the
-    `get_session_state` export's JSON envelope. The hand-authored
-    `sdks/web/src/types.ts` re-exports these instead of re-declaring twins.
-    """
+def generate_web_session_types(schemas: dict, output_dir: Path) -> None:
+    """Emit direct-session types from the canonical run/read wire schemas."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "session.ts").write_text(WEB_SESSION_TYPES_CONTENT)
+    wire = schemas["wire-types"]
+    definitions: dict[str, Any] = {}
+    roots: dict[str, Any] = {}
+    for name in ("WireRunResult", "WireSessionInfo", "InjectSystemContextResult", "RuntimeProfileRefusal"):
+        schema = _lookup_named_schema(wire, name)
+        if not schema:
+            raise KeyError(f"canonical {name} schema is missing")
+        roots[name] = schema
+        for dependency, definition in schema.get("$defs", {}).items():
+            if dependency in definitions and definitions[dependency] != definition:
+                raise ValueError(f"conflicting canonical session definition: {dependency}")
+            definitions[dependency] = definition
+    schema_root = dict(wire)
+    schema_root["$defs"] = {**wire.get("$defs", {}), **definitions}
+    lines = [
+        "// Generated direct-session contracts for @rkat/web",
+        "// Source: artifacts/schemas/wire-types.json",
+        "// Regenerate with: python3 tools/sdk-codegen/generate.py",
+        "",
+    ]
+    for name, schema in sorted({**definitions, **roots}.items()):
+        lines.append(f"export type {name} = {_web_events_ts_type(schema_root, schema)};\n")
+    lines.append("/** Canonical session/read projection. */")
+    lines.append("export type SessionState = WireSessionInfo;\n")
+    (output_dir / "session.ts").write_text("\n".join(lines))
 
 
 def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
@@ -6938,7 +6920,7 @@ def main():
     print(f"Generated web runtime contracts in {web_events_output}")
 
     # Generate web session façade contracts (K21).
-    generate_web_session_types(web_events_output)
+    generate_web_session_types(schemas, web_events_output)
     print(f"Generated web session contracts in {web_events_output}")
 
     # Ratchet: every catalog-named contract type must be exposed by the

@@ -12,7 +12,7 @@ Meerkat has one canonical semantic path:
 
 - **the runtime control plane** (`MeerkatMachine` in `meerkat-runtime`) owns `keep_alive`, Queue/Steer routing, comms drain lifecycle, external-event admission, and request/turn commit semantics; runtime-backed surfaces reach those semantics only by lowering into it
 - **`SessionService`** is the substrate lifecycle seam used by those surfaces
-- **`EphemeralSessionService` / `build_ephemeral_service`** remain valid for testing, embedded use, and WASM internals, but they are not the primary product path and do not own runtime semantics
+- **`EphemeralSessionService`** supplies in-memory session storage and execution for browser sessions behind `MeerkatMachine`; direct use through `build_ephemeral_service` remains available for explicit standalone tests and embeddings
 
 The runtime-backed path is:
 
@@ -742,8 +742,9 @@ records, compaction input, or extraction input. This is separate from durable
 user message.
 
 Deferred creation cannot carry this context because no runtime input exists
-yet; attach it to the eventual turn instead. The browser/WASM standalone live
-surface does not expose this durable runtime-input feature.
+yet; attach it to the eventual turn instead. Browser/WASM sessions carry it
+through the same runtime-input path, with in-memory retention for the page
+lifetime.
 
 ## Request-only and durable steer
 

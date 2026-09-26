@@ -6124,9 +6124,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                                     ))
                                 }
                                 Err(error) => {
-                                    json!(MobSpawnManyResultEntry::failed_with_structured_data(
+                                    json!(MobSpawnManyResultEntry::failed_with_error_details(
                                         error.cause(),
                                         error.to_string(),
+                                        error.error().wire_error_code(),
                                         error.error().structured_data(),
                                     ))
                                 }

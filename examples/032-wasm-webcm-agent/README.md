@@ -93,8 +93,8 @@ User message
 Each step is a separate turn. Agents end their turn after sending a message,
 and the in-memory autonomous host loop re-admits them when replies arrive. No
 application polling is required to wake agents. The UI does poll each event
-subscription to render incremental output. This is a standalone browser
-runtime; page reload clears its session and mob state.
+subscription to render incremental output. Browser sessions use the canonical
+runtime with in-memory storage; page reload clears session and mob state.
 Agent instructions discover canonical `peer_id` values with `peers`; labels are
 for display only. Tool cards track call IDs independently, and rendered Markdown
 is sanitized before insertion.

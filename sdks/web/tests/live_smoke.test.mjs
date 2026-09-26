@@ -146,7 +146,11 @@ async function withLiveRuntime(options, fn) {
       openaiBaseUrl: baseUrls.openaiBaseUrl,
       model: anthropicModel(),
     });
-    return fn(runtime, baseUrls);
+    try {
+      return await fn(runtime, baseUrls);
+    } finally {
+      await runtime.destroy();
+    }
   });
 }
 
@@ -183,10 +187,8 @@ test(
   { skip: !hasAnthropicKey() },
   async () => {
     await withLiveRuntime({}, async (runtime, baseUrls) => {
-      const session = runtime.createSession({
+      const session = await runtime.createSession({
         model: anthropicModel(),
-        apiKey: "proxy",
-        anthropicBaseUrl: baseUrls.anthropicBaseUrl,
       });
 
       const first = await session.turn(
@@ -200,19 +202,17 @@ test(
       const lower = second.text.toLowerCase();
       assert.ok(lower.includes("wasmotter45") || lower.includes("wasm otter 45"));
 
-      const state = session.getState();
+      const state = await session.getState();
       assert.equal(state.model, anthropicModel());
       assert.ok(state.session_id);
 
-      session.destroy();
-      const archived = session.getState();
-      assert.equal(archived.session_id, state.session_id);
-      assert.equal(archived.is_active, false);
+      await session.destroy();
+      await assert.rejects(() => session.getState(), error => error.code === "invalid_session_handle");
       await assert.rejects(
         () => session.turn("stale browser handle must not control archived session"),
-        /SESSION_NOT_FOUND|session not found/,
+        error => error.code === "invalid_session_handle",
       );
-      assert.throws(() => session.isDestroyed, /deprecated/i);
+      assert.equal("isDestroyed" in session, false);
     });
   },
 );
@@ -222,10 +222,8 @@ test(
   { skip: !hasAnthropicKey() },
   async () => {
     await withLiveRuntime({}, async (runtime, baseUrls) => {
-      const session = runtime.createSession({
+      const session = await runtime.createSession({
         model: anthropicModel(),
-        apiKey: "proxy",
-        anthropicBaseUrl: baseUrls.anthropicBaseUrl,
       });
 
       const staged = await session.appendSystemContext({
@@ -260,7 +258,7 @@ test(
         assert.ok(followUpLower.includes("wasm-ctx-46"));
       } finally {
         subscription.close();
-        session.destroy();
+        await session.destroy();
       }
     });
   },

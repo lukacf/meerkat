@@ -52,7 +52,7 @@ export const CHANNELS: { id: ChannelId; label: string; subtitle: string; icon: s
 // ── WASM Runtime ──
 export interface RuntimeModule {
   default: () => Promise<unknown>;
-  init_runtime_from_config: (configJson: string) => unknown;
+  init_runtime_from_config: (configJson: string) => Promise<unknown>;
   mob_create: (definitionJson: string) => Promise<unknown>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<unknown>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
@@ -68,7 +68,7 @@ export interface RuntimeModule {
   poll_subscription: (handle: string) => string;
   close_subscription: (handle: string) => void;
   mob_lifecycle: (mobId: string, action: string) => Promise<void>;
-  destroy_runtime: () => void;
+  destroy_runtime: () => Promise<void>;
 }
 
 export interface AgentSub { agentIdentity: string; handle: string; role: MessageRole; team: Team }

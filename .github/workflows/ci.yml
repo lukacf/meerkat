@@ -862,6 +862,10 @@ jobs:
         working-directory: examples/033-the-office-demo-sh/web
         run: npx playwright install --with-deps chromium
 
+      - name: Direct WASM runtime browser contracts
+        working-directory: sdks/web
+        run: npm run test:browser
+
       - name: 031 wasm mini diplomacy suite
         working-directory: examples/031-wasm-mini-diplomacy-sh/web
         run: npm test

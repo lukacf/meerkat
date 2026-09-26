@@ -1268,6 +1268,9 @@ pub enum MobSpawnManyFailureCause {
 pub struct MobSpawnManyFailedResult {
     pub cause: MobSpawnManyFailureCause,
     pub message: String,
+    /// Stable classification supplied by the canonical failure owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<crate::ErrorCode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_data: Option<Value>,
 }
@@ -1331,11 +1334,21 @@ impl MobSpawnManyResultEntry {
         message: impl Into<String>,
         structured_data: Option<Value>,
     ) -> Self {
+        Self::failed_with_error_details(cause, message, None, structured_data)
+    }
+
+    pub fn failed_with_error_details(
+        cause: MobSpawnManyFailureCause,
+        message: impl Into<String>,
+        code: Option<crate::ErrorCode>,
+        structured_data: Option<Value>,
+    ) -> Self {
         Self {
             status: MobSpawnManyResultStatus::Failed,
             result: MobSpawnManyResultPayload::Failed(MobSpawnManyFailedResult {
                 cause,
                 message: message.into(),
+                code,
                 structured_data,
             }),
         }
@@ -4107,6 +4120,27 @@ mod tests {
         let decoded: MobSpawnManyResultEntry =
             serde_json::from_value(legacy_without_data).expect("read pre-data failed row");
         assert_eq!(decoded, failed);
+    }
+
+    #[test]
+    fn mob_spawn_many_failure_preserves_profile_code_and_remediation() {
+        let data = serde_json::json!({
+            "profile": "browser", "capability": "schedule",
+            "clearing_action": "use_schedule_runtime"
+        });
+        let row = MobSpawnManyResultEntry::failed_with_error_details(
+            MobSpawnManyFailureCause::SessionError,
+            "scheduling is unavailable",
+            Some(crate::ErrorCode::CapabilityUnavailable),
+            Some(data.clone()),
+        );
+        let value = serde_json::to_value(&row).expect("encode capability refusal");
+        assert_eq!(value["result"]["code"], "CAPABILITY_UNAVAILABLE");
+        assert_eq!(value["result"]["structured_data"], data);
+        assert_eq!(
+            serde_json::from_value::<MobSpawnManyResultEntry>(value).unwrap(),
+            row
+        );
     }
 
     #[test]

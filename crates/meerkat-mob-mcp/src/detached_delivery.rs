@@ -404,6 +404,10 @@ pub enum DetachedDeliveryUnavailable {
     HostDeclaredUnavailable,
     /// The host claims delivery but has no runtime to admit the completion.
     NoRuntimeAdapter,
+    /// The caller's session could not be made live to receive the result
+    /// later: it is not a member of a mob this host manages (whose mob would
+    /// revive it) and the host installed no [`DetachedOwnerHost`].
+    NoOwnerRevivalHost,
 }
 
 pub(crate) type DetachedDeliveryRoute =

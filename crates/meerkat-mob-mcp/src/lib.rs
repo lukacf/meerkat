@@ -721,12 +721,47 @@ impl MobMcpState {
             .ok_or(crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter)
     }
 
+    /// [`Self::detached_delivery_route`] for a call whose result belongs to
+    /// `owner_session_id`. Also unavailable when that result could not reach
+    /// the owner later: the owner is not a member of a mob this state
+    /// manages (whose mob revives it) and the host installed no
+    /// [`DetachedOwnerHost`]. An owner whose membership cannot be read is not
+    /// known to be revivable, so it is treated as a non-member.
+    pub(crate) async fn detached_delivery_route_for_owner(
+        &self,
+        owner_session_id: &SessionId,
+    ) -> crate::detached_delivery::DetachedDeliveryRoute {
+        let runtime = self.detached_delivery_route()?;
+        if self.detached_owner_host().is_some() {
+            return Ok(runtime);
+        }
+        match self.member_for_bridge_session(owner_session_id).await {
+            Ok(Some(_)) => Ok(runtime),
+            Ok(None) | Err(_) => {
+                Err(crate::detached_delivery::DetachedDeliveryUnavailable::NoOwnerRevivalHost)
+            }
+        }
+    }
+
     /// Why fork_off and council would block on this host, or `None` when
     /// they deliver detached.
     pub fn detached_delivery_blocked_because(
         &self,
     ) -> Option<crate::detached_delivery::DetachedDeliveryUnavailable> {
         self.detached_delivery_route().err()
+    }
+
+    /// [`Self::detached_delivery_blocked_because`] for a call made by
+    /// `owner_session_id`, which also blocks when the result could not reach
+    /// that owner later
+    /// ([`crate::detached_delivery::DetachedDeliveryUnavailable::NoOwnerRevivalHost`]).
+    pub async fn detached_delivery_blocked_because_for(
+        &self,
+        owner_session_id: &SessionId,
+    ) -> Option<crate::detached_delivery::DetachedDeliveryUnavailable> {
+        self.detached_delivery_route_for_owner(owner_session_id)
+            .await
+            .err()
     }
 
     pub fn detached_completion_delivery(&self) -> DetachedCompletionDelivery {

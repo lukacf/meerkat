@@ -1347,7 +1347,10 @@ impl AgentMobToolSurface {
         // runtime to admit the completion. Otherwise block for the outcome:
         // the tool owns its deadline (max_run_secs), so the core default
         // does not cut the wait.
-        let route = self.state.detached_delivery_route();
+        let route = self
+            .state
+            .detached_delivery_route_for_owner(&self.owner_bridge_session_id)
+            .await;
         let blocked_because = route.as_ref().err().copied();
         if blocked_because
             == Some(crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter)
@@ -1606,7 +1609,10 @@ impl AgentMobToolSurface {
         // operation registry the council runs detached: the call returns the
         // council id and a job id, and the sealed outcome arrives as that
         // job's completion. Without one the call keeps the blocking contract.
-        let route = self.state.detached_delivery_route();
+        let route = self
+            .state
+            .detached_delivery_route_for_owner(&self.owner_bridge_session_id)
+            .await;
         let runtime = match route {
             Ok(runtime) => runtime,
             Err(reason) => {

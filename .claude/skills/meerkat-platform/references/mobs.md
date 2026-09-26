@@ -595,8 +595,9 @@ returns once the child is seated and its turn admitted: `status: "running"`,
 `agent_identity`, `member_ref`, `fork_session_id`, `cache_inheritance`, a
 `job_id`, and a `note`. When the child's turn ends, its outcome is recorded
 once in the forker's transcript as a durable `BackgroundJob` system notice
-("Background fork_off job <id> finished (completed|failed):" plus the outcome
-JSON; the typed block has `persisted: true`), delivered as a runtime input with
+(header "Background fork_off job <id> finished (<status>):" with status
+`completed`, `terminated` for an autokill, or `failed`; the outcome JSON is the
+typed block's `detail`, with `persisted: true`), delivered as a runtime input with
 steer handling and idempotency key `fork_off:<job_id>`: an idle forker runs one
 turn that sees it, a busy one runs exactly one follow-up turn after its
 current turn (not in-turn), and a non-live forker is revived through its mob first. It is

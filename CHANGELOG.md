@@ -49,9 +49,12 @@ them.
   waits for the child and no longer carries `bounded_result`, `usage`, `turns`
   or `tool_calls`. When the child's turn ends, its outcome is recorded once in
   the forker's transcript as a durable `BackgroundJob` system notice
-  ("Background fork_off job <job_id> finished (completed|failed):" followed by
-  the outcome JSON; the typed block is `SystemNoticeBlock::BackgroundJob` with
-  `persisted: true`). The notice is delivered to the forker's session as a
+  whose body is the header "Background fork_off job <job_id> finished
+  (<status>):" and whose typed block, `SystemNoticeBlock::BackgroundJob` with
+  `persisted: true`, carries the outcome JSON as `detail` (stored once; the
+  model sees header then detail). The notice status is `completed`,
+  `terminated` for a `max_run_secs` autokill (live or re-linked after a
+  restart), or `failed`. The notice is delivered to the forker's session as a
   runtime prompt input with steer handling and the idempotency key
   `fork_off:<job_id>`: an idle forker runs exactly one turn that sees it, a
   busy forker runs exactly one follow-up turn after its current turn (the
@@ -82,7 +85,8 @@ them.
   `{"status": "running", "council_id", "job_id", "note"}`; the sealed outcome
   (`result`, `cleanup`, `replayed`) is recorded and delivered the same way, as
   a "Background council job <job_id> finished" notice with the idempotency key
-  `council:<job_id>`. A refusal the council decides after the call returned (a
+  `council:<job_id>`; a convener that is a mob member and is no longer live is
+  revived through its mob first. A refusal the council decides after the call returned (a
   bound, a `council_id` conflict, `capability_unavailable`) is recorded as
   `{"error": ...}` with status `failed` instead of being a tool error. A
   sealed council whose exit reason is a failure (`participant_seating_failed`,
@@ -150,9 +154,10 @@ them.
   completion record of a detached job; behavior-only:
   `SystemNoticeMessage::is_synthetic_refresh_projection` now returns `false`
   for a `BackgroundJob` notice with a persisted block, so such a notice stays
-  in the transcript instead of being replaced at the next model call, and it
-  renders to the model as its body alone. New methods
-  `SystemNoticeMessage::persisted_background_job` (builds the record) and
+  in the transcript instead of being replaced at the next model call. New
+  methods `SystemNoticeMessage::persisted_background_job` (builds the record:
+  the body is a header naming the job and status, and the outcome is stored
+  once as the block's `detail`) and
   `SystemNoticeMessage::persisted_background_job_id` (recognizes it). The
   flag is part of the wire schema: the generated SDK types gain an optional
   `persisted` on `SystemNoticeBlockBackgroundJob` (TypeScript) and its Python
@@ -417,6 +422,11 @@ them.
   longer exists (a convener session that was deleted or archived, or a forker
   no longer seated) is reported as owner gone and settled, so later restarts
   do not retry it.
+- The `fork_off` and `council` tool schemas advertise the bounds the tools
+  enforce: `fork_off` `max_run_secs` minimum 1 and `max_text_bytes` at least
+  the truncation-marker length; `council` `max_rounds` 1 to 16,
+  `max_exchanges` 1 to 64, `max_result_bytes` 256 to 65536, and
+  `timeout_seconds` 1 to 86400 (the forked-participant TTL ceiling).
 - Member status never waits for the member's running turn.
   `MobHandle::member_status` (and so RPC `mob/member_status`,
   `mob_check_member`, and the operator tool `member_status`) still tries the

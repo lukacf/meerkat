@@ -192,11 +192,13 @@ council. How the sealed result reaches the caller depends on the host:
   `{"status": "running", "council_id": ..., "job_id": ..., "note": ...}`. When
   the council ends, its sealed outcome (`result`, `cleanup`, `replayed`) is
   recorded once in the convener's transcript as a durable `BackgroundJob`
-  system notice ("Background council job `<job_id>` finished (`completed` or
-  `failed`):" followed by the outcome, with `persisted: true` on its typed
-  block). It is delivered as a runtime input with the idempotency key
-  `council:<job_id>`: an idle convener runs one turn that sees it, and a busy
-  one runs exactly one follow-up turn after its current turn. The status is
+  system notice (the header "Background council job `<job_id>` finished
+  (`completed` or `failed`):", with the outcome as the typed block's `detail`
+  and `persisted: true`). It is delivered as a runtime input with the
+  idempotency key `council:<job_id>`: an idle convener runs one turn that sees
+  it, and a busy one runs exactly one follow-up turn after its current turn. A
+  convener that is a mob member and is no longer live (the runtime retired its
+  idle executor) is revived through its mob first. The status is
   **`failed`** when the exit reason is a failure (`participant_seating_failed`,
   `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`); the
   record still carries the full sealed outcome, and bound-limited ends
@@ -263,6 +265,11 @@ comms name; any other character is refused before the council starts. Stored
 council records whose ids contain `.` or `:` still load. The default
 merge is a bounded summary by the last participant. Other policies are
 `structured`, `selected_exchanges`, `artifact_reference`, and `no_merge`.
+
+The tool schema advertises the bounds the tool enforces: `max_rounds` 1 to 16,
+`max_exchanges` 1 to 64 (default: participants times rounds),
+`max_result_bytes` 256 to 65536, and `timeout_seconds` 1 to 86400 (default
+300), the ceiling set by the forked-participant capability TTL.
 
 The tool is available only when the calling agent's generated mob authority can
 create a temporary mob and manage every source mob in the participant list.

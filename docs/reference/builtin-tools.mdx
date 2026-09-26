@@ -350,17 +350,20 @@ When the child's turn ends, its outcome names the child (`agent_identity`,
 |----------|---------|
 | `completed` | The turn completed. Carries `bounded_result` (the child's final text under `max_text_bytes`, with explicit truncation), `usage`, `turns`, and `tool_calls`. The child stays seated. |
 | `failed` | The turn failed. Carries `error`. The child was retired. |
-| `max_run_elapsed` | The opt-in `max_run_secs` elapsed. The run was cancelled and the child retired; `retirement_error` reports a failed retirement. |
+| `max_run_elapsed` | The opt-in `max_run_secs` elapsed. The run was cancelled and the child retired; `retirement_error` reports a failed retirement. The notice status is `terminated`. |
 | `supervisor_stopped` | The runtime supervising the child stopped (mob shutdown) before the turn ended. |
 | `restart_interrupted` | The host restarted while the child ran and the child's turn did not survive the restart. The child stays seated for its forker. |
 
 The outcome is recorded once, durably, in the forker's own transcript as a
-`BackgroundJob` system notice: "Background fork_off job `<job_id>` finished
-(`completed` or `failed`):" followed by the outcome JSON. Its typed block,
-`SystemNoticeBlock::BackgroundJob`, carries the `job_id`, the tool name, the
-status, the outcome JSON as `detail`, and `persisted: true`, which marks it as
-a durable completion record rather than a progress notice that is refreshed at
-each model call (`SystemNoticeMessage::persisted_background_job_id` finds it).
+`BackgroundJob` system notice. Its body is the header "Background fork_off job
+`<job_id>` finished (`<status>`):", where the status is `completed`,
+`terminated` for a `max_run_secs` autokill, or `failed` for every other
+outcome. Its typed block, `SystemNoticeBlock::BackgroundJob`, carries the
+`job_id`, the tool name, that status, the outcome JSON as `detail` (stored only
+there), and `persisted: true`, which marks it as a durable completion record
+rather than a progress notice that is refreshed at each model call
+(`SystemNoticeMessage::persisted_background_job_id` finds it). The model sees
+the header followed by the outcome, once.
 It stays in the transcript across later model calls, turns, and reloads, and it
 remains readable after the child is retired: in the transcript the model sees,
 and through the forker's session history (`session/history` over JSON-RPC,

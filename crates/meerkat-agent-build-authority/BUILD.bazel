@@ -64,7 +64,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-agent-build-authority",
     },
     proc_macro_deps = all_crate_deps(
@@ -103,7 +103,7 @@ rust_test(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-agent-build-authority",
     },
     tags = [

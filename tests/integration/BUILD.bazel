@@ -59,7 +59,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
     proc_macro_deps = all_crate_deps(
@@ -109,7 +109,7 @@ rust_library(
         "//tests/integration:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
     proc_macro_deps = all_crate_deps(
@@ -163,7 +163,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
     tags = [
@@ -245,7 +245,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "e2e_artifacts",
         "CARGO_MANIFEST_DIR": "tests/integration",
     },
@@ -297,7 +297,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "voice_fixtures",
         "CARGO_MANIFEST_DIR": "tests/integration",
     },
@@ -357,7 +357,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "copilot_live_e2e",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -430,7 +430,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "e2e_auth_lane",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -506,7 +506,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "e2e_build_lane",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -596,7 +596,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "e2e_fast_lane",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -675,7 +675,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "e2e_live_lane",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -750,7 +750,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "e2e_models_lane",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -826,7 +826,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "e2e_smoke_lane",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -900,7 +900,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "e2e_system_lane",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -977,7 +977,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "gpt_live_public_e2e",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1054,7 +1054,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "live_mob_tools",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1126,7 +1126,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "phase1_wiring",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1196,7 +1196,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "phase2_mode_routing",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1266,7 +1266,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "phase6_cleanup_sweep",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1340,7 +1340,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "provider_tool_schema_compat",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1413,7 +1413,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "reserve_interaction_subscriber_fires",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1483,7 +1483,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "session_tool_visibility_kernel",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1553,7 +1553,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "session_turn_admission_kernel",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1623,7 +1623,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "smoke_mob_fork_off",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1695,7 +1695,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "smoke_model_fallback",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1767,7 +1767,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "smoke_shared_realm",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1842,7 +1842,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "system_realm_inheritance",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1913,7 +1913,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "system_shared_realm",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -1988,7 +1988,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "system_shared_realm",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -2075,7 +2075,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "system_shared_realm",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },
@@ -2162,7 +2162,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.42",
+        "CARGO_PKG_VERSION": "0.8.43",
         "CARGO_BIN_NAME": "system_shared_realm",
         "CARGO_MANIFEST_DIR": "./tests/integration",
     },

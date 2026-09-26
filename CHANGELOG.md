@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.43] - 2026-09-26
+
 ### Breaking
 
 - Behavior-only: `fork_off` is detached (`meerkat-mob-mcp`
@@ -13029,7 +13031,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.42...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.43...HEAD
+[0.8.43]: https://github.com/lukacf/meerkat/compare/v0.8.42...v0.8.43
 [0.8.42]: https://github.com/lukacf/meerkat/compare/v0.8.41...v0.8.42
 [0.8.41]: https://github.com/lukacf/meerkat/compare/v0.8.40...v0.8.41
 [0.8.40]: https://github.com/lukacf/meerkat/compare/v0.8.39...v0.8.40

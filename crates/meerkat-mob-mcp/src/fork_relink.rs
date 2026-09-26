@@ -108,6 +108,8 @@ pub struct RelinkDelivery {
     /// The host's managed mobs, read afresh each time such an owner is
     /// looked up, so a mob inserted later is found.
     pub managed_mobs: Option<ManagedMobs>,
+    /// Counts the deferred outcomes waiting on their owner's mob right now.
+    pub waiting_owners: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl RelinkDelivery {
@@ -119,6 +121,7 @@ impl RelinkDelivery {
             owner_host: state.detached_owner_host(),
             owner_mobs: Vec::new(),
             managed_mobs: Some(state.managed_mobs()),
+            waiting_owners: Some(state.fork_relink_waiting_owners_gauge()),
         }
     }
 
@@ -171,22 +174,6 @@ impl RelinkDelivery {
         }
         None
     }
-}
-
-/// Wait until one of `owners` may be revivable in its mob. `false` at once
-/// when none can be any more, or `owners` is empty.
-async fn any_owner_revivable(owners: Vec<(MobHandle, OwnerRevivalDeferral)>, attempt: u32) -> bool {
-    use futures::StreamExt as _;
-    let mut waits: futures::stream::FuturesUnordered<_> = owners
-        .into_iter()
-        .map(|(owner_mob, reason)| async move { reason.cleared(&owner_mob, attempt).await })
-        .collect();
-    while let Some(revivable) = waits.next().await {
-        if revivable {
-            return true;
-        }
-    }
-    false
 }
 
 /// A live view of the mobs a host manages (see
@@ -294,76 +281,119 @@ pub async fn relink_restored_fork_children(
 }
 
 /// Deliver again the outcomes `reports` could not deliver because the
-/// owner could not be revived yet ([`ForkRelinkAction::AwaitingOwner`]),
-/// each time that clears in the OWNER's mob (which may not be the child's):
-/// it starts running, or the operation in progress on the owner has had time
-/// to finish. Returns the final report of every child in `reports`. Waiting
-/// ends when no owner mob can run again (each completed, was destroyed, lost
-/// its actor or is no longer managed), or after [`MAX_OWNER_REVIVAL_WAITS`]
-/// waits. Delivery is idempotent per job, so nothing is recorded twice.
+/// owner could not be revived yet ([`ForkRelinkAction::AwaitingOwner`]).
+/// Each such job waits on its own owner's mob (which may not be the
+/// child's) with its own budget of [`MAX_OWNER_REVIVAL_WAITS`] waits: when
+/// its reason clears there (the mob runs, or the operation in progress on the
+/// owner has had time to finish) that job alone is delivered again, and the
+/// other jobs keep waiting. A job stops waiting when its owner's mob can run
+/// no more (completed, destroyed, lost its actor, no longer managed) or its
+/// budget is spent. Returns the final report of every child in `reports`.
+/// Delivery is idempotent per job, so nothing is recorded twice.
 pub(crate) async fn redeliver_when_owners_revivable(
     service: Arc<dyn meerkat_mob::MobSessionService>,
     delivery: RelinkDelivery,
     mob_id: &MobId,
     handle: &MobHandle,
     restored_before_ms: u64,
-    mut reports: Vec<ForkRelinkReport>,
+    reports: Vec<ForkRelinkReport>,
 ) -> Vec<ForkRelinkReport> {
-    for attempt in 0..MAX_OWNER_REVIVAL_WAITS {
-        let awaiting: BTreeMap<String, (MobId, OwnerRevivalDeferral)> = reports
-            .iter()
-            .filter_map(|report| match &report.action {
-                ForkRelinkAction::AwaitingOwner { mob_id, reason } => {
-                    Some((report.job_id.clone(), (mob_id.clone(), reason.clone())))
-                }
-                _ => None,
-            })
-            .collect();
-        if awaiting.is_empty() {
-            break;
-        }
-        // Wait on each owner's own mob (read afresh), until one of them may
-        // revive its owner.
-        let mut owners = Vec::new();
-        for (owner_mob, reason) in awaiting.values() {
-            if owners.iter().any(
-                |(known, known_reason): &(MobHandle, OwnerRevivalDeferral)| {
-                    known.mob_id() == owner_mob && known_reason == reason
-                },
-            ) {
-                continue;
+    let (awaiting, mut settled): (Vec<_>, Vec<_>) = reports
+        .into_iter()
+        .partition(|report| matches!(report.action, ForkRelinkAction::AwaitingOwner { .. }));
+    let finished = redeliver_each(
+        awaiting,
+        |owner_mob, reason, attempt| {
+            let delivery = &delivery;
+            async move {
+                let Some(owner_handle) = delivery.mob_handle(&owner_mob, handle).await else {
+                    return false;
+                };
+                let _waiting = delivery.waiting_owners.as_deref().map(WaitingOwner::arm);
+                reason.cleared(&owner_handle, attempt).await
             }
-            if let Some(owner_handle) = delivery.mob_handle(owner_mob, handle).await {
-                owners.push((owner_handle, reason.clone()));
+        },
+        |job_id| {
+            let (service, delivery) = (Arc::clone(&service), delivery.clone());
+            async move {
+                relink_mob_fork_children_where(
+                    service,
+                    delivery,
+                    mob_id,
+                    handle,
+                    restored_before_ms,
+                    |job| job.job_id == job_id,
+                )
+                .await
+                .into_iter()
+                .next()
             }
-        }
-        if !any_owner_revivable(owners, attempt).await {
-            break;
-        }
-        let retried = relink_mob_fork_children_where(
-            Arc::clone(&service),
-            delivery.clone(),
-            mob_id,
-            handle,
-            restored_before_ms,
-            |job| awaiting.contains_key(&job.job_id),
-        )
-        .await;
-        let delivered = retried
-            .iter()
-            .filter(|report| report.action == ForkRelinkAction::Delivered)
-            .count();
-        if delivered > 0 {
-            tracing::info!(
-                mob_id = %mob_id,
-                children = delivered,
-                "fork_off re-link delivered outcomes once their forker could be revived"
-            );
-        }
-        reports.retain(|report| !awaiting.contains_key(&report.job_id));
-        reports.extend(retried);
+        },
+    )
+    .await;
+    let delivered = finished
+        .iter()
+        .filter(|report| report.action == ForkRelinkAction::Delivered)
+        .count();
+    if delivered > 0 {
+        tracing::info!(
+            mob_id = %mob_id,
+            children = delivered,
+            "fork_off re-link delivered outcomes once their owner could be revived"
+        );
     }
-    reports
+    settled.extend(finished);
+    settled
+}
+
+/// Drive every awaiting job to its own end, concurrently: each waits
+/// (`wait(owner mob, reason, attempt)`, `true` once its owner may be
+/// revivable) with its own budget, and a wake retries that job alone
+/// (`retry(job_id)`, its new report, `None` when the child is gone).
+async fn redeliver_each<Wait, WaitFuture, Retry, RetryFuture>(
+    awaiting: Vec<ForkRelinkReport>,
+    wait: Wait,
+    retry: Retry,
+) -> Vec<ForkRelinkReport>
+where
+    Wait: Fn(MobId, OwnerRevivalDeferral, u32) -> WaitFuture,
+    WaitFuture: std::future::Future<Output = bool>,
+    Retry: Fn(String) -> RetryFuture,
+    RetryFuture: std::future::Future<Output = Option<ForkRelinkReport>>,
+{
+    let (wait, retry) = (&wait, &retry);
+    futures::future::join_all(awaiting.into_iter().map(|mut report| async move {
+        for attempt in 0..MAX_OWNER_REVIVAL_WAITS {
+            let ForkRelinkAction::AwaitingOwner { mob_id, reason } = &report.action else {
+                break;
+            };
+            if !wait(mob_id.clone(), reason.clone(), attempt).await {
+                break;
+            }
+            match retry(report.job_id.clone()).await {
+                Some(next) => report = next,
+                None => break,
+            }
+        }
+        report
+    }))
+    .await
+}
+
+/// One deferred outcome waiting on its owner's mob, counted while it waits.
+struct WaitingOwner<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> WaitingOwner<'a> {
+    fn arm(gauge: &'a std::sync::atomic::AtomicUsize) -> Self {
+        gauge.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(gauge)
+    }
+}
+
+impl Drop for WaitingOwner<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Re-link the fork children of one mob (see the module docs).
@@ -917,9 +947,106 @@ async fn deliver(
 
 #[cfg(test)]
 mod tests {
-    use super::{ChildObservation, ProgressVerdict, from_runtime};
-    use meerkat_mob::MemberRunState;
+    use super::{
+        ChildObservation, ForkRelinkAction, ForkRelinkReport, MAX_OWNER_REVIVAL_WAITS,
+        ProgressVerdict, from_runtime, redeliver_each,
+    };
+    use crate::detached_delivery::OwnerRevivalDeferral;
+    use meerkat_mob::{AgentIdentity, MemberRunState, MobId, MobState};
     use meerkat_runtime::{RuntimeDriverError, RuntimeState};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Each deferred job waits on its own owner's mob with its own budget,
+    /// and a wake retries that job alone. Job X's owner mob B stays stopped
+    /// while job Y's owner mob C keeps waking with its owner still deferred
+    /// (an operation in progress): Y spends its own budget, X is not retried
+    /// and keeps waiting, and when B alone resumes X is delivered once
+    /// (lifecycle review: C's wakes spent a budget shared with X and dropped
+    /// the wait on B).
+    #[tokio::test]
+    async fn each_deferred_job_waits_on_its_owner_mob_with_its_own_budget() {
+        let (mob_b, mob_c) = (MobId::from("owner-mob-b"), MobId::from("owner-mob-c"));
+        let report = |job: &str, action: ForkRelinkAction| ForkRelinkReport {
+            mob_id: MobId::from("child-mob-a"),
+            child: AgentIdentity::from(job),
+            job_id: job.to_string(),
+            action,
+        };
+        let x_waits = || ForkRelinkAction::AwaitingOwner {
+            mob_id: mob_b.clone(),
+            reason: OwnerRevivalDeferral::MobNotRunning {
+                phase: MobState::Stopped,
+            },
+        };
+        let y_waits = || ForkRelinkAction::AwaitingOwner {
+            mob_id: mob_c.clone(),
+            reason: OwnerRevivalDeferral::LifecycleOperationPending {
+                intent: "explicit_resume member owner-c".to_string(),
+            },
+        };
+        let (b_runs, b_runs_rx) = tokio::sync::watch::channel(false);
+        let (x_retries, y_retries) = (AtomicU32::new(0), AtomicU32::new(0));
+
+        let driver = redeliver_each(
+            vec![report("job-x", x_waits()), report("job-y", y_waits())],
+            |owner_mob, _reason, _attempt| {
+                let mut b_runs = b_runs_rx.clone();
+                let on_b = owner_mob == mob_b;
+                async move {
+                    if on_b {
+                        b_runs.wait_for(|runs| *runs).await.is_ok()
+                    } else {
+                        tokio::task::yield_now().await;
+                        true
+                    }
+                }
+            },
+            |job_id| {
+                let b_running = *b_runs_rx.borrow();
+                let (x_retries, y_retries) = (&x_retries, &y_retries);
+                let (x_waits, y_waits) = (&x_waits, &y_waits);
+                async move {
+                    if job_id == "job-x" {
+                        x_retries.fetch_add(1, Ordering::SeqCst);
+                        Some(report(
+                            "job-x",
+                            if b_running {
+                                ForkRelinkAction::Delivered
+                            } else {
+                                x_waits()
+                            },
+                        ))
+                    } else {
+                        y_retries.fetch_add(1, Ordering::SeqCst);
+                        Some(report("job-y", y_waits()))
+                    }
+                }
+            },
+        );
+        let control = async {
+            while y_retries.load(Ordering::SeqCst) < MAX_OWNER_REVIVAL_WAITS {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                x_retries.load(Ordering::SeqCst),
+                0,
+                "X is not retried while only C wakes"
+            );
+            let _ = b_runs.send(true);
+        };
+        let (finished, ()) = tokio::join!(driver, control);
+
+        let action = |job: &str| {
+            finished
+                .iter()
+                .find(|report| report.job_id == job)
+                .map(|report| report.action.clone())
+        };
+        assert_eq!(action("job-x"), Some(ForkRelinkAction::Delivered));
+        assert_eq!(action("job-y"), Some(y_waits()), "Y spent its own budget");
+        assert_eq!(x_retries.load(Ordering::SeqCst), 1, "X delivered once");
+        assert_eq!(y_retries.load(Ordering::SeqCst), MAX_OWNER_REVIVAL_WAITS);
+    }
 
     /// An unknown run state (the member was busy and the projection's
     /// bounded runtime read did not answer) is never taken for a settled

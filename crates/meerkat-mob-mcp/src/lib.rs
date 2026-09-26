@@ -480,6 +480,10 @@ pub struct MobMcpState {
     fork_relink_scheduled: std::sync::atomic::AtomicBool,
     /// Mobs whose fork children were already re-linked by this state.
     fork_relinked_mobs: std::sync::Mutex<std::collections::BTreeSet<MobId>>,
+    /// Deferred fork_off outcomes whose re-link is waiting on the owner's
+    /// mob right now (observability; see
+    /// [`Self::fork_relink_waiting_owners`]).
+    fork_relink_waiting_owners: Arc<std::sync::atomic::AtomicUsize>,
     /// Set once the realm-local capability expiry/cleanup driver is running.
     local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool,
     /// Driver cadence, configurable only through the explicit test seam.
@@ -582,6 +586,7 @@ impl MobMcpState {
             .unwrap_or(u64::MAX),
             fork_relink_scheduled: std::sync::atomic::AtomicBool::new(false),
             fork_relinked_mobs: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            fork_relink_waiting_owners: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool::new(false),
             local_forked_participant_sweep_interval_ms: std::sync::atomic::AtomicU64::new(
                 u64::try_from(LOCAL_FORKED_PARTICIPANT_SWEEP_INTERVAL.as_millis())
@@ -1816,6 +1821,19 @@ impl MobMcpState {
                 }
             });
         }
+    }
+
+    /// How many deferred fork_off outcomes the automatic re-link is waiting
+    /// on right now, each on its owner's mob. Observability for hosts and
+    /// tests.
+    #[doc(hidden)]
+    pub fn fork_relink_waiting_owners(&self) -> usize {
+        self.fork_relink_waiting_owners
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn fork_relink_waiting_owners_gauge(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.fork_relink_waiting_owners)
     }
 
     /// The mobs this state manages, as a live view the re-link reads afresh

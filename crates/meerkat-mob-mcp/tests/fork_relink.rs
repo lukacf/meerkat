@@ -1737,8 +1737,14 @@ async fn a_job_owner_in_a_mob_inserted_later_is_revived_through_it() {
 /// was left waiting when B resumed).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
-    let fixture =
-        CouncilFixture::new_runtime_backed(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    let seen = SeenRequests::default();
+    let fixture = CouncilFixture::new_runtime_backed({
+        let seen = seen.clone();
+        move |request| {
+            seen.record(request);
+            ScriptedTurn::Text(CHILD_REPLY.to_string())
+        }
+    });
     fixture.seed_source_mob(&["forker"]).await;
     let handle = fixture
         .state
@@ -1806,15 +1812,33 @@ async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
         })
     );
 
+    // The automatic re-link's waiter is armed, on B.
+    assert_eq!(
+        restarted.fork_relink_waiting_owners(),
+        1,
+        "one deferred outcome is waiting on its owner's mob"
+    );
+
     // Only the owner's mob resumes.
     owner_handle.resume().await.expect("resume the owner's mob");
     await_completion_record(&fixture, &owner, &job_id).await;
+    let marker = format!("Background fork_off job {job_id} finished (");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while seen.turns_that_saw(&marker) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the owner was never woken"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         completion_records(&fixture, &owner, &job_id).await,
         1,
         "delivered exactly once"
     );
+    assert_eq!(seen.turns_that_saw(&marker), 1, "the owner is woken once");
+    assert_eq!(restarted.fork_relink_waiting_owners(), 0);
     assert!(
         completion_record_text(&fixture, &owner, &job_id)
             .await

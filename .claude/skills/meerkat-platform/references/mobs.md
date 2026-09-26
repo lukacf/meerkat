@@ -613,7 +613,12 @@ already in the child's durable transcript, observes a still-running child with
 `max_run` measured from the original start, or delivers `restart_interrupted`,
 under the same idempotency key, and wakes an idle forker; a job whose
 completion was already admitted is never re-linked, and a respawned child
-carries no job. The `rkat` CLI
+carries no job. The re-link routes by the job's `owner_session_id` (never the
+child's roster entry); a limit already elapsed delivers `max_run_elapsed` at
+once and retires the child only after delivery settles (no
+`retirement_error` on the re-linked outcome); a respawned forker is
+`OwnerGone`; a deferred owner is `AwaitingOwner { mob_id, reason }` and each
+such job waits on its own owner's mob with its own budget. The `rkat` CLI
 declares `Unavailable` unless it stays alive, so `rkat run` without
 `--keep-alive` and one-shot `rkat mob` commands block and return the child's
 result directly, with `blocked_because` (`host_declared_unavailable` or

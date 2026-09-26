@@ -174,6 +174,11 @@ them.
   council's outcome. It is a serde-default sidecar outside the request
   fingerprint and the lifecycle machine; records written before this release
   decode it as absent.
+- `meerkat_mob::MobError` gains the variant `ForkJobOwnerNotSource {
+  source_member_id, source_session_id, owner_session_id }`; exhaustive matches
+  must handle it. `MobHandle::fork_member_then_run_detached` returns it for a
+  `DurableForkSourceAdmission::CallerTurn` fork whose `ForkJobBinding` owner
+  session is not the admitted source member's bridge session (see Changed).
 - **Generated `MobMachine` vocabulary (`meerkat-machine-schema`,
   `meerkat-machine-kernels`, `meerkat-mob`):** the machine gains the input
   `ResolveOwnedMemberAdmission { can_manage_mob, caller_owns_member }`, the
@@ -390,11 +395,25 @@ them.
   `MobHandle::fork_member_then_run_detached` takes as its `job` argument, and
   `TemporaryCouncilExitReason::is_failure`.
 - `meerkat-mob-mcp`: the `fork_relink` module (`relink_restored_fork_children`,
-  `relink_mob_fork_children`, `relink_child`, `ForkRelinkReport`,
-  `ForkRelinkAction` with `Delivered`, `AlreadyDelivered`, `OwnerGone`,
-  `AwaitingOwner(OwnerRevivalDeferral)`, `Failed`) and
-  `MobMcpState::relink_restored_fork_children`, the explicit entry point for
-  the post-restore re-link pass.
+  `relink_mob_fork_children(service, delivery, mob_id, handle,
+  restored_before_ms)`, `relink_child(service, &RelinkDelivery, mob_id,
+  handle, child, job)`, `ForkRelinkReport`, `ForkRelinkAction`
+  (`#[non_exhaustive]`) with `Delivered`, `AlreadyDelivered`, `OwnerGone`,
+  `AwaitingOwner { mob_id, reason }` (the owner's mob and its
+  `OwnerRevivalDeferral`), `Failed`), and `MobMcpState::relink_restored_fork_children`,
+  the explicit entry point for the post-restore re-link pass.
+  `RelinkDelivery` (`runtime`, `owner_host`, `owner_mobs`,
+  `managed_mobs: Option<ManagedMobs>`, `waiting_owners`; built with
+  `Default` and its public fields) says how a re-link reaches a job's owner:
+  the runtime that admits completions, the `DetachedOwnerHost` for a
+  plain-session owner, a fixed set of other mobs whose members may own a job,
+  and the host's managed mobs as a live view. `ManagedMobs` is that live view
+  of a `MobMcpState`'s mob map, read afresh at each owner lookup so a mob
+  inserted later is found; only the state builds it, so an embedder calling
+  `relink_child` directly passes its other mobs in `owner_mobs`. The
+  doc-hidden `MobMcpState::fork_relink_waiting_owners()` counts the deferred
+  outcomes waiting on their owner's mob right now, as a host and test
+  observation.
 - `meerkat-core`: `CoreDispatchDeadline` (`Applies`, `ToolOwned`;
   `#[non_exhaustive]`), `ToolExecutionContract::with_tool_owned_deadline`,
   `ToolExecutionContract::core_deadline`, and
@@ -558,27 +577,62 @@ them.
   job began in a previous process: a child whose reply to the job is already
   in its durable transcript has that reply delivered, however late the restart
   landed; a still-running child is observed until its turn ends, with
-  `max_run_secs` measured from the original start (autokill cascades);
+  `max_run_secs` measured from the original start;
   otherwise `restart_interrupted` is delivered and the child stays seated.
+  A limit that has already elapsed is decided at once, so an idle over-limit
+  child always gets `max_run_elapsed`, on its first pass and on later ones.
+  When the limit wins, the child's run is force-cancelled, `max_run_elapsed`
+  is delivered, and the child with its descendants is retired only once that
+  delivery settles (delivered, already delivered, or owner gone). A delivery
+  that must wait or fails keeps the cancelled child and its job record, and a
+  later pass retries it; a child left seated after its `max_run_elapsed`
+  record was committed (a crash or a failed retire) is retired by the next
+  pass with no second record. The re-link's `max_run_elapsed` outcome carries
+  no `retirement_error`, since retirement follows delivery; the live path's
+  outcome still does.
   Delivery uses the same durable notice and idempotency key, so an outcome
   recorded before the restart is not recorded twice, and an idle forker is
   woken to see it. A job whose completion was already admitted is finished
   and never re-linked, so a child kept seated for later work is not
   cancelled against the old job's limit; a respawn does not carry the job to
-  the successor (ownership still follows the identity). The child's reply is
+  the successor (ownership still follows the identity). The owner is resolved
+  from the job's `owner_session_id` before anything can retire the child,
+  never from the child's roster entry: a member of the child's mob, or of
+  another mob the host manages, is revived through its mob, and any other
+  owner is a plain session revived through the host's `DetachedOwnerHost`.
+  A child forked in its forker's own turn (`CallerTurn`, the forker recorded
+  as its spawner) is owned by a member of its own mob, so when that session
+  is no longer seated there (the forker was respawned or retired) the job is
+  reported `OwnerGone`, and past its limit the child and its descendants are
+  retired. The child's reply is
   read from the job's own part of its transcript, so a completion record of a
   fork the child made itself never stands in for it. A status read that does
   not observe the child (the mob's single status lane held by another reader,
   a slow actor, a failed read) is not taken as "not running": the pass checks
   the durable transcript for a finished reply and reads again (reads are
   classified as running, settled or unobserved, and an unobserved read, such
-  as a busy `LifecycleOperationAdmissionPending`, is never terminal). An owner that
+  as a busy `LifecycleOperationAdmissionPending`, is never terminal). A run
+  state of `MemberRunState::Unknown` (the member was busy and the status
+  projection's bounded runtime read did not answer) is never taken as
+  settled: the pass reads the child's runtime state directly. An owner that
   cannot be revived yet, because its mob is not running (MobKit restores a
   cleanly stopped mob Stopped) or a lifecycle operation is still reviving it,
-  is reported as awaiting, and delivery is retried when the mob starts running
-  or after a bounded backoff (at most 16 waits, stopping when the mob ends);
-  councils wait the same way. Reviving a member of a mob that is not running
+  is reported as `AwaitingOwner { mob_id, reason }`, naming the owner's own
+  mob. Each deferred job waits on that mob with its own budget (at most 16
+  waits, stopping when the mob can no longer run) and is retried when the mob
+  starts running or after a bounded backoff; a wake retries only that job,
+  keyed by the child's identity plus its job id (job ids need not be unique
+  across children), so one owner's wakes never spend another job's budget or
+  hand one child another's outcome. Councils wait the same way. Reviving a
+  member of a mob that is not running
   is refused typed as `InvalidTransition { from: <phase>, to: Running }`.
+- `MobHandle::fork_member_then_run_detached` binds a `CallerTurn` fork's job
+  to its source: the `ForkJobBinding` owner session must be the source
+  member's bridge session, checked inside the fork's admission against the
+  exact source session it admits (so a source respawned meanwhile is checked
+  as its successor), and otherwise the call is refused with
+  `MobError::ForkJobOwnerNotSource` before anything is forked or seated.
+  `Quiescent` bindings stay free, and `fork_off` always binds to its caller.
 - A detached council's convener hears back across a restart. The council's
   custody record carries the convener's job; after the post-restore recovery
   sweep, every council from an earlier process whose job is not settled has
@@ -896,6 +950,13 @@ them.
   `pattern`, supported formats, `minItems` 0 or 1) are sent as before, and a
   schema without rejected keywords is sent byte-identical. OpenAI,
   OpenAI-compatible and Gemini requests are unchanged.
+- `meerkat-runtime` test scaffolding: the durable-steer crash-recovery test
+  (`persistent_crash_after_the_join_recovers_the_input_for_exactly_one_follow_up`)
+  waited for the joined input to leave `Staged` before allowing the scripted
+  finish, which a recovered runtime that restages the input for its
+  follow-up run never allows. It now waits for the input to be no longer bound
+  to the crashed run.
+
 ### Known limitations
 
 - A `council` convener that is a plain session gets the detached route only

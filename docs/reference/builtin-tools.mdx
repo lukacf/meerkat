@@ -354,7 +354,7 @@ When the child's turn ends, its outcome names the child (`agent_identity`,
 |----------|---------|
 | `completed` | The turn completed. Carries `bounded_result` (the child's final text under `max_text_bytes`, with explicit truncation), `usage`, `turns`, and `tool_calls`. The child stays seated. |
 | `failed` | The turn failed. Carries `error`. The child was retired. |
-| `max_run_elapsed` | The opt-in `max_run_secs` elapsed. The run was cancelled and the child retired; `retirement_error` reports a failed retirement. The notice status is `terminated`. |
+| `max_run_elapsed` | The opt-in `max_run_secs` elapsed. The run was cancelled and the child retired; `retirement_error` reports a failed retirement (a live outcome only: after a restart the child is retired once the outcome is delivered, so a re-linked outcome carries none). The notice status is `terminated`. |
 | `supervisor_stopped` | The runtime supervising the child stopped (mob shutdown) before the turn ended. |
 | `restart_interrupted` | The host restarted while the child ran and the child's turn did not survive the restart. The child stays seated for its forker. |
 
@@ -419,9 +419,24 @@ child whose job began in a previous process:
 - a child whose reply to the job is already in its durable transcript has that
   reply delivered, however late the restart landed, and stays seated;
 - a child still running is observed until its turn ends, with `max_run_secs`
-  measured from the original start (an elapsed limit autokills it and its
-  descendants);
+  measured from the original start;
 - otherwise `restart_interrupted` is delivered and the child stays seated.
+
+A limit that has already elapsed is decided at once, so an idle child past its
+limit always gets `max_run_elapsed`. When the limit wins, the child's run is
+cancelled, `max_run_elapsed` is delivered, and the child and its descendants
+are retired once that delivery settles (delivered, or the owner gone). A
+delivery that must wait keeps the cancelled child and its job record, and a
+later pass delivers and retires it; a child left seated after its record was
+committed is retired by the next pass without a second record.
+
+The job's owner is its bound owner session, never read back from the child's
+roster entry: a member of the child's mob or of another mob the host manages
+is revived through its mob, and any other owner is a plain session made live
+through the host's `DetachedOwnerHost`. A `fork_off` child's owner is its
+forker, a member of the same mob; a forker that was respawned or retired
+since is gone, so the job is reported as owner gone and a child past its limit
+is retired with its descendants.
 
 Delivery uses the same record and idempotency key, so an outcome recorded
 before the restart is never recorded twice, and an idle forker is woken to see
@@ -431,9 +446,11 @@ respawned child carries no job, although its ownership still follows the
 identity. A job whose forker no longer exists is reported as owner gone
 instead of retried. A forker that cannot be revived yet, because its mob is
 not running (for example restored Stopped after a clean shutdown) or is still
-being revived, is reported as awaiting, and delivery is retried when the mob
-starts running or after a bounded backoff. `MobMcpState::relink_restored_fork_children` runs the pass
-explicitly.
+being revived, is reported as awaiting (`ForkRelinkAction::AwaitingOwner {
+mob_id, reason }`, naming the owner's mob). Each such job waits on its own
+owner's mob with its own bounded budget, and delivery is retried for that job
+alone when the mob starts running or after a bounded backoff.
+`MobMcpState::relink_restored_fork_children` runs the pass explicitly.
 
 `council` follows the same split. Detached, it returns `status: "running"`,
 the `council_id`, a `job_id`, and a `note`, and the sealed outcome (`result`,

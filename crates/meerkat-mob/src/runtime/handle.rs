@@ -4471,6 +4471,15 @@ impl ForkChildRun {
         ));
         self
     }
+
+    /// The handle reached its holder: from here dropping it only stops
+    /// listening.
+    fn handed_to_holder(mut self) -> Self {
+        if let Some(guard) = self.abandon_guard.take() {
+            guard.disarm();
+        }
+        self
+    }
 }
 
 /// How a detached fork child's exact turn ended.
@@ -13077,15 +13086,29 @@ impl MobHandle {
         message_count: Option<usize>,
         source_admission: meerkat_core::DurableForkSourceAdmission,
     ) -> Result<ForkMemberResult, MobError> {
+        let fork = self
+            .fork_source_session(source_identity, &member, message_count, source_admission)
+            .await?;
+        self.seat_forked_member(member, fork).await
+    }
+
+    /// Admit a fork of `source_identity` for `member` and persist the forked
+    /// transcript. Nothing is seated yet.
+    async fn fork_source_session(
+        &self,
+        source_identity: &AgentIdentity,
+        member: &SpawnMemberSpec,
+        message_count: Option<usize>,
+        source_admission: meerkat_core::DurableForkSourceAdmission,
+    ) -> Result<meerkat_core::SessionForkResult, MobError> {
         let (source_session_id, fork_target) = self
-            .admit_fork_member(source_identity, &member, source_admission)
+            .admit_fork_member(source_identity, member, source_admission)
             .await?;
         if source_admission == meerkat_core::DurableForkSourceAdmission::Quiescent {
             self.refuse_fork_source_with_admitted_work(source_identity, &source_session_id)
                 .await?;
         }
-        let fork = self
-            .session_service
+        self.session_service
             .fork_persisted_session(
                 &source_session_id,
                 message_count,
@@ -13099,8 +13122,7 @@ impl MobHandle {
                     cause: crate::error::ForkSourceUnavailableCause::Running,
                 },
                 error => MobError::from(error),
-            })?;
-        self.seat_forked_member(member, fork).await
+            })
     }
 
     /// Persist a real transcript fork, provision its child member, and run the
@@ -13189,7 +13211,10 @@ impl MobHandle {
     ///
     /// Validation, fork, seat and turn admission all happen before this
     /// returns, so every admission failure is reported synchronously and a
-    /// child whose turn could not be admitted is retired first.
+    /// child whose turn could not be admitted is retired first. A call
+    /// dropped before it returns leaves no child behind: once the child's
+    /// spawn is under way, seating and turn admission finish on a task of
+    /// their own and the child, which nobody holds, is retired.
     #[allow(clippy::too_many_arguments)]
     pub async fn fork_member_then_run_detached(
         &self,
@@ -13244,20 +13269,56 @@ impl MobHandle {
             // provably the spawner and owns the child.
             member.spawned_by = Some(source_identity.clone());
         }
-        let fork = self
-            .fork_member_with_source_admission(
-                source_identity,
-                member,
-                message_count,
-                source_admission,
-            )
+        let session_fork = self
+            .fork_source_session(source_identity, &member, message_count, source_admission)
             .await?;
-        // Until the caller holds the run handle the child is nobody's: if
-        // this future is dropped while admitting its turn, retire it.
-        let unreturned_child = ProvisionedChildRetireOnDrop::arm(
-            self.fork_child_cleanup_authority(),
-            fork.agent_identity.clone(),
-        );
+        // From the child's spawn command on, the actor seats the child whether
+        // or not this call is still polled, and a caller on a relieved task is
+        // aborted at its next await. So seating, turn admission and the
+        // supervisor's start run on a task of their own, which a dropped call
+        // cannot cancel. Until this call holds the run handle the child is
+        // nobody's: the run travels armed to retire it, so a dropped call, or
+        // a handoff dropped in transit, retires the child.
+        let (handoff_tx, handoff_rx) = tokio::sync::oneshot::channel();
+        let seat = self.clone();
+        tokio::spawn(async move {
+            let handoff = seat
+                .seat_and_start_detached_fork_child(
+                    member,
+                    session_fork,
+                    task,
+                    objective_id,
+                    result_spec,
+                    max_run,
+                )
+                .await;
+            // The receiver of a dropped call is gone: the unsent handoff
+            // drops here, and its armed run retires the child.
+            let _ = handoff_tx.send(handoff);
+        });
+        let handoff = handoff_rx.await.map_err(|_| {
+            MobError::Internal("the fork handoff task ended without a result".to_string())
+        })?;
+        let (fork, run) = handoff?;
+        // The caller holds the run now: dropping it only stops listening.
+        Ok((fork, run.handed_to_holder()))
+    }
+
+    /// Seat a detached fork child from its persisted fork, admit its one
+    /// exact turn and start the supervisor that owns the run. The returned
+    /// run is armed to retire the child if it is dropped before its holder
+    /// takes it (see [`Self::fork_member_then_run_detached`]). A child whose
+    /// turn could not be admitted is retired.
+    async fn seat_and_start_detached_fork_child(
+        &self,
+        member: SpawnMemberSpec,
+        session_fork: meerkat_core::SessionForkResult,
+        task: ContentInput,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+        result_spec: BoundedResultSpec,
+        max_run: Option<Duration>,
+    ) -> Result<(ForkMemberResult, ForkChildRun), BoundedMemberRunError> {
+        let fork = self.seat_forked_member(member, session_fork).await?;
         let turn = match self
             .start_work_for_identity_bounded(
                 fork.agent_identity.clone(),
@@ -13269,7 +13330,6 @@ impl MobHandle {
         {
             Ok(turn) => turn,
             Err(error) => {
-                unreturned_child.disarm();
                 return Err(self
                     .retire_failed_fork_child(
                         &fork.agent_identity,
@@ -13313,14 +13373,15 @@ impl MobHandle {
             // does not depend on it.
             let _ = outcome_tx.send(outcome);
         });
-        // The supervisor now owns the run; the caller gets the handle.
-        unreturned_child.disarm();
+        // The supervisor now owns the run; the handle goes to the caller,
+        // armed until the caller takes it.
         let run = ForkChildRun {
             outcome: outcome_rx,
             child: fork.agent_identity.clone(),
             cleanup: self.fork_child_cleanup_authority(),
             abandon_guard: None,
-        };
+        }
+        .retire_child_if_abandoned();
         Ok((fork, run))
     }
 

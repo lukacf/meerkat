@@ -21941,6 +21941,68 @@ async fn an_abandoned_armed_fork_run_retires_its_child() {
     );
 }
 
+/// A detached fork call dropped while its child's spawn is in flight leaves
+/// no child behind (lifecycle review: a relieved fork_off task is aborted at
+/// its next await, and the actor seats the child anyway). The seat finishes
+/// on a task of its own, and the child, which nobody holds, is retired.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_detached_fork_dropped_mid_spawn_leaves_no_child_seated() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("mid-spawn-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let child = AgentIdentity::from("mid-spawn-child");
+
+    // The child's spawn waits in its session creation.
+    service.set_create_session_delay_ms(1_500);
+    let idle = service.create_session_in_flight.load(Ordering::Relaxed);
+    let fork = tokio::spawn({
+        let (handle, a, child) = (handle.clone(), a.clone(), child.clone());
+        async move { caller_turn_fork_child(&handle, &a, &child, None).await }
+    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while service.create_session_in_flight.load(Ordering::Relaxed) == idle {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child's spawn never started"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    // The call is dropped with the child's spawn in flight.
+    fork.abort();
+    assert!(fork.await.is_err_and(|error| error.is_cancelled()));
+    service.set_create_session_delay_ms(0);
+
+    // The spawn completes regardless; then the unheld child is retired.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let retired = handle
+            .events
+            .replay_all()
+            .await
+            .expect("replay events")
+            .iter()
+            .any(|event| {
+                matches!(
+                    &event.kind,
+                    MobEventKind::MemberRetired { agent_identity, .. } if agent_identity == &child
+                )
+            });
+        if retired && handle.get_member(&child).await.unwrap().is_none() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the dropped call's child was left seated (retired: {retired})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        handle.get_member(&a).await.unwrap().is_some(),
+        "the forker is untouched"
+    );
+}
+
 /// Autokill of a child with its own running child retires both, deepest
 /// first (lifecycle review: C autokilled cascades to D).
 #[tokio::test]

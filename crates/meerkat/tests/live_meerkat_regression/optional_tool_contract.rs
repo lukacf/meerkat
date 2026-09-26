@@ -87,6 +87,20 @@ fn prompt() -> String {
     )
 }
 
+fn final_answer_consumes_receipt(answer: &str, receipt: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ReceiptAnswer {
+        receipt: String,
+    }
+
+    let answer = answer.trim();
+    answer == receipt
+        || (answer.starts_with('{')
+            && serde_json::from_str::<ReceiptAnswer>(answer)
+                .is_ok_and(|parsed| parsed.receipt == receipt))
+}
+
 fn required_input(name: &str) -> String {
     std::env::var(name)
         .ok()
@@ -304,9 +318,8 @@ async fn run_probe(mut config: Config, binding: AuthBindingRef, model: String, b
         result.tool_calls, 1,
         "exactly one ordinary tool call must execute"
     );
-    assert_eq!(
-        result.text.trim(),
-        dispatcher.receipt,
+    assert!(
+        final_answer_consumes_receipt(&result.text, &dispatcher.receipt),
         "final answer must consume the actual tool result"
     );
     let calls = dispatcher.calls();
@@ -351,7 +364,7 @@ async fn run_probe(mut config: Config, binding: AuthBindingRef, model: String, b
         .rposition(|message| {
             matches!(message,
                 Message::BlockAssistant(blocks) if blocks.stop_reason == Some(StopReason::EndTurn)
-                    && blocks.text_blocks().collect::<String>().trim() == dispatcher.receipt
+                    && final_answer_consumes_receipt(&blocks.text_blocks().collect::<String>(), &dispatcher.receipt)
             )
         })
         .expect("canonical assistant continuation answer");
@@ -379,7 +392,7 @@ async fn run_probe(mut config: Config, binding: AuthBindingRef, model: String, b
             .iter()
             .filter(|event| matches!(event, AgentEvent::RunCompleted {
         session_id, result: text, terminal_cause_kind: None, extraction_required: false, ..
-    } if session_id == &result.session_id && text.trim() == dispatcher.receipt))
+    } if session_id == &result.session_id && final_answer_consumes_receipt(text, &dispatcher.receipt)))
             .count(),
         1
     );
@@ -425,6 +438,54 @@ async fn e2e_optional_tool_contract_chatgpt() {
 #[cfg(test)]
 mod offline {
     use super::*;
+
+    #[test]
+    fn accepts_exact_raw_or_single_field_json_receipt_answers() {
+        let receipt = "probe-tool-only-123";
+        for answer in [
+            receipt.to_string(),
+            format!(" \n{receipt}\t "),
+            json!({ "receipt": receipt }).to_string(),
+            format!(" \n{{ \"receipt\" : \"{receipt}\" }}\t "),
+        ] {
+            assert!(
+                final_answer_consumes_receipt(&answer, receipt),
+                "{answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_or_nonexact_receipt_answer_envelopes() {
+        let receipt = "probe-tool-only-123";
+        let envelope = json!({ "receipt": receipt }).to_string();
+        for answer in [
+            String::new(),
+            "probe-wrong".to_string(),
+            json!({ "receipt": "probe-wrong" }).to_string(),
+            "{}".to_string(),
+            json!({ "other": receipt }).to_string(),
+            json!({ "receipt": receipt, "extra": true }).to_string(),
+            format!("Receipt: {receipt}"),
+            format!("Here it is: {envelope}"),
+            format!("{envelope} done"),
+            format!("```json\n{envelope}\n```"),
+            json!([receipt]).to_string(),
+            json!([{ "receipt": receipt }]).to_string(),
+            json!(receipt).to_string(),
+            "null".to_string(),
+            "false".to_string(),
+            json!({ "receipt": null }).to_string(),
+            json!({ "receipt": 123 }).to_string(),
+            json!({ "receipt": format!(" {receipt} ") }).to_string(),
+            format!("{{\"receipt\":\"{receipt}\",\"receipt\":\"{receipt}\"}}"),
+        ] {
+            assert!(
+                !final_answer_consumes_receipt(&answer, receipt),
+                "{answer:?}"
+            );
+        }
+    }
 
     #[test]
     fn accepts_only_canonical_provider_endpoints_without_echoing_rejected_urls() {

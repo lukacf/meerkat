@@ -351,10 +351,10 @@ run_wasm_contract_test() {
   "${CARGO}" test -p meerkat-web-runtime --target wasm32-unknown-unknown --test "${test_name}" --no-run
   case "${runner}" in
     chrome)
-      "${WASM_PACK}" test --headless --chrome meerkat-web-runtime --test "${test_name}"
+      "${WASM_PACK}" test --headless --chrome crates/meerkat-web-runtime --test "${test_name}"
       ;;
     node)
-      "${WASM_PACK}" test --node meerkat-web-runtime --test "${test_name}"
+      "${WASM_PACK}" test --node crates/meerkat-web-runtime --test "${test_name}"
       ;;
     *)
       echo "unknown wasm contract runner: ${runner}" >&2

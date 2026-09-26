@@ -95,7 +95,7 @@ run_logged seam-inventory \
   bash -lc '{ ulimit -s unlimited 2>/dev/null || ulimit -s 65520; } && ./scripts/repo-cargo run -p xtask -- seam-inventory --strict'
 
 run_logged wasm-contract \
-  bash -lc 'RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test release_targets --no-run && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' wasm-pack test --headless --chrome meerkat-web-runtime --test browser_contract && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' wasm-pack test --headless --chrome meerkat-web-runtime --test release_targets'
+  bash -lc 'RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test release_targets --no-run && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' wasm-pack test --headless --chrome crates/meerkat-web-runtime --test browser_contract && RUSTFLAGS='\''--cfg getrandom_backend="wasm_js"'\'' wasm-pack test --headless --chrome crates/meerkat-web-runtime --test release_targets'
 
 run_logged e2e-fast \
   ./scripts/repo-cargo e2e-fast

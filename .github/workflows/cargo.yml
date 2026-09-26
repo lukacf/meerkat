@@ -838,7 +838,7 @@ jobs:
         run: ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run
 
       - name: Browser contract test (headless Chrome)
-        run: wasm-pack test --headless --chrome meerkat-web-runtime --test browser_contract
+        run: wasm-pack test --headless --chrome crates/meerkat-web-runtime --test browser_contract
 
   sdk-web:
     name: Web SDK build + tests

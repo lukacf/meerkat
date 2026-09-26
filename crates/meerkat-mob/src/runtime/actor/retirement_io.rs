@@ -4609,7 +4609,14 @@ impl MobActor {
                     return Ok(Some(Box::pin(async move {
                         RetirementObservation::SpawnRollback(SpawnRollbackObservation::Restored(
                             provisioner
-                                .restore_resumed_member(&member, &operation, origin, &authority)
+                                .restore_resumed_member(
+                                    &member,
+                                    &operation,
+                                    origin,
+                                    &authority,
+                                    // The failed spawn leaves the roster.
+                                    crate::runtime::provisioner::RollbackOrigin::SpawnRollback,
+                                )
                                 .await,
                         ))
                     })));

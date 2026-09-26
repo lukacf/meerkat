@@ -23,7 +23,9 @@ use meerkat_contracts::{
     WireDeviceStart, WireLoginReady, WireLoginStart, WireOAuthProvider, WireProviderBinding,
     WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
-use meerkat_core::connection::{BindingId, ConnectionTargetError, ProfileId, RealmId};
+use meerkat_core::connection::{
+    BindingId, ConnectionTargetError, ProfileId, RealmId, WriteOwnerError,
+};
 use meerkat_core::handles::LeaseKey;
 use meerkat_core::{
     AuthBindingRef, CredentialSourceSpec, Provider, RealmConnectionSet, ResolvedConnectionTarget,
@@ -118,7 +120,7 @@ async fn resolve_binding_identity(
             // surface only maps the typed verdict to an HTTP status.
             let config = load_config(state).await?;
             match meerkat_core::connection::resolve_write_owner(&config, realm_id, binding_id) {
-                Err(inherited @ meerkat_core::connection::WriteOwnerError::Inherited { .. }) => {
+                Err(inherited @ WriteOwnerError::Inherited { .. }) => {
                     Err((StatusCode::CONFLICT, inherited.to_string()))
                 }
 
@@ -171,6 +173,20 @@ fn target_error_status(error: &ConnectionTargetError) -> StatusCode {
     }
 }
 
+/// Status of a strict-owner credential write refusal (decision 5). A write to
+/// a binding the addressed realm only inherits conflicts with the realm
+/// configuration: it must target the owning realm, which the error names
+/// (409). A binding no realm on the chain defines is not found, and a chain
+/// that cannot be resolved is a bad request, as for the same verdicts from
+/// target resolution.
+fn write_owner_error_status(error: &WriteOwnerError) -> StatusCode {
+    match error {
+        WriteOwnerError::Inherited { .. } => StatusCode::CONFLICT,
+        WriteOwnerError::Unknown { .. } => StatusCode::NOT_FOUND,
+        WriteOwnerError::Chain(_) => StatusCode::BAD_REQUEST,
+    }
+}
+
 fn host_auth_service(state: &AppState) -> meerkat::HostAuthService {
     meerkat::HostAuthService::new(
         state.provider_auth_persistence.clone(),
@@ -181,8 +197,8 @@ fn host_auth_service(state: &AppState) -> meerkat::HostAuthService {
 fn host_auth_error_response(error: meerkat::HostAuthError) -> axum::response::Response {
     let status = match &error {
         meerkat::HostAuthError::Target(error) => target_error_status(error),
-        meerkat::HostAuthError::WriteOwner(_)
-        | meerkat::HostAuthError::OAuthTarget(_)
+        meerkat::HostAuthError::WriteOwner(error) => write_owner_error_status(error),
+        meerkat::HostAuthError::OAuthTarget(_)
         | meerkat::HostAuthError::BrowserFlowUnsupported(_)
         | meerkat::HostAuthError::DeviceFlowUnsupported(_) => StatusCode::BAD_REQUEST,
         meerkat::HostAuthError::OAuthFlow(

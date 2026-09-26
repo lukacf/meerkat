@@ -7,7 +7,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use super::*;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use meerkat_core::handles::TurnStateHandle;
@@ -22,6 +22,9 @@ use meerkat_core::lifecycle::{
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 
 use crate::input_state::InputLifecycleState;
+
+/// How long a test makes the runner's append record lag the boundary take.
+const APPEND_RECORD_LAG: Duration = Duration::from_millis(150);
 
 /// What the simulated runner does next inside `apply`.
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +65,10 @@ struct RunnerScript {
     prepare_hold_armed: AtomicBool,
     prepare_hold_released: AtomicBool,
     prepare_hold_reached: AtomicBool,
+    /// Delay between a boundary take returning a durable append and the
+    /// runner recording it (milliseconds). Zero by default; a test sets it to
+    /// force the record to lag the input's Staged phase.
+    append_record_lag_ms: AtomicU64,
 }
 
 impl RunnerScript {
@@ -78,7 +85,17 @@ impl RunnerScript {
             prepare_hold_armed: AtomicBool::new(false),
             prepare_hold_released: AtomicBool::new(false),
             prepare_hold_reached: AtomicBool::new(false),
+            append_record_lag_ms: AtomicU64::new(0),
         })
+    }
+
+    /// Record each applied durable append only `lag` after its boundary take
+    /// returned, so the input shows Staged before the record exists.
+    fn lag_append_records(&self, lag: Duration) {
+        self.append_record_lag_ms.store(
+            u64::try_from(lag.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
     }
 
     fn step(&self, step: RunnerStep) {
@@ -201,6 +218,10 @@ impl CoreExecutor for DurableSteerExecutor {
                         .await
                         .map_err(|error| CoreExecutorError::Internal(error.to_string()))?;
                     if let Some(appends) = taken.applied_durable {
+                        let lag = self.script.append_record_lag_ms.load(Ordering::SeqCst);
+                        if lag > 0 {
+                            tokio::time::sleep(Duration::from_millis(lag)).await;
+                        }
                         self.script
                             .applied_durable
                             .lock()
@@ -396,6 +417,20 @@ impl DurableSteerRig {
         });
     }
 
+    /// Wait until the runner has recorded `expected` applied durable
+    /// appends. The runner records an append after its boundary take returns,
+    /// which can be after the input already shows Staged, so a test asserting
+    /// what was applied waits for the record, not for the phase.
+    async fn wait_for_applied_durable(&self, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.script.applied_durable().len() < expected {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("expected {expected} applied durable appends"));
+    }
+
     async fn wait_for_apply_calls(&self, expected: usize) {
         tokio::time::timeout(Duration::from_secs(5), async {
             while self.script.apply_calls.load(Ordering::SeqCst) < expected {
@@ -537,7 +572,19 @@ async fn admission_classifies_live_boundary_delivery_from_typed_structure() {
 
 #[tokio::test]
 async fn durable_steer_joins_the_running_run_and_is_consumed_with_its_commit() {
+    durable_steer_joins_the_running_run(Duration::ZERO).await;
+}
+
+/// The same join, with the runner recording the applied append only after
+/// the input shows Staged (the record can lag the phase).
+#[tokio::test]
+async fn durable_steer_join_is_asserted_after_a_lagging_append_record() {
+    durable_steer_joins_the_running_run(APPEND_RECORD_LAG).await;
+}
+
+async fn durable_steer_joins_the_running_run(append_record_lag: Duration) {
     let rig = DurableSteerRig::ephemeral().await;
+    rig.script.lag_append_records(append_record_lag);
     let batch = rig.start_busy_turn().await;
     let steer = typed_steer("BG-DONE", ConversationAppendRole::SystemNotice);
     let steer_id = steer.id().clone();
@@ -554,6 +601,7 @@ async fn durable_steer_joins_the_running_run_and_is_consumed_with_its_commit() {
     );
     assert!(!rig.steer_queue().await.contains(&steer_id));
     assert!(!rig.queue().await.contains(&steer_id));
+    rig.wait_for_applied_durable(1).await;
     assert_eq!(rig.script.applied_durable(), vec![steer_id.clone()]);
 
     // The input is consumed only with the run terminal.
@@ -1070,9 +1118,21 @@ async fn persistent_durable_fallback_after_the_run_retired_keeps_the_runtime_hea
 
 #[tokio::test]
 async fn persistent_crash_after_the_join_recovers_the_input_for_exactly_one_follow_up() {
+    persistent_crash_after_the_join(Duration::ZERO).await;
+}
+
+/// The same crash, with the crashed runner recording the applied append only
+/// after the input shows Staged (the record can lag the phase).
+#[tokio::test]
+async fn persistent_crash_after_the_join_is_asserted_after_a_lagging_append_record() {
+    persistent_crash_after_the_join(APPEND_RECORD_LAG).await;
+}
+
+async fn persistent_crash_after_the_join(append_record_lag: Duration) {
     let store: Arc<dyn crate::store::RuntimeStore> =
         Arc::new(crate::store::InMemoryRuntimeStore::new());
     let crashed = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    crashed.script.lag_append_records(append_record_lag);
     let session_id = crashed.session_id.clone();
     let runtime_id = MeerkatMachine::logical_runtime_id(&session_id);
     let batch = crashed.start_busy_turn().await;
@@ -1085,6 +1145,7 @@ async fn persistent_crash_after_the_join_recovers_the_input_for_exactly_one_foll
         .wait_for_phase(&steer_id, InputLifecycleState::Staged)
         .await;
     // The runner applied the append into the live image of the in-flight run.
+    crashed.wait_for_applied_durable(1).await;
     assert_eq!(crashed.script.applied_durable(), vec![steer_id.clone()]);
     let joined = store
         .load_input_state(&runtime_id, &steer_id)

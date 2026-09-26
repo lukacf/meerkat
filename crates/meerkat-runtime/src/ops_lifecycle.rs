@@ -32,8 +32,8 @@ use meerkat_core::ops_lifecycle::{
     OperationCompletionWatch, OperationId, OperationKind, OperationLifecycleAction,
     OperationLifecycleSnapshot, OperationPeerHandle, OperationProgressUpdate,
     OperationPublicResultClass, OperationResult, OperationSource, OperationSpec, OperationStatus,
-    OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry, WaitAllResult,
-    WaitAllSatisfied,
+    OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry, OpsOwnerAdmission,
+    WaitAllResult, WaitAllSatisfied,
 };
 use meerkat_core::time_compat::{Instant, SystemTime, UNIX_EPOCH};
 use meerkat_core::types::SessionId;
@@ -2340,6 +2340,14 @@ impl RuntimeOpsLifecycleRegistry {
         Ok(())
     }
 
+    /// Test-support entry to the exact ReloadRequired discard seal, for
+    /// consumers that must observe a sealed owner registry without driving a
+    /// full durability-reload discard.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seal_owner_for_reload_required_discard_for_test(&self) -> Result<(), OpsLifecycleError> {
+        self.seal_owner_for_reload_required_discard()
+    }
+
     /// Reopen persistence only for a registry reconstructed from durable
     /// authority during an exact ReloadRequired cold replacement. No ordinary
     /// sealed or retired registry can cross this boundary.
@@ -3356,6 +3364,17 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         state.records.remove(id);
         state.completed_order.retain(|queued| queued != id);
         Ok(())
+    }
+
+    fn owner_admission(&self) -> Result<OpsOwnerAdmission, OpsLifecycleError> {
+        let state = self.read_state()?;
+        Ok(if state.owner_retired {
+            OpsOwnerAdmission::Retired
+        } else if state.persistence_sealed {
+            OpsOwnerAdmission::Sealed
+        } else {
+            OpsOwnerAdmission::Open
+        })
     }
 
     fn cancel_operation(
@@ -4578,6 +4597,32 @@ mod tests {
             registry.snapshot(&completed_id).unwrap().unwrap().status,
             OperationStatus::Completed
         ));
+    }
+
+    #[test]
+    fn owner_admission_reports_open_sealed_and_retired_owner_registries() {
+        let sealed = RuntimeOpsLifecycleRegistry::new();
+        let running_spec = background_spec("sealed-running");
+        let running_id = running_spec.id.clone();
+        sealed.register_operation(running_spec).unwrap();
+        sealed.provisioning_succeeded(&running_id).unwrap();
+        assert_eq!(sealed.owner_admission().unwrap(), OpsOwnerAdmission::Open);
+        sealed.seal_owner_for_reload_required_discard().unwrap();
+        assert_eq!(sealed.owner_admission().unwrap(), OpsOwnerAdmission::Sealed);
+        assert_eq!(
+            sealed.snapshot(&running_id).unwrap().unwrap().status,
+            OperationStatus::Running,
+            "a ReloadRequired seal synthesizes no terminal transition"
+        );
+
+        let retired = RuntimeOpsLifecycleRegistry::new();
+        retired
+            .retire_owner_for_unregister("owner unregistered".into())
+            .unwrap();
+        assert_eq!(
+            retired.owner_admission().unwrap(),
+            OpsOwnerAdmission::Retired
+        );
     }
 
     #[test]

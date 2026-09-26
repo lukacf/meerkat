@@ -644,6 +644,8 @@ async fn provision_explicit_resume_member(
             receipt.operation_id,
             receipt.session_origin,
             receipt.rollback_authority,
+            // A failed rebuild keeps the member seated.
+            crate::runtime::provisioner::RollbackOrigin::RevivalOrRebuild,
         );
         let matches_session = match provision.member_ref() {
             Ok(member_ref) => {
@@ -670,7 +672,8 @@ async fn provision_explicit_resume_member(
         readiness
             .ensure_mob_comms_drain(&work.rebuild.entry.agent_identity, &work.rebuild.member_ref)
             .await?;
-        if !work.rebuild.repoints_session_binding || work.rebuild.recovered_peer_endpoint.is_some()
+        if work.rebuild.superseded_session_id.is_none()
+            || work.rebuild.recovered_peer_endpoint.is_some()
         {
             return Ok(None);
         }
@@ -884,7 +887,13 @@ async fn retry_retained_provision_effects(
     let mut attempts = 0_u32;
     loop {
         attempts = attempts.saturating_add(1);
-        let failure = match provisioner.retry_retained_provision_cleanup(retained).await {
+        let failure = match provisioner
+            .retry_retained_provision_cleanup(
+                retained,
+                crate::runtime::provisioner::RollbackOrigin::RevivalOrRebuild,
+            )
+            .await
+        {
             Ok(()) => return true,
             Err(failure) => failure,
         };

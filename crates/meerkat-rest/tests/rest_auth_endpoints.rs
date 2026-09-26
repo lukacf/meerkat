@@ -9,9 +9,12 @@
 //! /auth/bindings/{binding_id} -> POST /sessions with auth_binding". The
 //! live-provider half belongs in the `e2e-auth` lane; this file
 //! exercises the offline router half: each route is registered,
-//! dispatches, and returns a structured response.
+//! dispatches, and returns a structured response. It needs no live
+//! provider, network or real binary, so it runs in the integration-fast
+//! lane with the crate's default features (it was gated behind
+//! `integration-real-tests`, which no lane enables for this crate, so it
+//! never ran).
 
-#![cfg(feature = "integration-real-tests")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

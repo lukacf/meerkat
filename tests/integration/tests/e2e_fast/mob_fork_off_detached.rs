@@ -1779,19 +1779,28 @@ async fn e2e_fast_top_level_rpc_convener_is_revived_for_its_council_result() {
 // early, before that call's boundary), and that call only returns once the
 // runtime store holds the exact completion input ("fork_off:{job_id}"), so
 // the completion is admitted while the forker's original run is still open.
-// Run identity is read from typed facts: the admitted input's run
-// association, BoundaryAppendApplied, run terminals and the assistant rows'
-// run ids.
+// Boundary registration is asynchronous after admission, so the joins
+// scenario keeps opening real boundaries (bounded tool calls) until a model
+// request carries the record. Run identity and terminals are read from the
+// runtime's own input facts (run association, phase, terminal outcome,
+// attempts), BoundaryAppendApplied, and the assistant rows' run ids; every
+// wait is bounded by one absolute deadline.
 // ===========================================================================
 
 const IN_TURN_PROMPT: &str = "IN-TURN-7K fork, keep working, then finish";
 const IN_TURN_DONE: &str = "IN-TURN-DONE";
 const GATE_TIMEOUT: &str = "GATE-TIMEOUT";
+const BUS_PROBE: &str = "bus-probe";
+const BUS_PROBE_PROMPT: &str = "BUS-PROBE-2W reply";
+/// Extra boundaries the joins scenario may open while waiting for the
+/// record to be applied.
+const MAX_EXTRA_TOOL_CALLS: usize = 8;
 
 /// How the forker's turn continues once its child's completion is admitted.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AfterChild {
-    /// Two more tool calls, then final text: later boundaries exist.
+    /// Keep calling tools until a request carries the record, then once
+    /// more, then final text.
     MoreToolCalls,
     /// Final text straight away: no later boundary opens in this turn.
     FinishTurn,
@@ -1829,6 +1838,41 @@ fn fork_off_job_id(messages: &[Message]) -> Option<String> {
     })
 }
 
+fn in_turn_list_call_id(index: usize) -> String {
+    format!("toolu_itl_{index:02}_")
+}
+
+/// Tool steps already taken in the forker's turn: (fork done, list calls).
+fn in_turn_progress(rendered: &str) -> (bool, usize) {
+    let lists = (1..=MAX_EXTRA_TOOL_CALLS + 2)
+        .filter(|index| rendered.contains(&in_turn_list_call_id(*index)))
+        .count();
+    (rendered.contains("toolu_in_turn_fork"), lists)
+}
+
+/// One of the forker's runtime inputs, as the runtime store holds it.
+#[derive(Debug, Clone, PartialEq)]
+struct InputFact {
+    input_id: String,
+    key: Option<String>,
+    run: Option<String>,
+    phase: String,
+    terminal: Option<String>,
+    attempts: u32,
+}
+
+impl InputFact {
+    fn consumed_first_time(&self) -> bool {
+        self.phase == "Consumed"
+            && self.terminal.as_deref() == Some("Consumed")
+            && self.attempts <= 1
+    }
+
+    fn settled(&self) -> bool {
+        self.terminal.is_some()
+    }
+}
+
 /// Facts the script and the test share.
 #[derive(Default)]
 struct InTurnProbe {
@@ -1836,20 +1880,47 @@ struct InTurnProbe {
     forker_session: std::sync::OnceLock<SessionId>,
     /// The forker's post-fork model call has started.
     post_fork_call_started: std::sync::atomic::AtomicBool,
+    /// A request of the forker's turn carried the record.
+    record_seen: std::sync::atomic::AtomicBool,
     /// The exact completion input the store held while the run was open.
-    admitted_input: Mutex<Option<meerkat_core::lifecycle::InputId>>,
+    admitted_input: Mutex<Option<String>>,
 }
 
 impl InTurnProbe {
-    /// The exact completion input of `job_id` as the store holds it: its id
-    /// and the run it is associated with.
-    async fn completion_input(
-        &self,
-        job_id: &str,
-    ) -> Option<(
-        meerkat_core::lifecycle::InputId,
-        Option<meerkat_core::lifecycle::RunId>,
-    )> {
+    /// Every input of the forker's runtime, typed from the store.
+    async fn forker_inputs(&self) -> Vec<InputFact> {
+        let (Some(store), Some(session)) = (self.runtime_store.get(), self.forker_session.get())
+        else {
+            return Vec::new();
+        };
+        store
+            .load_input_states_strict(&meerkat_runtime::LogicalRuntimeId::for_session(session))
+            .await
+            .expect("forker input rows decode")
+            .into_iter()
+            .map(|stored| InputFact {
+                input_id: stored.state.input_id.to_string(),
+                key: stored
+                    .state
+                    .idempotency_key
+                    .as_ref()
+                    .map(|key| format!("{key}")),
+                run: stored.seed.last_run_id.as_ref().map(ToString::to_string),
+                phase: format!("{:?}", stored.seed.phase),
+                terminal: stored.seed.terminal_outcome.as_ref().map(|outcome| {
+                    format!("{outcome:?}")
+                        .split([' ', '{', '('])
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                }),
+                attempts: stored.seed.attempt_count,
+            })
+            .collect()
+    }
+
+    /// The exact completion input of `job_id`, looked up by its key.
+    async fn completion_input_id(&self, job_id: &str) -> Option<String> {
         let store = self.runtime_store.get()?;
         let session = self.forker_session.get()?;
         store
@@ -1859,34 +1930,17 @@ impl InTurnProbe {
             )
             .await
             .expect("exact idempotency index")
-            .map(|observed| {
-                (
-                    observed.state().state.input_id.clone(),
-                    observed.state().seed.last_run_id.clone(),
-                )
-            })
+            .map(|observed| observed.state().state.input_id.to_string())
     }
 }
 
 /// The forker forks in its own turn; its post-fork model call holds the
-/// run open until the child's completion input is admitted, then the turn
-/// either keeps calling tools or finishes. Every request is recorded.
+/// run open until the child's completion input is admitted; the turn then
+/// either opens boundaries until the record joins it, or finishes.
 struct InTurnScript {
     requests: Arc<Mutex<Vec<InTurnRequest>>>,
     probe: Arc<InTurnProbe>,
     after_child: AfterChild,
-}
-
-/// 0 before fork_off, then one step per tool result in the forker's turn.
-fn in_turn_stage(rendered: &str) -> usize {
-    [
-        "toolu_in_turn_fork",
-        "toolu_in_turn_list_1",
-        "toolu_in_turn_list_2",
-    ]
-    .iter()
-    .filter(|id| rendered.contains(*id))
-    .count()
 }
 
 #[async_trait::async_trait]
@@ -1898,10 +1952,11 @@ impl LlmClient for InTurnScript {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let last_user = last_user_text(request);
         let rendered = format!("{:?}", request.messages);
+        let records = persisted_records(&request.messages);
         self.requests.lock().unwrap().push(InTurnRequest {
             last_user: last_user.clone(),
             rendered: rendered.clone(),
-            records: persisted_records(&request.messages),
+            records,
         });
         let model = request.model.clone();
         let probe = Arc::clone(&self.probe);
@@ -1929,14 +1984,14 @@ impl LlmClient for InTurnScript {
                 if turn_finished || !last_user.contains(IN_TURN_PROMPT) {
                     return scripted_text(&model, FOLLOW_UP_REPLY);
                 }
-                match in_turn_stage(&rendered) {
-                    0 => scripted_tool_call(
+                match in_turn_progress(&rendered) {
+                    (false, _) => scripted_tool_call(
                         &model,
                         "toolu_in_turn_fork",
                         "fork_off",
                         json!({"member_id": CHILD, "task": CHILD_TASK}),
                     ),
-                    1 => {
+                    (true, 0) => {
                         probe
                             .post_fork_call_started
                             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1944,9 +1999,10 @@ impl LlmClient for InTurnScript {
                             return scripted_text(&model, GATE_TIMEOUT);
                         };
                         // Hold the run open until the store holds the exact
-                        // completion input.
+                        // completion input (admission only: boundary
+                        // preparation needs this runner parked).
                         loop {
-                            if let Some((input_id, _)) = probe.completion_input(&job_id).await {
+                            if let Some(input_id) = probe.completion_input_id(&job_id).await {
                                 *probe.admitted_input.lock().unwrap() = Some(input_id);
                                 break;
                             }
@@ -1958,15 +2014,37 @@ impl LlmClient for InTurnScript {
                         match after_child {
                             AfterChild::MoreToolCalls => scripted_tool_call(
                                 &model,
-                                "toolu_in_turn_list_1",
+                                &in_turn_list_call_id(1),
                                 "mob_list",
                                 json!({}),
                             ),
                             AfterChild::FinishTurn => scripted_text(&model, IN_TURN_DONE),
                         }
                     }
-                    2 => scripted_tool_call(&model, "toolu_in_turn_list_2", "mob_list", json!({})),
-                    _ => scripted_text(&model, IN_TURN_DONE),
+                    (true, lists) => {
+                        let next = scripted_tool_call(
+                            &model,
+                            &in_turn_list_call_id(lists + 1),
+                            "mob_list",
+                            json!({}),
+                        );
+                        if records >= 1 {
+                            // One more real boundary after the first request
+                            // that carries the record, then finish.
+                            if probe
+                                .record_seen
+                                .swap(true, std::sync::atomic::Ordering::SeqCst)
+                            {
+                                scripted_text(&model, IN_TURN_DONE)
+                            } else {
+                                next
+                            }
+                        } else if lists < MAX_EXTRA_TOOL_CALLS {
+                            next
+                        } else {
+                            scripted_text(&model, IN_TURN_DONE)
+                        }
+                    }
                 }
             }),
             |events| futures::stream::iter(events.into_iter().map(Ok)),
@@ -1989,12 +2067,13 @@ struct InTurnRun {
     job_id: String,
     /// The completion input the store held while the forker's run was open.
     admitted_input: String,
-    /// The run the completion input was finally associated with.
-    input_run: Option<String>,
+    /// Every forker input as the runtime settled it.
+    inputs: Vec<InputFact>,
     /// BoundaryAppendApplied events of the forker: (run id, input id).
     boundary_appends: Vec<(String, String)>,
-    /// RunCompleted events of the forker.
-    run_terminals: usize,
+    /// RunCompleted / RunFailed events of the forker.
+    runs_completed: usize,
+    runs_failed: usize,
 }
 
 impl InTurnRun {
@@ -2009,6 +2088,34 @@ impl InTurnRun {
                     .unwrap_or_else(|| panic!("assistant row without a run id: {row}"))
                     .to_string()
             })
+            .collect()
+    }
+
+    /// The run the forker's own prompt opened (its first assistant row).
+    fn original_run(&self) -> String {
+        self.assistant_runs()
+            .first()
+            .cloned()
+            .expect("the forker's turn wrote assistant rows")
+    }
+
+    fn completion_input(&self) -> &InputFact {
+        let key = format!("fork_off:{}", self.job_id);
+        let found: Vec<_> = self
+            .inputs
+            .iter()
+            .filter(|input| input.key.as_deref() == Some(key.as_str()))
+            .collect();
+        assert_eq!(found.len(), 1, "one completion input: {:#?}", self.inputs);
+        assert_eq!(found[0].input_id, self.admitted_input, "{:#?}", self.inputs);
+        found[0]
+    }
+
+    /// Distinct runs the forker's inputs were consumed by.
+    fn input_runs(&self) -> std::collections::BTreeSet<String> {
+        self.inputs
+            .iter()
+            .filter_map(|input| input.run.clone())
             .collect()
     }
 
@@ -2039,9 +2146,20 @@ impl InTurnRun {
             })
             .collect()
     }
+
+    /// Every input settled, consumed on its first attempt, no failed run.
+    fn assert_clean_terminals(&self) {
+        assert!(
+            self.inputs.iter().all(InputFact::consumed_first_time),
+            "every forker input is consumed on its first attempt: {:#?}",
+            self.inputs
+        );
+        assert_eq!(self.runs_failed, 0, "no failed run");
+    }
 }
 
 async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun {
+    let deadline = tokio::time::Instant::now() + WAIT * 2;
     let temp = tempfile::TempDir::new().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let probe = Arc::new(InTurnProbe::default());
@@ -2060,16 +2178,19 @@ async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun
         .await
         .expect("create mob");
     let handle = mob_state.handle_for(&mob_id).await.expect("mob handle");
-    handle
-        .spawn_spec(SpawnMemberSpec::new("keeper", AgentIdentity::from(PARENT)))
-        .await
-        .expect("spawn forker");
+    for member in [PARENT, BUS_PROBE] {
+        handle
+            .spawn_spec(SpawnMemberSpec::new("keeper", AgentIdentity::from(member)))
+            .await
+            .unwrap_or_else(|error| panic!("spawn {member}: {error}"));
+    }
     let session = handle
         .resolve_bridge_session_id(&AgentIdentity::from(PARENT))
         .await
         .expect("forker session");
     assert!(probe.forker_session.set(session.clone()).is_ok());
 
+    // Tap the mob event bus, and prove it delivers before the scenario runs.
     let mut bus = handle
         .subscribe_mob_events_with_config(meerkat_mob::MobEventRouterConfig {
             poll_interval: Duration::from_millis(20),
@@ -2077,15 +2198,53 @@ async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun
         })
         .await
         .expect("subscribe to the mob event bus");
-    let events: Arc<Mutex<Vec<meerkat_core::event::AgentEvent>>> = Arc::default();
+    let events: Arc<Mutex<Vec<(String, meerkat_core::event::AgentEvent)>>> = Arc::default();
     let sink = Arc::clone(&events);
     let tap = tokio::spawn(async move {
         while let Some(event) = bus.event_rx.recv().await {
-            if event.source.identity.as_str() == PARENT {
-                sink.lock().unwrap().push(event.envelope.payload);
-            }
+            sink.lock()
+                .unwrap()
+                .push((event.source.identity.to_string(), event.envelope.payload));
         }
     });
+    assert_eq!(
+        bounded_turn(&handle, BUS_PROBE, BUS_PROBE_PROMPT).await,
+        FOLLOW_UP_REPLY
+    );
+    while !events.lock().unwrap().iter().any(|(source, event)| {
+        source == BUS_PROBE && matches!(event, meerkat_core::event::AgentEvent::RunCompleted { .. })
+    }) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the mob event bus never delivered the probe member's run"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let forker_events = || -> Vec<meerkat_core::event::AgentEvent> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(source, _)| source == PARENT)
+            .map(|(_, event)| event.clone())
+            .collect()
+    };
+    let count = |events: &[meerkat_core::event::AgentEvent],
+                 pick: fn(&meerkat_core::event::AgentEvent) -> bool| {
+        events.iter().filter(|event| pick(event)).count()
+    };
+    fn run_completed(event: &meerkat_core::event::AgentEvent) -> bool {
+        matches!(event, meerkat_core::event::AgentEvent::RunCompleted { .. })
+    }
+    fn run_failed(event: &meerkat_core::event::AgentEvent) -> bool {
+        matches!(event, meerkat_core::event::AgentEvent::RunFailed { .. })
+    }
+    fn boundary_append(event: &meerkat_core::event::AgentEvent) -> bool {
+        matches!(
+            event,
+            meerkat_core::event::AgentEvent::BoundaryAppendApplied { .. }
+        )
+    }
 
     assert_eq!(
         bounded_turn(&handle, PARENT, IN_TURN_PROMPT).await,
@@ -2100,35 +2259,51 @@ async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun
             .as_str()
             .expect("job id")
             .to_string();
-    wait_for_single_record(&router, &session, &job_id).await;
-    // Let a follow-up run (or a wrong extra one) finish and its events flow.
-    let mut stable = 0;
-    let mut last = requests.lock().unwrap().len();
-    while stable < 10 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let now = requests.lock().unwrap().len();
-        if now == last {
-            stable += 1;
-        } else {
-            stable = 0;
-            last = now;
-        }
-    }
-    let history = history_messages(&session_history(&router, &session).await).clone();
-    let input_run = probe
-        .completion_input(&job_id)
-        .await
-        .and_then(|(_, run)| run.map(|run| run.to_string()));
     let admitted_input = probe
         .admitted_input
         .lock()
         .unwrap()
         .clone()
-        .expect("the completion input was admitted while the run was open")
-        .to_string();
+        .expect("the completion input was admitted while the run was open");
+
+    // Wait for the exact facts: the completion input settled, every forker
+    // input settled, and the terminal/boundary events this scenario owes.
+    let expected_runs = match after_child {
+        AfterChild::MoreToolCalls => 1,
+        AfterChild::FinishTurn => 2,
+    };
+    loop {
+        let inputs = probe.forker_inputs().await;
+        let completion_settled = inputs
+            .iter()
+            .any(|input| input.input_id == admitted_input && input.settled());
+        let seen = forker_events();
+        let events_owed = count(&seen, run_completed) + count(&seen, run_failed) >= expected_runs
+            && (after_child == AfterChild::FinishTurn || count(&seen, boundary_append) >= 1);
+        if completion_settled && inputs.iter().all(InputFact::settled) && events_owed {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the scenario never settled: inputs {inputs:#?}, forker events {seen:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // A bounded window in which nothing new may happen.
+    let requests_before = requests.lock().unwrap().len();
+    let inputs_before = probe.forker_inputs().await;
+    let before = (requests_before, inputs_before, forker_events().len());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let requests_after = requests.lock().unwrap().len();
+    let inputs_after = probe.forker_inputs().await;
+    let after = (requests_after, inputs_after, forker_events().len());
+    assert_eq!(before, after, "nothing new after the scenario settled");
+    assert!(tokio::time::Instant::now() < deadline);
+
+    let history = history_messages(&session_history(&router, &session).await).clone();
     tap.abort();
-    let events = events.lock().unwrap().clone();
-    let boundary_appends = events
+    let seen = forker_events();
+    let boundary_appends = seen
         .iter()
         .filter_map(|event| match event {
             meerkat_core::event::AgentEvent::BoundaryAppendApplied {
@@ -2137,40 +2312,49 @@ async fn run_in_turn_scenario(after_child: AfterChild, label: &str) -> InTurnRun
             _ => None,
         })
         .collect();
-    let run_terminals = events
-        .iter()
-        .filter(|event| matches!(event, meerkat_core::event::AgentEvent::RunCompleted { .. }))
-        .count();
     let requests = requests.lock().unwrap().clone();
+    let inputs = after.1;
     let _ = mob_state.mob_destroy(&mob_id).await;
     InTurnRun {
         requests,
         history,
         job_id,
         admitted_input,
-        input_run,
+        inputs,
         boundary_appends,
-        run_terminals,
+        runs_completed: count(&seen, run_completed),
+        runs_failed: count(&seen, run_failed),
     }
 }
 
 /// A running turn that keeps working after its child's record joined it
-/// (two more tool calls) carries the record in EVERY later model call of
-/// the turn, exactly once each, never re-appended; the record is one
-/// transcript row inside the one run, applied at that run's boundary, and
-/// no second run follows. (The single-next-call case is
+/// carries the record in EVERY later model call of the turn, exactly once
+/// each, never re-appended. The record is applied once, at a boundary of the
+/// forker's one run, and every input of that run is consumed by it; no
+/// second run follows. (The single-next-call case is
 /// e2e_fast_detached_completion_during_a_running_turn_joins_it.)
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_fast_in_turn_record_is_carried_once_by_every_later_call_of_the_turn() {
     let run = run_in_turn_scenario(AfterChild::MoreToolCalls, "joins").await;
+    let the_run = run.original_run();
     let turn = run.forker_turn_requests();
-    assert_eq!(turn.len(), 4, "fork, gated call, two tool steps: {turn:#?}");
-    assert_eq!(turn[0].records, 0, "nothing before the fork");
-    assert_eq!(
-        turn[1].records, 0,
-        "the child had not finished when this call opened"
+    let first = turn
+        .iter()
+        .position(|request| request.records > 0)
+        .unwrap_or_else(|| panic!("no request of the running turn carried the record: {turn:#?}"));
+    assert!(
+        first >= 2,
+        "not before the post-fork call's boundary: {turn:#?}"
     );
-    for (step, request) in turn.iter().enumerate().skip(2) {
+    assert!(
+        turn[..first].iter().all(|request| request.records == 0),
+        "{turn:#?}"
+    );
+    assert!(
+        turn.len() > first + 1,
+        "at least one later request of the turn: {turn:#?}"
+    );
+    for (step, request) in turn.iter().enumerate().skip(first) {
         assert_eq!(
             request.records, 1,
             "request {step} of the same turn carries the record exactly once: {request:#?}"
@@ -2182,23 +2366,25 @@ async fn e2e_fast_in_turn_record_is_carried_once_by_every_later_call_of_the_turn
         );
     }
 
-    let runs = run.assistant_runs();
-    let the_run = runs.first().expect("assistant rows").clone();
-    assert!(
-        runs.iter().all(|run_id| *run_id == the_run),
-        "every assistant row belongs to the forker's one run: {runs:?}"
-    );
     assert_eq!(
         run.boundary_appends,
         vec![(the_run.clone(), run.admitted_input.clone())],
-        "the admitted completion input was applied once, at a boundary of that run"
+        "the admitted completion input was applied once, at a boundary of the forker's run"
     );
     assert_eq!(
-        run.input_run.as_deref(),
-        Some(the_run.as_str()),
-        "the completion input belongs to that run"
+        run.completion_input().run.as_deref(),
+        Some(the_run.as_str())
     );
-    assert_eq!(run.run_terminals, 1, "one run, one terminal, no follow-up");
+    assert_eq!(
+        run.input_runs(),
+        std::collections::BTreeSet::from([the_run.clone()]),
+        "every forker input belongs to the one run: {:#?}",
+        run.inputs
+    );
+    run.assert_clean_terminals();
+    assert_eq!(run.runs_completed, 1, "one run, one terminal");
+    let runs = run.assistant_runs();
+    assert!(runs.iter().all(|run_id| *run_id == the_run), "{runs:?}");
     let rows = run.record_rows();
     assert_eq!(rows.len(), 1, "one transcript row: {:#?}", run.history);
     assert_eq!(run.history[rows[0] - 1]["role"], "tool_results");
@@ -2208,10 +2394,12 @@ async fn e2e_fast_in_turn_record_is_carried_once_by_every_later_call_of_the_turn
 
 /// The completion is admitted while the forker's last model call streams
 /// and no later boundary opens in that run: the record takes exactly one
-/// follow-up run, a distinct run that carries it once.
+/// follow-up run, a distinct run that consumes the completion input and
+/// carries the record once.
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_fast_detached_completion_without_a_later_boundary_takes_exactly_one_follow_up_turn() {
     let run = run_in_turn_scenario(AfterChild::FinishTurn, "fallback").await;
+    let original = run.original_run();
     let turn = run.forker_turn_requests();
     assert_eq!(turn.len(), 2, "fork, then the gated final call: {turn:#?}");
     assert!(
@@ -2224,23 +2412,28 @@ async fn e2e_fast_detached_completion_without_a_later_boundary_takes_exactly_one
         run.boundary_appends
     );
 
-    let runs = run.assistant_runs();
-    let original = runs.first().expect("assistant rows").clone();
-    let follow_ups: Vec<&String> = runs.iter().filter(|run_id| **run_id != original).collect();
-    assert!(
-        !follow_ups.is_empty() && follow_ups.iter().all(|run_id| **run_id == *follow_ups[0]),
-        "exactly one run after the original: {runs:?}"
-    );
-    let follow_up = follow_ups[0].clone();
+    let follow_up = run
+        .completion_input()
+        .run
+        .clone()
+        .expect("the completion input was consumed by a run");
+    assert_ne!(follow_up, original, "the follow-up is a distinct run");
     assert_eq!(
-        run.run_terminals, 2,
+        run.input_runs(),
+        std::collections::BTreeSet::from([original.clone(), follow_up.clone()]),
+        "exactly the original run and one follow-up run: {:#?}",
+        run.inputs
+    );
+    run.assert_clean_terminals();
+    assert_eq!(
+        run.runs_completed, 2,
         "the original run and one follow-up run"
     );
-    assert_eq!(
-        run.input_run.as_deref(),
-        Some(follow_up.as_str()),
-        "the admitted completion input ({}) was consumed by the follow-up run",
-        run.admitted_input
+    let runs = run.assistant_runs();
+    assert!(
+        runs.iter()
+            .all(|run_id| *run_id == original || *run_id == follow_up),
+        "{runs:?}"
     );
     let rows = run.record_rows();
     assert_eq!(rows.len(), 1, "saved exactly once: {:#?}", run.history);

@@ -35,8 +35,6 @@ them.
 
 ## [Unreleased]
 
-## [0.8.43] - 2026-09-26
-
 ### Breaking
 
 - `AgentEvent::RunStarted`, `RunCompleted`, and `RunFailed` gain an
@@ -101,6 +99,72 @@ them.
   containing one. Failed abandoned-input completion recovery now requires the
   exact recipient set and original run association; it cannot borrow a newer
   run's terminal or change that run's correlation.
+
+### Added
+
+- `meerkat_core::lifecycle::CoreExecutor::publish_boundary_appends_discarded(&mut self, &BoundaryAppendsDiscarded) -> Result<(), CoreExecutorError>`
+  and `meerkat_mob::MobSessionService::publish_boundary_appends_discarded_for_actor(&self, &LiveSessionActorWitness, &BoundaryAppendsDiscarded) -> Result<(), SessionError>`
+  are new async trait methods with default unsupported errors. Custom
+  executors and service decorators must implement or forward them to expose
+  persisted discard events. `meerkat_session::EphemeralSessionService` and
+  `PersistentSessionService` add the same async
+  `publish_boundary_appends_discarded_for_actor` method, bound to the original
+  live actor witness rather than a replacement actor with the same session ID.
+- Python, TypeScript and Web SDK run-boundary events expose optional generated
+  `TranscriptMessageIdentity` values, preserving the owner's snake_case nested
+  fields and absent facts. The Python and TypeScript parsers validate supplied
+  identity records without manufacturing missing run or interaction IDs.
+- `TranscriptMessageIdentity`, `LiveContextObservationId` and
+  `RealtimeMessageOrigin` implement `schemars::JsonSchema` when the `schema`
+  feature is enabled. `SystemNoticeMessage.created_at` remains defaulted to
+  the current time at deserialization, without freezing a generation-time
+  timestamp into emitted schemas.
+
+### Fixed
+
+- Member-host shutdown cancels outstanding event polls and refuses late
+  successful pages from the stopped observation. After a current host-status
+  failure, the next authenticated observation re-derives wired-peer trust
+  obligations even when it carries the previously observed boot token.
+- Durable notice history and live boundary events carry the same canonical
+  notice rows, exact session/run/input provenance and ordinal in the input's
+  complete append list. `transcript_start` reports the application-time image
+  position; compaction can change its later history position. A run terminal
+  alone does not prove those rows were discarded.
+- `boundary_appends_discarded` is published only after the durable join owner
+  resolves the exact application and any required requeue write succeeds.
+  A failed persistence write emits no discard event, and a discard from one
+  run cannot invalidate a later application of the same input in another run.
+- Canonical history/revision exports and retained session snapshots preserve
+  notice provenance. Ordinary transcript rewrites strip caller-supplied
+  `runtime_origin`, and content digests exclude it, so provenance neither
+  grants caller authority nor changes content identity.
+- Terminal peer responses are selected individually so each run receives one
+  valid terminal notice. Ordinary peer batching retains its existing order.
+- Failed input receipts retain their retry carrier until exact durable
+  finalization succeeds. Recovery checks the abandoned batch's own run and
+  failure evidence without replacing a newer run's correlation.
+- Retained in-turn appends finalize their durable completion receipt even
+  when no process-local completion observer is registered.
+- Run boundary events carry the same interaction, run, objective, and realtime
+  lineage as persisted assistant history. The start is published after the
+  existing execution authority selects the run ID and before its model output;
+  pre-start failures cannot claim a previous or caller-supplied run ID.
+- Responses function tools explicitly opt out of automatic strict schema
+  normalization. Optional nonnullable fields retain their authored contract
+  instead of becoming required provider arguments, including optional WorkGraph
+  scheduling dates. Dispatcher argument validation is unchanged.
+
+- Host shutdown cancels outstanding observation polls and rejects pages that
+  become ready after the owner stops. A current host-status failure clears the
+  cached boot observation so authenticated recovery reinstalls canonical peer
+  trust even when the boot token is unchanged. Failed installs remain pending
+  until acknowledged; stale binding failures cannot invalidate the current
+  binding.
+
+## [0.8.43] - 2026-09-26
+
+### Breaking
 
 - Behavior-only: `fork_off` is detached (`meerkat-mob-mcp`
   `AgentMobToolSurface`) on hosts that declare
@@ -433,24 +497,6 @@ them.
 
 ### Added
 
-- `meerkat_core::lifecycle::CoreExecutor::publish_boundary_appends_discarded(&mut self, &BoundaryAppendsDiscarded) -> Result<(), CoreExecutorError>`
-  and `meerkat_mob::MobSessionService::publish_boundary_appends_discarded_for_actor(&self, &LiveSessionActorWitness, &BoundaryAppendsDiscarded) -> Result<(), SessionError>`
-  are new async trait methods with default unsupported errors. Custom
-  executors and service decorators must implement or forward them to expose
-  persisted discard events. `meerkat_session::EphemeralSessionService` and
-  `PersistentSessionService` add the same async
-  `publish_boundary_appends_discarded_for_actor` method, bound to the original
-  live actor witness rather than a replacement actor with the same session ID.
-- Python, TypeScript and Web SDK run-boundary events expose optional generated
-  `TranscriptMessageIdentity` values, preserving the owner's snake_case nested
-  fields and absent facts. The Python and TypeScript parsers validate supplied
-  identity records without manufacturing missing run or interaction IDs.
-- `TranscriptMessageIdentity`, `LiveContextObservationId` and
-  `RealtimeMessageOrigin` implement `schemars::JsonSchema` when the `schema`
-  feature is enabled. `SystemNoticeMessage.created_at` remains defaulted to
-  the current time at deserialization, without freezing a generation-time
-  timestamp into emitted schemas.
-
 - `meerkat-core`: the provided method `BlobStore::attest_address(&self, blob_id,
   payload)` (the default attests nothing), `BlobAddressAttestation`
   (`StoreAddress`, `Unattested`), `StoredImageBlobVerification`
@@ -631,8 +677,7 @@ them.
   `TransientTurnContextStateHandle::discard_uncommitted_durable_deliveries`
   and `EphemeralSessionService::discard_uncommitted_boundary_deliveries`.
 - The `boundary_append_applied` event (`AgentEvent::BoundaryAppendApplied
-  { run_id, input_id, content, append_count, notices, transcript_start }`)
-  announces a durable append the
+  { run_id, input_id, content, append_count }`) announces a durable append the
   runner wrote into the running turn, so SSE clients and consoles see it live.
   It is in the contracts event catalog and the generated SDK event inventories.
 - `meerkat_runtime::ingress_types::LiveBoundaryDeliveryClass` and
@@ -889,39 +934,6 @@ them.
   coordinator-owned binding of a member that never joined the roster: its
   rollback retires the coordinator's operation and releases the binding, so a
   later spawn of the same session under another owner is no longer rejected.
-- Member-host shutdown cancels outstanding event polls and refuses late
-  successful pages from the stopped observation. After a current host-status
-  failure, the next authenticated observation re-derives wired-peer trust
-  obligations even when it carries the previously observed boot token.
-- Durable notice history and live boundary events carry the same canonical
-  notice rows, exact session/run/input provenance and ordinal in the input's
-  complete append list. `transcript_start` reports the application-time image
-  position; compaction can change its later history position. A run terminal
-  alone does not prove those rows were discarded.
-- `boundary_appends_discarded` is published only after the durable join owner
-  resolves the exact application and any required requeue write succeeds.
-  A failed persistence write emits no discard event, and a discard from one
-  run cannot invalidate a later application of the same input in another run.
-- Canonical history/revision exports and retained session snapshots preserve
-  notice provenance. Ordinary transcript rewrites strip caller-supplied
-  `runtime_origin`, and content digests exclude it, so provenance neither
-  grants caller authority nor changes content identity.
-- Terminal peer responses are selected individually so each run receives one
-  valid terminal notice. Ordinary peer batching retains its existing order.
-- Failed input receipts retain their retry carrier until exact durable
-  finalization succeeds. Recovery checks the abandoned batch's own run and
-  failure evidence without replacing a newer run's correlation.
-- Retained in-turn appends finalize their durable completion receipt even
-  when no process-local completion observer is registered.
-- Run boundary events carry the same interaction, run, objective, and realtime
-  lineage as persisted assistant history. The start is published after the
-  existing execution authority selects the run ID and before its model output;
-  pre-start failures cannot claim a previous or caller-supplied run ID.
-- Responses function tools explicitly opt out of automatic strict schema
-  normalization. Optional nonnullable fields retain their authored contract
-  instead of becoming required provider arguments, including optional WorkGraph
-  scheduling dates. Dispatcher argument validation is unchanged.
-
 - The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
   and 033 (the office demo) pass again and run in pull-request CI. A new
   "Example web suites" lane builds the `sdks/web` wasm runtime once with the

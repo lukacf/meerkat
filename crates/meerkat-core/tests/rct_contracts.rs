@@ -59,6 +59,21 @@ allowlist = ["git *", "ls -la"]
 }
 
 #[test]
+fn test_shell_max_output_chars_parses_and_defaults() -> Result<(), Box<dyn std::error::Error>> {
+    let config: Config = toml::from_str("[shell]\nmax_output_chars = 1234\n")?;
+    assert_eq!(config.shell.max_output_chars, 1234);
+    // A config written before the key existed keeps the default.
+    let config: Config = toml::from_str("[shell]\ntimeout_secs = 5\n")?;
+    assert_eq!(config.shell.timeout_secs, 5);
+    assert_eq!(
+        config.shell.max_output_chars,
+        meerkat_core::config::DEFAULT_SHELL_MAX_OUTPUT_CHARS
+    );
+    assert_eq!(Config::default().shell.max_output_chars, 40_000);
+    Ok(())
+}
+
+#[test]
 fn test_config_env_contract() -> Result<(), Box<dyn std::error::Error>> {
     let env = std::collections::HashMap::from([
         ("RKAT_MODEL".to_string(), "env-model".to_string()),

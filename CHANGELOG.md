@@ -175,6 +175,75 @@ them.
   `EffectKind::*`, `TransitionId::*`, and `MobMachineCatalogInput::*` move.
   Discriminants of generated machine enums are never a stable contract; match
   by name. Mob journals written by 0.8.42 load unchanged.
+- `meerkat_tools::builtin::ToolOutput` gains the variant
+  `JsonRenderedAsText { value, text }`; exhaustive matches must handle it.
+  `meerkat_tools::builtin::shell::ShellConfig` and `meerkat_core::ShellDefaults`
+  gain the public field `max_output_chars: usize` (serde-defaulted to 40000).
+- Dispatched `shell` and `shell_job_status` results are now one `Text` content
+  block instead of one `Structured` JSON block. This applies to the transcript
+  `tool_results` content, the `tool_result_received` and
+  `tool_execution_completed` event `content`, and every surface that carries
+  them (REST, RPC, MCP, SDKs). A `shell` result no longer carries the
+  `exit_code`, `stdout`, `stderr`, `timed_out`, `duration_secs`,
+  `stdout_lossy`, `stderr_lossy` and `placement` fields; a `shell_job_status`
+  result no longer carries the `BackgroundJob` fields (`id`, `command`,
+  `working_dir`, `placement`, `timeout_secs`, `started_at_unix`, `status`).
+  Exit status, streams and job state appear only inside the text. Code that
+  calls the tool directly (`BuiltinTool::call`) still gets the typed
+  `ShellOutput` or `BackgroundJob` through `ToolOutput::into_json`.
+- `meerkat_core::Usage` gains the public field `reasoning_tokens:
+  Option<u64>`, and `meerkat_contracts::WireUsage` gains the same field.
+  `meerkat_core::RunResult` gains `run_usage: Option<Usage>` and
+  `request_usage: Vec<TurnUsage>`, and `meerkat_contracts::WireRunResult`
+  gains `run_usage: Option<WireUsage>` and `request_usage: Vec<WireTurnUsage>`.
+  Struct literals naming every field must add them; all are serde-defaulted
+  and skipped when empty, so the JSON shape is additive.
+- Behaviour-only: `Usage::add` and `CumulativeUsage::add_turn` now aggregate
+  `cache_read_tokens`, `cache_creation_tokens` and `reasoning_tokens` instead of
+  clearing them, and `CumulativeUsage::from_usage` keeps them instead of
+  clearing them. `Usage::add` sums already-normalized totals field by field;
+  `add_turn` (per call) and `from_usage` (per total) clamp cache reads to the
+  input total and cache writes to what reads leave, so reads plus writes never
+  exceed input, and clamp reasoning to output. `Usage::cumulative_delta_since`
+  and `Usage::is_zero` are new.
+- Behaviour-only: `Session::record_cumulative_usage` normalizes the stored total
+  before adding, as `record_turn_usage` already did, so a pre-0.8.22 total with
+  raw summed cache counters is never mixed with normalized deltas.
+- `meerkat_core::agent::compact::CompactionOutcome` gains the public field
+  `summary_source: CompactionSummarySource` (new enum: `ProviderCall`,
+  `HostCurator`, `MechanicalFallback`).
+- Not measured by the semver gate: `meerkat_live::host::ObservationOutcome::UserContentCommitted`
+  now holds `observation: Box<LiveAdapterObservation>` instead of the
+  observation by value; the larger `Usage` pushed the enum over the
+  large-variant limit.
+- Behaviour-only: Gemini `output_tokens` now counts thinking tokens as well as candidates,
+  matching how Gemini bills them. Output totals rise on Gemini thinking models,
+  and `max_tokens` budgets now charge thinking, so a Gemini run can reach
+  `budget_exhausted` earlier than before.
+- `meerkat_core::AgentEvent::ExtractionSucceeded` and
+  `AgentEvent::ExtractionFailed` gain the public field `request_usage:
+  Vec<TurnUsage>`, one usage row per answered structured-output extraction
+  request. Struct literals naming every field must add it; it is
+  serde-defaulted and skipped when empty, so the JSON shape is additive.
+- `meerkat_core::AgentEvent::ExtractionSucceeded` gains the public field
+  `origin: StructuredOutputOrigin` (new enum `meerkat_core::StructuredOutputOrigin`:
+  `ExtractionRequest`, `FinalReply`). Struct literals naming every field must
+  add it; it is serde-defaulted to `extraction_request` and omitted when it has
+  that value, so the JSON shape is additive and older event logs read as
+  before.
+- Behaviour: `turn_completed` is now published for every committed agent-loop
+  provider call, including tool-loop calls (`stop_reason: tool_use`), instead of
+  only the call that closes the run. It pairs with the call's `turn_started`.
+  Consumers that counted `turn_completed` as one per run, or treated it as the
+  end of a run, must read `run_completed` for that. Consumers summing
+  `turn_completed.usage` rows now see every agent-loop call.
+- Behaviour-only: Chat Completions backends that report reasoning beside
+  `completion_tokens` (xAI) are detected from the row's exact arithmetic
+  (`total_tokens` equals prompt plus completion plus reasoning), and their
+  `output_tokens` now counts reasoning. Output totals rise on those backends,
+  and `max_tokens` budgets now charge reasoning, so such a run can reach
+  `budget_exhausted` earlier than before. A backend that omits `total_tokens`
+  is read as OpenAI's convention (reasoning inside completion).
 
 ### Added
 
@@ -255,6 +324,35 @@ them.
 - `fork_off` accepts `max_run_secs`: an optional autokill that cancels the
   child's run and retires the child once it has run that long. Omitted means no
   limit.
+- Cumulative usage reports cached input, cache writes and reasoning. The run
+  result's `usage` (what `rkat run --output json` prints), `run_completed.usage`,
+  the RPC and REST run results and mob run accounting now carry
+  `cache_read_tokens`, `cache_creation_tokens` and a new `reasoning_tokens`,
+  normalized on every provider so `cache_read_tokens <= input_tokens` and
+  `reasoning_tokens <= output_tokens`. Harnesses that read `cache_read_tokens`
+  from the run result no longer see `null` on OpenAI runs.
+- Per-call usage records reasoning tokens from OpenAI Responses
+  (`output_tokens_details.reasoning_tokens`), Chat Completions
+  (`completion_tokens_details.reasoning_tokens`) and Gemini
+  (`thoughtsTokenCount`).
+- Run results carry `run_usage`, the usage of that run alone, beside the
+  session-cumulative `usage`, and `request_usage`, one row per provider request
+  the run made (tool-loop calls, structured-output extraction and compaction
+  summaries made by the model included; curator and mechanical summaries make
+  no request and add no row). A run that suspends for callback results keeps
+  one account: once its staged callback results are applied, the next run
+  continues it, whether that is `run_pending` or a content turn. The Python and TypeScript SDK `RunResult`
+  expose them as `run_usage`/`request_usage` and `runUsage`/`requestUsage`,
+  the `@rkat/web` `TurnResult` as `run_usage`/`request_usage`, and every SDK
+  `Usage` gains `reasoning_tokens`/`reasoningTokens`. The generated
+  `WireUsage`/`WireRunResult` twins gain the same fields and a `WireTurnUsage`.
+- `Session::reported_total_usage` returns the session total as every
+  reporting surface shows it, normalized, without touching the stored total.
+- Extraction outcome events carry `request_usage`, one per-call usage row for
+  each extraction request (retries after a failed validation included), so
+  structured-output extraction is accounted on the event stream.
+- `meerkat_core::usage_summary` and `turn_usage_summary` format the one-line
+  token summaries `rkat run --verbose` prints.
 
 ### Changed
 
@@ -306,6 +404,79 @@ them.
 - A completed `fork_off` child stays seated until its forker retires it.
   Meerkat adds no retention limit of its own; MobKit applies its
   `idle_retire_secs` policy to fork children.
+- Foreground `shell` results reach the model as compact text instead of JSON:
+  a status line (`exit code N (Xs)`, or the timeout), stdout as is, and stderr
+  under `[stderr]` only when non-empty. The JSON envelope escaped every stream
+  and carried absolute placement paths and `false` flags, and it was re-sent on
+  every later request. Transcripts and events carry the same text (see
+  Breaking).
+- `shell_job_status` results reach the model as the same compact text: the job
+  ID and state, then the exit status and output of a completed job. The detail
+  of a background-job completion notice (and of the `background_job_completed`
+  event) is now that exit status and output instead of a Rust debug dump of the
+  job status.
+- Long shell output keeps its head and its tail, in foreground calls and
+  background jobs. stdout is capped at `[shell] max_output_chars` characters
+  (default 40000, about 10K tokens; stderr gets half). A cut moves to a line
+  boundary when the line it lands in fits the cap, and the marker names the
+  omitted lines, the line where the head ends and the line where the tail
+  starts, with a `sed -n` range that pages them. Foreground calls used to keep
+  only the last 100000 characters and background jobs the last 1 MiB, which
+  dropped the start of long diffs and file listings.
+- Smaller fixed per-request prompt: the system prompt no longer carries a
+  `# Available Tools` inventory. Every tool definition already reaches the
+  provider through the request tool array, so the inventory repeated each
+  composed tool's full description on every request (about 11-12 KB on a
+  CLI `--tools workspace` or `--yolo` session) and could not follow later
+  composition or visibility changes. Only guidance for families that are
+  actually composed remains (comms usage, deferred catalog discovery, skill
+  discovery). The composed tool set and dispatch are unchanged.
+  Behavior-only: `meerkat_skills::renderer::render_inventory` in collection
+  mode no longer names `browse_skills`/`load_skill`; both tools are
+  default-disabled, and the factory now appends
+  `meerkat_tools::builtin::skills::SKILL_DISCOVERY_TOOL_GUIDANCE` only when
+  both are composed.
+- Trimmed the largest tool definitions without dropping information:
+  `apply_patch` documents its grammar once (the argument schema no longer
+  repeats it) and its example now matches the real anchor semantics;
+  `generate_image` keeps per-field rules in its schema only and advertises the
+  image-reference definition once; the comms send tools document image
+  references once, on the `blocks` argument; the OpenAI and Gemini image
+  parameter notes are shorter.
+  Behavior-only: `meerkat_comms::mcp::tools::tools_list` returns the slimmer
+  definitions.
+- OpenAI tool emission drops the root `$schema` and `title` annotations that
+  schemars stamps on every derived tool schema (Gemini emission already did).
+  `ToolDef.input_schema` is unchanged. Behavior-only:
+  `meerkat_openai::normalize_openai_tool_parameters_schema` removes both root
+  keys.
+- Structured output (`--schema`, `output_schema`) shows the model the schema
+  up front and skips the extraction request when it is not needed. Every
+  request of a schema-bearing run carries a delimited `<structured_output>`
+  section, appended to the system prompt, stating that the final reply must be
+  a single JSON value matching the schema and including the schema as the
+  provider compiles it for validation. The section is byte-identical across
+  the run's requests, so prompt caching is unaffected, and it is request-only:
+  it is never written into the session transcript. Runs without a schema are
+  unchanged. When the final reply of the tool loop already validates (after
+  the existing code-fence and named-wrapper normalization, and with known JSON
+  Schema `format` keywords such as `date-time`, `email`, `uri` and `uuid`
+  asserted, since native constrained decoding enforces them on the extraction
+  request), it becomes `structured_output` and no extraction request is sent.
+  `RunResult` and the RPC, REST and SDK result shapes are the same as for a
+  successful extraction, `RunResult.text` is that reply, and the events are
+  `run_completed` then `extraction_succeeded`, whose new `origin` field is
+  `final_reply` (with no `request_usage`), so the ATIF export and `--verbose`
+  output record no extraction request for it. Any other final reply runs the
+  extraction path exactly as before: same prompt, temperature 0, no tools, the
+  native schema slot with unchanged `strict` defaults, and the same retry and
+  attempt accounting. After a sticky model fallback, the retried request shows
+  the schema as the fallback provider compiles it. Requests that reference
+  Gemini cached content are not given the section, and provider-authored cache
+  breakpoints over a request carrying it are not recorded as durable cache
+  evidence, since they describe a system prompt the transcript does not
+  contain. `meerkat_core::structured_output` and
+  `meerkat_core::StructuredOutputOrigin` are new public API.
 
 ### Fixed
 
@@ -321,7 +492,6 @@ them.
   through the browser connection. Its offline lane now names the missing
   runtime and page build instead of failing later with "Page failed to start".
   `MEERKAT_WEB_WASM_OPT=0` skips the wasm-opt pass in `sdks/web` builds.
-
 - The release semver gate identifies crates by package name across the baseline
   and candidate trees. After the move into `crates/` it resolved every crate by
   its old directory, classified all of them as identical or first publications,
@@ -417,7 +587,82 @@ them.
   forward `has_live_session`, `fork_persisted_session` and the other
   live-session, checkpointer and fork methods of `SessionService` and
   `MobSessionService` instead of falling back to the trait defaults.
-
+- The `shell` schema no longer advertises values the tool rejects:
+  `timeout_secs` declares a minimum of 1, and `background` is offered only when
+  durable background jobs are available, instead of failing with "requested
+  tool execution mode Detached is not supported".
+- Valid UTF-8 shell output longer than the capture buffer is no longer reported
+  as invalid UTF-8 when the buffer's edge splits a character.
+- A run that suspends for callback results continues its usage account only
+  after that run's staged callback results are applied; the next run of the
+  agent then continues it, whether `run_pending` or a content turn that carries
+  a new prompt. A run with no applied results discards the suspended account
+  instead of absorbing its calls. The carry-over is in memory, so an agent
+  rebuilt from storage resumes with a fresh account.
+- Pre-0.8.22 sessions report normalized usage everywhere: session read
+  `billing.usage`, mob run accounting (`usage_total` and each member), the run
+  result, run deltas and compaction rollback. Aborting an uncommitted
+  compaction on such a session no longer moves the reported total, and an abort
+  that recorded nothing restores the stored total byte for byte.
+- `rkat run --export-atif` records every provider request of the run as an
+  ATIF step with its own metrics: each tool-call turn, the answering turn and
+  each structured-output extraction request. It used to keep only the final
+  agent step, because a tool-call turn published no completion and was
+  overwritten by the next turn. Event logs written by earlier releases now
+  export their tool-call turns too, as unmetered steps. Step metrics carry
+  `cache_creation_tokens` and `reasoning_tokens` in `extra`, steps name their
+  model, and `final_metrics` sums every step.
+- `rkat run` and `rkat run --resume` wait for the session event log to finish
+  writing before exiting, and the drained `.rkat/sessions/<id>/events.jsonl` is
+  synced to disk. A run that streamed many deltas could exit 0 with the log
+  (and the realm event store the ATIF export reads) ending mid `text_delta`,
+  with no `run_completed`. If the log cannot finish, `rkat` now says so on
+  stderr. A failed keep-alive signal wait no longer skips this shutdown.
+- `rkat run --verbose` and `--stream` print one token line per provider request,
+  the first request and each extraction request included, on the presented
+  input denominator with cached and reasoning counts, and the closing `total`
+  is the run's `run_usage`. It used to print a line only for the final turn and
+  a total that was the session-cumulative `run_completed.usage`, which excludes
+  extraction and, on a resumed session, includes earlier runs. In keep-alive
+  mode, whose later runs return no result, each run's total is folded from its
+  per-request lines.
+- The OpenAI prompt-cache docs describe the default `prompt_cache_key`
+  correctly. It is one key per model (`meerkat:profile:openai:<model>`),
+  shared across sessions so identical system and tool prefixes can reuse
+  OpenAI's prefix cache, not a per-session key derived from the `SessionId`.
+  The key only routes requests, never proves a cache hit, and still needs a
+  byte-identical prefix; very high aggregate request rates on one model can
+  overflow OpenAI's routing for a single key. The docs also name the actual
+  GPT-5.6 default mode, `explicit`, instead of `implicit`. Behaviour is
+  unchanged.
+- Anthropic structured output works with schemas that use JSON Schema keywords
+  Anthropic's native slot rejects. The extraction request sent the full schema
+  in `output_config.format`, so a schema with `minimum`/`maximum` on a number
+  or integer (or `multipleOf`, `exclusiveMinimum`/`exclusiveMaximum`,
+  `maxItems`, `uniqueItems`, `minItems` above 1, `contains`,
+  `minProperties`/`maxProperties`, `propertyNames`, `dependentRequired`,
+  `dependentSchemas`, `dependencies`, `unevaluatedProperties`, `not`,
+  `oneOf`, or a pydantic discriminated union's `discriminator`) failed with
+  HTTP 400 and the run ended with `extraction_error` and no
+  `structured_output`. The slot now gets a lowered copy: those keywords are
+  removed (`oneOf` becomes `anyOf`) and restated in the field's
+  `description`. A keyword is lowered only where removing it widens what the
+  slot accepts and meerkat's validator still enforces it for the schema's
+  draft (`$schema`, 2020-12 when absent), so a reply that breaks a bound fails
+  validation and is retried as before. `discriminator` is the exception: it
+  is an OpenAPI annotation that forbids nothing. String `format` values
+  outside Anthropic's list are not lowered, because the extraction-phase
+  validator treats `format` as an annotation (validate-first asserts known
+  formats on the final reply only), so nothing would enforce a removed format
+  on the extraction reply; those schemas still fail loudly with HTTP 400. The
+  `<structured_output>` section shows the validation schema, bounds included,
+  never the lowered slot copy. `compile_schema` and
+  `schema_warnings` are unchanged: the lowering adds no warning and
+  `compat: strict` does not reject the lowered keywords, since validation
+  enforces them. Keywords Anthropic accepts (`minLength`, `maxLength`,
+  `pattern`, supported formats, `minItems` 0 or 1) are sent as before, and a
+  schema without rejected keywords is sent byte-identical. OpenAI,
+  OpenAI-compatible and Gemini requests are unchanged.
 ## [0.8.42] - 2026-09-24
 
 ### Added

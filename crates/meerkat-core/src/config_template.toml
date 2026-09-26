@@ -17,6 +17,7 @@ program = "nu"
 timeout_secs = 30
 security_mode = "unrestricted"
 security_patterns = []
+max_output_chars = 40000
 
 [rest]
 host = "127.0.0.1"

@@ -41,6 +41,13 @@ use serde_json::{Map, Value};
 /// (quoted from the validator message in the module documentation).
 const ROOT_REJECTED_KEYWORDS: &[&str] = &["not", "oneOf", "anyOf", "allOf", "enum"];
 
+/// Root annotations that carry no validation meaning for function parameters.
+/// Schemars stamps every derived tool schema with the meta-schema URL and the
+/// Rust input type name; neither helps the model, and on a full tool surface
+/// they add several KB to every request. They are dropped at emission only;
+/// `ToolDef.input_schema` itself is unchanged.
+const ROOT_ANNOTATION_KEYWORDS: &[&str] = &["$schema", "title"];
+
 /// Normalize a tool's `input_schema` for OpenAI function-parameter emission.
 ///
 /// - Local `$ref`s (`#/$defs/...`, `#/definitions/...`) are inlined; the
@@ -58,6 +65,7 @@ const ROOT_REJECTED_KEYWORDS: &[&str] = &["not", "oneOf", "anyOf", "allOf", "enu
 ///   call time.
 /// - A root without a `type` (or with a type array that admits `object`) is
 ///   declared `"type": "object"`.
+/// - Root `$schema` and `title` annotations are removed.
 /// - Nothing below the root is rewritten apart from `$ref` inlining.
 ///
 /// Returns [`Cow::Borrowed`] when the schema already satisfies every rule.
@@ -81,6 +89,9 @@ pub fn normalize_openai_tool_parameters_schema<'a>(
 
     let mut normalized = inline_local_schema_refs(schema, schema, &mut Vec::new(), 0);
     if let Value::Object(root) = &mut normalized {
+        for keyword in ROOT_ANNOTATION_KEYWORDS {
+            root.remove(*keyword);
+        }
         root.remove("not");
         root.remove("enum");
         fold_root_combinator(root, "allOf", RequiredMerge::Union);
@@ -102,6 +113,7 @@ pub fn normalize_openai_tool_parameters_schema<'a>(
 fn needs_rewrite(root: &Map<String, Value>, schema: &Value) -> bool {
     if ROOT_REJECTED_KEYWORDS
         .iter()
+        .chain(ROOT_ANNOTATION_KEYWORDS.iter())
         .chain(["$defs", "definitions"].iter())
         .any(|keyword| root.contains_key(*keyword))
     {
@@ -488,6 +500,32 @@ mod tests {
     }
 
     #[test]
+    fn root_schema_and_title_annotations_are_dropped_at_emission() {
+        let schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "TaskGetParams",
+            "description": "Parameters for task_get",
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "title": "nested titles are untouched"}
+            },
+            "required": ["id"]
+        });
+
+        let normalized =
+            normalize_openai_tool_parameters_schema("task_get", &schema).expect("object root");
+
+        assert!(normalized.get("$schema").is_none());
+        assert!(normalized.get("title").is_none());
+        assert_eq!(normalized["description"], "Parameters for task_get");
+        assert_eq!(
+            normalized["properties"]["id"]["title"], "nested titles are untouched",
+            "only root annotations are dropped"
+        );
+        assert_eq!(normalized["required"], json!(["id"]));
+    }
+
+    #[test]
     fn schema_already_in_emission_shape_is_returned_borrowed() {
         let schema = json!({
             "type": "object",
@@ -508,7 +546,10 @@ mod tests {
         );
         assert_eq!(*normalized, schema);
 
-        for keyword in ROOT_REJECTED_KEYWORDS {
+        for keyword in ROOT_REJECTED_KEYWORDS
+            .iter()
+            .chain(ROOT_ANNOTATION_KEYWORDS)
+        {
             let mut rejected = schema.clone();
             rejected[*keyword] = json!([]);
             assert!(

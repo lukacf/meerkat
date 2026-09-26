@@ -203,6 +203,39 @@ impl SessionProjector {
             .await
     }
 
+    /// Make a session's projected files durable.
+    ///
+    /// Each projection write flushes `events.jsonl` to the operating system
+    /// but does not sync it, which keeps a burst of streamed deltas cheap. A
+    /// projection that has drained syncs once, so the derived log a process
+    /// leaves behind when it exits is complete on disk rather than only in
+    /// the page cache. Files the projection never wrote are skipped.
+    pub async fn sync(&self, session_id: &SessionId) -> Result<(), ProjectionError> {
+        let dir = self.session_dir(session_id);
+        for file_name in ["events.jsonl", "summary.txt", "checkpoint"] {
+            // Opened for writing because some platforms refuse to sync a
+            // read-only handle; nothing is written through it.
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.join(file_name))
+                .await
+            {
+                Ok(file) => file.sync_all().await.map_err(ProjectionError::Io)?,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(ProjectionError::Io(err)),
+            }
+        }
+        // The file names themselves live in the directory: sync it too so a
+        // freshly created log survives a crash right after exit.
+        #[cfg(unix)]
+        match tokio::fs::File::open(&dir).await {
+            Ok(directory) => directory.sync_all().await.map_err(ProjectionError::Io)?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(ProjectionError::Io(err)),
+        }
+        Ok(())
+    }
+
     /// Read the last checkpoint seq for a session (0 if no checkpoint).
     pub async fn read_checkpoint(&self, session_id: &SessionId) -> u64 {
         match self.read_checkpoint_state(session_id).await {
@@ -870,6 +903,37 @@ mod tests {
             std::fs::metadata(session_dir.join("events.jsonl"))
                 .unwrap()
                 .len()
+        );
+    }
+
+    /// Syncing a drained projection leaves the files it wrote untouched, and
+    /// a session the projection never wrote to is not an error.
+    #[tokio::test]
+    async fn test_projector_sync_keeps_projected_files_and_skips_absent_ones() {
+        let dir = TempDir::new().unwrap();
+        let projector = SessionProjector::new(dir.path().join(".rkat"));
+        let store = MemEventStore::new();
+        let sid = SessionId::new();
+
+        projector
+            .sync(&sid)
+            .await
+            .expect("a session with no projected files syncs as a no-op");
+
+        store.add_events(
+            &sid,
+            &[AgentEvent::TextDelta {
+                delta: "partial".to_string(),
+            }],
+        );
+        projector.project(&store, &sid, 1).await.unwrap();
+        let events_path = projector.session_dir(&sid).join("events.jsonl");
+        let before = std::fs::read(&events_path).unwrap();
+        projector.sync(&sid).await.expect("projected files sync");
+        assert_eq!(std::fs::read(&events_path).unwrap(), before);
+        assert!(
+            !projector.session_dir(&sid).join("summary.txt").exists(),
+            "sync must not create files the projection never wrote"
         );
     }
 

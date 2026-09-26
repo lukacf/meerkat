@@ -2190,9 +2190,16 @@ impl LlmClient for GeminiClient {
                             yield LlmEvent::UsageUpdate {
                                 usage: meerkat_core::TurnUsage::try_from_usage(Usage {
                                     input_tokens: usage.prompt_token_count.unwrap_or(0),
-                                    output_tokens: usage.candidates_token_count.unwrap_or(0),
+                                    // Gemini bills thinking separately from
+                                    // candidates; output covers both so
+                                    // reasoning stays a subset of output.
+                                    output_tokens: usage
+                                        .candidates_token_count
+                                        .unwrap_or(0)
+                                        .saturating_add(usage.thoughts_token_count.unwrap_or(0)),
                                     cache_creation_tokens: None,
                                     cache_read_tokens: usage.cached_content_token_count,
+                                    reasoning_tokens: usage.thoughts_token_count,
                                     provider_accounting: Some(
                                         meerkat_core::ProviderTokenAccounting::gemini(
                                             &request.model,
@@ -2385,6 +2392,8 @@ struct GeminiUsage {
     prompt_token_count: Option<u64>,
     cached_content_token_count: Option<u64>,
     candidates_token_count: Option<u64>,
+    #[serde(default)]
+    thoughts_token_count: Option<u64>,
 }
 
 #[cfg(test)]
@@ -3941,6 +3950,102 @@ mod tests {
         assert_eq!(id_to_name[1], ("fc_1".to_string(), "write_file"));
         assert_eq!(id_to_name[2], ("fc_2".to_string(), "search")); // Second search gets fc_2
         assert_eq!(id_to_name[3], ("fc_3".to_string(), "read_file"));
+    }
+
+    // =========================================================================
+    // Structured-output schema pins
+    //
+    // Anthropic lowers the schema it sends in its native structured-output
+    // slot. These pins hold this adapter's compiled schema and request slot
+    // byte-identical for schemas that carry keywords Anthropic's slot
+    // rejects (numeric bounds, array and object constraints, `oneOf`, `not`,
+    // unsupported string formats), so that lowering can never leak here.
+    // =========================================================================
+
+    /// The live-matrix review schema (numeric bounds on `number` and `integer`).
+    fn pinned_review_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "verdict": {"type": "string", "enum": ["approve", "request_changes", "comment"]},
+                "inline_comments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "line": {"type": "integer", "minimum": 1},
+                            "category": {"type": "string", "enum": ["bug", "security", "performance", "style", "docs"]},
+                            "message": {"type": "string"},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                        },
+                        "required": ["path", "line", "category", "message", "confidence"],
+                        "additionalProperties": false
+                    }
+                },
+                "general_comments": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["verdict", "inline_comments"],
+            "additionalProperties": false
+        })
+    }
+
+    /// Every keyword family Anthropic's slot lowering touches.
+    fn pinned_constraint_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "score": {"type": "number", "minimum": 0, "maximum": 1, "multipleOf": 0.01, "description": "Score."},
+                "count": {"type": ["integer", "null"], "format": "uint32", "minimum": 0, "exclusiveMaximum": 100},
+                "ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "minItems": 2, "maxItems": 5, "uniqueItems": true},
+                "choice": {"oneOf": [{"type": "string", "format": "int64"}, {"type": "integer", "minimum": 1}]},
+                "meta": {"type": "object", "properties": {"a": {"type": "string", "minLength": 1, "pattern": "^a"}}, "minProperties": 1, "propertyNames": {"pattern": "^a$"}},
+                "not_x": {"type": "string", "not": {"const": "x"}}
+            },
+            "required": ["score", "count", "ids", "choice", "meta", "not_x"]
+        })
+    }
+
+    const PINNED_GEMINI: [(&str, &str, &str); 2] = [
+        (
+            "review",
+            r#"{"additionalProperties":false,"properties":{"general_comments":{"items":{"type":"string"},"type":"array"},"inline_comments":{"items":{"additionalProperties":false,"properties":{"category":{"enum":["bug","security","performance","style","docs"],"type":"string"},"confidence":{"maximum":1,"minimum":0,"type":"number"},"line":{"minimum":1,"type":"integer"},"message":{"type":"string"},"path":{"type":"string"}},"required":["path","line","category","message","confidence"],"type":"object"},"type":"array"},"verdict":{"enum":["approve","request_changes","comment"],"type":"string"}},"required":["verdict","inline_comments"],"type":"object"}"#,
+            "[]",
+        ),
+        (
+            "constraints",
+            r#"{"properties":{"choice":{"oneOf":[{"format":"int64","type":"string"},{"minimum":1,"type":"integer"}]},"count":{"exclusiveMaximum":100,"format":"uint32","minimum":0,"type":["integer","null"]},"ids":{"items":{"format":"uuid","type":"string"},"maxItems":5,"minItems":2,"type":"array","uniqueItems":true},"meta":{"minProperties":1,"properties":{"a":{"minLength":1,"pattern":"^a","type":"string"}},"propertyNames":{"pattern":"^a$"},"required":[],"type":"object"},"not_x":{"not":{"const":"x"},"type":"string"},"score":{"description":"Score.","maximum":1,"minimum":0,"multipleOf":0.01,"type":"number"}},"required":["score","count","ids","choice","meta","not_x"],"type":"object"}"#,
+            r#"[{"provider":"gemini","path":"/properties/count/exclusiveMaximum","message":"Keyword 'exclusiveMaximum' may be ignored by Gemini responseJsonSchema"},{"provider":"gemini","path":"/properties/ids/uniqueItems","message":"Keyword 'uniqueItems' may be ignored by Gemini responseJsonSchema"},{"provider":"gemini","path":"/properties/meta/minProperties","message":"Keyword 'minProperties' may be ignored by Gemini responseJsonSchema"},{"provider":"gemini","path":"/properties/meta/propertyNames","message":"Keyword 'propertyNames' may be ignored by Gemini responseJsonSchema"},{"provider":"gemini","path":"/properties/meta/properties/a/minLength","message":"Keyword 'minLength' may be ignored by Gemini responseJsonSchema"},{"provider":"gemini","path":"/properties/meta/properties/a/pattern","message":"Keyword 'pattern' may be ignored by Gemini responseJsonSchema"},{"provider":"gemini","path":"/properties/meta/propertyNames/pattern","message":"Keyword 'pattern' may be ignored by Gemini responseJsonSchema"},{"provider":"gemini","path":"/properties/not_x/not","message":"Keyword 'not' may be ignored by Gemini responseJsonSchema"},{"provider":"gemini","path":"/properties/score/multipleOf","message":"Keyword 'multipleOf' may be ignored by Gemini responseJsonSchema"}]"#,
+        ),
+    ];
+
+    #[test]
+    fn structured_output_schema_pins_are_byte_identical() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let client = GeminiClient::new("test-key".to_string());
+        for (name, expected_schema, expected_warnings) in PINNED_GEMINI {
+            let raw = match name {
+                "review" => pinned_review_schema(),
+                _ => pinned_constraint_schema(),
+            };
+            let output_schema = OutputSchema::new(raw)?;
+            let compiled = client.compile_schema(&output_schema)?;
+            let request = LlmRequest::new(
+                "gemini-3-pro-preview",
+                vec![Message::User(UserMessage::text("extract".to_string()))],
+            )
+            .with_gemini_tag_merge(|t| t.structured_output = Some(output_schema.clone()));
+            let body = client.build_request_body(&request)?;
+            let slot = &body["generationConfig"]["responseJsonSchema"];
+            assert_eq!(slot, &compiled.schema, "{name}");
+            assert_eq!(slot.to_string(), expected_schema, "{name}");
+            assert_eq!(
+                serde_json::to_string(&compiled.warnings)?,
+                expected_warnings,
+                "{name}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

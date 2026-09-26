@@ -4686,6 +4686,8 @@ async fn dedup_terminal_input_returns_none_handle() {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             };
             Ok(CoreApplyOutput::with_run_result(
                 RunBoundaryReceiptDraft {
@@ -4799,6 +4801,8 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             };
             Ok(CoreApplyOutput::with_run_result(
                 RunBoundaryReceiptDraft {

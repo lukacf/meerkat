@@ -768,6 +768,7 @@ Shell behavior is controlled by `ShellConfig`:
 | `max_concurrent_processes` | `usize` | `10` | Maximum concurrent background processes |
 | `security_mode` | `SecurityMode` | `Unrestricted` | Command security policy |
 | `security_patterns` | `Vec<String>` | `[]` | Glob patterns for allow/deny lists |
+| `max_output_chars` | `usize` | `40000` | Cap, in characters, on stdout returned to the model by foreground calls and background jobs (stderr gets half). Longer output keeps its head and tail. Set with `[shell] max_output_chars`. |
 
 **Source:** `crates/meerkat-tools/src/builtin/shell/config.rs`
 </Accordion>
@@ -802,24 +803,44 @@ Execute a shell command. Uses POSIX-style parsing for policy checks; runs via Nu
 </ParamField>
 
 <ParamField body="timeout_secs" type="u64" default="Config default (30)">
-  Timeout in seconds.
+  Timeout in seconds, at least 1.
 </ParamField>
 
 <ParamField body="background" type="bool" default="false">
   If `true`, durably submit a non-resumable shell job and return its stable job
-  ID. Requires persistent realm job and blob stores. Job truth survives restart;
-  a lost subprocess is classified as `worker_lost`, not replayed.
+  ID. Requires persistent realm job and blob stores, and is advertised to the
+  model only when they are bound. Job truth survives restart; a lost subprocess
+  is classified as `worker_lost`, not replayed.
 </ParamField>
 
+A foreground result reaches the model as compact text: one status line, then
+stdout as is, then stderr under a `[stderr]` line only when it is non-empty.
+Flags such as invalid UTF-8 appear only when set. Transcripts, tool events and
+every surface carry this text as a `Text` content block. Only code that calls
+the tool directly (`BuiltinTool::call`) gets the typed `ShellOutput` through
+`ToolOutput::into_json`.
+
+stdout is capped at `[shell] max_output_chars` characters (default 40000, about
+10K tokens), and stderr at half of that. The cap applies to foreground calls
+and background jobs alike. Longer output keeps up to half the cap from its
+start and the rest from its end. A cut moves to a line boundary when the line
+it lands in fits the cap. The marker between the two sides names the omitted
+lines, the line where the head ends and the line where the tail starts, and a
+`sed -n` range that pages exactly the omitted lines:
+
+```text
+[... lines 153-4900 of 5000 omitted (4748 lines, 22893 of 23893 characters); the head ends at line 152 and the tail starts at line 4901. To see them, re-run the command piped through `sed -n '153,4900p'`, or narrow it with `grep -n`. ...]
+```
+
+When a line is longer than the cap, the cut falls inside it and the marker says
+which lines were cut and suggests narrowing the command instead.
+
 <CodeGroup>
-```json Returns (foreground)
-{
-  "exit_code": 0,
-  "stdout": "...",
-  "stderr": "...",
-  "timed_out": false,
-  "duration_secs": 1.23
-}
+```text Returns (foreground)
+exit code 0 (1.2s)
+...stdout...
+[stderr]
+...stderr...
 ```
 
 ```json Returns (background)
@@ -834,7 +855,9 @@ Execute a shell command. Uses POSIX-style parsing for policy checks; runs via Nu
 </CodeGroup>
 
 <Note>
-Output is truncated to the last 100,000 characters if it exceeds that limit. Fields `stdout_lossy` and `stderr_lossy` indicate whether output was lossy-decoded from non-UTF-8 bytes.
+Invalid UTF-8 is decoded lossily. The typed `ShellOutput` records it in
+`stdout_lossy` and `stderr_lossy`, and the text result notes it. A character
+split by the capture buffer's edge is not invalid output and is not flagged.
 </Note>
 
 **Source:** `crates/meerkat-tools/src/builtin/shell/tool.rs`
@@ -907,7 +930,12 @@ The summary `status` field is one of: `"queued"`, `"running"`,
 </Accordion>
 
 <Accordion title="shell_job_status">
-Check status of a background shell job. Returns full job details including output when complete.
+Check status of a background shell job. The model sees compact text: the job
+ID and its state, and for a completed job its exit status and output, capped
+like foreground output. Transcripts and events carry the same text; only code
+that calls the tool directly gets the typed `BackgroundJob` through
+`ToolOutput::into_json`. A background job's completion notice carries the same
+exit status and output.
 
 **Default enabled:** No (requires shell to be enabled)
 
@@ -915,7 +943,13 @@ Check status of a background shell job. Returns full job details including outpu
   The job ID to check.
 </ParamField>
 
-```json
+<CodeGroup>
+```text Returns (to the model)
+job job_<uuid-v7> completed: exit code 0 (0.0s)
+test
+```
+
+```json Typed value (Rust callers)
 {
   "id": "job_<uuid-v7>",
   "command": "echo test",
@@ -931,6 +965,7 @@ Check status of a background shell job. Returns full job details including outpu
   }
 }
 ```
+</CodeGroup>
 
 **Error:** `ExecutionFailed` if the job ID is not found.
 

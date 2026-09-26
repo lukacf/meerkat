@@ -635,6 +635,22 @@ async fn project_session_event_stream(
             break;
         }
     }
+    sync_projected_files(&projector, &session_id).await;
+}
+
+/// Sync a drained projection's derived files before its drain witness
+/// resolves, so a host that awaits the drain and then exits leaves a complete
+/// `.rkat/` log on disk. The derived view is not session authority: a sync
+/// failure degrades it exactly like a failed projection write does.
+async fn sync_projected_files(projector: &SessionProjector, session_id: &SessionId) {
+    if let Err(error) = projector.sync(session_id).await {
+        tracing::warn!(
+            session_id = %session_id,
+            degraded_projection = true,
+            error = %error,
+            "derived .rkat/ view could not be synced after its projection drained"
+        );
+    }
 }
 
 async fn flush_projected_events(
@@ -835,7 +851,8 @@ async fn project_create_time_events(
 
     if let Some(session_id) = session_id.as_ref()
         && projection_admitted
-        && let Err(error) = flush_projected_events(
+    {
+        if let Err(error) = flush_projected_events(
             &event_store,
             &projector,
             session_id,
@@ -844,12 +861,14 @@ async fn project_create_time_events(
             &projection_gates,
         )
         .await
-    {
-        tracing::error!(
-            session_id = %session_id,
-            error = %error,
-            "final create-time event projection flush failed: durable event append failed"
-        );
+        {
+            tracing::error!(
+                session_id = %session_id,
+                error = %error,
+                "final create-time event projection flush failed: durable event append failed"
+            );
+        }
+        sync_projected_files(&projector, session_id).await;
     }
 }
 
@@ -2572,7 +2591,7 @@ fn view_from_authoritative_session(session: &Session) -> SessionView {
         },
         billing: SessionUsage {
             total_tokens: session.total_tokens(),
-            usage: session.total_usage(),
+            usage: session.reported_total_usage(),
         },
     }
 }
@@ -13917,6 +13936,25 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Session read and list report a pre-0.8.22 session's raw summed cache
+    /// counters normalized, and leave the stored total untouched.
+    #[test]
+    fn session_view_reports_legacy_usage_normalized() {
+        let mut encoded = serde_json::to_value(Session::new()).unwrap();
+        encoded["usage"] = serde_json::json!({
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "cache_creation_tokens": 4000,
+            "cache_read_tokens": 50000
+        });
+        let session: Session = serde_json::from_value(encoded).unwrap();
+        let view = view_from_authoritative_session(&session);
+        assert_eq!(view.billing.usage.input_tokens, 1000);
+        assert_eq!(view.billing.usage.cache_read_tokens, Some(1000));
+        assert_eq!(view.billing.usage.cache_creation_tokens, Some(0));
+        assert_eq!(session.total_usage().cache_read_tokens, Some(50_000));
+    }
     use crate::ephemeral::{
         EphemeralSessionService, HeadCanonicalRuntimeBoundaryAcknowledgeOutcome,
         HeadCanonicalRuntimeBoundaryPrepareRequest, ObservedSessionTailKind,
@@ -17982,6 +18020,8 @@ mod tests {
                     extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
+                    run_usage: None,
+                    request_usage: Vec::new(),
                 }
             };
             if self.callback_pending_after_run {
@@ -19683,6 +19723,8 @@ mod tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 
@@ -19892,6 +19934,8 @@ mod tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 

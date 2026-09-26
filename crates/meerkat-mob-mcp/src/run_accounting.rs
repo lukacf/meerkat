@@ -104,10 +104,10 @@ pub fn mob_run_accounting_projection(members: Vec<MobMemberUsageInput>) -> WireM
                 entry.model = Some(model);
                 entry.provider = Some(provider);
                 entry.message_count = Some(message_count);
-                // `Usage::add` is the canonical accumulator for already
-                // normalized cumulative usage. It drops cache counters because
-                // their relation to `input_tokens` is provider-specific, so the
-                // total reports none while each member entry keeps its own.
+                // Member totals are normalized first: a pre-0.8.22 member
+                // session can report raw summed cache counters. `Usage::add`
+                // then sums cache and reasoning with the subset invariant.
+                let usage = meerkat_core::CumulativeUsage::from_usage(usage).into_inner();
                 total.add(&usage);
                 entry.usage = Some(usage.into());
             }
@@ -157,6 +157,29 @@ mod tests {
     }
 
     #[test]
+    fn legacy_member_usage_is_normalized_before_it_is_summed() {
+        // A member session saved before 0.8.22 carries raw summed cache
+        // counters far above its input total.
+        let mut legacy = usage(1000, 50);
+        legacy.cache_creation_tokens = Some(4000);
+        legacy.cache_read_tokens = Some(50_000);
+        let projection = mob_run_accounting_projection(vec![
+            read_member("m-legacy", "s-1", legacy),
+            read_member("m-new", "s-2", usage(200, 10)),
+        ]);
+        assert_eq!(projection.usage_total.input_tokens, 1200);
+        assert_eq!(projection.usage_total.cache_read_tokens, Some(1000));
+        assert_eq!(projection.usage_total.cache_creation_tokens, Some(0));
+        let member = projection
+            .members
+            .iter()
+            .find(|member| member.agent_identity == "m-legacy")
+            .and_then(|member| member.usage.as_ref())
+            .expect("legacy member reports usage");
+        assert_eq!(member.cache_read_tokens, Some(1000));
+    }
+
+    #[test]
     fn totals_are_the_exact_sum_of_readable_member_usage() {
         let mut cached = usage(250, 25);
         cached.cache_creation_tokens = Some(64);
@@ -168,13 +191,10 @@ mod tests {
         assert_eq!(projection.usage_total.input_tokens, 350);
         assert_eq!(projection.usage_total.output_tokens, 35);
         assert_eq!(projection.usage_total.total_tokens, 385);
-        // Deliberate asymmetry, owned by `Usage::add`: cache counters are kept
-        // per member but dropped from the aggregate, because their relation to
-        // `input_tokens` is provider-specific and the aggregate may span
-        // providers. An auditor summing the member cache counters will not
-        // find them in `usage_total`; the wire doc states that.
-        assert_eq!(projection.usage_total.cache_creation_tokens, None);
-        assert_eq!(projection.usage_total.cache_read_tokens, None);
+        // Member usage is already normalized, so the aggregate sums the
+        // cache counters too; the member without them contributes zero.
+        assert_eq!(projection.usage_total.cache_creation_tokens, Some(64));
+        assert_eq!(projection.usage_total.cache_read_tokens, Some(128));
         let cached_member = projection
             .members
             .iter()

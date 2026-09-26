@@ -3,7 +3,7 @@
 //! Renders scoped events to stderr (chrome: thinking, tool calls, status)
 //! and stdout (text content) with ANSI styling.
 
-use meerkat_core::{AgentEvent, ScopedAgentEvent};
+use meerkat_core::{AgentEvent, CumulativeUsage, ScopedAgentEvent, TurnUsage, Usage};
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, IsTerminal, Write};
 
@@ -35,11 +35,134 @@ pub enum StreamRenderPolicy {
     Focus(String),
 }
 
+/// Where a run's token total comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunTotalSource {
+    /// The host prints the primary run's total from its run result, which
+    /// charges every call the run made (a one-shot `rkat run`). The renderer
+    /// prints totals only for other scopes.
+    HostRunResult,
+    /// Every run's total is folded from the per-call rows on the stream. For
+    /// hosts whose later runs return no result (keep-alive).
+    StreamRows,
+}
+
+impl RunTotalSource {
+    fn renderer_prints_total(self, scope_id: &str) -> bool {
+        match self {
+            Self::StreamRows => true,
+            Self::HostRunResult => scope_id != "primary",
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct ScopeRenderState {
     in_thinking: bool,
     in_text: bool,
     reasoning_bytes: usize,
+    tokens: RunTokenLedger,
+}
+
+/// Per-call token rows of the run in progress on one scope.
+///
+/// Every committed agent-loop call publishes `turn_completed` and every
+/// extraction request a `request_usage` row on the extraction outcome, so the
+/// rows are one line per provider request, and folding them the way the
+/// session does gives the run's own total.
+#[derive(Debug, Default)]
+struct RunTokenLedger {
+    run_usage: CumulativeUsage,
+}
+
+/// A token-accounting line, in print order.
+#[derive(Debug, PartialEq, Eq)]
+enum TokenLine {
+    /// One provider request.
+    Request(String),
+    /// A call the provider sent no accounting for.
+    Unmeasured,
+    /// The run's total, closing the run.
+    Total(String),
+}
+
+impl RunTokenLedger {
+    /// Fold one event and return the token lines it contributes.
+    fn observe(&mut self, event: &AgentEvent, prints_total: bool) -> Vec<TokenLine> {
+        match event {
+            AgentEvent::RunStarted { .. } => {
+                self.run_usage = CumulativeUsage::default();
+                Vec::new()
+            }
+            AgentEvent::TurnCompleted { usage, .. } => match usage {
+                Some(usage) => vec![self.request(usage, None)],
+                // Absent accounting reads as absent, never as `0 tokens`.
+                None => vec![TokenLine::Unmeasured],
+            },
+            AgentEvent::RunCompleted {
+                extraction_required,
+                ..
+            } => {
+                // A run with structured output closes at its extraction
+                // outcome, whose requests belong to the same run.
+                if *extraction_required || !prints_total {
+                    Vec::new()
+                } else {
+                    vec![self.total()]
+                }
+            }
+            AgentEvent::ExtractionSucceeded { request_usage, .. }
+            | AgentEvent::ExtractionFailed { request_usage, .. } => {
+                let mut lines = request_usage
+                    .iter()
+                    .map(|usage| self.request(usage, Some("extraction")))
+                    .collect::<Vec<_>>();
+                if prints_total {
+                    lines.push(self.total());
+                }
+                lines
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn request(&mut self, usage: &TurnUsage, label: Option<&str>) -> TokenLine {
+        self.run_usage.add_turn(usage);
+        let summary = meerkat_core::turn_usage_summary(usage);
+        TokenLine::Request(match label {
+            Some(label) => format!("{label}: {summary}"),
+            None => summary,
+        })
+    }
+
+    fn total(&self) -> TokenLine {
+        TokenLine::Total(run_total_line(self.run_usage.as_usage()))
+    }
+}
+
+fn run_total_line(usage: &Usage) -> String {
+    format!("total: {}", meerkat_core::usage_summary(usage))
+}
+
+/// Print a run's closing total, as the renderer does at the end of a run.
+/// Hosts call this with the authoritative total from the run result.
+pub fn print_run_total(usage: &Usage) {
+    let ansi = stderr_is_tty();
+    chrome_line(
+        false,
+        "primary",
+        &format!("\n{}────────{}", style(ansi, DIM), reset(ansi)),
+    );
+    chrome_line(
+        false,
+        "primary",
+        &format!(
+            "{}{}{}",
+            style(ansi, DIM),
+            run_total_line(usage),
+            reset(ansi)
+        ),
+    );
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -77,6 +200,7 @@ pub struct StreamRenderer {
     ansi: bool,
     policy: StreamRenderPolicy,
     verbose: bool,
+    run_totals: RunTotalSource,
     states: HashMap<String, ScopeRenderState>,
     discovered_scopes: BTreeSet<String>,
     focus_seen: bool,
@@ -84,11 +208,17 @@ pub struct StreamRenderer {
 
 impl StreamRenderer {
     /// Create a new renderer.
-    pub fn new(ansi: bool, policy: StreamRenderPolicy, verbose: bool) -> Self {
+    pub fn new(
+        ansi: bool,
+        policy: StreamRenderPolicy,
+        verbose: bool,
+        run_totals: RunTotalSource,
+    ) -> Self {
         Self {
             ansi,
             policy,
             verbose,
+            run_totals,
             states: HashMap::new(),
             discovered_scopes: BTreeSet::new(),
             focus_seen: false,
@@ -123,14 +253,22 @@ impl StreamRenderer {
         }
 
         let state = self.states.entry(scope_id.clone()).or_default();
+        let mux = matches!(self.policy, StreamRenderPolicy::MuxAll);
         render_event(
             self.ansi,
-            matches!(self.policy, StreamRenderPolicy::MuxAll),
+            mux,
             &scope_id,
             state,
             self.verbose,
             &scoped.event,
         );
+        let prints_total = self.run_totals.renderer_prints_total(&scope_id);
+        let token_lines = state.tokens.observe(&scoped.event, prints_total);
+        if !token_lines.is_empty() {
+            end_text_block(state);
+            end_thinking_block(mux, &scope_id, state);
+        }
+        render_token_lines(self.ansi, mux, &scope_id, token_lines);
     }
 
     /// Finalize rendering and return summary info for focus validation.
@@ -183,24 +321,10 @@ fn render_event(
             }
         }
 
-        AgentEvent::TurnCompleted { stop_reason, usage } => {
+        // The turn's token line comes from the run token ledger.
+        AgentEvent::TurnCompleted { .. } => {
             end_text_block(state);
             end_thinking_block(mux, scope_id, state);
-            let line = match usage {
-                Some(usage) => format!(
-                    "{}  {} tokens ({} in / {} out){}",
-                    style(ansi, DIM),
-                    usage.input_tokens + usage.output_tokens,
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    reset(ansi)
-                ),
-                // The provider accounted for nothing on this turn. Printing
-                // `0 tokens` would be a wrong number that reads as a real one.
-                None => format!("{}  tokens unmeasured{}", style(ansi, DIM), reset(ansi)),
-            };
-            chrome_line(mux, scope_id, &line);
-            let _ = stop_reason;
         }
 
         // The degradation markers are operator-facing: they name the exact
@@ -472,23 +596,24 @@ fn render_event(
         // ── Session lifecycle ──────────────────────────────────────
         AgentEvent::RunStarted { .. } => {}
 
-        AgentEvent::RunCompleted { usage, .. } => {
+        // `run_completed.usage` is session-cumulative and precedes any
+        // extraction, so it is not this run's total. The run token ledger
+        // prints the total when the run (including extraction) closes.
+        AgentEvent::RunCompleted { .. } => {
+            end_text_block(state);
+            end_thinking_block(mux, scope_id, state);
+        }
+
+        AgentEvent::ExtractionFailed { reason, .. } => {
             end_text_block(state);
             end_thinking_block(mux, scope_id, state);
             chrome_line(
                 mux,
                 scope_id,
-                &format!("\n{}────────{}", style(ansi, DIM), reset(ansi)),
-            );
-            chrome_line(
-                mux,
-                scope_id,
                 &format!(
-                    "{}total: {} tokens ({} in / {} out){}",
-                    style(ansi, DIM),
-                    usage.input_tokens + usage.output_tokens,
-                    usage.input_tokens,
-                    usage.output_tokens,
+                    "{}⚠ extraction failed: {}{}",
+                    style(ansi, YELLOW),
+                    reason,
                     reset(ansi)
                 ),
             );
@@ -643,6 +768,30 @@ fn render_event(
 
         // Remaining hook/interaction/stream events - silent in stream mode
         _ => {}
+    }
+}
+
+fn render_token_lines(ansi: bool, mux: bool, scope_id: &str, lines: Vec<TokenLine>) {
+    for line in lines {
+        let text = match line {
+            TokenLine::Request(summary) => format!("  {summary}"),
+            // The provider accounted for nothing on this call. Printing
+            // `0 tokens` would be a wrong number that reads as a real one.
+            TokenLine::Unmeasured => "  tokens unmeasured".to_string(),
+            TokenLine::Total(total) => {
+                chrome_line(
+                    mux,
+                    scope_id,
+                    &format!("\n{}────────{}", style(ansi, DIM), reset(ansi)),
+                );
+                total
+            }
+        };
+        chrome_line(
+            mux,
+            scope_id,
+            &format!("{}{}{}", style(ansi, DIM), text, reset(ansi)),
+        );
     }
 }
 
@@ -898,8 +1047,12 @@ mod tests {
 
     #[test]
     fn test_renderer_policy_focus() {
-        let mut renderer =
-            StreamRenderer::new(false, StreamRenderPolicy::Focus("mob:a".into()), false);
+        let mut renderer = StreamRenderer::new(
+            false,
+            StreamRenderPolicy::Focus("mob:a".into()),
+            false,
+            RunTotalSource::StreamRows,
+        );
         renderer.render(&ScopedAgentEvent {
             scope_id: "mob:b".into(),
             scope_path: vec![],
@@ -921,7 +1074,12 @@ mod tests {
 
     #[test]
     fn test_renderer_policy_primary_only_matches_literal_primary_scope() {
-        let mut renderer = StreamRenderer::new(false, StreamRenderPolicy::PrimaryOnly, false);
+        let mut renderer = StreamRenderer::new(
+            false,
+            StreamRenderPolicy::PrimaryOnly,
+            false,
+            RunTotalSource::StreamRows,
+        );
         renderer.render(&ScopedAgentEvent {
             scope_id: "primary/sub:child-1".into(),
             scope_path: vec![],
@@ -940,5 +1098,208 @@ mod tests {
         assert_eq!(summary.discovered_scopes.len(), 2);
         assert!(renderer.states.contains_key("primary"));
         assert!(!renderer.states.contains_key("primary/sub:child-1"));
+    }
+
+    fn openai_row(prompt: u64, output: u64, cached: u64) -> TurnUsage {
+        TurnUsage::new(
+            Usage {
+                input_tokens: prompt,
+                output_tokens: output,
+                cache_creation_tokens: None,
+                cache_read_tokens: Some(cached),
+                reasoning_tokens: None,
+                provider_accounting: None,
+            },
+            meerkat_core::ProviderTokenAccounting::openai("gpt-test", prompt),
+        )
+    }
+
+    fn anthropic_row(uncached: u64, written: u64, read: u64, output: u64) -> TurnUsage {
+        TurnUsage::new(
+            Usage {
+                input_tokens: uncached,
+                output_tokens: output,
+                cache_creation_tokens: Some(written),
+                cache_read_tokens: Some(read),
+                reasoning_tokens: None,
+                provider_accounting: None,
+            },
+            meerkat_core::ProviderTokenAccounting::anthropic(
+                "claude-test",
+                uncached,
+                written,
+                read,
+            ),
+        )
+    }
+
+    fn run_completed(extraction_required: bool) -> AgentEvent {
+        AgentEvent::RunCompleted {
+            session_id: meerkat_core::SessionId::new(),
+            result: "done".into(),
+            structured_output: None,
+            extraction_required,
+            // Session-cumulative and pre-extraction: never the run's total.
+            usage: Usage {
+                input_tokens: 999_999,
+                output_tokens: 999_999,
+                ..Usage::default()
+            }
+            .into(),
+            terminal_cause_kind: None,
+        }
+    }
+
+    fn run_started() -> AgentEvent {
+        AgentEvent::RunStarted {
+            session_id: meerkat_core::SessionId::new(),
+            input: meerkat_core::RunInput::Content {
+                content: meerkat_core::ContentInput::Text("go".into()),
+            },
+        }
+    }
+
+    fn fold(events: &[AgentEvent], prints_total: bool) -> Vec<TokenLine> {
+        let mut ledger = RunTokenLedger::default();
+        events
+            .iter()
+            .flat_map(|event| ledger.observe(event, prints_total))
+            .collect()
+    }
+
+    /// Every provider request is a line, the first (tool-call) request and
+    /// each extraction request included, and the total closes the run after
+    /// extraction with exactly the fold of those lines.
+    #[test]
+    fn token_lines_cover_every_request_and_total_the_run() {
+        let lines = fold(
+            &[
+                run_started(),
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::ToolUse,
+                    usage: Some(openai_row(1000, 10, 0)),
+                },
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(openai_row(1200, 20, 1000)),
+                },
+                run_completed(true),
+                AgentEvent::ExtractionSucceeded {
+                    session_id: meerkat_core::SessionId::new(),
+                    structured_output: serde_json::json!({"answer": "ok"}),
+                    schema_warnings: None,
+                    request_usage: vec![openai_row(1250, 25, 1200), openai_row(1300, 30, 1250)],
+                    origin: meerkat_core::StructuredOutputOrigin::ExtractionRequest,
+                },
+            ],
+            true,
+        );
+        assert_eq!(
+            lines,
+            vec![
+                TokenLine::Request("1010 tokens (1000 in / 10 out, 0 cached)".into()),
+                TokenLine::Request("1220 tokens (1200 in / 20 out, 1000 cached)".into()),
+                TokenLine::Request(
+                    "extraction: 1275 tokens (1250 in / 25 out, 1200 cached)".into()
+                ),
+                TokenLine::Request(
+                    "extraction: 1330 tokens (1300 in / 30 out, 1250 cached)".into()
+                ),
+                TokenLine::Total("total: 4835 tokens (4750 in / 85 out, 3450 cached)".into()),
+            ]
+        );
+    }
+
+    /// A run without extraction closes at `run_completed`; its total is the
+    /// run's own rows, not the session-cumulative `run_completed.usage`, and
+    /// the next run starts from zero.
+    #[test]
+    fn a_run_total_is_the_runs_own_rows_and_resets_per_run() {
+        let lines = fold(
+            &[
+                run_started(),
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(openai_row(100, 5, 0)),
+                },
+                run_completed(false),
+                run_started(),
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(openai_row(200, 7, 100)),
+                },
+                run_completed(false),
+            ],
+            true,
+        );
+        assert_eq!(
+            lines.last(),
+            Some(&TokenLine::Total(
+                "total: 207 tokens (200 in / 7 out, 100 cached)".into()
+            ))
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| matches!(line, TokenLine::Total(_)))
+                .count(),
+            2
+        );
+    }
+
+    /// Per-request lines use the presented-input denominator, so an
+    /// Anthropic call's line counts its cached input and the lines add up to
+    /// the total.
+    #[test]
+    fn anthropic_request_lines_count_presented_input() {
+        let lines = fold(
+            &[
+                run_started(),
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(anthropic_row(120, 0, 4300, 90)),
+                },
+                run_completed(false),
+            ],
+            true,
+        );
+        assert_eq!(
+            lines,
+            vec![
+                TokenLine::Request("4510 tokens (4420 in / 90 out, 4300 cached)".into()),
+                TokenLine::Total("total: 4510 tokens (4420 in / 90 out, 4300 cached)".into()),
+            ]
+        );
+    }
+
+    /// With the host printing the primary run's total from its run result,
+    /// the renderer prints the request lines and no total; an unmeasured
+    /// call reads as unmeasured.
+    #[test]
+    fn host_run_result_totals_leave_only_request_lines() {
+        let lines = fold(
+            &[
+                run_started(),
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::ToolUse,
+                    usage: None,
+                },
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(openai_row(100, 5, 0)),
+                },
+                run_completed(false),
+            ],
+            RunTotalSource::HostRunResult.renderer_prints_total("primary"),
+        );
+        assert_eq!(
+            lines,
+            vec![
+                TokenLine::Unmeasured,
+                TokenLine::Request("105 tokens (100 in / 5 out, 0 cached)".into()),
+            ]
+        );
+        assert!(RunTotalSource::HostRunResult.renderer_prints_total("mob:worker"));
+        assert!(RunTotalSource::StreamRows.renderer_prints_total("primary"));
     }
 }

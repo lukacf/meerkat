@@ -6104,11 +6104,20 @@ impl AgentFactory {
 
         // Build the tool dispatcher. Wait-tool-specific binding was removed
         // along with the generic wait tool.
+        //
+        // Tool definitions (name, description, input schema) reach every
+        // provider through the per-request tool array, which is projected from
+        // the final composed dispatcher and the live `ToolScope`. The system
+        // prompt therefore carries no per-tool inventory: a build-time copy of
+        // `ToolDef.description` duplicated that text on every request and
+        // could not follow later composition or visibility changes. Only
+        // family-level guidance whose owning tools are actually composed is
+        // appended below (comms usage, deferred catalog discovery, skill
+        // discovery).
         #[allow(unused_mut)]
-        let (mut tools, mut tool_usage_instructions) =
+        let mut tools: Arc<dyn AgentToolDispatcher> =
             if let Some(dispatcher) = build_config.tool_dispatcher_override.take() {
-                let usage = render_tool_usage_instructions(dispatcher.as_ref());
-                (dispatcher, usage)
+                dispatcher
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -6160,13 +6169,10 @@ impl AgentFactory {
                 #[cfg(target_arch = "wasm32")]
                 {
                     // Fallback: empty tool dispatcher when no override is set on wasm32.
-                    let usage = String::new();
-                    (
-                        Arc::new(EmptyToolDispatcher) as Arc<dyn AgentToolDispatcher>,
-                        usage,
-                    )
+                    Arc::new(EmptyToolDispatcher) as Arc<dyn AgentToolDispatcher>
                 }
             };
+        let mut tool_usage_instructions = String::new();
 
         tracing::debug!(
             base_tool_count = tools.tools().len(),
@@ -6272,17 +6278,10 @@ impl AgentFactory {
                     .with_creator_tool_access_policy(creator_tool_access_policy),
                 ) as Arc<dyn AgentToolDispatcher>,
             };
-            let schedule_usage = render_tool_usage_instructions(schedule_dispatcher.as_ref());
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
                 tools,
                 schedule_dispatcher,
             ]));
-            if !schedule_usage.is_empty() {
-                if !tool_usage_instructions.is_empty() {
-                    tool_usage_instructions.push_str("\n\n");
-                }
-                tool_usage_instructions.push_str(&schedule_usage);
-            }
         }
 
         tracing::debug!(
@@ -6345,17 +6344,10 @@ impl AgentFactory {
                     }
                 }
             };
-            let workgraph_usage = render_tool_usage_instructions(workgraph_dispatcher.as_ref());
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
                 tools,
                 workgraph_dispatcher,
             ]));
-            if !workgraph_usage.is_empty() {
-                if !tool_usage_instructions.is_empty() {
-                    tool_usage_instructions.push_str("\n\n");
-                }
-                tool_usage_instructions.push_str(&workgraph_usage);
-            }
         }
 
         tracing::debug!(
@@ -6445,18 +6437,9 @@ impl AgentFactory {
                 .build_mob_tools(mob_args)
                 .await
                 .map_err(|e| BuildAgentError::Config(format!("Mob tool factory: {e}")))?;
-            // The mob family is mounted without a `# Available Tools` prompt
-            // inventory: this surface is composed after the inventory was
-            // rendered, and `render_tool_usage_instructions` skips every tool
-            // with `ToolSourceKind::Mob` provenance, which also covers the
-            // operator family that arrives through `external_tools`. The
-            // descriptions already reach every provider through
-            // `ToolDef.description`; rendering them a second time cost each
-            // mob-enabled session roughly 16.6 KB of system prompt per request
-            // (19 agent-facing tools, ~15.8 KB, plus the 12-tool operator
-            // family, ~0.75 KB). Exact deferred-catalog dispatchers already
-            // omit the inventory; the mob family follows that convention.
-            // Non-mob families are unchanged.
+            // Like every other family, the mob tools carry no system-prompt
+            // inventory; their descriptions reach the provider through
+            // `ToolDef.description` in the per-request tool array.
             // Use DynamicToolComposite (not ToolGateway) so dynamic child
             // dispatchers (e.g. callback tools) can surface additions between turns.
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
@@ -6661,15 +6644,21 @@ impl AgentFactory {
 
         // 12. Build system prompt (single canonical path)
         let mut extra_sections: Vec<&str> = Vec::new();
-        // Only inject skill inventory (with tool guidance) when builtins are
-        // enabled — otherwise browse_skills/load_skill don't exist — and only
+        // Only inject the skill inventory when builtins are enabled, and only
         // for `Full` prompt-section builds (A1/ADJ-17: SpecPinned mob-
-        // materialized builds keep spec-built prompts byte-pinned).
+        // materialized builds keep spec-built prompts byte-pinned). The
+        // inventory names no tools; the discovery-tool guidance follows it
+        // only when `browse_skills` and `load_skill` are actually composed
+        // (both are default-disabled builtins).
         if !inventory_section.is_empty()
             && effective_builtins
             && skill_inventory_prompt_section_enabled(build_config.host_prompt_sections)
         {
             extra_sections.push(inventory_section.as_str());
+            #[cfg(feature = "skills")]
+            if meerkat_tools::builtin::skills::skill_discovery_tools_composed(&tools.tools()) {
+                extra_sections.push(meerkat_tools::builtin::skills::SKILL_DISCOVERY_TOOL_GUIDANCE);
+            }
         }
         for section in &preloaded_skill_sections {
             extra_sections.push(section.as_str());
@@ -15575,7 +15564,7 @@ mod tests {
         let ops_lifecycle: Arc<dyn OpsLifecycleRegistry> =
             Arc::new(RuntimeOpsLifecycleRegistry::new());
 
-        let (dispatcher, usage) = factory
+        let dispatcher = factory
             .build_tool_dispatcher_for_agent_with_overrides(
                 &Config::default(),
                 None,
@@ -15606,10 +15595,6 @@ mod tests {
             assert!(
                 dispatcher.tools().iter().any(|tool| tool.name == expected),
                 "{expected} should be visible through factory-built builtins"
-            );
-            assert!(
-                usage.contains(expected),
-                "{expected} should appear in usage instructions"
             );
         }
 
@@ -15644,7 +15629,7 @@ mod tests {
         let ops_lifecycle: Arc<dyn OpsLifecycleRegistry> =
             Arc::new(RuntimeOpsLifecycleRegistry::new());
 
-        let (dispatcher, usage) = factory
+        let dispatcher = factory
             .build_tool_dispatcher_for_agent_with_overrides(
                 &Config::default(),
                 None,
@@ -15676,10 +15661,6 @@ mod tests {
                 .all(|tool| !tool.name.starts_with("blob_")),
             "blob tools should be absent without a session blob store"
         );
-        assert!(
-            !usage.contains("blob_save_file"),
-            "blob tool usage should be absent without a session blob store"
-        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -15708,7 +15689,7 @@ mod tests {
         let ops_lifecycle: Arc<dyn OpsLifecycleRegistry> =
             Arc::new(RuntimeOpsLifecycleRegistry::new());
 
-        let (dispatcher, _) = factory
+        let dispatcher = factory
             .build_tool_dispatcher_for_agent_with_overrides(
                 &Config::default(),
                 Some(external),
@@ -15767,7 +15748,7 @@ mod tests {
         let mut effective_config = Config::default();
         effective_config.shell.program = "sh".to_string();
 
-        let (dispatcher, _) = factory
+        let dispatcher = factory
             .build_tool_dispatcher_for_agent_with_overrides(
                 &effective_config,
                 None,
@@ -15808,14 +15789,15 @@ mod tests {
             .dispatch(call)
             .await
             .expect("shell dispatch should succeed");
-        let payload: serde_json::Value =
-            serde_json::from_str(&outcome.result.text_content()).unwrap();
-        assert_eq!(
-            payload["exit_code"],
-            serde_json::json!(0),
-            "probe must run under a POSIX shell: {payload}"
+        // The model sees compact text: a status line, then stdout.
+        let text = outcome.result.text_content();
+        let mut lines = text.lines();
+        let status = lines.next().unwrap_or_default();
+        assert!(
+            status.starts_with("exit code 0 ("),
+            "probe must run under a POSIX shell: {text}"
         );
-        let stdout_program = payload["stdout"].as_str().unwrap_or_default().trim();
+        let stdout_program = lines.next().unwrap_or_default().trim();
         let stdout_basename = std::path::Path::new(stdout_program)
             .file_name()
             .and_then(|name| name.to_str())
@@ -15828,7 +15810,7 @@ mod tests {
 }
 
 impl AgentFactory {
-    /// Build the tool dispatcher and usage instructions.
+    /// Build the base tool dispatcher.
     ///
     /// `effective_builtins` and `effective_shell` override the factory-level
     /// flags for this specific build.
@@ -15859,18 +15841,12 @@ impl AgentFactory {
         brain_swap_models: Vec<String>,
         brain_swap_realization_host_ready: bool,
         durable_shell_runtime: Option<meerkat_tools::builtin::shell::DurableShellJobRuntime>,
-    ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
+    ) -> Result<Arc<dyn AgentToolDispatcher>, BuildAgentError> {
         let compose_image_generation =
             image_generation_visibility.resolve(false) && image_generation_machine.is_some();
         if !effective_builtins && !effective_shell && !compose_image_generation {
             // No builtins - return the external tools if provided, otherwise empty.
-            return match external {
-                Some(ext) => {
-                    let usage = render_tool_usage_instructions(ext.as_ref());
-                    Ok((ext, usage))
-                }
-                None => Ok((Arc::new(EmptyToolDispatcher), String::new())),
-            };
+            return Ok(external.unwrap_or_else(|| Arc::new(EmptyToolDispatcher)));
         }
 
         // Create a task store.
@@ -15956,41 +15932,8 @@ impl AgentFactory {
             )
             .await?;
 
-        let usage = render_tool_usage_instructions(dispatcher.as_ref());
-        Ok((dispatcher, usage))
+        Ok(dispatcher)
     }
-}
-
-fn render_tool_usage_instructions(dispatcher: &dyn AgentToolDispatcher) -> String {
-    if CatalogControlDispatcher::should_enable_for(dispatcher) {
-        return String::new();
-    }
-
-    let tools = dispatcher.tools();
-    // The mob family carries no prompt inventory. Its descriptions already
-    // reach every provider through `ToolDef.description`, and the family is
-    // mounted through two dispatchers (the agent-facing mob surface and the
-    // operator tools composed into `external_tools`), so the rule keys on
-    // `ToolSourceKind::Mob` provenance rather than on the call site. Every
-    // other family renders exactly as before.
-    let mut rendered = tools
-        .iter()
-        .filter(|tool| !has_mob_provenance(tool))
-        .peekable();
-    if rendered.peek().is_none() {
-        return String::new();
-    }
-    let mut out = String::from("# Available Tools\n\n");
-    for tool in rendered {
-        out.push_str(&format!("## {}\n{}\n\n", tool.name, tool.description));
-    }
-    out
-}
-
-fn has_mob_provenance(tool: &meerkat_core::ToolDef) -> bool {
-    tool.provenance
-        .as_ref()
-        .is_some_and(|provenance| provenance.kind == meerkat_core::ToolSourceKind::Mob)
 }
 
 fn deferred_catalog_guidance() -> &'static str {
@@ -16000,7 +15943,7 @@ fn deferred_catalog_guidance() -> &'static str {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod prompt_tests {
-    use super::{deferred_catalog_guidance, render_tool_usage_instructions};
+    use super::deferred_catalog_guidance;
     use async_trait::async_trait;
     use futures::stream;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
@@ -16273,8 +16216,8 @@ mod prompt_tests {
         let with_mob = system_prompt_of(mob_agent.session().messages());
 
         assert!(
-            without_mob.contains("## visible\nvisible tool"),
-            "non-mob external tools keep their `# Available Tools` entry: {without_mob}"
+            !without_mob.contains("visible tool") && !without_mob.contains("# Available Tools"),
+            "no tool family renders a system-prompt inventory: {without_mob}"
         );
         assert!(
             !with_mob.contains(DELEGATE_DESCRIPTION) && !with_mob.contains(SPAWN_DESCRIPTION),
@@ -16312,89 +16255,298 @@ mod prompt_tests {
         );
     }
 
-    #[test]
-    fn render_tool_usage_instructions_omits_mob_provenance_tools_and_keeps_the_rest() {
-        let mut mixed: Vec<Arc<ToolDef>> = tools(&["visible"]).to_vec();
-        mixed.extend(
-            mob_surface_tools(&[("spawn_member", "Spawn a mob member from a profile.")])
-                .iter()
-                .cloned(),
-        );
-        let dispatcher = UsageTestDispatcher {
-            tools: mixed.into(),
-            exact_catalog: false,
-            may_require_control_plane: false,
-            pending_sources: Arc::from([]),
-        };
+    /// Scripted provider: the first request calls `tool_name`, every later
+    /// request answers with text. Each request is captured so a test can
+    /// inspect the system prompt and the provider-facing tool array of the
+    /// same request.
+    struct ScriptedToolCallClient {
+        tool_name: &'static str,
+        tool_args: serde_json::Value,
+        requests: std::sync::Mutex<Vec<LlmRequest>>,
+    }
 
-        let usage = render_tool_usage_instructions(&dispatcher);
+    impl ScriptedToolCallClient {
+        fn new(tool_name: &'static str, tool_args: serde_json::Value) -> Self {
+            Self {
+                tool_name,
+                tool_args,
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<LlmRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for ScriptedToolCallClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let first = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request.clone());
+                requests.len() == 1
+            };
+            if first {
+                Box::pin(stream::iter(vec![
+                    Ok(LlmEvent::ToolCallComplete {
+                        id: "scripted-call-1".into(),
+                        name: self.tool_name.into(),
+                        args: self.tool_args.clone(),
+                        meta: None,
+                    }),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: StopReason::ToolUse,
+                        },
+                    }),
+                ]))
+            } else {
+                Box::pin(stream::iter(vec![
+                    Ok(LlmEvent::TextDelta {
+                        delta: "OK".into(),
+                        meta: None,
+                    }),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    }),
+                ]))
+            }
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    fn tool_result_for<'a>(
+        messages: &'a [Message],
+        call_id: &str,
+    ) -> Option<&'a meerkat_core::types::ToolResult> {
+        messages.iter().find_map(|message| match message {
+            Message::ToolResults { results, .. } => {
+                results.iter().find(|result| result.tool_use_id == call_id)
+            }
+            _ => None,
+        })
+    }
+
+    /// The system prompt documents no tool: tool definitions reach the
+    /// provider only through the per-request tool array, which is projected
+    /// from the final composed dispatcher. The composed builtin set, its full
+    /// descriptions, and dispatch through it are unchanged.
+    #[tokio::test]
+    async fn builtin_session_prompt_documents_no_tool_while_tool_surface_and_dispatch_are_unchanged()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let client = Arc::new(ScriptedToolCallClient::new(
+            "datetime",
+            serde_json::json!({}),
+        ));
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .project_root(temp.path())
+            .builtins(true)
+            .shell(false);
+        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+        build_config.llm_client_override = Some(Arc::clone(&client) as Arc<dyn LlmClient>);
+
+        let mut agent = factory
+            .build_agent(build_config, &Config::default())
+            .await
+            .unwrap();
+        let system_prompt = system_prompt_of(agent.session().messages());
+        let visible = agent.tool_scope().visible_tools();
+        let visible_names: Vec<&str> = visible.iter().map(|tool| tool.name.as_str()).collect();
+        for expected in [
+            "task_list",
+            "task_get",
+            "task_create",
+            "task_update",
+            "datetime",
+            "apply_patch",
+        ] {
+            assert!(
+                visible_names.contains(&expected),
+                "builtin `{expected}` must stay composed: {visible_names:?}"
+            );
+        }
+        assert!(
+            !system_prompt.contains("# Available Tools"),
+            "the system prompt must carry no per-tool inventory: {system_prompt}"
+        );
+        for tool in visible.iter() {
+            assert!(
+                !tool.description.is_empty(),
+                "`{}` keeps its provider-facing description",
+                tool.name
+            );
+            assert!(
+                !system_prompt.contains(tool.description.as_str()),
+                "`{}` description must not be duplicated into the system prompt",
+                tool.name
+            );
+        }
+
+        agent
+            .run(meerkat_core::ContentInput::Text("what time is it?".into()))
+            .await
+            .unwrap();
+
+        let requests = client.requests();
+        assert_eq!(requests.len(), 2, "one tool round trip, then the answer");
+        let request_tool_names: Vec<&str> = requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
         assert_eq!(
-            usage, "# Available Tools\n\n## visible\nvisible tool\n\n",
-            "only the non-mob tool renders, exactly as before"
+            request_tool_names, visible_names,
+            "the provider receives exactly the composed, visible tool set"
+        );
+        let result = tool_result_for(agent.session().messages(), "scripted-call-1")
+            .expect("datetime dispatch produced a tool result");
+        assert!(
+            !result.is_error,
+            "datetime dispatches through the composed dispatcher: {result:?}"
         );
     }
 
-    #[test]
-    fn render_tool_usage_instructions_is_empty_when_every_tool_is_mob_provenance() {
-        let dispatcher = UsageTestDispatcher {
-            tools: mob_surface_tools(&[
-                ("spawn_member", "Spawn a mob member from a profile."),
-                ("member_status", "Get a member's execution status snapshot."),
-            ]),
+    #[cfg(feature = "skills")]
+    fn collection_mode_skill_runtime() -> Arc<meerkat_core::skills::SkillRuntime> {
+        let key = meerkat_core::skills::SkillKey::builtin(
+            meerkat_core::skills::SkillName::parse("inventory-skill").unwrap(),
+        );
+        let source =
+            meerkat_skills::InMemorySkillSource::new(vec![meerkat_core::skills::SkillDocument {
+                descriptor: meerkat_core::skills::SkillDescriptor::new(
+                    key,
+                    "inventory-skill",
+                    "Skill that forces the collection inventory",
+                ),
+                body: "inventory skill body".into(),
+                extensions: Default::default(),
+            }]);
+        // Threshold 0 renders the collection-mode inventory for one skill.
+        let engine =
+            meerkat_skills::DefaultSkillEngine::new(source, Vec::new()).with_inventory_threshold(0);
+        Arc::new(meerkat_core::skills::SkillRuntime::new(Arc::new(engine)))
+    }
+
+    /// The skill discovery tools are default-disabled builtins, so a normal
+    /// session composes neither. The skill inventory must then name neither
+    /// tool; the discovery guidance appears only when both are composed.
+    #[cfg(feature = "skills")]
+    #[tokio::test]
+    async fn skill_inventory_names_discovery_tools_only_when_they_are_composed() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .project_root(temp.path())
+            .builtins(true)
+            .shell(false);
+
+        let mut default_build = AgentBuildConfig::new("claude-sonnet-4-5");
+        default_build.llm_client_override = Some(Arc::new(PromptTestClient));
+        default_build.skill_engine_override = Some(collection_mode_skill_runtime());
+        let default_agent = factory
+            .build_agent(default_build, &Config::default())
+            .await
+            .unwrap();
+        let default_prompt = system_prompt_of(default_agent.session().messages());
+        let default_visible = default_agent.tool_scope().visible_tool_names().unwrap();
+        assert!(
+            default_prompt.contains("<available_skills mode=\"collections\">"),
+            "the inventory itself stays in the prompt: {default_prompt}"
+        );
+        assert!(
+            !default_visible.contains("browse_skills") && !default_visible.contains("load_skill"),
+            "skill discovery tools are default-disabled: {default_visible:?}"
+        );
+        assert!(
+            !default_prompt.contains("browse_skills") && !default_prompt.contains("load_skill"),
+            "uncomposed skill discovery tools must not be documented: {default_prompt}"
+        );
+
+        let mut composed_build = AgentBuildConfig::new("claude-sonnet-4-5");
+        composed_build.llm_client_override = Some(Arc::new(PromptTestClient));
+        composed_build.skill_engine_override = Some(collection_mode_skill_runtime());
+        composed_build.tool_dispatcher_override = Some(Arc::new(UsageTestDispatcher {
+            tools: tools(&["browse_skills", "load_skill"]),
             exact_catalog: false,
             may_require_control_plane: false,
             pending_sources: Arc::from([]),
-        };
+        }));
+        let composed_agent = factory
+            .build_agent(composed_build, &Config::default())
+            .await
+            .unwrap();
+        let composed_prompt = system_prompt_of(composed_agent.session().messages());
+        assert!(
+            composed_prompt.contains(meerkat_tools::builtin::skills::SKILL_DISCOVERY_TOOL_GUIDANCE),
+            "composed discovery tools get their guidance: {composed_prompt}"
+        );
+        assert!(
+            !composed_prompt.contains("browse_skills tool\n")
+                && !composed_prompt.contains("# Available Tools"),
+            "the discovery tools are still not inventoried: {composed_prompt}"
+        );
+    }
+
+    /// Schedule and WorkGraph families used to append their own
+    /// `# Available Tools` block. Composing them must leave the system prompt
+    /// free of their descriptions while the tools stay provider-visible.
+    #[tokio::test]
+    async fn composed_schedule_family_is_visible_but_not_documented_in_the_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let schedule = Arc::new(UsageTestDispatcher {
+            tools: tools(&["meerkat_schedule_list"]),
+            exact_catalog: false,
+            may_require_control_plane: false,
+            pending_sources: Arc::from([]),
+        });
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .schedule(true);
+        let mut build_config = external_only_build_config();
+        build_config.schedule_tools = Some(schedule);
+
+        let agent = factory
+            .build_agent(build_config, &Config::default())
+            .await
+            .unwrap();
+        let system_prompt = system_prompt_of(agent.session().messages());
+        let visible = agent.tool_scope().visible_tool_names().unwrap();
 
         assert!(
-            render_tool_usage_instructions(&dispatcher).is_empty(),
-            "a mob-only dispatcher renders no header and no entries"
+            visible.contains("meerkat_schedule_list"),
+            "the schedule family stays composed and visible: {visible:?}"
+        );
+        assert!(
+            !system_prompt.contains("meerkat_schedule_list tool")
+                && !system_prompt.contains("# Available Tools"),
+            "the schedule family must not be documented in the prompt: {system_prompt}"
         );
     }
 
     #[test]
-    fn render_tool_usage_instructions_keeps_inventory_for_non_exact_dispatchers() {
-        let dispatcher = UsageTestDispatcher {
-            tools: tools(&["visible", "secret"]),
-            exact_catalog: false,
-            may_require_control_plane: false,
-            pending_sources: Arc::from([]),
-        };
-
-        let usage = render_tool_usage_instructions(&dispatcher);
-        assert!(usage.contains("# Available Tools"));
-        assert!(usage.contains("visible tool"));
-        assert!(usage.contains("secret tool"));
-    }
-
-    #[test]
-    fn render_tool_usage_instructions_omits_inventory_for_exact_dispatchers() {
-        let dispatcher = UsageTestDispatcher {
-            tools: tools(&["visible", "secret_lookup", "secret_audit"]),
-            exact_catalog: true,
-            may_require_control_plane: false,
-            pending_sources: Arc::from([]),
-        };
-
-        let usage = render_tool_usage_instructions(&dispatcher);
-        assert!(usage.is_empty());
+    fn deferred_catalog_guidance_names_the_control_plane_tools() {
         assert!(deferred_catalog_guidance().contains("tool_catalog_search"));
         assert!(deferred_catalog_guidance().contains("tool_catalog_load"));
-    }
-
-    #[test]
-    fn render_tool_usage_instructions_keeps_inventory_for_exact_dispatchers_without_deferred_entries()
-     {
-        let dispatcher = UsageTestDispatcher {
-            tools: tools(&["visible"]),
-            exact_catalog: true,
-            may_require_control_plane: false,
-            pending_sources: Arc::from([]),
-        };
-
-        let usage = render_tool_usage_instructions(&dispatcher);
-        assert!(usage.contains("# Available Tools"));
-        assert!(usage.contains("visible tool"));
     }
 
     #[tokio::test]

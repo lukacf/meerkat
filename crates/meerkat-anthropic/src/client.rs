@@ -979,12 +979,18 @@ impl AnthropicClient {
                         .map_err(|e| LlmError::InvalidRequest {
                             message: e.to_string(),
                         })?;
+                // `compiled.schema` is the validation schema the agent checks
+                // the reply against. The native slot gets the lowering of it
+                // that Anthropic's grammar compiler accepts; see
+                // `output_format_schema`.
+                let slot_schema =
+                    crate::output_format_schema::lower_output_format_schema(&compiled.schema);
                 if body.get("output_config").is_none() {
                     body["output_config"] = serde_json::json!({});
                 }
                 body["output_config"]["format"] = serde_json::json!({
                     "type": "json_schema",
-                    "schema": compiled.schema
+                    "schema": slot_schema
                 });
             }
 
@@ -2037,6 +2043,11 @@ impl LlmClient for AnthropicClient {
         Ok(())
     }
 
+    /// The validation schema: the configured schema with
+    /// `additionalProperties: false` on every open object that declares
+    /// `properties`. Every other keyword, including the ones Anthropic's
+    /// native slot rejects, is kept so the agent enforces it. The request
+    /// builder lowers this further for `output_config.format` only.
     fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
         let mut schema = output_schema.schema.as_value().clone();
         ensure_additional_properties_false(&mut schema);
@@ -3529,6 +3540,122 @@ mod tests {
         assert_eq!(
             output_config["format"]["schema"]["additionalProperties"],
             serde_json::json!(false)
+        );
+        Ok(())
+    }
+
+    /// The review schema from the structured-output live matrix: a `number`
+    /// confidence bounded to 0..1 and an `integer` line with a minimum.
+    fn bounded_review_output_schema() -> OutputSchema {
+        OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "verdict": {"type": "string", "enum": ["approve", "request_changes", "comment"]},
+                "inline_comments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "line": {"type": "integer", "minimum": 1},
+                            "category": {"type": "string", "enum": ["bug", "security", "performance", "style", "docs"]},
+                            "message": {"type": "string"},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                        },
+                        "required": ["path", "line", "category", "message", "confidence"],
+                        "additionalProperties": false
+                    }
+                },
+                "general_comments": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["verdict", "inline_comments"],
+            "additionalProperties": false
+        }))
+        .expect("valid schema")
+    }
+
+    /// `output_config.format.schema` exactly as main sent it for
+    /// [`bounded_review_output_schema`], recorded from the live matrix proxy.
+    /// Anthropic rejected it with HTTP 400 ("For 'number' type, properties
+    /// maximum, minimum are not supported"). It is also the validation schema,
+    /// which must stay byte-identical.
+    const RECORDED_REJECTED_REVIEW_SLOT: &str = r#"{"additionalProperties":false,"properties":{"general_comments":{"items":{"type":"string"},"type":"array"},"inline_comments":{"items":{"additionalProperties":false,"properties":{"category":{"enum":["bug","security","performance","style","docs"],"type":"string"},"confidence":{"maximum":1,"minimum":0,"type":"number"},"line":{"minimum":1,"type":"integer"},"message":{"type":"string"},"path":{"type":"string"}},"required":["path","line","category","message","confidence"],"type":"object"},"type":"array"},"verdict":{"enum":["approve","request_changes","comment"],"type":"string"}},"required":["verdict","inline_comments"],"type":"object"}"#;
+
+    /// The slot schema sent for [`bounded_review_output_schema`] now: the
+    /// bounds are gone from the grammar and restated in the descriptions.
+    const LOWERED_REVIEW_SLOT: &str = r#"{"additionalProperties":false,"properties":{"general_comments":{"items":{"type":"string"},"type":"array"},"inline_comments":{"items":{"additionalProperties":false,"properties":{"category":{"enum":["bug","security","performance","style","docs"],"type":"string"},"confidence":{"description":"Constraints (JSON Schema): {\"minimum\":0,\"maximum\":1}","type":"number"},"line":{"description":"Constraints (JSON Schema): {\"minimum\":1}","type":"integer"},"message":{"type":"string"},"path":{"type":"string"}},"required":["path","line","category","message","confidence"],"type":"object"},"type":"array"},"verdict":{"enum":["approve","request_changes","comment"],"type":"string"}},"required":["verdict","inline_comments"],"type":"object"}"#;
+
+    #[test]
+    fn structured_output_slot_drops_rejected_bounds_while_validation_keeps_them()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let output_schema = bounded_review_output_schema();
+
+        let validation = client.compile_schema(&output_schema)?;
+        assert!(validation.warnings.is_empty());
+        assert_eq!(
+            validation.schema.to_string(),
+            RECORDED_REJECTED_REVIEW_SLOT,
+            "the validation schema keeps every bound, byte-identical to before"
+        );
+
+        for effort in [None, Some(AnthropicEffort::High)] {
+            let request = LlmRequest::new(
+                "claude-sonnet-4-6",
+                vec![Message::User(UserMessage::text("extract".to_string()))],
+            )
+            .with_anthropic_tag_merge(|t| {
+                t.structured_output = Some(output_schema.clone());
+                t.effort = effort;
+            });
+            let body = client.build_request_body(&request)?;
+            let format = &body["output_config"]["format"];
+            assert_eq!(format["type"], "json_schema");
+            assert_eq!(
+                format["schema"].to_string(),
+                LOWERED_REVIEW_SLOT,
+                "the native slot carries no minimum/maximum (effort {effort:?})"
+            );
+            if effort.is_some() {
+                assert_eq!(body["output_config"]["effort"], "high");
+            }
+        }
+
+        // Building the request never touches the validation schema.
+        assert_eq!(
+            client.compile_schema(&output_schema)?.schema.to_string(),
+            RECORDED_REJECTED_REVIEW_SLOT
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn structured_output_slot_is_the_validation_schema_when_nothing_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let output_schema = OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Z]"},
+                "born": {"type": "string", "format": "date"},
+                // Outside Anthropic's format list, so the provider rejects it
+                // loudly. It is never lowered: the reply validator does not
+                // assert `format`, so nothing else would enforce it.
+                "pointer": {"type": "string", "format": "json-pointer"},
+                "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "kind": {"anyOf": [{"type": "string", "enum": ["a", "b"]}, {"type": "null"}]}
+            },
+            "required": ["name"]
+        }))?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![Message::User(UserMessage::text("extract".to_string()))],
+        )
+        .with_anthropic_tag_merge(|t| t.structured_output = Some(output_schema.clone()));
+        let body = client.build_request_body(&request)?;
+        assert_eq!(
+            body["output_config"]["format"]["schema"],
+            client.compile_schema(&output_schema)?.schema
         );
         Ok(())
     }

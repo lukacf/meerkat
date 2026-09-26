@@ -13415,6 +13415,240 @@ mod tests {
         assert_eq!(payload["text"], "ok");
     }
 
+    // -----------------------------------------------------------------------
+    // Structured output over REST: validate-first and extraction fallback
+    // -----------------------------------------------------------------------
+
+    /// The loop's default extraction prompt, verbatim.
+    const REST_DEFAULT_EXTRACTION_PROMPT: &str = "Provide the final output as valid JSON \
+matching the required schema. Output ONLY the JSON, no additional text or markdown formatting.";
+
+    /// Scripted client for structured-output runs: answers the n-th request
+    /// with the n-th scripted reply and records every request it receives.
+    struct ScriptedStructuredOutputClient {
+        replies: Vec<&'static str>,
+        requests: Arc<std::sync::Mutex<Vec<LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for ScriptedStructuredOutputClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            let reply = {
+                let mut requests = self.requests.lock().expect("recorded requests lock");
+                requests.push(request.clone());
+                self.replies
+                    .get(requests.len() - 1)
+                    .copied()
+                    .expect("the run sent more requests than scripted")
+            };
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: reply.to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        provider_for_successful_rest_test_model(&request.model),
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// POST `/sessions` with an output schema through the real REST router,
+    /// answered by the scripted replies. Returns the HTTP JSON body and the
+    /// requests the run sent.
+    async fn post_structured_output_session(
+        replies: Vec<&'static str>,
+    ) -> (serde_json::Value, Vec<LlmRequest>) {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        state.llm_client_override = Some(Arc::new(ScriptedStructuredOutputClient {
+            replies,
+            requests: Arc::clone(&requests),
+        }));
+        let app = router(state);
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            app.oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "prompt": "Review the change and give a verdict.",
+                            "output_schema": {
+                                "type": "object",
+                                "properties": {
+                                    "verdict": {"type": "string", "enum": ["approve", "reject"]},
+                                    "notes": {"type": "array", "items": {"type": "string"}}
+                                },
+                                "required": ["verdict", "notes"],
+                                "additionalProperties": false
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("structured-output create route timed out")
+        .unwrap();
+
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "structured-output create failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let recorded = requests.lock().expect("recorded requests lock").clone();
+        (payload, recorded)
+    }
+
+    fn rest_leads_with_schema_section(request: &LlmRequest) -> bool {
+        matches!(
+            request.messages.first(),
+            Some(meerkat_core::Message::System(system))
+                if system.content.matches(
+                    meerkat_core::structured_output::OUTPUT_SCHEMA_INSTRUCTIONS_OPEN
+                ).count() == 1
+        )
+    }
+
+    fn json_keys(value: &serde_json::Value) -> std::collections::BTreeSet<String> {
+        value
+            .as_object()
+            .expect("REST session response is a JSON object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Validate-first over REST: a final reply that already matches the schema
+    /// becomes `structured_output` without an extraction request, and the
+    /// REST session response has the same key set as the extraction-fallback
+    /// response.
+    #[tokio::test]
+    async fn rest_create_session_validate_first_structured_output_reaches_response() {
+        let (payload, requests) =
+            post_structured_output_session(vec![r#"{"verdict":"approve","notes":["tidy"]}"#]).await;
+
+        assert_eq!(
+            requests.len(),
+            1,
+            "validate-first sends no extraction request"
+        );
+        assert!(
+            rest_leads_with_schema_section(&requests[0]),
+            "the request leads with exactly one schema section: {:?}",
+            requests[0].messages.first()
+        );
+        assert!(payload["session_id"].is_string(), "{payload}");
+        assert_eq!(
+            payload["structured_output"],
+            json!({"verdict": "approve", "notes": ["tidy"]})
+        );
+        assert_eq!(payload["text"], r#"{"verdict":"approve","notes":["tidy"]}"#);
+        assert_eq!(payload["turns"], 1);
+        assert_eq!(payload["tool_calls"], 0);
+        assert!(payload.get("extraction_error").is_none(), "{payload}");
+        assert!(
+            payload["usage"].is_object(),
+            "usage keeps its wire shape: {payload}"
+        );
+
+        let (fallback, _) = post_structured_output_session(vec![
+            "Approved; one note: tidy.",
+            r#"{"verdict":"approve","notes":["tidy"]}"#,
+        ])
+        .await;
+        assert_eq!(
+            json_keys(&payload),
+            json_keys(&fallback),
+            "both structured-output paths produce the same REST response keys"
+        );
+    }
+
+    /// Extraction fallback over REST: a prose final reply fails validate-first,
+    /// the unchanged extraction request runs (default prompt, temperature 0,
+    /// no tools, same schema section), and the REST response carries the
+    /// extracted value with `text` still the primary reply.
+    #[tokio::test]
+    async fn rest_create_session_extraction_fallback_structured_output_reaches_response() {
+        let (payload, requests) = post_structured_output_session(vec![
+            "Approved; one note: tidy.",
+            r#"{"verdict":"approve","notes":["tidy"]}"#,
+        ])
+        .await;
+
+        assert_eq!(requests.len(), 2, "the extraction request ran");
+        assert!(rest_leads_with_schema_section(&requests[0]));
+        assert!(rest_leads_with_schema_section(&requests[1]));
+        assert_eq!(
+            requests[0].messages.first(),
+            requests[1].messages.first(),
+            "the extraction request keeps the main turn's system prompt byte for byte"
+        );
+        let extraction = &requests[1];
+        assert!(
+            matches!(
+                extraction.messages.last(),
+                Some(meerkat_core::Message::User(user))
+                    if user.text_content() == REST_DEFAULT_EXTRACTION_PROMPT
+            ),
+            "the unchanged extraction prompt closes the request: {:?}",
+            extraction.messages.last()
+        );
+        assert_eq!(extraction.temperature, Some(0.0));
+        assert!(extraction.tools.is_empty(), "no tools on extraction");
+
+        assert_eq!(
+            payload["structured_output"],
+            json!({"verdict": "approve", "notes": ["tidy"]})
+        );
+        assert_eq!(payload["text"], "Approved; one note: tidy.");
+        assert_eq!(payload["turns"], 2);
+        assert!(payload.get("extraction_error").is_none(), "{payload}");
+    }
+
     /// REST end-to-end acceptance for Ask 1: `injected_context` on session
     /// create materializes as typed injected-context transcript messages
     /// immediately before the first turn's user message, in order — visible
@@ -14789,6 +15023,8 @@ mod tests {
                 quarantined: vec![],
                 collection_fault: None,
             }),
+            run_usage: None,
+            request_usage: Vec::new(),
         };
 
         let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
@@ -15823,6 +16059,8 @@ mod tests {
                     extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
+                    run_usage: None,
+                    request_usage: Vec::new(),
                 },
                 &realm,
             );

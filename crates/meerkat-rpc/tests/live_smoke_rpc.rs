@@ -438,6 +438,8 @@ async fn e2e_diagnostics_projection_contract_across_cli_rest_rpc_mcp() {
             quarantined: vec![],
             collection_fault: None,
         }),
+        run_usage: None,
+        request_usage: Vec::new(),
     };
 
     // RPC/REST share WireRunResult; diagnostics must survive conversion.

@@ -109,6 +109,8 @@ impl CoreExecutor for ResultExecutor {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             },
         ))
     }
@@ -157,6 +159,8 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
                     extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
+                    run_usage: None,
+                    request_usage: Vec::new(),
                 },
             ))
         }
@@ -497,6 +501,8 @@ async fn choke_004_completion_during_running_defers_wake() {
                     extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
+                    run_usage: None,
+                    request_usage: Vec::new(),
                 },
             ))
         }
@@ -635,6 +641,8 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             };
             Ok(CoreApplyOutput::with_run_result(
                 RunBoundaryReceiptDraft {

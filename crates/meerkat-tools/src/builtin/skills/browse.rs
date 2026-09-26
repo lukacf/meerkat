@@ -40,12 +40,12 @@ impl BrowseSkillsTool {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for BrowseSkillsTool {
     fn name(&self) -> &'static str {
-        "browse_skills"
+        super::BROWSE_SKILLS_TOOL_NAME
     }
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "browse_skills".into(),
+            name: super::BROWSE_SKILLS_TOOL_NAME.into(),
             description:
                 "List available skills, optionally filtered by search query or source UUID.".into(),
             input_schema: crate::schema::schema_for::<BrowseSkillsArgs>(),

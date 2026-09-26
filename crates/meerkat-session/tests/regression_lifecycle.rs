@@ -110,6 +110,7 @@ impl SessionAgent for MockAgent {
             output_tokens: 5,
             cache_creation_tokens: None,
             cache_read_tokens: None,
+            reasoning_tokens: None,
             provider_accounting: None,
         };
 
@@ -135,6 +136,8 @@ impl SessionAgent for MockAgent {
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         })
     }
 
@@ -173,6 +176,7 @@ impl SessionAgent for MockAgent {
                 output_tokens: self.total_output_tokens,
                 cache_creation_tokens: None,
                 cache_read_tokens: None,
+                reasoning_tokens: None,
                 provider_accounting: None,
             },
             last_assistant_text: Some("Hello from mock".to_string()),
@@ -228,6 +232,8 @@ impl SessionAgent for SnapshotAgent {
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         })
     }
 
@@ -452,6 +458,8 @@ impl SessionAgent for RecordingTurnAgent {
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         })
     }
 
@@ -478,6 +486,8 @@ impl SessionAgent for RecordingTurnAgent {
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         })
     }
 

@@ -10,7 +10,9 @@
 //! 3. Config-level inline override (`config.agent.system_prompt`).
 //! 4. Default system prompt + AGENTS.md files.
 //! 5. Config-level tool instructions (`config.agent.tool_instructions`).
-//! 6. Dispatcher-provided tool usage instructions (appended last).
+//! 6. Tool-family guidance for composed families, such as comms usage or
+//!    deferred catalog discovery (appended last). Per-tool definitions are not
+//!    repeated here; they reach the provider through the request tool array.
 
 use crate::SystemPromptOverride;
 use meerkat_core::{

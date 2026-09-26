@@ -91,6 +91,17 @@ export interface WireUsage {
   total_tokens: number;
   cache_creation_tokens?: number;
   cache_read_tokens?: number;
+  reasoning_tokens?: number;
+}
+
+export interface WireTurnUsage extends WireUsage {
+  accounting: {
+    provider: string;
+    model: string;
+    presented_tokens: number;
+    convention: string;
+    aggregation: string;
+  };
 }
 
 export interface WireRunResult {
@@ -100,6 +111,8 @@ export interface WireRunResult {
   turns: number;
   tool_calls: number;
   usage: WireUsage;
+  run_usage?: WireUsage;
+  request_usage?: WireTurnUsage[];
   terminal_cause_kind?: string;
   structured_output?: unknown;
   extraction_error?: { last_output: string; attempts: number; reason: string };
@@ -685,6 +698,8 @@ export interface HelpRequest {
 
 export interface HelpResponse {
   extraction_error?: Record<string, unknown> | null;
+  request_usage?: Record<string, unknown>[];
+  run_usage?: WireUsage | null;
   schema_warnings?: Record<string, unknown>[] | null;
   session_id: string;
   session_ref?: string | null;

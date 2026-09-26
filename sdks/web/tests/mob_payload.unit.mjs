@@ -1387,3 +1387,34 @@ test('Mob.spawnHelper / forkHelper serialize canonical role_name and model_overr
   });
   assert.equal(forkResult.retirement_error, 'cleanup delayed');
 });
+
+// The helper result's usage keeps cache and reasoning counters, and rejects a
+// malformed reasoning count instead of dropping it.
+test('Mob.spawnHelper keeps cache and reasoning usage counters', async () => {
+  const helperJson = (usage) => JSON.stringify({
+    output: 'ok',
+    agent_identity: 'h-1',
+    member_ref: 'ref-h-1',
+    tokens_used: 0,
+    bounded_result: { label: 'summary', status: 'completed', text: 'ok' },
+    session_id: 'session-h-1',
+    usage,
+    turns: 1,
+    tool_calls: 0,
+  });
+  let usage = { input_tokens: 300, output_tokens: 20, cache_read_tokens: 200, reasoning_tokens: 12 };
+  const mob = new Mob('mob-web-unit', {
+    async mob_spawn_helper() {
+      return helperJson(usage);
+    },
+  });
+  const result = await mob.spawnHelper('summarize', { agentIdentity: 'h-1', resultLabel: 'summary', maxTextBytes: 4096 });
+  assert.equal(result.usage.cache_read_tokens, 200);
+  assert.equal(result.usage.reasoning_tokens, 12);
+
+  usage = { input_tokens: 300, output_tokens: 20, reasoning_tokens: 'many' };
+  await assert.rejects(
+    () => mob.spawnHelper('summarize', { agentIdentity: 'h-1', resultLabel: 'summary', maxTextBytes: 4096 }),
+    /usage\.reasoning_tokens must be number/,
+  );
+});

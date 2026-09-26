@@ -627,6 +627,13 @@ struct CallingLlmPrepared {
     typed_provider_params: Option<ProviderParamsOverride>,
 }
 
+/// Accounting of one tool-loop provider call, carried from the model
+/// response to the turn commit that publishes it.
+struct CallingLlmToolTurnAccounting {
+    stop_reason: crate::types::StopReason,
+    usage: Option<TurnUsage>,
+}
+
 /// The classified assistant response for one boundary.
 struct CallingLlmAssistantTurn {
     assistant_msg: BlockAssistantMessage,
@@ -2227,6 +2234,8 @@ where
                                     &retry_schedule,
                                     self.effective_model_registry.as_deref(),
                                 )?;
+                                let previous_output_schema_section =
+                                    self.output_schema_request_instructions();
                                 match self
                                     .apply_model_fallback_switch(
                                         activation,
@@ -2248,7 +2257,12 @@ where
                                         current_tools = next_tools;
                                         current_provider_params = next_params;
                                         current_max_tokens = next_max_tokens;
-                                        Arc::make_mut(&mut current_messages).push(notice);
+                                        let messages = Arc::make_mut(&mut current_messages);
+                                        self.reproject_output_schema_instructions_after_fallback(
+                                            messages,
+                                            previous_output_schema_section.as_deref(),
+                                        );
+                                        messages.push(notice);
                                         *durable_visibility_parent =
                                             Some(next_durable_visibility_parent);
                                     }
@@ -2381,6 +2395,8 @@ where
                                 &retry_schedule,
                                 self.effective_model_registry.as_deref(),
                             )?;
+                            let previous_output_schema_section =
+                                self.output_schema_request_instructions();
                             match self
                                 .apply_model_fallback_switch(
                                     activation,
@@ -2402,7 +2418,12 @@ where
                                     current_tools = next_tools;
                                     current_provider_params = next_params;
                                     current_max_tokens = next_max_tokens;
-                                    Arc::make_mut(&mut current_messages).push(notice);
+                                    let messages = Arc::make_mut(&mut current_messages);
+                                    self.reproject_output_schema_instructions_after_fallback(
+                                        messages,
+                                        previous_output_schema_section.as_deref(),
+                                    );
+                                    messages.push(notice);
                                     *durable_visibility_parent =
                                         Some(next_durable_visibility_parent);
                                 }
@@ -2909,6 +2930,11 @@ where
                             // can silently refund usage.
                             self.session.record_turn_usage(&outcome.summary_usage);
                             self.budget.record_turn_usage(&outcome.summary_usage);
+                            if outcome.summary_source
+                                == crate::agent::compact::CompactionSummarySource::ProviderCall
+                            {
+                                self.run_request_usage.push(outcome.summary_usage.clone());
+                            }
                             // The summary call's accounting identity is routed,
                             // not repaired: the counters above are charged as
                             // reported and the disagreement is published.
@@ -3808,19 +3834,14 @@ where
         live: &crate::types::Usage,
         rollback: &crate::types::Usage,
     ) -> Result<crate::types::Usage, AgentError> {
-        fn delta(live: u64, rollback: u64, field: &str) -> Result<u64, AgentError> {
-            live.checked_sub(rollback).ok_or_else(|| {
-                AgentError::InternalError(format!(
-                    "compaction rollback observed non-monotonic {field} usage ({live} < {rollback})"
-                ))
-            })
-        }
-        Ok(crate::types::Usage {
-            input_tokens: delta(live.input_tokens, rollback.input_tokens, "input-token")?,
-            output_tokens: delta(live.output_tokens, rollback.output_tokens, "output-token")?,
-            cache_creation_tokens: None,
-            cache_read_tokens: None,
-            provider_accounting: None,
+        // Both snapshots are normalized first: a legacy session's stored total
+        // can carry raw cache sums that a later recorded turn clamps.
+        let live = crate::types::CumulativeUsage::from_usage(live.clone()).into_inner();
+        let rollback = crate::types::CumulativeUsage::from_usage(rollback.clone()).into_inner();
+        live.cumulative_delta_since(&rollback).ok_or_else(|| {
+            AgentError::InternalError(format!(
+                "compaction rollback observed non-monotonic usage (live {live:?} < rollback {rollback:?})"
+            ))
         })
     }
 
@@ -3845,7 +3866,10 @@ where
             )?;
             let attempted_cadence = self.compaction_cadence.clone();
             let mut restored_session = rollback.rollback_session;
-            if retained_usage != crate::types::Usage::default() {
+            // Nothing recorded during the attempt (every counter zero, with
+            // `Some(0)` counting as zero) restores the rollback head byte for
+            // byte, legacy raw counters included.
+            if !retained_usage.is_zero() {
                 restored_session.record_cumulative_usage(retained_usage);
             }
             let mut restored_cadence = rollback.rollback_compaction_cadence;
@@ -4095,7 +4119,9 @@ where
         let result = RunResult {
             text: extraction_error.last_output.clone(),
             session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
+            usage: self.reported_session_usage(),
+            run_usage: self.run_usage_delta(),
+            request_usage: self.run_request_usage.clone(),
             turns: turn_count + 1,
             tool_calls: tool_call_count,
             terminal_cause_kind: None,
@@ -4151,6 +4177,20 @@ where
         Ok(())
     }
 
+    /// The session total as reported and as used for deltas: normalized so
+    /// the cache and reasoning counters are subsets of their parent totals.
+    /// Sessions saved before 0.8.22 summed raw per-call cache counters, which
+    /// can exceed the input total; the stored value is left untouched.
+    fn reported_session_usage(&self) -> crate::types::Usage {
+        self.session.reported_total_usage()
+    }
+
+    /// Usage accrued since the current run began.
+    fn run_usage_delta(&self) -> Option<crate::types::Usage> {
+        self.reported_session_usage()
+            .cumulative_delta_since(&self.run_usage_baseline)
+    }
+
     /// The main agent loop
     #[allow(unused_assignments)]
     pub(super) async fn run_loop(
@@ -4193,6 +4233,24 @@ where
         // park is a separate seam and remains unbounded here.
         self.budget.begin_turn();
         self.extraction_state.reset();
+        // Once a suspended run's staged callback results are applied, the next
+        // run continues its account so calls made before the suspension stay
+        // in that run's usage, whichever entry point starts it. A suspension
+        // whose results were never applied is discarded, not absorbed.
+        match self
+            .run_usage_suspended_run
+            .take()
+            .filter(|suspended| suspended.callback_results_applied)
+        {
+            Some(resumed) => {
+                self.run_usage_baseline = resumed.baseline;
+                self.run_request_usage = resumed.rows;
+            }
+            None => {
+                self.run_usage_baseline = self.reported_session_usage();
+                self.run_request_usage.clear();
+            }
+        }
         // RuntimeStore holds the pre-run Session snapshot until an explicit
         // sticky-fallback CAS advances its control projection. Seal that exact
         // parent once; CallingLlm visibility promotion/catalog refreshes mutate
@@ -5734,9 +5792,20 @@ where
         in_extraction: bool,
         result: LlmStreamResult,
     ) -> Result<CallingLlmGate<CallingLlmAssistantTurn>, AgentError> {
+        // A request carrying the structured-output instruction projection has
+        // a leading system prompt the canonical transcript does not contain,
+        // so a breakpoint the provider authored over it is evidence about that
+        // request only. It can never bind to the transcript, and reporting it
+        // as a discarded anchor on every turn would describe a fault that does
+        // not exist. Such claims are therefore not promoted at all.
+        let turn_cache_breakpoint_claims = if self.requests_carry_output_schema_projection() {
+            &[][..]
+        } else {
+            result.cache_breakpoint_claims()
+        };
         let (authored_cache_breakpoints, mut cache_breakpoint_discards) =
             promote_cache_breakpoint_claims(
-                result.cache_breakpoint_claims(),
+                turn_cache_breakpoint_claims,
                 self.client.provider(),
                 self.client.model(),
             );
@@ -5888,6 +5957,15 @@ where
             self.budget.record_turn_usage(turn_usage);
             self.last_input_tokens = turn_usage.presented_tokens();
             self.session.record_turn_usage(turn_usage);
+            self.run_request_usage.push(turn_usage.clone());
+            // Extraction publishes no `turn_completed`; its rows ride the
+            // extraction outcome event. Recorded here, where every answered
+            // request is charged, so an attempt that later fails validation,
+            // a hook, or the budget still publishes its row.
+            if in_extraction {
+                self.extraction_state
+                    .record_request_usage(turn_usage.clone());
+            }
         }
         if let Some(exceeded) = self.budget.observe().exceeded() {
             emit_phase_event!(self, ctx, budget_warning_event(exceeded));
@@ -6090,7 +6168,12 @@ where
         tool_defs: &Arc<[Arc<ToolDef>]>,
         assistant: CallingLlmAssistantTurn,
     ) -> Result<CallingLlmStep, AgentError> {
-        let assistant_msg = assistant.assistant_msg;
+        let CallingLlmAssistantTurn {
+            assistant_msg,
+            stop_reason,
+            usage,
+            ..
+        } = assistant;
         if in_extraction {
             let tool_call_names = assistant_msg
                 .tool_calls()
@@ -6183,8 +6266,13 @@ where
         let batch = self
             .collect_calling_llm_tool_outcomes(ctx, tool_defs, dispatch_results)
             .await?;
-        self.commit_calling_llm_tool_turn(ctx, assistant_msg, batch)
-            .await
+        self.commit_calling_llm_tool_turn(
+            ctx,
+            assistant_msg,
+            CallingLlmToolTurnAccounting { stop_reason, usage },
+            batch,
+        )
+        .await
     }
     /// Runs pre-tool hooks and visibility prechecks over the requested
     /// tool calls, admitting the executable subset.
@@ -6442,6 +6530,7 @@ where
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
         assistant_msg: BlockAssistantMessage,
+        accounting: CallingLlmToolTurnAccounting,
         batch: CallingLlmToolBatch,
     ) -> Result<CallingLlmStep, AgentError> {
         let CallingLlmToolBatch {
@@ -6566,6 +6655,13 @@ where
                 emit_phase_event!(self, ctx, AgentEvent::AssistantImageAppended { image });
             }
         }
+        // The tool-loop call's assistant message is committed (or staged
+        // with its callback batch), so its turn is complete. Publishing it
+        // pairs this request's `TurnStarted` and puts its accounting on the
+        // event stream, where a consumer sees every agent-loop provider call
+        // rather than only the one that closes the run.
+        let CallingLlmToolTurnAccounting { stop_reason, usage } = accounting;
+        emit_phase_event!(self, ctx, AgentEvent::TurnCompleted { stop_reason, usage });
 
         self.observe_cancel_after_boundary_request(ctx.run_id)?;
 
@@ -6585,6 +6681,12 @@ where
             })?;
             self.execute_turn_effects(&transition, ctx.turn_count, ctx.event_tx)
                 .await?;
+            self.run_usage_suspended_run = Some(crate::agent::SuspendedRunUsage {
+                run_id: ctx.run_id.clone(),
+                baseline: self.run_usage_baseline.clone(),
+                rows: self.run_request_usage.clone(),
+                callback_results_applied: false,
+            });
             if callback_pending.len() == 1 {
                 let (tool_use_id, tool_name, args) = callback_pending.remove(0);
                 return Err(AgentError::CallbackPending {
@@ -6708,6 +6810,7 @@ where
             &assistant_text,
             output_schema,
             &compiled.schema,
+            super::extraction::FormatAssertion::Annotation,
         );
         let validation = match validation {
             Ok(validation) => validation,
@@ -6763,7 +6866,9 @@ where
                 let result = RunResult {
                     text: extraction_error.last_output.clone(),
                     session_id: self.session.id().clone(),
-                    usage: self.session.total_usage(),
+                    usage: self.reported_session_usage(),
+                    run_usage: self.run_usage_delta(),
+                    request_usage: self.run_request_usage.clone(),
                     turns: ctx.turn_count + 1,
                     tool_calls: ctx.tool_call_count,
                     terminal_cause_kind: None,
@@ -6775,13 +6880,36 @@ where
                 self.save_session_best_effort(ctx.run_id).await?;
                 self.emit_extraction_failed_event(&extraction_error, ctx.event_tx.as_ref())
                     .await;
-                return Ok(CallingLlmStep::Done(Ok(result)));
+                Ok(CallingLlmStep::Done(Ok(result)))
             }
             super::extraction::ExtractionValidation::Passed(normalized) => {
-                self.extraction_state.record_success(normalized);
+                self.complete_extraction_validation_passed(
+                    ctx,
+                    normalized,
+                    crate::event::StructuredOutputOrigin::ExtractionRequest,
+                )
+                .await
             }
         }
-
+    }
+    /// Complete a run whose structured output validated.
+    ///
+    /// The one success terminal for structured output, shared by the
+    /// extraction phase and by validate-first (the primary final reply already
+    /// validated, so no extraction request was sent). Both therefore produce
+    /// the same `RunResult` shape, the same authority transition out of
+    /// `Extracting`, the same checkpoint, and the same `ExtractionSucceeded`
+    /// event, whose typed `origin` records which request produced the value
+    /// (validate-first sends no extraction request, so it has no
+    /// `request_usage` rows). The caller must already have entered
+    /// `Extracting`.
+    async fn complete_extraction_validation_passed(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        normalized: serde_json::Value,
+        origin: crate::event::StructuredOutputOrigin,
+    ) -> Result<CallingLlmStep, AgentError> {
+        self.extraction_state.record_success(normalized);
         let structured_output = self.extraction_state.take_result();
         let schema_warnings = self.extraction_state.take_schema_warnings();
         let result = RunResult {
@@ -6791,7 +6919,9 @@ where
                 .unwrap_or_default()
                 .to_string(),
             session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
+            usage: self.reported_session_usage(),
+            run_usage: self.run_usage_delta(),
+            request_usage: self.run_request_usage.clone(),
             turns: ctx.turn_count + 1,
             tool_calls: ctx.tool_call_count,
             terminal_cause_kind: None,
@@ -6800,7 +6930,7 @@ where
             schema_warnings,
             skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
         };
-        // Validation passed — complete via authority
+        // Validation passed - complete via authority
         let t = self.apply_turn_input(TurnExecutionInput::ExtractionValidationPassed {
             run_id: ctx.run_id.clone(),
         })?;
@@ -6812,6 +6942,7 @@ where
             self.emit_extraction_succeeded_event(
                 structured_output,
                 result.schema_warnings.clone(),
+                origin,
                 ctx.event_tx.as_ref(),
             )
             .await;
@@ -6895,7 +7026,9 @@ where
             let mut result = RunResult {
                 text: final_text.clone(),
                 session_id: self.session.id().clone(),
-                usage: self.session.total_usage(),
+                usage: self.reported_session_usage(),
+                run_usage: self.run_usage_delta(),
+                request_usage: self.run_request_usage.clone(),
                 turns: ctx.turn_count + 1,
                 tool_calls: ctx.tool_call_count,
                 terminal_cause_kind: None,
@@ -6917,6 +7050,45 @@ where
 
             self.extraction_state
                 .set_schema_warnings(compiled.warnings.clone());
+
+            // Validate-first: the model was shown the schema up front, so its
+            // final reply may already be the structured output. When it
+            // validates (after the same code-fence and named-wrapper
+            // normalization the extraction phase applies), accept it and skip
+            // the extraction request. Anything else - invalid JSON, a schema
+            // mismatch, or a validator fault - falls through to the unchanged
+            // extraction path below, which reproduces and reports that fault
+            // exactly as before. No extraction attempt is consumed here.
+            //
+            // Known `format` keywords are asserted here even though the
+            // extraction phase treats them as annotations: providers that
+            // decode natively against the schema (Anthropic, OpenAI strict)
+            // force conforming values on the extraction request, and a
+            // free-form final reply must not bypass that contract. A format
+            // violation therefore takes the extraction path, as it did before
+            // validate-first existed.
+            if let Ok(super::extraction::ExtractionValidation::Passed(normalized)) =
+                super::extraction::validate_response_text(
+                    &final_text,
+                    &output_schema,
+                    &compiled.schema,
+                    super::extraction::FormatAssertion::Asserted,
+                )
+            {
+                // Authority: DrainingBoundary -> Extracting -> Completed,
+                // the same completion the extraction phase takes.
+                self.apply_turn_input(TurnExecutionInput::EnterExtraction {
+                    run_id: ctx.run_id.clone(),
+                    max_retries: self.config.structured_output_retries,
+                })?;
+                return self
+                    .complete_extraction_validation_passed(
+                        ctx,
+                        normalized,
+                        crate::event::StructuredOutputOrigin::FinalReply,
+                    )
+                    .await;
+            }
 
             // Push extraction prompt as user message
             let prompt = self
@@ -6955,7 +7127,9 @@ where
         let mut result = RunResult {
             text: final_text,
             session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
+            usage: self.reported_session_usage(),
+            run_usage: self.run_usage_delta(),
+            request_usage: self.run_request_usage.clone(),
             turns: ctx.turn_count + 1,
             tool_calls: ctx.tool_call_count,
             terminal_cause_kind: None,
@@ -7003,7 +7177,9 @@ where
             SurfaceResultClass::Success => Ok(RunResult {
                 text: self.session.last_assistant_text().unwrap_or_default(),
                 session_id: self.session.id().clone(),
-                usage: self.session.total_usage(),
+                usage: self.reported_session_usage(),
+                run_usage: self.run_usage_delta(),
+                request_usage: self.run_request_usage.clone(),
                 turns,
                 tool_calls,
                 terminal_cause_kind: public_terminal_cause_kind(cause_kind),
@@ -9449,8 +9625,9 @@ mod tests {
                             Usage {
                                 input_tokens: 11,
                                 output_tokens: 4,
-                                cache_creation_tokens: Some(6),
+                                cache_creation_tokens: Some(2),
                                 cache_read_tokens: Some(9),
+                                reasoning_tokens: None,
                                 provider_accounting: None,
                             },
                         ),
@@ -9722,8 +9899,9 @@ mod tests {
         expected.add(&Usage {
             input_tokens: 11,
             output_tokens: 4,
-            cache_creation_tokens: Some(6),
+            cache_creation_tokens: Some(2),
             cache_read_tokens: Some(9),
+            reasoning_tokens: None,
             provider_accounting: None,
         });
         assert_eq!(agent.session().total_usage(), expected);
@@ -9770,8 +9948,9 @@ mod tests {
         expected.add(&Usage {
             input_tokens: 11,
             output_tokens: 4,
-            cache_creation_tokens: Some(6),
+            cache_creation_tokens: Some(2),
             cache_read_tokens: Some(9),
+            reasoning_tokens: None,
             provider_accounting: None,
         });
         assert_eq!(agent.session().total_usage(), expected);
@@ -9890,6 +10069,133 @@ mod tests {
         projection
     }
 
+    /// Guards the normalized compaction rollback: aborting an uncommitted
+    /// compaction on a pre-0.8.22 session keeps the summary call charged and
+    /// leaves the reported total where it was, instead of mixing a normalized
+    /// delta into the raw legacy head.
+    #[tokio::test]
+    async fn legacy_session_compaction_abort_keeps_reported_usage_consistent() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .memory_store(memory_store.clone())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let mut encoded = serde_json::to_value(agent.session()).unwrap();
+        encoded["usage"] = serde_json::json!({
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "cache_creation_tokens": 4000,
+            "cache_read_tokens": 50000
+        });
+        *agent.session_mut() = serde_json::from_value(encoded).unwrap();
+        let rollback_session = agent.session().clone();
+        let rollback_last_input_tokens = agent.last_input_tokens;
+        let rollback_compaction_cadence = agent.compaction_cadence.clone();
+        let projection = append_abort_test_projection(agent.session_mut(), "legacy-abort");
+        // The compaction summary call: 300 uncached plus 4000 cache-read.
+        agent
+            .session_mut()
+            .record_turn_usage(&crate::TurnUsage::new(
+                Usage {
+                    input_tokens: 300,
+                    output_tokens: 10,
+                    cache_creation_tokens: Some(0),
+                    cache_read_tokens: Some(4000),
+                    ..Default::default()
+                },
+                crate::ProviderTokenAccounting::anthropic("mock-model", 300, 0, 4000),
+            ));
+        let reported_before_abort = agent.session().reported_total_usage();
+        assert_eq!(reported_before_abort.input_tokens, 5300);
+        assert_eq!(reported_before_abort.cache_read_tokens, Some(5000));
+        assert_eq!(reported_before_abort.cache_creation_tokens, Some(0));
+        memory_store.staged.lock().unwrap().push(projection.clone());
+        agent.compaction_transaction = Some(crate::agent::CompactionTransaction {
+            phase: crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(Box::new(
+                crate::agent::CompactionRollbackState {
+                    rollback_session,
+                    rollback_last_input_tokens,
+                    rollback_compaction_cadence,
+                    rollback_durable_row_floor: 0,
+                },
+            )),
+            projections: vec![projection],
+        });
+
+        agent
+            .abort_uncommitted_compaction_projections()
+            .await
+            .expect("a legacy session's uncommitted compaction aborts cleanly");
+        assert!(agent.compaction_transaction.is_none());
+        assert_eq!(
+            agent.session().reported_total_usage(),
+            reported_before_abort,
+            "the abort keeps the summary call charged and moves no counter"
+        );
+        let stored = agent.session().total_usage();
+        assert_eq!(
+            stored,
+            agent.session().reported_total_usage(),
+            "the restored head is normalized like any recorded call"
+        );
+    }
+
+    /// An abort on a pre-0.8.22 session that recorded nothing restores the raw
+    /// head byte for byte: no normalization and no timestamp bump.
+    #[tokio::test]
+    async fn legacy_session_compaction_abort_with_nothing_recorded_keeps_raw_head() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .memory_store(memory_store.clone())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let mut encoded = serde_json::to_value(agent.session()).unwrap();
+        encoded["usage"] = serde_json::json!({
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "cache_creation_tokens": 4000,
+            "cache_read_tokens": 50000
+        });
+        *agent.session_mut() = serde_json::from_value(encoded).unwrap();
+        let rollback_session = agent.session().clone();
+        let raw_head = rollback_session.total_usage();
+        let rollback_updated_at = rollback_session.updated_at();
+        let rollback_last_input_tokens = agent.last_input_tokens;
+        let rollback_compaction_cadence = agent.compaction_cadence.clone();
+        let projection = append_abort_test_projection(agent.session_mut(), "legacy-noop-abort");
+        memory_store.staged.lock().unwrap().push(projection.clone());
+        agent.compaction_transaction = Some(crate::agent::CompactionTransaction {
+            phase: crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(Box::new(
+                crate::agent::CompactionRollbackState {
+                    rollback_session,
+                    rollback_last_input_tokens,
+                    rollback_compaction_cadence,
+                    rollback_durable_row_floor: 0,
+                },
+            )),
+            projections: vec![projection],
+        });
+
+        agent
+            .abort_uncommitted_compaction_projections()
+            .await
+            .expect("a no-op abort succeeds");
+        assert_eq!(
+            agent.session().total_usage(),
+            raw_head,
+            "an abort that recorded nothing restores the raw head byte for byte"
+        );
+        assert_eq!(agent.session().updated_at(), rollback_updated_at);
+    }
+
     #[tokio::test]
     async fn empty_runtime_outbox_keeps_transaction_abortable_after_commit_failure() {
         let memory_store = Arc::new(AbortRetryMemoryStore::new());
@@ -9915,6 +10221,7 @@ mod tests {
             output_tokens: 7,
             cache_creation_tokens: Some(5),
             cache_read_tokens: Some(3),
+            reasoning_tokens: None,
             provider_accounting: None,
         };
         agent
@@ -11229,10 +11536,21 @@ mod tests {
 
         agent.run("first".into()).await.unwrap();
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
-        agent
+        let second = agent
             .run_with_events("second".into(), tx)
             .await
             .expect("capacity-overflow compaction must make progress and continue the turn");
+        assert_eq!(
+            second.request_usage.len(),
+            1,
+            "the mechanical fallback summary makes no provider request and adds no row"
+        );
+        assert!(
+            second
+                .request_usage
+                .iter()
+                .all(|row| row.accounting().model != "mechanical-compaction-fallback")
+        );
 
         let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
         assert!(
@@ -11276,7 +11594,12 @@ mod tests {
             .await;
 
         agent.run("first".into()).await.unwrap();
-        agent.run("second".into()).await.unwrap();
+        let second = agent.run("second".into()).await.unwrap();
+        assert_eq!(
+            second.request_usage.len(),
+            2,
+            "a committed provider-backed compaction summary is exactly one request row, beside the turn"
+        );
 
         let indexed = memory_store.contents();
         assert!(
@@ -12041,25 +12364,56 @@ mod tests {
 
         agent.run("first".into()).await.unwrap();
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
-        agent
+        let second = agent
             .run_with_events("second".into(), tx)
             .await
             .expect("curated compaction should commit and continue the turn");
+        assert!(
+            second
+                .request_usage
+                .iter()
+                .all(|row| row.accounting().model != "host-compaction-curator"),
+            "a curated summary makes no provider request and adds no request row"
+        );
+        assert_eq!(
+            second.request_usage.len(),
+            1,
+            "only the turn's own provider call is a request row"
+        );
 
         let mut saw_completed = false;
+        let mut turns_started = Vec::new();
+        let mut turns_completed = 0usize;
         while let Ok(event) = rx.try_recv() {
-            if let crate::event::AgentEvent::CompactionCompleted { summary_tokens, .. } = event {
-                assert_eq!(
-                    summary_tokens, 0,
-                    "curated summaries consume no LLM tokens; summary usage must be zero"
-                );
-                saw_completed = true;
+            match event {
+                crate::event::AgentEvent::CompactionCompleted { summary_tokens, .. } => {
+                    assert_eq!(
+                        summary_tokens, 0,
+                        "curated summaries consume no LLM tokens; summary usage must be zero"
+                    );
+                    saw_completed = true;
+                }
+                crate::event::AgentEvent::TurnStarted { turn_number } => {
+                    turns_started.push(turn_number);
+                }
+                crate::event::AgentEvent::TurnCompleted { .. } => turns_completed += 1,
+                _ => {}
             }
         }
         assert!(
             saw_completed,
             "curator-produced compaction should complete via the normal commit path"
         );
+        // The compaction boundary sends the loop back to rebuild the request
+        // without advancing the turn counter, so the one call's turn is
+        // announced twice with the same number. docs/reference/usage-accounting.mdx
+        // documents this, and the ATIF exporter folds the repeat into one step.
+        assert_eq!(
+            turns_started,
+            vec![0, 0],
+            "a compaction repoll re-announces the turn it is already in"
+        );
+        assert_eq!(turns_completed, 1, "one provider call, one turn_completed");
         assert_eq!(
             client.seen_last_user_messages(),
             vec!["first".to_string(), "second".to_string()],
@@ -15460,6 +15814,208 @@ mod tests {
         );
     }
 
+    struct UsageCallbackDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for UsageCallbackDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::callback_pending(
+                call.name,
+                serde_json::json!({ "question": "approve?" }),
+            ))
+        }
+    }
+
+    /// First call requests the callback tool (1000 in, 10 out); every later
+    /// call answers (1500 in, 20 out).
+    struct UsageCallbackClient {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for UsageCallbackClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let usage = |input: u64, output: u64| {
+                normalized_test_usage(
+                    self,
+                    Usage {
+                        input_tokens: input,
+                        output_tokens: output,
+                        ..Default::default()
+                    },
+                )
+            };
+            Ok(if call == 0 {
+                super::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "callback-call".to_string(),
+                        name: "ask_user".into(),
+                        args: serde_json::value::RawValue::from_string(
+                            r#"{"question":"approve?"}"#.to_string(),
+                        )
+                        .expect("static callback arguments should parse"),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    usage(1000, 10),
+                )
+            } else {
+                super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "done".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    usage(1500, 20),
+                )
+            })
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    async fn usage_callback_agent()
+    -> crate::agent::Agent<UsageCallbackClient, UsageCallbackDispatcher, NoopStore> {
+        AgentBuilder::new()
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(
+                Arc::new(UsageCallbackClient {
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                }),
+                Arc::new(UsageCallbackDispatcher {
+                    tools: Arc::from([Arc::new(ToolDef::new(
+                        "ask_user",
+                        "waits for an external callback",
+                        serde_json::json!({ "type": "object" }),
+                    ))]),
+                }),
+                Arc::new(NoopStore),
+            )
+            .await
+    }
+
+    /// Calls made before a callback suspension stay in the resumed run's
+    /// run_usage and request_usage.
+    #[tokio::test]
+    async fn callback_resume_keeps_the_run_usage_account() {
+        let mut agent = usage_callback_agent().await;
+        let error = agent
+            .run("ask for approval".to_string().into())
+            .await
+            .expect_err("the first entry suspends for the callback");
+        assert!(matches!(error, AgentError::CallbackPending { .. }));
+        agent
+            .apply_pending_callback_tool_results(vec![ToolResult::new(
+                "callback-call".to_string(),
+                "approved".to_string(),
+                false,
+            )])
+            .expect("the callback result applies");
+        let result = agent
+            .run_pending()
+            .await
+            .expect("the resumed run completes");
+
+        assert_eq!(
+            result.request_usage.len(),
+            2,
+            "the pre-suspension call stays in the resumed run's rows"
+        );
+        let run_usage = result.run_usage.expect("run usage");
+        assert_eq!(run_usage.input_tokens, 2500);
+        assert_eq!(run_usage.output_tokens, 30);
+        assert_eq!(result.usage.input_tokens, 2500);
+    }
+
+    /// A callback resume that arrives with a new prompt (applied results,
+    /// then a content turn) keeps the suspended run's account, like
+    /// `run_pending` does.
+    #[tokio::test]
+    async fn applied_callback_then_content_turn_keeps_the_run_usage_account() {
+        let mut agent = usage_callback_agent().await;
+        let error = agent
+            .run("ask for approval".to_string().into())
+            .await
+            .expect_err("the first entry suspends for the callback");
+        assert!(matches!(error, AgentError::CallbackPending { .. }));
+        agent
+            .apply_pending_callback_tool_results(vec![ToolResult::new(
+                "callback-call".to_string(),
+                "approved".to_string(),
+                false,
+            )])
+            .expect("the callback result applies");
+        let result = agent
+            .run("and also do this".to_string().into())
+            .await
+            .expect("the content turn completes");
+        assert_eq!(
+            result.request_usage.len(),
+            2,
+            "the pre-suspension call stays in the continuing run's rows"
+        );
+        let run_usage = result.run_usage.expect("run usage");
+        assert_eq!(run_usage.input_tokens, 2500);
+        assert_eq!(run_usage.output_tokens, 30);
+    }
+
+    /// A run that does not resume the callback never absorbs the suspended
+    /// run's account: the host abandoned the callback and started over.
+    #[tokio::test]
+    async fn abandoned_callback_does_not_leak_into_the_next_run() {
+        let mut agent = usage_callback_agent().await;
+        let error = agent
+            .run("ask for approval".to_string().into())
+            .await
+            .expect_err("the first entry suspends for the callback");
+        assert!(matches!(error, AgentError::CallbackPending { .. }));
+
+        let fresh = agent
+            .run("a fresh unrelated prompt".to_string().into())
+            .await
+            .expect("an unrelated run is admitted");
+        assert_eq!(
+            fresh.request_usage.len(),
+            1,
+            "only the unrelated run's own call is its row"
+        );
+        let run_usage = fresh.run_usage.expect("run usage");
+        assert_eq!(run_usage.input_tokens, 1500);
+        assert_eq!(run_usage.output_tokens, 20);
+        assert_eq!(
+            fresh.usage.input_tokens, 2500,
+            "the session total keeps both"
+        );
+    }
+
     #[tokio::test]
     async fn callback_pending_preserves_completed_sibling_outcome() {
         struct MixedCallbackDispatcher {
@@ -18134,6 +18690,7 @@ mod tests {
                         output_tokens: 500,
                         cache_creation_tokens: None,
                         cache_read_tokens: None,
+                        reasoning_tokens: None,
                         provider_accounting: None,
                     },
                 ),
@@ -21931,6 +22488,7 @@ mod tests {
         seen_max_tokens: Mutex<Vec<u32>>,
         seen_provider_params:
             Mutex<Vec<Option<crate::lifecycle::run_primitive::ProviderParamsOverride>>>,
+        seen_leading_system_prompts: Mutex<Vec<Option<String>>>,
     }
 
     fn extraction_fallback_registry() -> crate::ModelRegistry {
@@ -21970,7 +22528,12 @@ mod tests {
                 target_profile,
                 seen_max_tokens: Mutex::new(Vec::new()),
                 seen_provider_params: Mutex::new(Vec::new()),
+                seen_leading_system_prompts: Mutex::new(Vec::new()),
             }
+        }
+
+        fn seen_leading_system_prompts(&self) -> Vec<Option<String>> {
+            self.seen_leading_system_prompts.lock().unwrap().clone()
         }
 
         fn with_provider_mismatch() -> Self {
@@ -22024,12 +22587,19 @@ mod tests {
 
         async fn stream_response(
             &self,
-            _messages: &[Message],
+            messages: &[Message],
             _tools: &[Arc<ToolDef>],
             max_tokens: u32,
             _temperature: Option<f32>,
             provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
         ) -> Result<super::LlmStreamResult, AgentError> {
+            self.seen_leading_system_prompts
+                .lock()
+                .unwrap()
+                .push(match messages.first() {
+                    Some(Message::System(system)) => Some(system.content.clone()),
+                    _ => None,
+                });
             self.seen_max_tokens.lock().unwrap().push(max_tokens);
             self.seen_provider_params
                 .lock()
@@ -22174,6 +22744,30 @@ mod tests {
             })
         }
 
+        /// Follows the active client, like the production fallback client:
+        /// once the fallback is active, the target provider's lowering
+        /// applies.
+        fn compile_schema(
+            &self,
+            output_schema: &crate::OutputSchema,
+        ) -> Result<crate::CompiledSchema, crate::schema::SchemaError> {
+            let mut schema = output_schema.schema.as_value().clone();
+            if self
+                .active_fallback
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && let Some(object) = schema.as_object_mut()
+            {
+                object.insert(
+                    "x-active-compiled".to_string(),
+                    serde_json::json!("anthropic"),
+                );
+            }
+            Ok(crate::CompiledSchema {
+                schema,
+                warnings: Vec::new(),
+            })
+        }
+
         fn compile_model_fallback_schema(
             &self,
             target_identity: &crate::SessionLlmIdentity,
@@ -22230,6 +22824,76 @@ mod tests {
             crate::TurnUsage::host_declared(crate::Provider::Other, "mock-model", Usage::default())
                 .into_inner(),
         )
+    }
+
+    fn openai_text_response(
+        text: &str,
+        input: u64,
+        cached: u64,
+        output: u64,
+    ) -> super::LlmStreamResult {
+        super::LlmStreamResult::new(
+            vec![AssistantBlock::Text {
+                text: text.to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+            crate::TurnUsage::new(
+                Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_read_tokens: Some(cached),
+                    ..Default::default()
+                },
+                crate::ProviderTokenAccounting::openai("gpt-5.6-luna", input),
+            )
+            .into_inner(),
+        )
+    }
+
+    /// run_usage and request_usage cover the extraction call and its retry,
+    /// not only the agentic turn.
+    #[tokio::test]
+    async fn run_usage_and_request_rows_cover_extraction_and_its_retry() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"]
+        }))
+        .unwrap();
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            openai_text_response("I found the answer", 1000, 0, 20),
+            openai_text_response("not json", 1100, 1000, 5),
+            openai_text_response(r#"{"answer": "42"}"#, 1200, 1100, 7),
+        ]));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent
+            .run("What is the answer?".to_string().into())
+            .await
+            .expect("extraction retry should succeed");
+        assert_eq!(client.calls_made(), 3, "agentic + extraction + retry");
+        assert_eq!(result.structured_output.as_ref().unwrap()["answer"], "42");
+        assert_eq!(result.request_usage.len(), 3, "one row per provider call");
+        let run_usage = result.run_usage.expect("run usage");
+        assert_eq!(run_usage.input_tokens, 3300);
+        assert_eq!(run_usage.output_tokens, 32);
+        assert_eq!(run_usage.cache_read_tokens, Some(2100));
+        assert_eq!(
+            result
+                .request_usage
+                .iter()
+                .map(crate::TurnUsage::presented_tokens)
+                .sum::<u64>(),
+            run_usage.input_tokens
+        );
+        assert_eq!(
+            result.usage.input_tokens, 3300,
+            "fresh session: total equals run"
+        );
     }
 
     /// Happy path: agent with output_schema, LLM returns valid JSON
@@ -22409,6 +23073,111 @@ mod tests {
             }
             other => panic!("expected Anthropic fallback extraction params, got {other:?}"),
         }
+    }
+
+    /// The `<structured_output>` section shows the active provider's compiled
+    /// schema. A retry after a sticky model fallback goes to the target
+    /// provider, so it must carry the target's section (the schema terminal
+    /// validation now uses), not the one composed for the failed provider.
+    #[tokio::test]
+    async fn fallback_retry_reprojects_the_output_schema_section_for_the_target() {
+        use crate::retry::RetryPolicy;
+        use crate::structured_output::render_output_schema_instructions;
+
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let registry = Arc::new(extraction_fallback_registry());
+        let target_profile = registry
+            .profile_witness_for_provider(crate::Provider::Anthropic, "claude-backup")
+            .expect("same-registry fallback profile");
+        let client = Arc::new(ExtractionFallbackOverrideClient::with_target_profile(
+            target_profile,
+        ));
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new().max_tokens_per_turn(1024),
+            explicit_hot_swap_session("gpt-primary"),
+        )
+        .output_schema(schema.clone())
+        .with_effective_model_registry(Arc::clone(&registry))
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing)
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+            stream_inactivity_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+
+        let result = agent
+            .run("extract after fallback".to_string().into())
+            .await
+            .expect("extraction fallback should retry and validate structured output");
+        assert_eq!(result.structured_output.unwrap()["answer"], "42");
+
+        let primary_section = render_output_schema_instructions(schema.schema.as_value());
+        let mut target_schema = schema.schema.as_value().clone();
+        target_schema["x-active-compiled"] = serde_json::json!("anthropic");
+        let target_section = render_output_schema_instructions(&target_schema);
+        assert_ne!(primary_section, target_section);
+
+        let prompts = client.seen_leading_system_prompts();
+        assert_eq!(
+            prompts.len(),
+            3,
+            "expected main call, failed extraction call, and fallback extraction retry"
+        );
+        for (index, prompt) in prompts.iter().enumerate().take(2) {
+            let prompt = prompt.as_deref().expect("leading system prompt");
+            assert!(
+                prompt.ends_with(&primary_section),
+                "call {index} must carry the primary provider's section: {prompt}"
+            );
+        }
+        let retried = prompts[2].as_deref().expect("leading system prompt");
+        let head = retried.strip_suffix(&target_section).unwrap_or_else(|| {
+            panic!("the fallback retry must carry the target's section: {retried}")
+        });
+        let primary_head = prompts[0]
+            .as_deref()
+            .and_then(|prompt| prompt.strip_suffix(&primary_section))
+            .expect("primary section suffix");
+        assert_eq!(
+            head, primary_head,
+            "only the section changes; the rest of the leading system prompt is kept"
+        );
+        assert_eq!(
+            retried
+                .matches(crate::structured_output::OUTPUT_SCHEMA_INSTRUCTIONS_OPEN)
+                .count(),
+            1,
+            "the fallback retry carries exactly one section"
+        );
+        assert!(
+            !agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| matches!(message, Message::System(system) if system.content.contains(crate::structured_output::OUTPUT_SCHEMA_INSTRUCTIONS_OPEN))),
+            "the re-projected section stays request-only"
+        );
     }
 
     #[tokio::test]

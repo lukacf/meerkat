@@ -104,9 +104,7 @@ impl ImageGenerationProviderProfile for GeminiImageGenerationProfile {
     fn image_generation_documentation(&self) -> Option<&'static str> {
         Some(
             r#"Gemini:
-- Models: provider:"gemini" uses the catalog Gemini image default; supported native image models are owned by the shared model catalog.
-- provider_params: {"aspect_ratio":"1:1"|"16:9"|"9:16"|"square1x1"|"landscape16x9"|"portrait9x16","image_size":"1K"|"2K"|"4K"|"one_k"|"two_k"|"four_k"}.
-- Universal size maps to Gemini aspectRatio/imageSize first; provider_params override those mapped values."#,
+- provider_params: {"aspect_ratio":"1:1"|"16:9"|"9:16"|"square1x1"|"landscape16x9"|"portrait9x16","image_size":"1K"|"2K"|"4K"|"one_k"|"two_k"|"four_k"}; these override the aspect ratio and image size mapped from the universal size."#,
         )
     }
 

@@ -644,6 +644,8 @@ export type StreamTruncationReason = {
   max_bytes: number;
 };
 
+export type StructuredOutputOrigin = "extraction_request" | "final_reply";
+
 export interface StructuredProviderExtension {
   body?: string;
   key: string;
@@ -771,6 +773,7 @@ export type TurnUsage = {
   input_tokens: number;
   output_tokens: number;
   provider_accounting?: ProviderTokenAccounting | null;
+  reasoning_tokens?: number | null;
 };
 
 export interface UnmeasuredTurnUsageAccounting {
@@ -784,6 +787,7 @@ export type Usage = {
   input_tokens: number;
   output_tokens: number;
   provider_accounting?: ProviderTokenAccounting | null;
+  reasoning_tokens?: number | null;
 };
 
 export interface RunStartedEvent {
@@ -803,6 +807,8 @@ export interface RunCompletedEvent {
 }
 
 export interface ExtractionSucceededEvent {
+  origin?: StructuredOutputOrigin;
+  request_usage?: TurnUsage[];
   schema_warnings?: SchemaWarning[] | null;
   session_id: SessionId;
   structured_output: unknown;
@@ -813,6 +819,7 @@ export interface ExtractionFailedEvent {
   attempts: number;
   last_output: string;
   reason: string;
+  request_usage?: TurnUsage[];
   session_id: SessionId;
   type: "extraction_failed";
 }

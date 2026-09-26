@@ -4446,6 +4446,8 @@ impl LocalSessionService {
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         })
     }
 }
@@ -4537,6 +4539,8 @@ impl SessionService for LocalSessionService {
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         })
     }
 
@@ -7671,6 +7675,8 @@ mod tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 
@@ -7790,6 +7796,8 @@ mod tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 

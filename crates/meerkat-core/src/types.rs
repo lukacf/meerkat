@@ -3214,9 +3214,13 @@ pub enum SecurityMode {
 /// - **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a
 ///   running total over every provider call recorded on the *session*, not on
 ///   one run. Its `input_tokens` is the saturating sum of each call's
-///   *presented* tokens (see [`CumulativeUsage::add_turn`]), and its cache
-///   detail fields are always `None` because their relationship to the input
-///   total is provider-specific.
+///   *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail
+///   fields and `reasoning_tokens` are provider-normalized sums: every
+///   provider's cache-read and cache-write counts are disjoint parts of that
+///   call's presented input, and reasoning is a subset of output, so on a
+///   cumulative value `cache_read_tokens + cache_creation_tokens <=
+///   input_tokens` and `reasoning_tokens <= output_tokens` on every provider.
+///   A field stays `None` until some call reports it.
 ///
 /// # What consumers must not sum
 ///
@@ -3231,14 +3235,15 @@ pub enum SecurityMode {
 ///   [`TurnUsage::presented_tokens`]) instead, which is exactly what
 ///   [`CumulativeUsage::add_turn`] does.
 /// - Do not expect the per-call rows to reconcile with the cumulative account
-///   either. Intermediate tool-loop calls, the structured-output extraction
-///   call, and the compaction summary call are all charged to the cumulative
-///   account and publish no `turn_completed` row, so the rows cover a strict
-///   subset of the tokens.
+///   unconditionally. Every committed agent-loop call publishes a
+///   `turn_completed` row and every extraction request a `request_usage` row
+///   on the extraction outcome event, but the compaction summary call and a
+///   call whose turn fails after the provider answered are charged to the
+///   cumulative account without a row.
 ///
 /// The worked example lives in `docs/reference/usage-accounting.mdx`. Its
 /// numbers are pinned against the agent loop by
-/// `turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`
+/// `turn_rows_cover_every_call_while_the_run_total_is_session_cumulative`
 /// (`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's
 /// arithmetic by `cumulative_usage_matches_documented_aggregation_example`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -3249,6 +3254,11 @@ pub struct Usage {
     pub output_tokens: u64,
     pub cache_creation_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
+    /// Reasoning (thinking) tokens the provider reported as a subset of
+    /// `output_tokens`. `None` when the provider does not report a separate
+    /// reasoning count (Anthropic folds thinking into `output_tokens`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
     /// Provider-authored normalized input accounting for one model turn.
     ///
     /// Cumulative usage intentionally leaves this `None`: an aggregate may
@@ -3281,17 +3291,88 @@ impl Usage {
     /// Accumulate already-normalized cumulative usage.
     ///
     /// Provider turn usage must first pass through [`TurnUsage`] and
-    /// [`CumulativeUsage::add_turn`]. Raw cache counters are deliberately not
-    /// aggregated here because their relationship to `input_tokens` differs
-    /// by provider.
+    /// [`CumulativeUsage::add_turn`], which normalizes the cache and reasoning
+    /// details into subsets of input and output. Two such cumulative values
+    /// add field by field; a detail field stays `None` only when neither side
+    /// reports it.
     pub fn add(&mut self, other: &Usage) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
-        self.cache_creation_tokens = None;
-        self.cache_read_tokens = None;
+        self.cache_creation_tokens =
+            add_optional_counts(self.cache_creation_tokens, other.cache_creation_tokens);
+        self.cache_read_tokens =
+            add_optional_counts(self.cache_read_tokens, other.cache_read_tokens);
+        self.reasoning_tokens = add_optional_counts(self.reasoning_tokens, other.reasoning_tokens);
         // Per-turn provider/model/convention evidence cannot be promoted to a
         // potentially cross-provider cumulative aggregate.
         self.provider_accounting = None;
+    }
+
+    /// True when every counter is zero; an absent detail counter and
+    /// `Some(0)` both count as zero.
+    pub fn is_zero(&self) -> bool {
+        self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cache_creation_tokens.unwrap_or(0) == 0
+            && self.cache_read_tokens.unwrap_or(0) == 0
+            && self.reasoning_tokens.unwrap_or(0) == 0
+    }
+
+    /// Usage accrued between an `earlier` snapshot of the same cumulative
+    /// account and this one.
+    ///
+    /// Returns `None` when any counter went backwards, which means the two
+    /// values are not snapshots of one monotone account. A detail field
+    /// absent from `earlier` counts as zero there.
+    pub fn cumulative_delta_since(&self, earlier: &Usage) -> Option<Usage> {
+        /// `Err(())` when the counter went backwards; `Ok(None)` when neither
+        /// snapshot reports it.
+        fn optional_delta(later: Option<u64>, earlier: Option<u64>) -> Result<Option<u64>, ()> {
+            match (later, earlier) {
+                (None, None) => Ok(None),
+                (None, Some(_)) => Err(()),
+                (Some(later), earlier) => {
+                    later.checked_sub(earlier.unwrap_or(0)).map(Some).ok_or(())
+                }
+            }
+        }
+        Some(Usage {
+            input_tokens: self.input_tokens.checked_sub(earlier.input_tokens)?,
+            output_tokens: self.output_tokens.checked_sub(earlier.output_tokens)?,
+            cache_creation_tokens: optional_delta(
+                self.cache_creation_tokens,
+                earlier.cache_creation_tokens,
+            )
+            .ok()?,
+            cache_read_tokens: optional_delta(self.cache_read_tokens, earlier.cache_read_tokens)
+                .ok()?,
+            reasoning_tokens: optional_delta(self.reasoning_tokens, earlier.reasoning_tokens)
+                .ok()?,
+            provider_accounting: None,
+        })
+    }
+}
+
+/// Clamp cache reads and writes to disjoint subsets of `input`: reads to
+/// `input`, then writes to what reads leave. Every provider reports them as
+/// disjoint parts of the presented input, so a clamp only ever bites on
+/// malformed or pre-0.8.22 summed counters.
+fn clamp_cache_counts(
+    cache_read: Option<u64>,
+    cache_creation: Option<u64>,
+    input: u64,
+) -> (Option<u64>, Option<u64>) {
+    let cache_read = cache_read.map(|count| count.min(input));
+    let remaining = input.saturating_sub(cache_read.unwrap_or(0));
+    (cache_read, cache_creation.map(|count| count.min(remaining)))
+}
+
+/// Sum two optional counters, treating a missing side as zero, and keep
+/// `None` only when both sides are missing.
+fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
     }
 }
 
@@ -3384,8 +3465,9 @@ impl std::ops::Deref for TurnUsage {
     }
 }
 
-/// Cumulative usage across committed turns. Cache detail counters are not
-/// aggregated because their relationship to input totals is provider-specific.
+/// Cumulative usage across committed turns. Cache detail counters and
+/// reasoning are aggregated as provider-normalized subsets: see
+/// [`CumulativeUsage::add_turn`].
 ///
 /// This value is **already a total**, and the total is session-scoped: on the
 /// event stream it is `Session::total_usage()`, which is persisted with the
@@ -3395,16 +3477,29 @@ impl std::ops::Deref for TurnUsage {
 /// intentionally carries no [`crate::ProviderTokenAccounting`], because one
 /// session may span providers and models and so cannot truthfully claim a
 /// single per-call convention; per-model attribution is read from the per-call
-/// `turn_completed` rows, which cover only the calls that closed a run.
+/// rows (`turn_completed.usage` and the extraction events' `request_usage`).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(transparent)]
 pub struct CumulativeUsage(Usage);
 
 impl CumulativeUsage {
+    /// Wrap a value that is already a cumulative, normalized total (for
+    /// example a persisted `Session` total). Detail counters are kept but
+    /// clamped so the invariant holds even for a malformed or pre-0.8.22
+    /// input: cache reads to `input_tokens`, cache writes to what reads leave,
+    /// reasoning to `output_tokens`.
     pub fn from_usage(mut usage: Usage) -> Self {
-        usage.cache_creation_tokens = None;
-        usage.cache_read_tokens = None;
+        let (cache_read, cache_creation) = clamp_cache_counts(
+            usage.cache_read_tokens,
+            usage.cache_creation_tokens,
+            usage.input_tokens,
+        );
+        usage.cache_read_tokens = cache_read;
+        usage.cache_creation_tokens = cache_creation;
+        usage.reasoning_tokens = usage
+            .reasoning_tokens
+            .map(|count| count.min(usage.output_tokens));
         usage.provider_accounting = None;
         Self(usage)
     }
@@ -3413,14 +3508,32 @@ impl CumulativeUsage {
     ///
     /// The input component accumulates [`TurnUsage::presented_tokens`], the
     /// provider-normalized presented-input total, never the raw per-call
-    /// `input_tokens`. This is the reference aggregation consumers should
-    /// reproduce; see the worked example in
+    /// `input_tokens`. The cache-read and cache-write counters accumulate the
+    /// call's cache counters, clamped jointly to the call's presented tokens:
+    /// reads to presented, then writes to what reads leave. Every provider
+    /// convention reports them as disjoint parts of presented input
+    /// (Anthropic as components of it, OpenAI, Gemini and OpenAI-compatible
+    /// backends as details inside it), so the clamp only bites on malformed
+    /// counters. Reasoning accumulates clamped to the call's output. This is the reference
+    /// aggregation consumers should reproduce; see the worked example in
     /// `docs/reference/usage-accounting.mdx`.
     pub fn add_turn(&mut self, turn: &TurnUsage) {
-        self.0.input_tokens = self.0.input_tokens.saturating_add(turn.presented_tokens());
+        let presented = turn.presented_tokens();
+        self.0.input_tokens = self.0.input_tokens.saturating_add(presented);
         self.0.output_tokens = self.0.output_tokens.saturating_add(turn.output_tokens);
-        self.0.cache_creation_tokens = None;
-        self.0.cache_read_tokens = None;
+        let (cache_read, cache_creation) = clamp_cache_counts(
+            turn.cache_read_tokens,
+            turn.cache_creation_tokens,
+            presented,
+        );
+        self.0.cache_creation_tokens =
+            add_optional_counts(self.0.cache_creation_tokens, cache_creation);
+        self.0.cache_read_tokens = add_optional_counts(self.0.cache_read_tokens, cache_read);
+        self.0.reasoning_tokens = add_optional_counts(
+            self.0.reasoning_tokens,
+            turn.reasoning_tokens
+                .map(|count| count.min(turn.output_tokens)),
+        );
         self.0.provider_accounting = None;
     }
 
@@ -3896,8 +4009,21 @@ pub struct RunResult {
     pub text: String,
     /// Session ID for resumption
     pub session_id: SessionId,
-    /// Total token usage
+    /// Session-cumulative token usage: every provider call recorded on the
+    /// session so far, including earlier runs. Take the latest value; never
+    /// sum it across runs. See [`CumulativeUsage`].
     pub usage: Usage,
+    /// Usage accrued by this run alone: the change in the session total from
+    /// the start of the run to its end, with the same normalized fields as
+    /// `usage`. On a fresh session it equals `usage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_usage: Option<Usage>,
+    /// One row per provider request this run made, in order, with the raw
+    /// per-call counters and the adapter's accounting evidence. Includes tool
+    /// loop calls, the structured-output extraction call and any compaction
+    /// summary call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_usage: Vec<TurnUsage>,
     /// Number of turns taken
     pub turns: u32,
     /// Number of tool calls made

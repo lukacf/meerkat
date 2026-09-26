@@ -14774,7 +14774,7 @@ mod tests {
             .await
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
-        runtime
+        let first = runtime
             .start_turn_via_runtime(
                 &id,
                 "durable first turn".into(),
@@ -14787,6 +14787,20 @@ mod tests {
             )
             .await
             .unwrap();
+        // The scripted reply already matches the schema, so validate-first
+        // accepts it without an extraction request, and the RPC turn result
+        // carries it as structured_output.
+        assert_eq!(first.turns, 1, "no extraction request was sent");
+        assert_eq!(
+            first.structured_output,
+            Some(serde_json::json!({"retained": true}))
+        );
+        let wire = serde_json::to_value(crate::handlers::turn::TurnResult::from(first)).unwrap();
+        assert_eq!(
+            wire["structured_output"],
+            serde_json::json!({"retained": true})
+        );
+        assert!(wire.get("extraction_error").is_none());
         let before = runtime.load_persisted_session(&id).await.unwrap().unwrap();
         let state = serde_json::to_value(before.build_state()).unwrap();
         let messages = serde_json::to_value(before.messages()).unwrap();

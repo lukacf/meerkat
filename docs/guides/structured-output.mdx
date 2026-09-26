@@ -4,7 +4,7 @@ description: "Force agents to produce validated JSON conforming to a user-provid
 icon: "square-code"
 ---
 
-Structured output forces the agent to produce validated JSON conforming to a schema you provide. The extraction runs as a separate turn after agentic work completes, with automatic retry on validation failure. Schemas are normalized across providers -- the same schema works with Anthropic, OpenAI, and Gemini, with provider-specific lowering handled transparently.
+Structured output forces the agent to produce validated JSON conforming to a schema you provide. The model sees the schema from the first request, and when its final reply already validates, that reply is the structured output. Otherwise an extraction turn runs after agentic work completes, with automatic retry on validation failure. Schemas are normalized across providers -- the same schema works with Anthropic, OpenAI, and Gemini, with provider-specific lowering handled transparently.
 
 <Note>
 This page is the task-first guide. For the low-level schema/type inventory, see [Structured output reference](/reference/structured-output-reference).
@@ -23,12 +23,31 @@ Use this guide when you want to:
 When `output_schema` is configured on an agent, the execution flow is:
 
 <Steps>
+  <Step title="The schema is visible from the first request">
+    Every request of the run carries a `<structured_output>` section appended
+    to the system prompt. It tells the model that its final reply (the reply
+    in which it calls no tools) must be a single JSON value matching the
+    schema, and it includes the schema as the provider compiles it for
+    validation. The section is identical on every request, so prompt caching
+    is unaffected. It is added to the request only and is never written into
+    the session transcript. Runs without `output_schema` are unchanged.
+    Changing the schema between turns of one session changes the prompt
+    prefix; see [Known limits](/reference/structured-output-reference#known-limits).
+  </Step>
   <Step title="Agentic loop runs normally">
     The agent processes the prompt, calls tools, and iterates until no more tool calls remain.
   </Step>
-  <Step title="Extraction turn fires">
-    An additional LLM call is made with no tools and a prompt asking for valid
-    JSON matching the schema. Extraction requests temperature `0.0` where the
+  <Step title="Validate-first">
+    The final reply is parsed and validated against the schema (after the same
+    code-fence and named-wrapper normalization extraction uses, and with known
+    `format` keywords such as `date-time` or `email` asserted). When it
+    validates, it becomes `RunResult.structured_output` and no extraction
+    request is sent.
+  </Step>
+  <Step title="Extraction turn fires when needed">
+    Otherwise an additional LLM call is made with no tools and a prompt asking
+    for valid JSON matching the schema, with the provider's native schema
+    slot attached. Extraction requests temperature `0.0` where the
     provider/model supports it; lowering may omit unsupported parameters.
     This does not guarantee deterministic output.
   </Step>
@@ -59,7 +78,11 @@ main turn is accepted, Meerkat emits:
 }
 ```
 
-It then emits exactly one extraction terminal:
+It then emits exactly one extraction terminal. A run whose final reply
+already validated emits `extraction_succeeded` the same way, without an
+extraction request; its `origin` is then `"final_reply"` and it carries no
+`request_usage` (`origin` is omitted when an extraction request produced the
+value):
 
 ```json
 {
@@ -82,7 +105,8 @@ or:
 ```
 
 Extraction attempts do not publish ordinary streamed text or additional
-`turn_completed` events. A failed extraction is not a `run_failed` event: the
+`turn_completed` events; the outcome event's `request_usage` lists the token
+usage of each extraction request. A failed extraction is not a `run_failed` event: the
 main agentic run completed, and `RunResult.extraction_error` carries the
 post-main failure.
 
@@ -284,7 +308,7 @@ fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema,
 
 The default implementation passes through the normalized schema without provider-specific lowering. Provider adapters override this to apply transformations:
 
-- **Anthropic**: may add `additionalProperties: false` to object nodes
+- **Anthropic**: adds `additionalProperties: false` to object nodes that leave it open. The native `output_config.format` slot then gets a lowered copy: keywords Anthropic's slot rejects (numeric bounds such as `minimum`/`maximum`/`multipleOf`, `maxItems`, `uniqueItems`, `minItems` above 1, `contains`, object-size and property-name rules, `not`, and the OpenAPI `discriminator` annotation) are removed and restated in the field's `description`, and `oneOf` becomes `anyOf`. A keyword is lowered only when its removal widens what the slot accepts and local validation, which still runs against the full compiled schema, enforces it for the schema's draft, so those constraints are enforced by validation and retry. String formats outside Anthropic's list are not lowered: extraction-phase validation treats `format` as an annotation (validate-first asserts known formats on the final reply only), so such a schema still fails loudly with HTTP 400. The `<structured_output>` section shows the full compiled schema, bounds included, never the lowered slot copy. The lowering adds no `SchemaWarning`, and `Strict` compat does not reject the lowered keywords
 - **Gemini**: may strip unsupported JSON Schema keywords
 - **OpenAI**: may apply strict-mode transformations
 

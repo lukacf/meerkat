@@ -261,6 +261,8 @@ mod tests {
                 session_id: SessionId::new(),
                 structured_output: serde_json::json!({"answer": 42}),
                 schema_warnings: None,
+                request_usage: Vec::new(),
+                origin: crate::event::StructuredOutputOrigin::ExtractionRequest,
             })
             .expect("terminal");
         assert_eq!(terminal.kind, TurnTerminalKind::ExtractionSucceeded);
@@ -280,6 +282,8 @@ mod tests {
                 session_id: SessionId::new(),
                 structured_output: serde_json::json!({"answer": 42}),
                 schema_warnings: None,
+                request_usage: Vec::new(),
+                origin: crate::event::StructuredOutputOrigin::ExtractionRequest,
             })
             .expect("terminal");
         assert_eq!(
@@ -304,6 +308,7 @@ mod tests {
                 last_output: "ignored (parked wins)".to_string(),
                 attempts: 2,
                 reason: "Invalid JSON".to_string(),
+                request_usage: Vec::new(),
             })
             .expect("terminal");
         assert_eq!(terminal.kind, TurnTerminalKind::ExtractionFailed);

@@ -2017,6 +2017,7 @@ mod tests {
                 last_output: "raw".to_string(),
                 attempts: 2,
                 reason: "invalid schema".to_string(),
+                request_usage: Vec::new(),
             },
         );
         let ordinary_sidecar = BridgeTurnOutcomeRecord {
@@ -2361,6 +2362,8 @@ mod tests {
                 session_id: SessionId::new(),
                 structured_output: serde_json::json!({"v": 7}),
                 schema_warnings: None,
+                request_usage: Vec::new(),
+                origin: meerkat_core::StructuredOutputOrigin::ExtractionRequest,
             },
         );
         registry

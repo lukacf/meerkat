@@ -7553,6 +7553,7 @@ mod tests {
                 last_output: "x".repeat(MEMBER_EVENTS_REPLY_MAX_BYTES + 1024),
                 attempts: 1,
                 reason: "oversized".to_string(),
+                request_usage: Vec::new(),
             },
         );
         let error = bounded_member_events_reply(MemberEventsWindow {
@@ -11086,6 +11087,8 @@ mod tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })),
         );
 
@@ -11123,6 +11126,8 @@ mod tests {
                 }),
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })),
         );
 

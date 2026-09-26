@@ -28,6 +28,7 @@ mod job_status_tool;
 mod jobs_list_tool;
 mod monitor_protocol;
 mod monitor_tool;
+mod output;
 mod process_lifecycle;
 mod security;
 mod tool;

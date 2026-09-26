@@ -1014,9 +1014,11 @@ impl LlmClient for OpenAiCompatibleClient {
                             };
 
                             if let Some(event_usage) = event.usage {
+                                let (output_tokens, reasoning_tokens) =
+                                    chat_output_and_reasoning(&event_usage);
                                 let usage = Usage {
                                     input_tokens: event_usage.prompt_tokens.unwrap_or(0),
-                                    output_tokens: event_usage.completion_tokens.unwrap_or(0),
+                                    output_tokens,
                                     cache_creation_tokens: event_usage
                                         .prompt_tokens_details
                                         .as_ref()
@@ -1025,6 +1027,7 @@ impl LlmClient for OpenAiCompatibleClient {
                                         .prompt_tokens_details
                                         .as_ref()
                                         .and_then(|details| details.cached_tokens),
+                                    reasoning_tokens,
                                     provider_accounting: Some(
                                         meerkat_core::ProviderTokenAccounting::openai_compatible_for(
                                             self.provider,
@@ -1360,7 +1363,50 @@ struct ChatUsage {
     #[serde(default)]
     completion_tokens: Option<u64>,
     #[serde(default)]
+    total_tokens: Option<u64>,
+    #[serde(default)]
     prompt_tokens_details: Option<ChatPromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<ChatCompletionTokensDetails>,
+}
+
+/// Output and reasoning for one Chat Completions usage row, with reasoning a
+/// subset of output.
+///
+/// Backends differ on where reasoning sits. OpenAI counts
+/// `completion_tokens_details.reasoning_tokens` inside `completion_tokens`;
+/// others (xAI) count it beside them. The row's own arithmetic says which:
+/// when `total_tokens == prompt_tokens + completion_tokens + reasoning_tokens`
+/// exactly and reasoning is non-zero, reasoning was outside completion and is
+/// added to output. Every other row keeps `completion_tokens` as output.
+fn chat_output_and_reasoning(usage: &ChatUsage) -> (u64, Option<u64>) {
+    let completion = usage.completion_tokens.unwrap_or(0);
+    let reasoning = usage
+        .completion_tokens_details
+        .as_ref()
+        .and_then(|details| details.reasoning_tokens);
+    let reasoning_outside_completion = match (reasoning, usage.total_tokens) {
+        (Some(reasoning), Some(total)) if reasoning > 0 => {
+            usage
+                .prompt_tokens
+                .unwrap_or(0)
+                .checked_add(completion)
+                .and_then(|sum| sum.checked_add(reasoning))
+                == Some(total)
+        }
+        _ => false,
+    };
+    if reasoning_outside_completion {
+        (completion.saturating_add(reasoning.unwrap_or(0)), reasoning)
+    } else {
+        (completion, reasoning)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1375,6 +1421,43 @@ struct ChatPromptTokensDetails {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    fn chat_usage(value: serde_json::Value) -> ChatUsage {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn chat_usage_adds_reasoning_reported_outside_completion() {
+        // Recorded from a live xAI grok-3-mini streaming call.
+        let usage = chat_usage(serde_json::json!({
+            "prompt_tokens": 205,
+            "completion_tokens": 1,
+            "total_tokens": 324,
+            "prompt_tokens_details": {"cached_tokens": 192},
+            "completion_tokens_details": {"reasoning_tokens": 118}
+        }));
+        assert_eq!(chat_output_and_reasoning(&usage), (119, Some(118)));
+    }
+
+    #[test]
+    fn chat_usage_keeps_reasoning_counted_inside_completion() {
+        // OpenAI: total = prompt + completion, reasoning inside completion.
+        let usage = chat_usage(serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 50,
+            "total_tokens": 60,
+            "completion_tokens_details": {"reasoning_tokens": 40}
+        }));
+        assert_eq!(chat_output_and_reasoning(&usage), (50, Some(40)));
+        let without_total = chat_usage(serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 50,
+            "completion_tokens_details": {"reasoning_tokens": 40}
+        }));
+        assert_eq!(chat_output_and_reasoning(&without_total), (50, Some(40)));
+        let none = chat_usage(serde_json::json!({"prompt_tokens": 3, "completion_tokens": 2}));
+        assert_eq!(chat_output_and_reasoning(&none), (2, None));
+    }
     use axum::body::to_bytes;
     use axum::{
         Json, Router,
@@ -1476,6 +1559,120 @@ mod tests {
             parameters["properties"]["lease_expires_at"]["format"],
             "date-time"
         );
+    }
+
+    // =========================================================================
+    // Structured-output schema pins
+    //
+    // Anthropic lowers the schema it sends in its native structured-output
+    // slot. These pins hold this adapter's compiled schema and request slot
+    // byte-identical for schemas that carry keywords Anthropic's slot
+    // rejects (numeric bounds, array and object constraints, `oneOf`, `not`,
+    // unsupported string formats), so that lowering can never leak here.
+    // =========================================================================
+
+    /// The live-matrix review schema (numeric bounds on `number` and `integer`).
+    fn pinned_review_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "verdict": {"type": "string", "enum": ["approve", "request_changes", "comment"]},
+                "inline_comments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "line": {"type": "integer", "minimum": 1},
+                            "category": {"type": "string", "enum": ["bug", "security", "performance", "style", "docs"]},
+                            "message": {"type": "string"},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                        },
+                        "required": ["path", "line", "category", "message", "confidence"],
+                        "additionalProperties": false
+                    }
+                },
+                "general_comments": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["verdict", "inline_comments"],
+            "additionalProperties": false
+        })
+    }
+
+    /// Every keyword family Anthropic's slot lowering touches.
+    fn pinned_constraint_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "score": {"type": "number", "minimum": 0, "maximum": 1, "multipleOf": 0.01, "description": "Score."},
+                "count": {"type": ["integer", "null"], "format": "uint32", "minimum": 0, "exclusiveMaximum": 100},
+                "ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "minItems": 2, "maxItems": 5, "uniqueItems": true},
+                "choice": {"oneOf": [{"type": "string", "format": "int64"}, {"type": "integer", "minimum": 1}]},
+                "meta": {"type": "object", "properties": {"a": {"type": "string", "minLength": 1, "pattern": "^a"}}, "minProperties": 1, "propertyNames": {"pattern": "^a$"}},
+                "not_x": {"type": "string", "not": {"const": "x"}}
+            },
+            "required": ["score", "count", "ids", "choice", "meta", "not_x"]
+        })
+    }
+
+    const PINNED_CHAT_COMPLETIONS: [(&str, bool, &str); 4] = [
+        (
+            "review",
+            false,
+            r#"{"json_schema":{"name":"output","schema":{"additionalProperties":false,"properties":{"general_comments":{"items":{"type":"string"},"type":"array"},"inline_comments":{"items":{"additionalProperties":false,"properties":{"category":{"enum":["bug","security","performance","style","docs"],"type":"string"},"confidence":{"maximum":1,"minimum":0,"type":"number"},"line":{"minimum":1,"type":"integer"},"message":{"type":"string"},"path":{"type":"string"}},"required":["path","line","category","message","confidence"],"type":"object"},"type":"array"},"verdict":{"enum":["approve","request_changes","comment"],"type":"string"}},"required":["verdict","inline_comments"],"type":"object"},"strict":false},"type":"json_schema"}"#,
+        ),
+        (
+            "review",
+            true,
+            r#"{"json_schema":{"name":"output","schema":{"additionalProperties":false,"properties":{"general_comments":{"items":{"type":"string"},"type":"array"},"inline_comments":{"items":{"additionalProperties":false,"properties":{"category":{"enum":["bug","security","performance","style","docs"],"type":"string"},"confidence":{"maximum":1,"minimum":0,"type":"number"},"line":{"minimum":1,"type":"integer"},"message":{"type":"string"},"path":{"type":"string"}},"required":["path","line","category","message","confidence"],"type":"object"},"type":"array"},"verdict":{"enum":["approve","request_changes","comment"],"type":"string"}},"required":["verdict","inline_comments"],"type":"object"},"strict":true},"type":"json_schema"}"#,
+        ),
+        (
+            "constraints",
+            false,
+            r#"{"json_schema":{"name":"output","schema":{"properties":{"choice":{"oneOf":[{"format":"int64","type":"string"},{"minimum":1,"type":"integer"}]},"count":{"exclusiveMaximum":100,"format":"uint32","minimum":0,"type":["integer","null"]},"ids":{"items":{"format":"uuid","type":"string"},"maxItems":5,"minItems":2,"type":"array","uniqueItems":true},"meta":{"minProperties":1,"properties":{"a":{"minLength":1,"pattern":"^a","type":"string"}},"propertyNames":{"pattern":"^a$"},"required":[],"type":"object"},"not_x":{"not":{"const":"x"},"type":"string"},"score":{"description":"Score.","maximum":1,"minimum":0,"multipleOf":0.01,"type":"number"}},"required":["score","count","ids","choice","meta","not_x"],"type":"object"},"strict":false},"type":"json_schema"}"#,
+        ),
+        (
+            "constraints",
+            true,
+            r#"{"json_schema":{"name":"output","schema":{"additionalProperties":false,"properties":{"choice":{"oneOf":[{"format":"int64","type":"string"},{"minimum":1,"type":"integer"}]},"count":{"exclusiveMaximum":100,"format":"uint32","minimum":0,"type":["integer","null"]},"ids":{"items":{"format":"uuid","type":"string"},"maxItems":5,"minItems":2,"type":"array","uniqueItems":true},"meta":{"additionalProperties":false,"minProperties":1,"properties":{"a":{"minLength":1,"pattern":"^a","type":"string"}},"propertyNames":{"pattern":"^a$"},"required":[],"type":"object"},"not_x":{"not":{"const":"x"},"type":"string"},"score":{"description":"Score.","maximum":1,"minimum":0,"multipleOf":0.01,"type":"number"}},"required":["score","count","ids","choice","meta","not_x"],"type":"object"},"strict":true},"type":"json_schema"}"#,
+        ),
+    ];
+
+    #[test]
+    fn structured_output_schema_pins_are_byte_identical() {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
+
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            "https://example.test".to_string(),
+            None,
+            options(true, true, true, true),
+        );
+        for (name, strict, expected) in PINNED_CHAT_COMPLETIONS {
+            let raw = match name {
+                "review" => pinned_review_schema(),
+                _ => pinned_constraint_schema(),
+            };
+            let mut output_schema = OutputSchema::new(raw).expect("valid schema");
+            output_schema.strict = strict;
+            let compiled = client.compile_schema(&output_schema).expect("compile");
+            assert!(compiled.warnings.is_empty());
+            let mut request = LlmRequest::new("catalog-model", Vec::new());
+            request.provider_params = Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                structured_output: Some(output_schema),
+                ..Default::default()
+            }));
+            let body = client
+                .build_chat_completions_body(&request)
+                .expect("Chat Completions body");
+            let format = &body["response_format"];
+            assert_eq!(
+                format["json_schema"]["schema"], compiled.schema,
+                "{name} strict={strict}"
+            );
+            assert_eq!(format.to_string(), expected, "{name} strict={strict}");
+        }
     }
 
     #[test]

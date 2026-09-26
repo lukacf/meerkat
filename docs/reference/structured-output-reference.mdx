@@ -15,28 +15,104 @@ Use this page when you need exact structured-output terminology and types rather
 | `SchemaCompat` | `Lossy` drops provider-unsupported schema features with warnings; `Strict` rejects them. |
 | `SchemaFormat` | Currently `MeerkatV1`. |
 | `SchemaWarning` | Provider, JSON path, and explanation for a lossy lowering decision. |
-| `CompiledSchema` | Provider-lowered schema plus warnings. |
+| `CompiledSchema` | Provider-lowered validation schema plus warnings. Local validation runs against it. An adapter whose native schema slot rejects some keywords (Anthropic `output_config.format`) sends a further-lowered copy in that slot only. That copy drops only keywords local validation still enforces (plus annotations such as `discriminator`), so it adds no warnings and `Strict` does not reject them. |
 
 ## Request-side controls
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `output_schema` | `None` | Declared extraction schema. When absent, there is no extraction phase. |
-| `structured_output_retries` | `2` | Validation retries after the first attempt, for at most three extraction calls by default. |
+| `output_schema` | `None` | Declared output schema. When absent, requests carry no schema section and there is no extraction phase. |
+| `structured_output_retries` | `2` | Validation retries after the first extraction attempt, for at most three extraction calls by default. Validate-first does not consume an attempt. |
 
 Provider adapters compile the normalized schema before extraction. Strictness
 is a provider-lowering request; local JSON Schema validation still runs before
 Meerkat accepts the result.
 
+## Schema visibility
+
+When `output_schema` is set, every request of the run (main turns and
+extraction turns) carries this section, appended to the leading system prompt
+after a blank line, or as the system prompt when the session has none:
+
+```text
+<structured_output>
+Your final reply (the reply in which you call no tools) is parsed as structured output. It must be a single JSON value that validates against the JSON Schema below, with no other text and no markdown code fences. Replies that call tools are not affected.
+JSON Schema:
+{"type":"object",...}
+</structured_output>
+```
+
+The schema is the one the active provider compiles for validation, as compact
+JSON (Anthropic, for example, shows `additionalProperties: false` on every
+object). For Anthropic the section also keeps keywords the native
+`output_config.format` slot cannot take, such as `minimum` and `maximum`: only
+the slot copy on the extraction request is lowered, and validate-first and
+extraction both validate against the full compiled schema. The optional schema `name` is not shown. The section is a pure
+function of the compiled schema, so it is byte-identical across the requests
+of a run and prompt caching is unaffected. It is added to requests only and
+never written into the session transcript. Requests that reference Gemini
+cached content (`cached_content_name`) are left unchanged, because the cached
+content owns their system instruction. Provider-authored cache breakpoints
+over a request carrying the section describe a system prompt the transcript
+does not contain, so they are not recorded as durable cache evidence.
+
+## Validate-first
+
+When the agentic loop ends, the final reply is validated first, with the same
+code-fence stripping and named-wrapper unwrapping extraction applies. A reply
+that validates becomes `RunResult.structured_output` and no extraction request
+is sent. Anything else (prose, invalid JSON, a schema mismatch, or a validator
+fault) runs the extraction phase exactly as described below: the same prompt,
+temperature `0.0`, no tools, the provider's native schema slot, and the same
+retry accounting.
+
+The `extraction_succeeded` event of a validate-first success carries
+`"origin": "final_reply"` and no `request_usage`, so consumers that count
+provider requests (the ATIF exporter, usage summaries) do not count an
+extraction request that never ran. `origin` is omitted when an extraction
+request produced the value, which is also how events written before the field
+existed read.
+
+Validate-first also asserts known JSON Schema `format` keywords (for example
+`date-time`, `email`, `uri`, `uuid`); unknown formats are ignored. Providers
+that decode natively against the schema enforce these formats on the
+extraction request, so a final reply that has the right shape but breaks a
+declared format runs extraction instead of being accepted. The extraction
+phase's own validation treats `format` as an annotation, as before.
+
+The section shows the schema as the active provider compiles it. When a
+sticky model fallback switches providers mid-request, the retried request
+shows the fallback provider's compiled schema, which is also the one used
+for validation from then on.
+
+## Known limits
+
+- **Changing the schema between turns of one session invalidates the cached
+  prompt prefix.** The section is part of the leading system prompt, so a turn
+  that sets, clears, or swaps `output_schema` sends a different prompt prefix
+  than the turns before it, and the provider's prompt cache misses for that
+  prefix once. Only callers that change the schema from turn to turn are
+  affected: a session with a stable schema (or none) sends a byte-identical
+  prefix on every request, and caching works as usual.
+- **OpenAI Responses `store=true` continuation keeps the section of the stored
+  chain.** With the explicit `store=true` opt-in, follow-up requests continue
+  the conversation the provider stored instead of resending it, so the model
+  still sees the section the earlier requests carried, the same way a stored
+  chain keeps an earlier system prompt. If the schema changed since, the
+  visible reply may follow the old schema. `structured_output` stays correct:
+  validate-first checks the reply against the current schema, a reply shaped by
+  the old one fails, and the extraction request runs with the current schema
+  in the native slot.
+
 ## Result-side fields
 
 | Field | Meaning |
 |-------|---------|
-| `RunResult.text` | Committed main-turn assistant output after provider schema compilation succeeds. Extraction does not replace it. |
-| `RunResult.structured_output` | Validated JSON value on success. |
+| `RunResult.text` | Committed main-turn assistant output after provider schema compilation succeeds. Extraction does not replace it. When validate-first accepts the final reply, `text` is that reply as written. |
+| `RunResult.structured_output` | Validated JSON value on success, from validate-first or extraction. |
 | `RunResult.extraction_error` | Main output, attempts, and reason when the post-main extraction phase fails. |
 | `RunResult.schema_warnings` | Lossy provider-compilation warnings, when any. |
-| `RunResult.turns` | Includes extraction attempts. |
+| `RunResult.turns` | Includes extraction attempts, if any ran. |
 
 Provider schema compilation happens before the main output is saved into the
 result. A compilation failure can therefore return the typed extraction failure
@@ -53,9 +129,12 @@ terminal observability stages:
 2. Extraction emits exactly one follow-up terminal event:
    `extraction_succeeded` with `structured_output` and optional
    `schema_warnings`, or `extraction_failed` with `last_output`, `attempts`,
-   and `reason`.
+   and `reason`. When validate-first accepts the final reply,
+   `extraction_succeeded` follows `run_completed` directly.
 
-Extraction does not emit ordinary text or `turn_completed` events. Extraction
+Extraction does not emit ordinary text or `turn_completed` events. Both
+outcome events carry `request_usage`: one per-call usage row for each answered
+extraction request, including attempts that failed validation. Extraction
 failure does not emit `run_failed`; the main run already completed, and the
 returned `RunResult` carries `extraction_error`.
 

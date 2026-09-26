@@ -11276,6 +11276,8 @@ mod tests {
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         };
         let terminal = Some(CoreApplyTerminal::RunResult(Box::new(run_result)));
 

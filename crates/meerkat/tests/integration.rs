@@ -1013,6 +1013,7 @@ mod combined {
             output_tokens: 50,
             cache_creation_tokens: None,
             cache_read_tokens: None,
+            reasoning_tokens: None,
             provider_accounting: None,
         };
         session.push(Message::BlockAssistant(BlockAssistantMessage {
@@ -1042,6 +1043,7 @@ mod combined {
             output_tokens: 75,
             cache_creation_tokens: None,
             cache_read_tokens: None,
+            reasoning_tokens: None,
             provider_accounting: None,
         };
         session.push(Message::BlockAssistant(BlockAssistantMessage {
@@ -1071,6 +1073,7 @@ mod combined {
             output_tokens: 100,
             cache_creation_tokens: None,
             cache_read_tokens: None,
+            reasoning_tokens: None,
             provider_accounting: None,
         };
 

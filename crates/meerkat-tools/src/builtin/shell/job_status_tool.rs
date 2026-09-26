@@ -83,9 +83,10 @@ impl BuiltinTool for ShellJobStatusTool {
                 )
             })?;
 
-        serde_json::to_value(job)
-            .map(ToolOutput::Json)
-            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))
+        let text = job.render_for_model();
+        let value = serde_json::to_value(job)
+            .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
+        Ok(ToolOutput::JsonRenderedAsText { value, text })
     }
 }
 
@@ -187,6 +188,36 @@ mod tests {
         // Verify values
         assert_eq!(result["id"], job_id.0);
         assert_eq!(result["command"], "echo test");
+    }
+
+    #[tokio::test]
+    async fn job_status_reaches_the_model_as_compact_text() {
+        let session_id = meerkat_core::types::SessionId::new();
+        let manager = Arc::new(
+            JobManager::new(ShellConfig::default()).bind_canonical_async_ops(
+                session_id,
+                Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new()),
+            ),
+        );
+        let job_id = manager
+            .register_synthetic_running_job("sleep 5", None, 30)
+            .await
+            .unwrap();
+        let tool = ShellJobStatusTool::new(Arc::clone(&manager));
+
+        let output = tool.call(json!({ "job_id": job_id.0 })).await.unwrap();
+        let ToolOutput::JsonRenderedAsText { value, text } = output else {
+            unreachable!("shell_job_status renders text for the model");
+        };
+        assert!(
+            text.starts_with(&format!("job {job_id} running (started at unix time ")),
+            "{text}"
+        );
+        assert!(!text.contains('{'), "no JSON envelope: {text}");
+        // Rust callers keep the typed job.
+        assert_eq!(value["id"], job_id.0);
+        assert_eq!(value["command"], "sleep 5");
+        assert_eq!(value["status"]["status"], "running");
     }
 
     // ==================== Error Tests ====================

@@ -18,14 +18,49 @@ different denominators.
 | --- | --- | --- |
 | Event | `turn_completed.usage` | `run_completed.usage` |
 | Rust type | `TurnUsage` | `CumulativeUsage` |
-| Scope | exactly one provider request: the assistant turn that closed the run | every provider call recorded on the **session** before this event's emission, across runs |
+| Scope | exactly one provider request: one agent-loop turn, either a tool-loop call or the call that closed the run | every provider call recorded on the **session** before this event's emission, across runs |
 | `input_tokens` | raw provider counter (Anthropic: **uncached input only**) | already the sum of each recorded call's presented input |
-| `cache_creation_tokens` / `cache_read_tokens` | provider-reported, present | always absent |
+| `cache_creation_tokens` / `cache_read_tokens` | provider-reported, present | normalized sums, subsets of `input_tokens` |
+| `reasoning_tokens` | provider-reported where the provider has a count | normalized sum, a subset of `output_tokens` |
 | `accounting` | present (provider + model + presented input) | absent by design |
 
 A session may span providers and models, so the cumulative account deliberately
-carries no single provider/model and no cache detail counters: their
-relationship to the input total is provider-specific.
+carries no single provider/model. Its detail counters are still comparable
+across providers, because every adapter's cache counts are subsets of that
+call's presented input:
+
+- Anthropic reports cache-write and cache-read input as disjoint components of
+  the presented total.
+- OpenAI, Gemini and OpenAI-compatible backends report cached input as a detail
+  inside their inclusive input total.
+
+So on every cumulative value, on every provider:
+
+```
+cache_read_tokens + cache_creation_tokens <= input_tokens
+reasoning_tokens                          <= output_tokens
+```
+
+A detail counter is absent until some recorded call reports it. Sessions saved
+by 0.8.22 through 0.8.42 carry no cumulative detail counters, so theirs start
+from zero and cover only later calls. Sessions saved before 0.8.22 carry raw
+summed cache counters that can exceed the input total. Every reporting surface
+clamps them to the invariant above: the run result, run and compaction
+rollback deltas, session read `billing.usage`, and mob run accounting.
+Reads are clamped to input first and writes to what reads leave, so such a
+session's history reads as fully cached. The stored value is untouched until
+the next recorded call normalizes it.
+
+Reasoning is the provider's thinking-token count: OpenAI Responses
+`output_tokens_details.reasoning_tokens`, Chat Completions
+`completion_tokens_details.reasoning_tokens`, and Gemini `thoughtsTokenCount`.
+Gemini bills thinking separately from candidates, so its `output_tokens` is
+candidates plus thoughts. Chat Completions backends differ: OpenAI counts
+reasoning inside `completion_tokens`, while others such as xAI count it beside
+them. A row whose `total_tokens` equals prompt plus completion plus reasoning
+exactly, with non-zero reasoning, is read as reasoning outside completion, and
+its `output_tokens` becomes completion plus reasoning. Anthropic reports no separate count and folds
+thinking into `output_tokens`, so its `reasoning_tokens` stays absent.
 
 <Warning>
 `run_completed.usage` is **session-cumulative, not run-scoped**. It snapshots
@@ -33,23 +68,60 @@ relationship to the input total is provider-specific.
 session and restored on resume, so on the second and later runs it already
 contains earlier runs' recorded calls. Later calls can advance the account
 beyond this snapshot, notably structured-output extraction. There is no
-per-run token account on the event stream.
+per-run token account on the event stream; the final run result carries one
+(see below).
 </Warning>
+
+## Run results: per-run and per-request usage
+
+The final run result (`rkat run --output json`, the RPC and REST run results,
+the Python and TypeScript SDK `RunResult` and the `@rkat/web` `TurnResult`)
+carries three usage views:
+
+| Field | Scope |
+| --- | --- |
+| `usage` | session-cumulative, as above |
+| `run_usage` | this run alone: the change in the session total from the start of the run to its end, with the same normalized fields |
+| `request_usage` | one row per provider request this run made, in order: tool-loop calls, the structured-output extraction call and its retries, and any compaction summary call. Each row is a per-call usage with its `accounting` |
+
+`run_usage` and the sum of `request_usage[*].accounting.presented_tokens` agree
+on input for a run that records every call it makes. A run that suspends for
+callback tool results keeps one account once its staged results are applied:
+the next run of the agent continues it, whether that is `run_pending` or a
+content turn carrying a new prompt, so calls made before the suspension appear
+in that run's result. A run with no applied results discards the suspended
+account. The carry-over lives in the agent's memory: a resume on an agent
+rebuilt from storage starts a fresh account, and the pre-suspension calls
+appear only in the session total. Compaction summaries written
+by a host curator or the mechanical capacity fallback make no provider request
+and add no row. Legacy totals are clamped as described above. On a fresh session
+`run_usage` equals `usage`. A harness that runs several turns on one session
+should read `run_usage`, never sum `usage`.
 
 ## Which calls emit a usage row
 
-The event stream reports fewer provider calls than the cumulative account can
-charge. Session usage advances when a measured, chargeable outcome reaches the
-accounting path; measurement alone does not guarantee recording.
-`run_completed.usage` includes only calls recorded before its emission.
+Every committed agent-loop call publishes its own per-call row, and
+structured-output extraction publishes one row per extraction request. Session
+usage advances when a measured, chargeable outcome reaches the accounting path;
+measurement alone does not guarantee recording. `run_completed.usage` includes
+only calls recorded before its emission.
 
-| Provider call | Emits `turn_completed` | Counted in session-cumulative usage |
+| Provider call | Per-call row on the event stream | Counted in session-cumulative usage |
 | --- | --- | --- |
-| The assistant turn that closes a run | yes | yes |
-| Intermediate tool-loop calls in the same run | no | yes |
-| Structured-output extraction calls and retries | no | yes, after the pre-extraction `run_completed` |
-| The compaction summary call | no (`compaction_completed` instead) | when `run_compaction` returns a chargeable outcome |
-| A host-appended or realtime assistant turn | yes | yes |
+| The assistant turn that closes a run | `turn_completed` | yes |
+| Intermediate tool-loop calls in the same run | `turn_completed` with `stop_reason: tool_use` | yes |
+| Structured-output extraction calls and retries | one `request_usage` row each on `extraction_succeeded` / `extraction_failed` | yes, after the pre-extraction `run_completed` |
+| The compaction summary call | none (`compaction_completed.summary_tokens` only) | when `run_compaction` returns a chargeable outcome |
+| A call whose turn fails after the provider answered (a denied hook, an exhausted budget) | none | yes |
+| A host-appended or realtime assistant turn | `turn_completed` | yes |
+
+`turn_completed` pairs with the `turn_started` of the same call. When a
+compaction boundary sends the loop back to rebuild a request, the loop announces
+the same `turn_number` again before the call, so pair a `turn_completed` with
+the latest `turn_started`. Extraction publishes no `turn_completed`: its rows
+ride the extraction outcome event, and an attempt that fails validation still
+publishes its row there. Event logs written by earlier releases carry
+`turn_completed` only for the call that closed each run.
 
 Measured compaction summary usage is recorded once `run_compaction` returns an outcome,
 even if the subsequent rewrite handoff or projection fails. A measured summary
@@ -64,10 +136,12 @@ the extraction requests. Their measured usage can increase the final
 carry that updated total. Use the final result or an authoritative session
 observation to include the extraction phase.
 
-At a comparable observation point, the normalized sum of measured turn rows
-cannot exceed the session-cumulative account, and is often strictly less.
-Treat that residual as unattributed cost, not a reconciliation error. Do not
-compare later turn rows against an earlier completion snapshot.
+At a comparable observation point, the normalized sum of the measured rows
+cannot exceed the session-cumulative account. For a run whose calls all
+committed and that did no compaction, the run's rows fold to exactly its
+`run_usage`. Treat any residual as unattributed cost (compaction summaries,
+failed turns, unmeasured calls), not a reconciliation error. Do not compare
+later rows against an earlier completion snapshot.
 
 ## Per-model attribution lives on the per-call event
 
@@ -155,18 +229,23 @@ the run); the second run makes one call.
 
 | Run | Call | `input_tokens` (uncached) | `cache_creation_tokens` | `cache_read_tokens` | `presented_tokens` | `output_tokens` | `turn_completed` row |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1000 | 4000 | 0 | 5000 | 200 | no |
-| 1 | 2 | 300 | 0 | 4000 | 4300 | 150 | no |
+| 1 | 1 | 1000 | 4000 | 0 | 5000 | 200 | yes |
+| 1 | 2 | 300 | 0 | 4000 | 4300 | 150 | yes |
 | 1 | 3 | 120 | 0 | 4300 | 4420 | 90 | yes |
 | 2 | 4 | 200 | 0 | 4500 | 4700 | 60 | yes |
 
 What the stream publishes:
 
 ```
-run 1  turn_completed.usage.accounting.presented_tokens = 4420  output = 90
+run 1  turn_completed (tool_use).usage.accounting.presented_tokens = 5000  output = 200
+run 1  turn_completed (tool_use).usage.accounting.presented_tokens = 4300  output = 150
+run 1  turn_completed (end_turn).usage.accounting.presented_tokens = 4420  output = 90
 run 1  run_completed.usage: input = 13720  output = 440  total = 14160
-run 2  turn_completed.usage.accounting.presented_tokens = 4700  output = 60
+       cache_creation = 4000  cache_read = 8300
+run 2  turn_completed (end_turn).usage.accounting.presented_tokens = 4700  output = 60
 run 2  run_completed.usage: input = 18420  output = 500  total = 18920
+       cache_creation = 4000  cache_read = 12800
+run 2  run_usage:           input = 4700   output = 60   cache_read = 4500
 ```
 
 For this ordinary tool-loop example, read that as follows.
@@ -174,13 +253,12 @@ For this ordinary tool-loop example, read that as follows.
 - **The session total is the latest `run_completed.usage`**: 18920 tokens. The
   first run's 14160 is the same account observed earlier, not a separate run's
   cost.
-- **What the turn rows attribute** is 9120 presented input plus 150 output, so
-  9270 of the 18920 tokens. The other 9650 belong to calls that publish no turn
-  row (2 intermediate tool-loop calls here). Within run 1 alone the
-  unattributed input is 13720 - 4420 = 9300.
+- **What the turn rows attribute** is 18420 presented input plus 500 output:
+  all 18920 tokens. Every call committed and nothing else ran, so the four rows
+  fold to the session total, and run 1's three rows fold to its 14160.
 
 These numbers are pinned by
-`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative` in
+`turn_rows_cover_every_call_while_the_run_total_is_session_cumulative` in
 `crates/meerkat-core/src/agent/usage_accounting_tests.rs`, which drives the real agent
 loop, and the `CumulativeUsage` arithmetic is pinned by
 `cumulative_usage_matches_documented_aggregation_example` in
@@ -200,9 +278,9 @@ field report hit. Use one snapshot at the desired observation point; never add
 cumulative snapshots. A pre-extraction completion event is not the final
 result's usage.
 
-**2. Do not sum per-call `input_tokens`.** Across the two turn rows above that
-gives `120 + 200 = 320`, against 9120 presented tokens, because the raw
-Anthropic counter excludes cache-write and cache-read input. Sum
+**2. Do not sum per-call `input_tokens`.** Across the four turn rows above that
+gives `1000 + 300 + 120 + 200 = 1620`, against 18420 presented tokens, because
+the raw Anthropic counter excludes cache-write and cache-read input. Sum
 `accounting.presented_tokens` instead.
 
 **3. Do not compare `total_tokens` across the two accounts.** On a per-call
@@ -219,10 +297,11 @@ The two safe aggregations, using comparable observation points:
   suffices only if no later measured work, including extraction, has advanced
   the account; it is not unconditionally equal to the final result.
 - **Per-model breakdown of the observable calls**: sum
-  `turn_completed.usage.accounting.presented_tokens` and
-  `turn_completed.usage.output_tokens`, grouped by
-  `turn_completed.usage.accounting.model`. Report the residual against the
-  session total explicitly; do not present this breakdown as the full cost.
+  `accounting.presented_tokens` and `output_tokens` over the
+  `turn_completed.usage` rows and the extraction events' `request_usage` rows,
+  grouped by `accounting.model`. Report any residual against the session total
+  explicitly (compaction summaries and turns that failed after the provider
+  answered publish no row); do not present this breakdown as the full cost.
 
 ## SDK surfaces
 
@@ -244,9 +323,10 @@ session-cumulative account, not the last call's usage.
 
 ## Known limits
 
-- There is no per-run token account. For a complete logical-run delta,
-  difference comparable final cumulative results or authoritative session
-  observations before and after the run, including its extraction phase.
+- The event stream carries no per-run token account; the final run result's
+  `run_usage` is one. Without a run result, difference comparable final
+  cumulative results or authoritative session observations before and after
+  the run, including its extraction phase.
   Isolate or account for other activity on that same session, and report
   missing measurements separately rather than treating them as zero.
   Differencing pre-extraction `run_completed.usage` snapshots instead can
@@ -254,9 +334,9 @@ session-cumulative account, not the last call's usage.
 - `compaction_completed.summary_tokens` is the output size of the compaction
   summary call and carries no provider/model attribution and no presented-input
   count, so compaction cost cannot be attributed from the event stream alone.
-- Intermediate tool-loop calls and the structured-output extraction call publish
-  no usage-bearing event at all, so per-model attribution is inherently partial
-  for tool-heavy or structured-output runs.
+- A call whose turn fails after the provider answered (a denied hook, an
+  exhausted budget) is charged but publishes no per-call row, and neither does
+  a compaction summary call; `RunResult.request_usage` lists them.
 - `run_completed.usage` carries no per-model breakdown. For a session that
   switched models, group the per-call rows yourself; the cumulative total is
   model-agnostic on purpose.

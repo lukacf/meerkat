@@ -65,22 +65,28 @@ export interface ProviderTokenAccounting {
  *
  * Cumulative (`run_completed.usage`, `RunResult.usage`): a *session*-cumulative
  * total whose `inputTokens` is already the sum of each recorded call's presented
- * tokens, whose cache fields are always absent, and which carries no
- * `accounting` because a session may span providers and models. It is persisted
+ * tokens, whose cache and reasoning fields are normalized sums
+ * (`cacheReadTokens <= inputTokens`, `reasoningTokens <= outputTokens` on every
+ * provider), and which carries no `accounting` because a session may span
+ * providers and models. It is persisted
  * with the session, so on the second run of a session it already contains the
  * first run's calls.
  *
  * Do not sum the cumulative value with anything - take the latest one - and do
  * not sum per-call `inputTokens` (that undercounts on cache-heavy Anthropic
- * sessions); sum `accounting.presentedTokens` instead. The per-call rows cover
- * only the calls that closed a run, so they do not reconcile with the cumulative
- * total.
+ * sessions); sum `accounting.presentedTokens` instead. Every committed
+ * agent-loop call publishes a `turn_completed` row; extraction requests,
+ * compaction summaries and turns that fail after the provider answered do not,
+ * so the rows need not reconcile with the cumulative total.
  */
 export interface Usage {
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly cacheCreationTokens?: number;
   readonly cacheReadTokens?: number;
+  /** Reasoning (thinking) tokens, a subset of `outputTokens`. Absent when the
+   * provider reports no separate count (Anthropic). */
+  readonly reasoningTokens?: number;
   /** Absent on cumulative usage and on rows written before 0.8.22. */
   readonly accounting?: ProviderTokenAccounting;
 }
@@ -754,7 +760,8 @@ function parseAccounting(raw: unknown): ProviderTokenAccounting | undefined {
   };
 }
 
-function parseUsage(raw: unknown): Usage {
+/** Parse a wire usage object (per-call or cumulative). */
+export function parseUsage(raw: unknown): Usage {
   if (!isPlainRecord(raw)) {
     throw new Error("missing usage");
   }
@@ -768,6 +775,9 @@ function parseUsage(raw: unknown): Usage {
     cacheReadTokens: raw.cache_read_tokens != null
       ? requireNumberField(raw, "cache_read_tokens")
       : undefined,
+    ...(raw.reasoning_tokens != null
+      ? { reasoningTokens: requireNumberField(raw, "reasoning_tokens") }
+      : {}),
     ...(accounting !== undefined ? { accounting } : {}),
   };
 }

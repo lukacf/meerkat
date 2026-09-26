@@ -33,6 +33,22 @@ async fn dispatch_json(
     serde_json::from_str(&text).or(Ok(serde_json::Value::String(text)))
 }
 
+/// Dispatch a tool whose result reaches the model as compact text
+/// (`shell_job_status`) and return that text.
+async fn dispatch_text(
+    dispatcher: &dyn AgentToolDispatcher,
+    name: &str,
+    args: serde_json::Value,
+) -> Result<String, ToolError> {
+    let args_raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+    let call = ToolCallView {
+        id: "test-1",
+        name,
+        args: &args_raw,
+    };
+    Ok(dispatcher.dispatch(call).await?.result.text_content())
+}
+
 /// Create a CompositeDispatcher with shell tools enabled.
 fn create_dispatcher_with_shell(
     temp_dir: &TempDir,
@@ -139,25 +155,13 @@ async fn integration_real_p1_shell_tool_shares_job_manager_with_job_control_tool
         "Job should be running"
     );
 
-    // Step 3: Verify the job is queryable via shell_job_status
-    let status_result =
-        dispatch_json(&dispatcher, "shell_job_status", json!({ "job_id": job_id })).await?;
-
-    // If JobManagers aren't shared, this will return null/error
+    // Step 3: Verify the job is queryable via shell_job_status. If the
+    // JobManagers aren't shared, this returns an error.
+    let status_text =
+        dispatch_text(&dispatcher, "shell_job_status", json!({ "job_id": job_id })).await?;
     assert!(
-        !status_result.is_null(),
-        "BUG: shell_job_status returns null for job {job_id}! \
-         ShellTool uses a different JobManager than shell_job_status."
-    );
-
-    // Verify the status response has expected fields
-    assert!(
-        status_result.get("id").is_some(),
-        "shell_job_status should return job info with id field"
-    );
-    assert!(
-        status_result.get("status").is_some(),
-        "shell_job_status should return job info with status field"
+        status_text.starts_with(&format!("job {job_id} ")),
+        "shell_job_status should name the job and its status, got: {status_text}"
     );
 
     // Step 4: Verify the job can be cancelled via shell_job_cancel
@@ -174,28 +178,10 @@ async fn integration_real_p1_shell_tool_shares_job_manager_with_job_control_tool
 
     // Verify job is now cancelled
     let final_status =
-        dispatch_json(&dispatcher, "shell_job_status", json!({ "job_id": job_id })).await?;
-
-    let status_obj = final_status.get("status");
-    // JobStatus is serialized with serde tag="status", so it looks like:
-    // {"duration_secs": 0.0, "status": "cancelled"}
-    let is_cancelled = status_obj.is_some_and(|s| {
-        // Check various serialization formats:
-        // 1. Direct string: "cancelled"
-        s.as_str() == Some("cancelled")
-                // 2. Object with "Cancelled" key (enum variant)
-                || s.get("Cancelled").is_some()
-                // 3. Object with inner "status" field containing "cancelled" (serde tag format)
-                || s.get("status").and_then(|v| v.as_str()) == Some("cancelled")
-                // 4. Check first key contains "cancel"
-                || s.as_object()
-                    .and_then(|o| o.keys().next())
-                    .is_some_and(|k| k.to_lowercase().contains("cancel"))
-    });
-
+        dispatch_text(&dispatcher, "shell_job_status", json!({ "job_id": job_id })).await?;
     assert!(
-        is_cancelled,
-        "Job should be cancelled after shell_job_cancel. Got status: {final_status:?}"
+        final_status.starts_with(&format!("job {job_id} cancelled")),
+        "Job should be cancelled after shell_job_cancel. Got status: {final_status}"
     );
 
     Ok(())
@@ -282,16 +268,14 @@ async fn ops_registry_integration_red_ok_background_job_visibility_survives_unti
     );
 
     let before_cancel =
-        dispatch_json(&dispatcher, "shell_job_status", json!({ "job_id": job_id })).await?;
+        dispatch_text(&dispatcher, "shell_job_status", json!({ "job_id": job_id })).await?;
     assert!(
-        before_cancel.get("status").is_some(),
-        "background op should remain observable while in flight"
+        before_cancel.starts_with(&format!("job {job_id} running")),
+        "background op should remain observable while in flight, got: {before_cancel}"
     );
     let running_snapshot = job_manager
         .ops_lifecycle_snapshot(&meerkat_tools::builtin::shell::JobId::from_string(
-            before_cancel["id"]
-                .as_str()
-                .ok_or("status response should include job id")?,
+            job_id.as_str(),
         ))
         .await
         .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?
@@ -301,25 +285,19 @@ async fn ops_registry_integration_red_ok_background_job_visibility_survives_unti
     dispatch_json(
         &dispatcher,
         "shell_job_cancel",
-        json!({ "job_id": before_cancel["id"].clone() }),
+        json!({ "job_id": job_id.as_str() }),
     )
     .await?;
 
-    let after_cancel = dispatch_json(
-        &dispatcher,
-        "shell_job_status",
-        json!({ "job_id": before_cancel["id"].clone() }),
-    )
-    .await?;
+    let after_cancel =
+        dispatch_text(&dispatcher, "shell_job_status", json!({ "job_id": job_id })).await?;
     assert!(
-        after_cancel.to_string().to_lowercase().contains("cancel"),
-        "background op should surface a terminal cancelled state"
+        after_cancel.starts_with(&format!("job {job_id} cancelled")),
+        "background op should surface a terminal cancelled state, got: {after_cancel}"
     );
     let cancelled_snapshot = job_manager
         .ops_lifecycle_snapshot(&meerkat_tools::builtin::shell::JobId::from_string(
-            after_cancel["id"]
-                .as_str()
-                .ok_or("cancelled status response should include job id")?,
+            job_id.as_str(),
         ))
         .await
         .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?

@@ -240,25 +240,25 @@ impl Drop for OwnedProcessGroup {
 
 /// Drain a reader task without allowing a leaked/escaped writer to hold the
 /// shell waiter forever.
-pub(super) async fn join_output_bounded(
-    mut handle: JoinHandle<std::io::Result<Vec<u8>>>,
+pub(super) async fn join_output_bounded<T: Default>(
+    mut handle: JoinHandle<std::io::Result<T>>,
     label: &str,
-) -> Vec<u8> {
+) -> T {
     match tokio::time::timeout(OUTPUT_DRAIN_TIMEOUT, &mut handle).await {
         Ok(Ok(Ok(buf))) => buf,
         Ok(Ok(Err(error))) => {
             warn!("Failed to read {}: {}", label, error);
-            Vec::new()
+            T::default()
         }
         Ok(Err(error)) => {
             warn!("{} reader task failed: {}", label, error);
-            Vec::new()
+            T::default()
         }
         Err(_) => {
             handle.abort();
             let _ = handle.await;
             warn!("{} reader task exceeded bounded drain timeout", label);
-            Vec::new()
+            T::default()
         }
     }
 }

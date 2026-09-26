@@ -621,6 +621,7 @@ fn test_usage_accumulation() {
         output_tokens: 50,
         cache_creation_tokens: Some(10),
         cache_read_tokens: None,
+        reasoning_tokens: None,
         provider_accounting: None,
     };
 
@@ -629,20 +630,25 @@ fn test_usage_accumulation() {
         output_tokens: 75,
         cache_creation_tokens: None,
         cache_read_tokens: Some(10),
+        reasoning_tokens: None,
         provider_accounting: None,
     };
 
     total.add(&turn1);
     assert_eq!(total.input_tokens, 100);
     assert_eq!(total.output_tokens, 50);
-    assert_eq!(total.cache_creation_tokens, None);
+    assert_eq!(total.cache_creation_tokens, Some(10));
     assert_eq!(total.cache_read_tokens, None);
+    assert_eq!(total.reasoning_tokens, None);
 
     total.add(&turn2);
     assert_eq!(total.input_tokens, 250);
     assert_eq!(total.output_tokens, 125);
-    assert_eq!(total.cache_creation_tokens, None);
-    assert_eq!(total.cache_read_tokens, None);
+    // A detail counter missing on one side counts as zero there, and stays
+    // `None` only while no side has reported it.
+    assert_eq!(total.cache_creation_tokens, Some(10));
+    assert_eq!(total.cache_read_tokens, Some(10));
+    assert_eq!(total.reasoning_tokens, None);
     assert_eq!(total.total_tokens(), 375);
 }
 
@@ -654,6 +660,7 @@ fn cumulative_usage_uses_normalized_presented_total_not_cache_details() {
             output_tokens: 7,
             cache_creation_tokens: Some(20),
             cache_read_tokens: Some(30),
+            reasoning_tokens: None,
             provider_accounting: None,
         },
         crate::ProviderTokenAccounting::anthropic("claude-test", 10, 20, 30),
@@ -663,8 +670,110 @@ fn cumulative_usage_uses_normalized_presented_total_not_cache_details() {
 
     assert_eq!(cumulative.input_tokens, 60);
     assert_eq!(cumulative.output_tokens, 7);
-    assert_eq!(cumulative.cache_creation_tokens, None);
+    // Anthropic's cache components are disjoint parts of the presented
+    // total, so the cumulative cache counters are subsets of input.
+    assert_eq!(cumulative.cache_creation_tokens, Some(20));
+    assert_eq!(cumulative.cache_read_tokens, Some(30));
+}
+
+/// Recorded GPT-5.6 Responses `response.completed` usage (from a live
+/// gpt-5.6-luna request): OpenAI's `input_tokens` already includes the cached
+/// subset, and reasoning is a subset of output.
+fn recorded_openai_turn(
+    input: u64,
+    cached: u64,
+    cache_write: u64,
+    output: u64,
+    reasoning: u64,
+) -> TurnUsage {
+    TurnUsage::new(
+        Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_tokens: Some(cache_write),
+            cache_read_tokens: Some(cached),
+            reasoning_tokens: Some(reasoning),
+            provider_accounting: None,
+        },
+        crate::ProviderTokenAccounting::openai("gpt-5.6-luna", input),
+    )
+}
+
+#[test]
+fn cumulative_usage_sums_openai_cache_and_reasoning_as_subsets() {
+    let mut cumulative = CumulativeUsage::default();
+    cumulative.add_turn(&recorded_openai_turn(7272, 0, 7269, 143, 39));
+    cumulative.add_turn(&recorded_openai_turn(7454, 7269, 182, 140, 30));
+    cumulative.add_turn(&recorded_openai_turn(13269, 7451, 5815, 126, 38));
+
+    assert_eq!(cumulative.input_tokens, 27995);
+    assert_eq!(cumulative.output_tokens, 409);
+    assert_eq!(cumulative.cache_read_tokens, Some(14720));
+    assert_eq!(cumulative.cache_creation_tokens, Some(13266));
+    assert_eq!(cumulative.reasoning_tokens, Some(107));
+    assert_eq!(cumulative.total_tokens(), 27995 + 409);
+}
+
+#[test]
+fn cumulative_usage_clamps_detail_counters_to_their_parent_totals() {
+    // A misreporting adapter cannot break the subset invariant.
+    let mut cumulative = CumulativeUsage::default();
+    cumulative.add_turn(&recorded_openai_turn(100, 500, 700, 10, 90));
+    assert_eq!(cumulative.cache_read_tokens, Some(100));
+    // Reads and writes are disjoint parts of input: writes get what reads
+    // leave, so reads + writes never exceed input.
+    assert_eq!(cumulative.cache_creation_tokens, Some(0));
+    let mut split = CumulativeUsage::default();
+    split.add_turn(&recorded_openai_turn(100, 60, 70, 10, 5));
+    assert_eq!(split.cache_read_tokens, Some(60));
+    assert_eq!(split.cache_creation_tokens, Some(40));
+    assert_eq!(cumulative.reasoning_tokens, Some(10));
+}
+
+#[test]
+fn cumulative_usage_keeps_absent_detail_counters_absent() {
+    let turn = TurnUsage::new(
+        Usage {
+            input_tokens: 40,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        crate::ProviderTokenAccounting::openai("gpt-5.6-luna", 40),
+    );
+    let mut cumulative = CumulativeUsage::default();
+    cumulative.add_turn(&turn);
     assert_eq!(cumulative.cache_read_tokens, None);
+    assert_eq!(cumulative.cache_creation_tokens, None);
+    assert_eq!(cumulative.reasoning_tokens, None);
+    let json = serde_json::to_value(cumulative.as_usage()).unwrap();
+    assert!(json.get("reasoning_tokens").is_none());
+}
+
+#[test]
+fn cumulative_delta_since_subtracts_every_counter_and_rejects_regression() {
+    let mut earlier = CumulativeUsage::default();
+    earlier.add_turn(&recorded_openai_turn(7272, 0, 7269, 143, 39));
+    let mut later = earlier.clone();
+    later.add_turn(&recorded_openai_turn(7454, 7269, 182, 140, 30));
+
+    let delta = later
+        .as_usage()
+        .cumulative_delta_since(earlier.as_usage())
+        .expect("monotone snapshots");
+    assert_eq!(delta.input_tokens, 7454);
+    assert_eq!(delta.output_tokens, 140);
+    assert_eq!(delta.cache_read_tokens, Some(7269));
+    assert_eq!(delta.cache_creation_tokens, Some(182));
+    assert_eq!(delta.reasoning_tokens, Some(30));
+
+    assert_eq!(
+        earlier.as_usage().cumulative_delta_since(later.as_usage()),
+        None
+    );
+    // A detail counter absent from the earlier snapshot counts as zero.
+    let fresh = Usage::default();
+    let from_zero = later.as_usage().cumulative_delta_since(&fresh).unwrap();
+    assert_eq!(from_zero.cache_read_tokens, Some(7269));
 }
 
 #[test]
@@ -677,6 +786,7 @@ fn test_run_result_json_schema() {
             output_tokens: 500,
             cache_creation_tokens: None,
             cache_read_tokens: None,
+            reasoning_tokens: None,
             provider_accounting: None,
         },
         turns: 3,
@@ -686,6 +796,8 @@ fn test_run_result_json_schema() {
         extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
+        run_usage: None,
+        request_usage: Vec::new(),
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -1037,6 +1149,8 @@ fn test_run_result_with_structured_output() {
         extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
+        run_usage: None,
+        request_usage: Vec::new(),
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -1062,6 +1176,8 @@ fn test_run_result_without_structured_output_skips_field() {
         extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
+        run_usage: None,
+        request_usage: Vec::new(),
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -2530,6 +2646,7 @@ mod usage_aggregation_semantics {
                 output_tokens: output,
                 cache_creation_tokens: Some(cache_creation),
                 cache_read_tokens: Some(cache_read),
+                reasoning_tokens: None,
                 provider_accounting: None,
             },
             ProviderTokenAccounting::anthropic(model, uncached, cache_creation, cache_read),
@@ -2577,10 +2694,25 @@ mod usage_aggregation_semantics {
         assert_eq!(cumulative.output_tokens, 500);
         assert_eq!(cumulative.total_tokens(), 18_920);
 
-        assert!(
-            cumulative.cache_creation_tokens.is_none() && cumulative.cache_read_tokens.is_none(),
-            "cumulative usage never aggregates provider cache detail counters"
-        );
+        // Anthropic's cache components are disjoint parts of each call's
+        // presented total, so their sums are subsets of the cumulative input.
+        assert_eq!(cumulative.cache_creation_tokens, Some(4_000));
+        assert_eq!(cumulative.cache_read_tokens, Some(12_800));
+        assert_eq!(cumulative.reasoning_tokens, None);
+
+        // The second run's own usage is the delta of the session total.
+        let mut first_run = CumulativeUsage::default();
+        for call in &calls[..3] {
+            first_run.add_turn(call);
+        }
+        let second_run = cumulative
+            .as_usage()
+            .cumulative_delta_since(first_run.as_usage())
+            .expect("session total is monotone");
+        assert_eq!(second_run.input_tokens, 4_700);
+        assert_eq!(second_run.output_tokens, 60);
+        assert_eq!(second_run.cache_read_tokens, Some(4_500));
+        assert_eq!(second_run.cache_creation_tokens, Some(0));
         assert!(
             cumulative.provider_accounting.is_none(),
             "a possibly multi-model aggregate must not claim one per-call convention"

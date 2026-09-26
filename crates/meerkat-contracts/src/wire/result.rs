@@ -60,7 +60,15 @@ pub struct WireRunResult {
     pub text: String,
     pub turns: u32,
     pub tool_calls: u32,
+    /// Session-cumulative usage; see `RunResult::usage`.
     pub usage: WireUsage,
+    /// Usage accrued by this run alone; see `RunResult::run_usage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_usage: Option<WireUsage>,
+    /// One row per provider request this run made, in order; see
+    /// `RunResult::request_usage`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_usage: Vec<crate::wire::WireTurnUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,6 +90,8 @@ impl From<RunResult> for WireRunResult {
             turns: r.turns,
             tool_calls: r.tool_calls,
             usage: r.usage.into(),
+            run_usage: r.run_usage.map(Into::into),
+            request_usage: r.request_usage.into_iter().map(Into::into).collect(),
             terminal_cause_kind: r.terminal_cause_kind,
             structured_output: r.structured_output,
             extraction_error: r.extraction_error,
@@ -217,6 +227,8 @@ mod tests {
                 quarantined: vec![],
                 collection_fault: None,
             }),
+            run_usage: None,
+            request_usage: Vec::new(),
         };
 
         let wire: WireRunResult = run.into();

@@ -4206,9 +4206,23 @@ impl Session {
     ///
     /// This is reserved for durable import/rollback paths. Provider turns use
     /// [`Self::record_turn_usage`] so raw cache counters never enter policy.
+    /// Like that path, it normalizes the stored total before adding, so a
+    /// pre-0.8.22 total with raw summed cache counters is never mixed with
+    /// normalized deltas. A session nothing is recorded on keeps its stored
+    /// total byte for byte.
     pub fn record_cumulative_usage(&mut self, usage: Usage) {
-        self.usage.add(&usage);
+        let mut total = crate::types::CumulativeUsage::from_usage(self.usage.clone()).into_inner();
+        total.add(&usage);
+        self.usage = total;
         self.mark_content_mutated(SystemTime::now());
+    }
+
+    /// The session total as every reporting surface shows it: normalized so
+    /// cache reads and writes are disjoint subsets of `input_tokens` and
+    /// reasoning a subset of `output_tokens`. The stored total is untouched,
+    /// so store heads that compare it keep matching.
+    pub fn reported_total_usage(&self) -> Usage {
+        crate::types::CumulativeUsage::from_usage(self.usage.clone()).into_inner()
     }
 
     /// Read and revalidate provider-authored cache-breakpoint proofs against
@@ -13887,6 +13901,7 @@ mod tests {
             output_tokens: 5,
             cache_creation_tokens: None,
             cache_read_tokens: None,
+            reasoning_tokens: None,
             provider_accounting: None,
         });
 

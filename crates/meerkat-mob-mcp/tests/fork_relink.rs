@@ -913,7 +913,15 @@ async fn relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
 async fn seat_unmanaged_owner(
     fixture: &CouncilFixture,
 ) -> (meerkat_mob::MobHandle, meerkat_core::SessionId) {
-    let owner_mob = meerkat_mob::MobId::from(format!("{}-owners", fixture.source_mob_id()));
+    seat_owner_in(fixture, "owners").await
+}
+
+/// [`seat_unmanaged_owner`] in the mob `<source>-<suffix>`.
+async fn seat_owner_in(
+    fixture: &CouncilFixture,
+    suffix: &str,
+) -> (meerkat_mob::MobHandle, meerkat_core::SessionId) {
+    let owner_mob = meerkat_mob::MobId::from(format!("{}-{suffix}", fixture.source_mob_id()));
     fixture
         .state
         .mob_create_definition(support::council_definition(owner_mob.as_str()))
@@ -1844,5 +1852,115 @@ async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
             .await
             .contains(CHILD_REPLY)
     );
+    fixture.teardown().await;
+}
+
+/// Two children of one mob whose jobs share an id (bindings are the host's;
+/// nothing makes a job id unique across children), bound to owners in two
+/// different mobs, both stopped with their owners not live. Each deferred
+/// outcome is retried as exactly its child's job: when only C resumes, Y is
+/// delivered once and X keeps waiting on B; when B resumes, X is delivered
+/// once (lifecycle review: a retry selected every child with the job id and
+/// adopted the first report, so a child could take the other's report).
+#[tokio::test(flavor = "multi_thread")]
+async fn children_sharing_a_job_id_are_each_retried_as_their_own_job() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let (b_handle, b_owner) = seat_owner_in(&fixture, "owners-b").await;
+    let (c_handle, c_owner) = seat_owner_in(&fixture, "owners-c").await;
+    let job_id = "job-shared-id".to_string();
+    // X is forked first and sorts first: a retry that took the first report
+    // for the id would hand Y the report of X.
+    for (child, owner) in [("aaa-shared-x", &b_owner), ("zzz-shared-y", &c_owner)] {
+        let (_fork, run) = handle
+            .fork_member_then_run_detached(
+                &AgentIdentity::from("forker"),
+                child_spec(child),
+                None,
+                "fork_off_result",
+                16 * 1024,
+                meerkat_core::DurableForkSourceAdmission::Quiescent,
+                None,
+                Some(ForkJobBinding {
+                    job_id: job_id.clone(),
+                    owner_session_id: owner.clone(),
+                }),
+            )
+            .await
+            .expect("fork");
+        assert!(matches!(
+            run.outcome().await,
+            Some(ForkChildRunOutcome::Completed(_))
+        ));
+    }
+    // The "restart": both owners' mobs come back stopped, owners not live.
+    let runtime = fixture.runtime_adapter.clone().expect("runtime-backed");
+    for (owner_mob, owner) in [(&b_handle, &b_owner), (&c_handle, &c_owner)] {
+        owner_mob.stop().await.expect("stop the owner's mob");
+        runtime
+            .unregister_session(owner)
+            .await
+            .expect("the owner is not live after the restart");
+    }
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+        fixture.service.clone(),
+        Some(Arc::clone(&runtime)),
+        meerkat_mob::MobControlPrincipal::Owner,
+    ));
+    for owner_mob in [&b_handle, &c_handle] {
+        restarted
+            .mob_insert_handle(owner_mob.mob_id().clone(), owner_mob.clone())
+            .await;
+    }
+    restarted
+        .mob_insert_handle(fixture.source_mob_id(), handle.clone())
+        .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while restarted.fork_relink_waiting_owners() < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both outcomes should wait on their owners' mobs"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // Only C resumes: Y is delivered, X keeps waiting on B.
+    c_handle.resume().await.expect("resume C");
+    await_completion_record(&fixture, &c_owner, &job_id).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(completion_records(&fixture, &c_owner, &job_id).await, 1);
+    assert!(
+        completion_record_text(&fixture, &c_owner, &job_id)
+            .await
+            .contains("zzz-shared-y"),
+        "C's owner is delivered Y's outcome"
+    );
+    assert_eq!(completion_records(&fixture, &b_owner, &job_id).await, 0);
+    assert_eq!(
+        restarted.fork_relink_waiting_owners(),
+        1,
+        "only X still waits, on B"
+    );
+
+    // B resumes: X is delivered, once.
+    b_handle.resume().await.expect("resume B");
+    await_completion_record(&fixture, &b_owner, &job_id).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(completion_records(&fixture, &b_owner, &job_id).await, 1);
+    assert!(
+        completion_record_text(&fixture, &b_owner, &job_id)
+            .await
+            .contains("aaa-shared-x"),
+        "B's owner is delivered X's outcome"
+    );
+    assert_eq!(completion_records(&fixture, &c_owner, &job_id).await, 1);
+    assert_eq!(restarted.fork_relink_waiting_owners(), 0);
     fixture.teardown().await;
 }

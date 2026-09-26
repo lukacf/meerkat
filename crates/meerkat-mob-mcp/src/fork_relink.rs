@@ -313,20 +313,23 @@ pub(crate) async fn redeliver_when_owners_revivable(
                 reason.cleared(&owner_handle, attempt).await
             }
         },
-        |job_id| {
+        |child, job_id| {
             let (service, delivery) = (Arc::clone(&service), delivery.clone());
             async move {
+                // Exactly this child's job: a job id is not unique across
+                // children (bindings are the host's), and delivery dedup is
+                // per owner session.
                 relink_mob_fork_children_where(
                     service,
                     delivery,
                     mob_id,
                     handle,
                     restored_before_ms,
-                    |job| job.job_id == job_id,
+                    |candidate, job| candidate == &child && job.job_id == job_id,
                 )
                 .await
                 .into_iter()
-                .next()
+                .find(|report| report.child == child && report.job_id == job_id)
             }
         },
     )
@@ -349,7 +352,8 @@ pub(crate) async fn redeliver_when_owners_revivable(
 /// Drive every awaiting job to its own end, concurrently: each waits
 /// (`wait(owner mob, reason, attempt)`, `true` once its owner may be
 /// revivable) with its own budget, and a wake retries that job alone
-/// (`retry(job_id)`, its new report, `None` when the child is gone).
+/// (`retry(child, job_id)`, that child's new report, `None` when the child is
+/// gone).
 async fn redeliver_each<Wait, WaitFuture, Retry, RetryFuture>(
     awaiting: Vec<ForkRelinkReport>,
     wait: Wait,
@@ -358,7 +362,7 @@ async fn redeliver_each<Wait, WaitFuture, Retry, RetryFuture>(
 where
     Wait: Fn(MobId, OwnerRevivalDeferral, u32) -> WaitFuture,
     WaitFuture: std::future::Future<Output = bool>,
-    Retry: Fn(String) -> RetryFuture,
+    Retry: Fn(AgentIdentity, String) -> RetryFuture,
     RetryFuture: std::future::Future<Output = Option<ForkRelinkReport>>,
 {
     let (wait, retry) = (&wait, &retry);
@@ -370,7 +374,7 @@ where
             if !wait(mob_id.clone(), reason.clone(), attempt).await {
                 break;
             }
-            match retry(report.job_id.clone()).await {
+            match retry(report.child.clone(), report.job_id.clone()).await {
                 Some(next) => report = next,
                 None => break,
             }
@@ -410,19 +414,20 @@ pub async fn relink_mob_fork_children(
         mob_id,
         handle,
         restored_before_ms,
-        |_| true,
+        |_, _| true,
     )
     .await
 }
 
-/// [`relink_mob_fork_children`] for the children whose job `select` picks.
+/// [`relink_mob_fork_children`] for the children `select` picks (by the
+/// child's identity and its job).
 async fn relink_mob_fork_children_where(
     service: Arc<dyn meerkat_mob::MobSessionService>,
     delivery: RelinkDelivery,
     mob_id: &MobId,
     handle: &MobHandle,
     restored_before_ms: u64,
-    select: impl Fn(&ForkJobRecord) -> bool,
+    select: impl Fn(&AgentIdentity, &ForkJobRecord) -> bool,
 ) -> Vec<ForkRelinkReport> {
     // One roster read lists the children and, before anything can retire a
     // child, resolves each job's owner among the mob's members.
@@ -432,7 +437,7 @@ async fn relink_mob_fork_children_where(
         let Some(job) = entry.fork_job.clone() else {
             continue;
         };
-        if job.started_at_ms >= restored_before_ms || !select(&job) {
+        if job.started_at_ms >= restored_before_ms || !select(&entry.agent_identity, &job) {
             continue;
         }
         let owner = match roster.find_by_bridge_session_id(&job.owner_session_id) {
@@ -1001,7 +1006,7 @@ mod tests {
                     }
                 }
             },
-            |job_id| {
+            |_child, job_id| {
                 let b_running = *b_runs_rx.borrow();
                 let (x_retries, y_retries) = (&x_retries, &y_retries);
                 let (x_waits, y_waits) = (&x_waits, &y_waits);

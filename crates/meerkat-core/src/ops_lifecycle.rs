@@ -464,6 +464,28 @@ pub enum CompletionCursorConsumer {
     RuntimeInjected,
 }
 
+/// Whether an operation registry is still the live lifecycle authority of
+/// the owner session that holds it.
+///
+/// A registry stops being live authority in two typed ways. Canonical owner
+/// teardown (unregister) terminalizes every operation and closes admission.
+/// A ReloadRequired discard seals persistence without terminal transitions:
+/// its non-terminal operations remain readable, but a recovered successor
+/// registry owns their canonical terminalization, so callers must neither
+/// continue them nor mutate them through the sealed registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpsOwnerAdmission {
+    /// The owner registration is live: operations may be continued and
+    /// transitioned through this registry.
+    Open,
+    /// Persistence was sealed after the owner lost durable authority
+    /// (ReloadRequired discard). A recovered successor owns canonical
+    /// terminalization of the operations left in this registry.
+    Sealed,
+    /// The owner registration was retired and every operation terminalized.
+    Retired,
+}
+
 /// Shared async-operation lifecycle registry.
 pub trait OpsLifecycleRegistry: Send + Sync {
     fn register_operation(&self, spec: OperationSpec) -> Result<(), OpsLifecycleError>;
@@ -513,6 +535,14 @@ pub trait OpsLifecycleRegistry: Send + Sync {
         id: &OperationId,
         reason: Option<String>,
     ) -> Result<(), OpsLifecycleError>;
+    /// Report whether this registry is still the live lifecycle authority of
+    /// its owner session.
+    ///
+    /// The default refuses explicitly: a registry that cannot observe its
+    /// owner's admission state must not be reported as live.
+    fn owner_admission(&self) -> Result<OpsOwnerAdmission, OpsLifecycleError> {
+        Err(OpsLifecycleError::Unsupported("owner_admission".into()))
+    }
     fn request_retire(&self, id: &OperationId) -> Result<(), OpsLifecycleError>;
     fn mark_retired(&self, id: &OperationId) -> Result<(), OpsLifecycleError>;
     fn snapshot(

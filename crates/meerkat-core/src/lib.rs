@@ -320,7 +320,7 @@ pub use ops_lifecycle::{
     OperationCompletionWatch, OperationCompletionWatchError, OperationKind,
     OperationLifecycleSnapshot, OperationPeerHandle, OperationProgressUpdate,
     OperationRetentionRequest, OperationStatus, OperationTerminalOutcome, OpsLifecycleError,
-    OpsLifecycleRegistry, WaitAllResult, WaitAllSatisfied,
+    OpsLifecycleRegistry, OpsOwnerAdmission, WaitAllResult, WaitAllSatisfied,
 };
 pub use peer_correlation::{
     InboundPeerRequestState, InteractionStreamAbandonReason, InteractionStreamState,

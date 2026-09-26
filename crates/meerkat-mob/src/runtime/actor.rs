@@ -6405,7 +6405,10 @@ pub(super) struct ExplicitResumeMemberRebuild {
     member_ref: MemberRef,
     bridge_session_id: SessionId,
     requires_materialization: bool,
-    repoints_session_binding: bool,
+    /// The session this rebuild repoints the member away from (its snapshot
+    /// was lost and `bridge_session_id` is the selected persisted
+    /// successor). `None` when the member keeps its bound session.
+    superseded_session_id: Option<SessionId>,
     recovered_peer_endpoint: Option<TrustedPeerDescriptor>,
 }
 
@@ -6504,6 +6507,18 @@ struct RestoredMemberOperationBinding {
         String,
         super::provisioner::PlacedOperationRecoveryExpectation,
     )>,
+}
+
+/// Which seam realizes a restored member operation binding. Actor startup
+/// runs against a fresh ops adapter, so any surviving binding is an invariant
+/// violation and the strict bind applies. The explicit same-handle resume
+/// post-commit step runs against the live adapter, where a parent-owned
+/// member legitimately still holds its coordinator-owned binding.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestoredOperationBindingSeam {
+    ActorStartup,
+    ExplicitResumePostCommit,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -17728,7 +17743,7 @@ impl ExplicitResumePreparationContext {
                     member_ref,
                     bridge_session_id: session_id,
                     requires_materialization,
-                    repoints_session_binding: false,
+                    superseded_session_id: None,
                     recovered_peer_endpoint: None,
                 });
                 continue;
@@ -17762,7 +17777,7 @@ impl ExplicitResumePreparationContext {
                     member_ref,
                     bridge_session_id: session_id,
                     requires_materialization,
-                    repoints_session_binding: false,
+                    superseded_session_id: None,
                     recovered_peer_endpoint: None,
                 });
                 continue;
@@ -17850,7 +17865,7 @@ impl ExplicitResumePreparationContext {
                 member_ref: replacement_member_ref,
                 bridge_session_id: replacement_session_id,
                 requires_materialization: replacement_requires_materialization,
-                repoints_session_binding: true,
+                superseded_session_id: Some(session_id),
                 recovered_peer_endpoint,
             });
         }
@@ -17919,7 +17934,7 @@ impl MobActor {
                 member_ref,
                 bridge_session_id,
                 requires_materialization,
-                repoints_session_binding,
+                superseded_session_id,
                 recovered_peer_endpoint,
             } = rebuild;
             let dsl_identity = mob_dsl::AgentIdentity::from_domain(
@@ -17933,7 +17948,7 @@ impl MobActor {
             {
                 continue;
             }
-            if repoints_session_binding {
+            if let Some(superseded_session_id) = superseded_session_id.as_ref() {
                 // `RecoverMemberSessionBinding` is a Running-only machine
                 // transition. The helper stages binding + endpoint on one
                 // detached authority, appends the replay-authority event, and
@@ -17953,6 +17968,23 @@ impl MobActor {
                 let _ = self
                     .machine_state_watch_tx
                     .send(self.dsl_authority.state().clone());
+                // The superseded session is never addressed again. Its
+                // attachment retirement kept a coordinator-owned operation
+                // binding; settle it now so the coordinator's operation is not
+                // orphaned, and carry a live owner context to the successor.
+                // A refusal leaves the adapter untouched and this member is
+                // not rebuilt in this attempt.
+                if let Err(error) = self
+                    .provisioner
+                    .settle_session_ops_binding_for_explicit_resume_repoint(
+                        superseded_session_id,
+                        &bridge_session_id,
+                    )
+                    .await
+                {
+                    first_infrastructure_error.get_or_insert(error);
+                    continue;
+                }
             }
             if !requires_materialization {
                 continue;
@@ -18036,7 +18068,7 @@ impl MobActor {
                     member_ref,
                     bridge_session_id,
                     requires_materialization,
-                    repoints_session_binding,
+                    superseded_session_id,
                     recovered_peer_endpoint,
                 },
                 attempt,
@@ -27505,6 +27537,7 @@ impl MobActor {
     async fn realize_restored_member_operation_binding(
         io: ResumeOperationBindingIo,
         plan: RestoredMemberOperationBinding,
+        seam: RestoredOperationBindingSeam,
     ) -> Result<(), MobError> {
         let RestoredMemberOperationBinding {
             entry,
@@ -27570,13 +27603,26 @@ impl MobActor {
                 )
                 .await?;
         } else {
-            io.provisioner
-                .bind_member_owner_context(
-                    &entry.member_ref,
-                    generated_owner_session_id,
-                    Arc::clone(bindings.ops_lifecycle()),
-                )
-                .await?;
+            match seam {
+                RestoredOperationBindingSeam::ActorStartup => {
+                    io.provisioner
+                        .bind_member_owner_context(
+                            &entry.member_ref,
+                            generated_owner_session_id,
+                            Arc::clone(bindings.ops_lifecycle()),
+                        )
+                        .await?;
+                }
+                RestoredOperationBindingSeam::ExplicitResumePostCommit => {
+                    io.provisioner
+                        .restore_member_owner_context_for_explicit_resume(
+                            &entry.member_ref,
+                            generated_owner_session_id,
+                            Arc::clone(bindings.ops_lifecycle()),
+                        )
+                        .await?;
+                }
+            }
         }
         Ok(())
     }
@@ -27589,7 +27635,12 @@ impl MobActor {
         let entries = self.roster.read().await.list().cloned().collect::<Vec<_>>();
         for entry in entries {
             if let Some(plan) = self.prepare_restored_member_operation_binding(entry)? {
-                Self::realize_restored_member_operation_binding(io.clone(), plan).await?;
+                Self::realize_restored_member_operation_binding(
+                    io.clone(),
+                    plan,
+                    RestoredOperationBindingSeam::ActorStartup,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -28754,6 +28805,7 @@ impl MobActor {
                 operation_id.clone(),
                 super::provisioner::ProvisionSessionOrigin::ResumedDurable,
                 Some(rollback_authority),
+                super::provisioner::RollbackOrigin::SpawnRollback,
             );
             // Resume fast-path: admission still commits inline, but the
             // activation stages are routed. The caller's reply rides the
@@ -30917,6 +30969,7 @@ impl MobActor {
                         spawn_receipt.operation_id,
                         spawn_receipt.session_origin,
                         spawn_receipt.rollback_authority,
+                        super::provisioner::RollbackOrigin::SpawnRollback,
                     );
                     if let Err(error) = orphan.rollback().await {
                         tracing::warn!(
@@ -31050,6 +31103,7 @@ impl MobActor {
                         spawn_receipt.operation_id.clone(),
                         spawn_receipt.session_origin,
                         spawn_receipt.rollback_authority.take(),
+                        super::provisioner::RollbackOrigin::SpawnRollback,
                     );
                     if let Err(error) = self.require_member_operation_eligible() {
                         if let Some(remote_exec) = remote.as_ref() {

@@ -6,7 +6,7 @@ use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_core::ops_lifecycle::{
     OperationId, OperationKind, OperationLifecycleAction, OperationLifecycleSnapshot,
     OperationPeerHandle, OperationProgressUpdate, OperationSource, OperationSpec, OperationStatus,
-    OpsLifecycleError, OpsLifecycleRegistry,
+    OpsLifecycleError, OpsLifecycleRegistry, OpsOwnerAdmission,
 };
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::types::SessionId;
@@ -88,14 +88,50 @@ pub(crate) struct MobOpsAdapter {
     member_bindings: Arc<Mutex<HashMap<MemberOpsKey, MemberOpsBinding>>>,
 }
 
+/// Outcome of re-establishing a committed session member's generated
+/// operation binding after an explicit same-handle resume commit.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExplicitResumeSessionBindingRestore {
+    /// No binding survived; the generated self-owned binding was installed.
+    EstablishedGenerated,
+    /// The identical generated self-owned binding is already installed.
+    GeneratedAlreadyCurrent,
+    /// The member was spawned under a coordinator's owner context; its
+    /// published coordinator-owned binding is kept unchanged.
+    RetainedOwnerContext { owner_bridge_session_id: SessionId },
+}
+
 /// Exact adapter-local witness for one session operation-registry binding.
 /// Used only when explicit resume has already proved that the corresponding
 /// runtime attachment cannot be reused and must not clear a later binding.
+///
+/// The witness also carries the binding's owner session and registry, so a
+/// rebuild or revival that replaces the member's runtime incarnation can
+/// rebind under the exact owner context it observed.
 #[cfg(feature = "runtime-adapter")]
 #[derive(Clone)]
 pub(crate) struct SessionOpsBindingWitness {
     binding_id: uuid::Uuid,
     registry: Arc<dyn OpsLifecycleRegistry>,
+    owner_bridge_session_id: SessionId,
+    /// The witnessed binding has the adapter-generic session-child shape (no
+    /// placed display name and no pinned exact operation).
+    generic_session_child: bool,
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl SessionOpsBindingWitness {
+    /// The coordinator session that owns `child_session_id`'s mob-child
+    /// operation when the witnessed binding was installed from a spawn-time
+    /// owner context. Every generated binding path binds a session member
+    /// under its own session, so a generic session binding owned by another
+    /// session is parent-owned, and its registry is the coordinator's rather
+    /// than the member's own runtime registry.
+    fn parent_owner(&self, child_session_id: &SessionId) -> Option<&SessionId> {
+        (self.generic_session_child && &self.owner_bridge_session_id != child_session_id)
+            .then_some(&self.owner_bridge_session_id)
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -103,8 +139,133 @@ impl std::fmt::Debug for SessionOpsBindingWitness {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionOpsBindingWitness")
             .field("binding_id", &self.binding_id)
+            .field("owner_bridge_session_id", &self.owner_bridge_session_id)
+            .field("generic_session_child", &self.generic_session_child)
             .finish_non_exhaustive()
     }
+}
+
+/// What explicit-resume attachment retirement or resumed-provision rollback
+/// did with the member's session binding.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExplicitResumeSessionBindingRelease {
+    /// No binding existed.
+    Absent,
+    /// The binding pointed at the member's own runtime registry, which goes
+    /// away with the retired attachment, so it was removed.
+    Cleared,
+    /// The binding is parent-owned: its registry is the coordinator's and
+    /// outlives the member's attachment. It is kept so the rebuild or revival
+    /// rebinds under the same owner context instead of re-owning the member.
+    RetainedParentOwner { owner_bridge_session_id: SessionId },
+}
+
+/// What a failed resumed SPAWN's rollback did with the member's session
+/// binding. The spawn rollback removes the member from the roster, so no
+/// binding outlives it.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SpawnRollbackSessionBindingRelease {
+    /// No binding existed (a provisioning abort had already removed it).
+    Absent,
+    /// A self-owned binding was removed.
+    Cleared,
+    /// A parent-owned binding was removed after the coordinator's mob-child
+    /// operation this attempt used was settled through the coordinator's
+    /// registry.
+    ClearedParentOwner {
+        owner_bridge_session_id: SessionId,
+        settlement: ParentOperationSettlement,
+    },
+}
+
+/// How a coordinator's mob-child operation was settled once its member
+/// session stopped being that coordinator's child.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParentOperationSettlement {
+    /// The attempt carried no operation, so there was nothing to settle.
+    NoOperation,
+    /// The operation was driven terminal through the registry's typed
+    /// transitions.
+    Terminalized(OperationId),
+    /// The operation was already terminal (or already evicted as terminal).
+    AlreadyTerminal(OperationId),
+    /// The coordinator's registry is no longer its owner's live lifecycle
+    /// authority; its successor (or owner teardown) owns terminalization.
+    OwnerRegistryClosed(OpsOwnerAdmission),
+}
+
+/// What an explicit-resume repoint did with the operation binding of the
+/// superseded session after the member moved to a successor session.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionRepointOpsBinding {
+    /// No binding was retained for the superseded session.
+    NoRetainedBinding,
+    /// The retained binding is not a parent-owned session binding and was
+    /// left untouched.
+    NotParentOwned,
+    /// The coordinator's owner context is live: its operation for the
+    /// superseded session was retired, the superseded binding dropped, and
+    /// the successor bound under the same owner and registry with a new
+    /// Running mob-child operation that the successor's rebuild continues.
+    TransferredParentOwner {
+        owner_bridge_session_id: SessionId,
+        retired_operation_id: OperationId,
+        successor_operation_id: OperationId,
+    },
+    /// The owner context is live but the successor already has its own
+    /// binding, which is never overwritten: the coordinator's operation for
+    /// the superseded session was retired and the superseded binding dropped.
+    SuccessorAlreadyBound {
+        owner_bridge_session_id: SessionId,
+        retired_operation_id: OperationId,
+    },
+    /// The owner context has ended: the superseded binding was dropped (an
+    /// operation left mid-retirement was terminalized first), and the
+    /// successor is left to its generated self-owned bind.
+    ParentOwnerEnded {
+        owner_bridge_session_id: SessionId,
+        terminalized_operation_id: Option<OperationId>,
+    },
+}
+
+/// How a missing-live revival (warm revival or an explicit-resume rebuild)
+/// bound the revived member session's operation registry.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RevivedSessionOpsBinding {
+    /// The member was self-owned or unbound: the new registration's generated
+    /// self-owned binding was installed.
+    Generated,
+    /// The member is parent-owned and the coordinator's registry still holds
+    /// its one live mob-child operation: the exact binding is kept, so the
+    /// revival replays that operation under the same owner and registry.
+    RetainedParentOwner {
+        owner_bridge_session_id: SessionId,
+        operation_id: OperationId,
+    },
+    /// The member was parent-owned but that owner context has ended: the
+    /// coordinator's registry holds no live operation for it (the operation
+    /// is terminal, or the owner's registration was retired). An operation
+    /// left mid-retirement was terminalized through the registry first. The
+    /// generated self-owned binding was installed.
+    ParentOwnerEnded {
+        owner_bridge_session_id: SessionId,
+        terminalized_operation_id: Option<OperationId>,
+    },
+}
+
+/// Classification of a preserved parent owner context for one member
+/// session.
+#[cfg(feature = "runtime-adapter")]
+enum ParentOwnerContextState {
+    Live(OperationId),
+    Ended {
+        terminalized_operation_id: Option<OperationId>,
+    },
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -333,32 +494,127 @@ impl MobOpsAdapter {
         if let Some(existing) = bindings.get(&member_key) {
             let exact_retry = existing.owner_bridge_session_id == owner_bridge_session_id
                 && Arc::ptr_eq(&existing.registry, &registry)
-                && existing.display_name.is_none()
-                && existing.operation_source
-                    == OperationSource::session_child(child_session_id.clone())
-                && existing.exact_operation_id.is_none()
-                && existing.provision_claim.is_none();
+                && Self::is_unclaimed_generic_session_binding(existing, &child_session_id);
             if exact_retry {
                 return Ok(());
             }
-            return Err(MobError::Internal(format!(
-                "session '{child_session_id}' already has a different operation-registry binding incarnation"
-            )));
+            return Err(Self::different_session_binding_incarnation(
+                &child_session_id,
+            ));
         }
         bindings.insert(
             member_key,
-            MemberOpsBinding {
-                binding_id: uuid::Uuid::new_v4(),
-                provision_claim: None,
-                unpublished_attempt: true,
-                owner_bridge_session_id,
-                registry,
-                display_name: None,
-                operation_source: OperationSource::session_child(child_session_id),
-                exact_operation_id: None,
-            },
+            Self::new_generic_session_binding(child_session_id, owner_bridge_session_id, registry),
         );
         Ok(())
+    }
+
+    /// Re-establish the generated operation binding MobMachine authorized
+    /// for a committed session member after an explicit same-handle resume
+    /// commit.
+    ///
+    /// Invariant: every generated binding path (the provisioner's generated
+    /// owner arm, the builder's seeded bind, actor startup restore, and this
+    /// post-commit restore) binds a session member under its own session,
+    /// `owner_bridge_session_id == child_session_id`. A session binding whose
+    /// owner is a different session was therefore installed from a
+    /// spawn-time `CanonicalOpsOwnerContext`: a coordinator spawned this
+    /// member and owns its mob-child operation in the coordinator's
+    /// registry. MobMachine never models that owner
+    /// (`SessionProvisionOperationOwnerAuthorized` is a `NoOwnerRealization`
+    /// seam), and a same-handle stop+resume leaves both the binding and the
+    /// coordinator's operation untouched, so a published owner-context
+    /// binding is retained as-is instead of being re-owned by the member.
+    ///
+    /// Everything else stays strict and fails closed with the same rejection
+    /// as [`Self::bind_session_registry`]: a self-owned binding on another
+    /// registry incarnation, an owner-context binding that is unpublished or
+    /// still claimed (its provisioning transaction is in flight), and any
+    /// placed or exact-operation binding. An absent binding is established
+    /// exactly as `bind_session_registry` would, and an identical generated
+    /// binding is an exact retry.
+    pub(crate) fn restore_session_binding_for_explicit_resume(
+        &self,
+        child_session_id: SessionId,
+        generated_owner_session_id: SessionId,
+        generated_registry: Arc<dyn OpsLifecycleRegistry>,
+    ) -> Result<ExplicitResumeSessionBindingRestore, MobError> {
+        if generated_owner_session_id != child_session_id {
+            return Err(MobError::Internal(format!(
+                "explicit-resume operation binding restore for session '{child_session_id}' was authorized for owner '{generated_owner_session_id}'; the generated owner is not the member session"
+            )));
+        }
+        let member_key = MemberOpsKey::Session(child_session_id.clone());
+        let mut bindings = self
+            .member_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(existing) = bindings.get(&member_key) else {
+            bindings.insert(
+                member_key,
+                Self::new_generic_session_binding(
+                    child_session_id,
+                    generated_owner_session_id,
+                    generated_registry,
+                ),
+            );
+            return Ok(ExplicitResumeSessionBindingRestore::EstablishedGenerated);
+        };
+        let generic = Self::is_unclaimed_generic_session_binding(existing, &child_session_id);
+        if generic
+            && existing.owner_bridge_session_id == generated_owner_session_id
+            && Arc::ptr_eq(&existing.registry, &generated_registry)
+        {
+            return Ok(ExplicitResumeSessionBindingRestore::GeneratedAlreadyCurrent);
+        }
+        if generic
+            && existing.owner_bridge_session_id != generated_owner_session_id
+            && !existing.unpublished_attempt
+        {
+            return Ok(ExplicitResumeSessionBindingRestore::RetainedOwnerContext {
+                owner_bridge_session_id: existing.owner_bridge_session_id.clone(),
+            });
+        }
+        Err(Self::different_session_binding_incarnation(
+            &child_session_id,
+        ))
+    }
+
+    /// Adapter-generic session binding shape shared by generated and
+    /// owner-context binds: no placed display name, the member's own
+    /// child-session operation source, no pinned exact operation, and no
+    /// in-flight provision claim.
+    fn is_unclaimed_generic_session_binding(
+        existing: &MemberOpsBinding,
+        child_session_id: &SessionId,
+    ) -> bool {
+        existing.display_name.is_none()
+            && existing.operation_source == OperationSource::session_child(child_session_id.clone())
+            && existing.exact_operation_id.is_none()
+            && existing.provision_claim.is_none()
+    }
+
+    fn new_generic_session_binding(
+        child_session_id: SessionId,
+        owner_bridge_session_id: SessionId,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+    ) -> MemberOpsBinding {
+        MemberOpsBinding {
+            binding_id: uuid::Uuid::new_v4(),
+            provision_claim: None,
+            unpublished_attempt: true,
+            owner_bridge_session_id,
+            registry,
+            display_name: None,
+            operation_source: OperationSource::session_child(child_session_id),
+            exact_operation_id: None,
+        }
+    }
+
+    fn different_session_binding_incarnation(child_session_id: &SessionId) -> MobError {
+        MobError::Internal(format!(
+            "session '{child_session_id}' already has a different operation-registry binding incarnation"
+        ))
     }
 
     pub(crate) fn capture_session_binding_witness(
@@ -372,6 +628,11 @@ impl MobOpsAdapter {
             .map(|binding| SessionOpsBindingWitness {
                 binding_id: binding.binding_id,
                 registry: Arc::clone(&binding.registry),
+                owner_bridge_session_id: binding.owner_bridge_session_id.clone(),
+                generic_session_child: binding.display_name.is_none()
+                    && binding.exact_operation_id.is_none()
+                    && binding.operation_source
+                        == OperationSource::session_child(child_session_id.clone()),
             })
     }
 
@@ -485,22 +746,31 @@ impl MobOpsAdapter {
         })
     }
 
-    /// Compare-and-remove only the binding observed before exact attachment
-    /// retirement. A replacement binding is never cleared, and an armed
-    /// provision claim fails closed rather than being detached underneath its
-    /// owner.
-    pub(crate) fn clear_session_binding_for_explicit_resume(
+    /// Compare-and-release only the binding observed before exact attachment
+    /// retirement (or before a resumed-provision rollback). A replacement
+    /// binding is never touched, and an armed provision claim fails closed
+    /// rather than being detached underneath its owner.
+    ///
+    /// A self-owned binding points at the member's own runtime registry,
+    /// which goes away with the retired attachment, so it is removed. A
+    /// parent-owned binding points at the coordinator's registry, which
+    /// outlives the member's attachment and still holds the coordinator's
+    /// mob-child operation for this member, so it is kept: the rebuild or
+    /// revival then rebinds under that exact owner context
+    /// ([`Self::bind_session_registry_for_revival`]) instead of silently
+    /// re-owning the member and orphaning the coordinator's operation.
+    pub(crate) fn release_session_binding_for_explicit_resume(
         &self,
         child_session_id: &SessionId,
         expected: Option<SessionOpsBindingWitness>,
-    ) -> Result<(), MobError> {
+    ) -> Result<ExplicitResumeSessionBindingRelease, MobError> {
         let member_key = MemberOpsKey::Session(child_session_id.clone());
         let mut bindings = self
             .member_bindings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(current) = bindings.get(&member_key) else {
-            return Ok(());
+            return Ok(ExplicitResumeSessionBindingRelease::Absent);
         };
         let Some(expected) = expected else {
             return Err(MobError::Internal(format!(
@@ -519,8 +789,316 @@ impl MobOpsAdapter {
                 "operation-registry binding for session '{child_session_id}' still has an exact provision claim during explicit resume"
             )));
         }
+        if let Some(owner_bridge_session_id) = expected.parent_owner(child_session_id) {
+            return Ok(ExplicitResumeSessionBindingRelease::RetainedParentOwner {
+                owner_bridge_session_id: owner_bridge_session_id.clone(),
+            });
+        }
         bindings.remove(&member_key);
-        Ok(())
+        Ok(ExplicitResumeSessionBindingRelease::Cleared)
+    }
+
+    /// Release the member's session binding after a failed resumed SPAWN
+    /// was rolled back.
+    ///
+    /// Unlike a revival or rebuild rollback
+    /// ([`Self::release_session_binding_for_explicit_resume`]), a spawn
+    /// rollback removes the member from the roster, so nothing will ever
+    /// rebind or retire this binding again. Keeping a coordinator-owned
+    /// binding would leak it and make a later spawn of the same session under
+    /// another owner fail its strict bind. A parent-owned binding therefore
+    /// first settles the coordinator's mob-child operation this attempt used,
+    /// through the coordinator's registry, and is then removed. The binding
+    /// must still be exactly the one observed before the rollback (same
+    /// incarnation and registry, no provision claim), or this fails closed
+    /// without mutation.
+    pub(crate) fn clear_session_binding_for_spawn_rollback(
+        &self,
+        child_session_id: &SessionId,
+        expected: Option<SessionOpsBindingWitness>,
+        operation_id: Option<&OperationId>,
+    ) -> Result<SpawnRollbackSessionBindingRelease, MobError> {
+        let member_key = MemberOpsKey::Session(child_session_id.clone());
+        let mut bindings = self
+            .member_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(current) = bindings.get(&member_key) else {
+            return Ok(SpawnRollbackSessionBindingRelease::Absent);
+        };
+        let Some(expected) = expected else {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' appeared during resumed spawn rollback"
+            )));
+        };
+        if current.binding_id != expected.binding_id
+            || !Arc::ptr_eq(&current.registry, &expected.registry)
+        {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' changed during resumed spawn rollback"
+            )));
+        }
+        if current.provision_claim.is_some() {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' still has an exact provision claim during resumed spawn rollback"
+            )));
+        }
+        let Some(owner_bridge_session_id) = expected.parent_owner(child_session_id).cloned() else {
+            bindings.remove(&member_key);
+            return Ok(SpawnRollbackSessionBindingRelease::Cleared);
+        };
+        let settlement = match operation_id {
+            None => ParentOperationSettlement::NoOperation,
+            Some(operation_id) => Self::settle_parent_operation_of_former_child(
+                &current.registry,
+                &owner_bridge_session_id,
+                child_session_id,
+                operation_id,
+            )?,
+        };
+        bindings.remove(&member_key);
+        Ok(SpawnRollbackSessionBindingRelease::ClearedParentOwner {
+            owner_bridge_session_id,
+            settlement,
+        })
+    }
+
+    /// Drive the coordinator's exact mob-child operation for a session that
+    /// is no longer that coordinator's child to a terminal state, through
+    /// the coordinator registry's typed transitions. A registry that is no
+    /// longer its owner's live authority is left to its successor or owner
+    /// teardown. An operation that is not `child_session_id`'s mob-child
+    /// operation under the witnessed owner fails closed without mutation.
+    fn settle_parent_operation_of_former_child(
+        registry: &Arc<dyn OpsLifecycleRegistry>,
+        owner_bridge_session_id: &SessionId,
+        child_session_id: &SessionId,
+        operation_id: &OperationId,
+    ) -> Result<ParentOperationSettlement, MobError> {
+        let admission = registry
+            .owner_admission()
+            .map_err(|error| MobError::Internal(error.to_string()))?;
+        if admission != OpsOwnerAdmission::Open {
+            return Ok(ParentOperationSettlement::OwnerRegistryClosed(admission));
+        }
+        let Some(snapshot) = registry
+            .snapshot(operation_id)
+            .map_err(|error| MobError::Internal(error.to_string()))?
+        else {
+            // Only terminal operations are evicted from a live registry.
+            return Ok(ParentOperationSettlement::AlreadyTerminal(
+                operation_id.clone(),
+            ));
+        };
+        if snapshot.kind != OperationKind::MobMemberChild
+            || snapshot.operation_source
+                != Some(OperationSource::session_child(child_session_id.clone()))
+            || &snapshot.owner_session_id != owner_bridge_session_id
+        {
+            return Err(MobError::Internal(format!(
+                "operation '{operation_id}' is not session '{child_session_id}''s mob child operation under owner '{owner_bridge_session_id}'; refusing to settle it"
+            )));
+        }
+        if Self::snapshot_is_terminal(&snapshot) {
+            return Ok(ParentOperationSettlement::AlreadyTerminal(
+                operation_id.clone(),
+            ));
+        }
+        match snapshot.status {
+            OperationStatus::Provisioning => match registry
+                .abort_provisioning(operation_id, Some("resumed spawn rolled back".to_string()))
+            {
+                Ok(()) => {}
+                Err(error)
+                    if Self::invalid_transition_is_idempotent(
+                        registry,
+                        OperationLifecycleAction::Abort,
+                        &error,
+                    )? => {}
+                Err(error) => return Err(MobError::Internal(error.to_string())),
+            },
+            OperationStatus::Running | OperationStatus::Retiring => {
+                Self::complete_parent_operation_retirement(registry, operation_id)?;
+            }
+            status => {
+                return Err(MobError::Internal(format!(
+                    "operation '{operation_id}' has incompatible settlement status {status:?}"
+                )));
+            }
+        }
+        Ok(ParentOperationSettlement::Terminalized(
+            operation_id.clone(),
+        ))
+    }
+
+    /// Move a parent-owned member's operation binding to the successor
+    /// session an explicit resume repointed it to.
+    ///
+    /// The superseded session's attachment was retired while its snapshot
+    /// was lost, and retirement kept the coordinator-owned binding. Nothing
+    /// will address the superseded session again, so its binding and the
+    /// coordinator's operation for it must not be left behind. The owner
+    /// context is classified through the retained binding's registry exactly
+    /// as a revival would:
+    ///
+    /// - live: a new Running mob-child operation for the successor is
+    ///   registered under the same owner in the same registry, the old
+    ///   operation is retired, the superseded binding is dropped, and the
+    ///   successor is bound (published) under the same owner, so the
+    ///   successor's rebuild continues the coordinator's operation. A
+    ///   successor that already has a binding keeps it; the old operation is
+    ///   still retired and the superseded binding dropped;
+    /// - ended: the superseded binding is dropped (an operation left
+    ///   mid-retirement is terminalized first) and the successor is left to
+    ///   its generated self-owned bind;
+    /// - ambiguous or unreplayable: fails closed and leaves everything
+    ///   untouched.
+    pub(crate) fn repoint_parent_owned_session_binding(
+        &self,
+        superseded_session_id: &SessionId,
+        successor_session_id: &SessionId,
+    ) -> Result<SessionRepointOpsBinding, MobError> {
+        if superseded_session_id == successor_session_id {
+            return Err(MobError::Internal(format!(
+                "explicit-resume repoint of session '{superseded_session_id}' names itself as its successor"
+            )));
+        }
+        let superseded_key = MemberOpsKey::Session(superseded_session_id.clone());
+        let successor_key = MemberOpsKey::Session(successor_session_id.clone());
+        let mut bindings = self
+            .member_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(current) = bindings.get(&superseded_key) else {
+            return Ok(SessionRepointOpsBinding::NoRetainedBinding);
+        };
+        if current.provision_claim.is_some() {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for superseded session '{superseded_session_id}' still has an exact provision claim during explicit-resume repoint"
+            )));
+        }
+        let parent_owned_generic = current.display_name.is_none()
+            && current.exact_operation_id.is_none()
+            && current.operation_source
+                == OperationSource::session_child(superseded_session_id.clone())
+            && &current.owner_bridge_session_id != superseded_session_id;
+        if !parent_owned_generic {
+            return Ok(SessionRepointOpsBinding::NotParentOwned);
+        }
+        let owner_bridge_session_id = current.owner_bridge_session_id.clone();
+        let registry = Arc::clone(&current.registry);
+        let retired_operation_id = match Self::classify_parent_owner_context(
+            &registry,
+            &owner_bridge_session_id,
+            superseded_session_id,
+        )? {
+            ParentOwnerContextState::Ended {
+                terminalized_operation_id,
+            } => {
+                bindings.remove(&superseded_key);
+                return Ok(SessionRepointOpsBinding::ParentOwnerEnded {
+                    owner_bridge_session_id,
+                    terminalized_operation_id,
+                });
+            }
+            ParentOwnerContextState::Live(operation_id) => operation_id,
+        };
+        if bindings.contains_key(&successor_key) {
+            Self::complete_parent_operation_retirement(&registry, &retired_operation_id)?;
+            bindings.remove(&superseded_key);
+            return Ok(SessionRepointOpsBinding::SuccessorAlreadyBound {
+                owner_bridge_session_id,
+                retired_operation_id,
+            });
+        }
+        let superseded = registry
+            .snapshot(&retired_operation_id)
+            .map_err(|error| MobError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "parent-owned operation '{retired_operation_id}' for superseded session '{superseded_session_id}' disappeared during explicit-resume repoint"
+                ))
+            })?;
+        // Register and start the successor operation before retiring the old
+        // one: a refused registration leaves everything untouched, and a later
+        // failure compensates only the operation this repoint created.
+        let successor_operation_id = OperationId::new();
+        registry
+            .register_operation(OperationSpec {
+                id: successor_operation_id.clone(),
+                kind: OperationKind::MobMemberChild,
+                owner_session_id: owner_bridge_session_id.clone(),
+                display_name: superseded.display_name.clone(),
+                source_label: superseded.source_label.clone(),
+                operation_source: Some(OperationSource::session_child(
+                    successor_session_id.clone(),
+                )),
+                child_session_id: Some(successor_session_id.clone()),
+                expect_peer_channel: superseded.expect_peer_channel,
+            })
+            .map_err(|error| MobError::Internal(error.to_string()))?;
+        if let Err(error) = registry.provisioning_succeeded(&successor_operation_id) {
+            return Err(Self::repoint_failure_after_successor_registration(
+                &registry,
+                &successor_operation_id,
+                OperationStatus::Provisioning,
+                MobError::Internal(error.to_string()),
+            ));
+        }
+        if let Err(error) =
+            Self::complete_parent_operation_retirement(&registry, &retired_operation_id)
+        {
+            return Err(Self::repoint_failure_after_successor_registration(
+                &registry,
+                &successor_operation_id,
+                OperationStatus::Running,
+                error,
+            ));
+        }
+        bindings.remove(&superseded_key);
+        bindings.insert(
+            successor_key,
+            MemberOpsBinding {
+                binding_id: uuid::Uuid::new_v4(),
+                provision_claim: None,
+                // The coordinator's owner context was already published for
+                // this member; the successor binding carries it forward.
+                unpublished_attempt: false,
+                owner_bridge_session_id: owner_bridge_session_id.clone(),
+                registry,
+                display_name: None,
+                operation_source: OperationSource::session_child(successor_session_id.clone()),
+                exact_operation_id: None,
+            },
+        );
+        Ok(SessionRepointOpsBinding::TransferredParentOwner {
+            owner_bridge_session_id,
+            retired_operation_id,
+            successor_operation_id,
+        })
+    }
+
+    fn repoint_failure_after_successor_registration(
+        registry: &Arc<dyn OpsLifecycleRegistry>,
+        successor_operation_id: &OperationId,
+        successor_status: OperationStatus,
+        error: MobError,
+    ) -> MobError {
+        let cleanup = match successor_status {
+            OperationStatus::Provisioning => registry
+                .abort_provisioning(
+                    successor_operation_id,
+                    Some("explicit-resume repoint failed".to_string()),
+                )
+                .map_err(|error| MobError::Internal(error.to_string())),
+            _ => Self::complete_parent_operation_retirement(registry, successor_operation_id),
+        };
+        match cleanup {
+            Ok(()) => error,
+            Err(cleanup_error) => MobError::Internal(format!(
+                "{error}; successor operation '{successor_operation_id}' cleanup also failed: {cleanup_error}"
+            )),
+        }
     }
 
     /// Release the binding of a superseded runtime incarnation before a
@@ -565,6 +1143,202 @@ impl MobOpsAdapter {
         }
         bindings.remove(&member_key);
         Ok(())
+    }
+
+    /// Bind a missing-live revival's session under the owner context
+    /// observed before the revival began.
+    ///
+    /// The observed binding must still be current (same incarnation, same
+    /// registry, no provision claim) or the revival fails closed, exactly as
+    /// [`Self::release_superseded_session_binding_for_revival`]. Then:
+    ///
+    /// - a self-owned (or absent) binding is superseded by the generated
+    ///   self-owned binding of the new registration;
+    /// - a parent-owned binding whose coordinator registry still holds the
+    ///   member's one live `Running` mob-child operation is kept unchanged, so
+    ///   the revival replays that operation under the same owner and registry;
+    /// - a parent-owned binding whose owner context has ended (no live
+    ///   operation remains: terminal, or the owner's registration retired and
+    ///   terminated it) is released and the generated self-owned binding is
+    ///   installed. An operation left mid-retirement (`Retiring`) is first
+    ///   terminalized through the registry's typed retirement transitions, so
+    ///   no non-terminal parent operation is orphaned.
+    ///
+    /// Any other parent-side shape (several live operations, a live operation
+    /// in another status or under another owner) fails closed and leaves the
+    /// binding untouched.
+    pub(crate) fn bind_session_registry_for_revival(
+        &self,
+        child_session_id: SessionId,
+        observed: Option<&SessionOpsBindingWitness>,
+        generated_owner_session_id: SessionId,
+        generated_registry: Arc<dyn OpsLifecycleRegistry>,
+    ) -> Result<RevivedSessionOpsBinding, MobError> {
+        let member_key = MemberOpsKey::Session(child_session_id.clone());
+        let mut bindings = self
+            .member_bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(current) = bindings.get(&member_key) else {
+            bindings.insert(
+                member_key,
+                Self::new_generic_session_binding(
+                    child_session_id,
+                    generated_owner_session_id,
+                    generated_registry,
+                ),
+            );
+            return Ok(RevivedSessionOpsBinding::Generated);
+        };
+        let Some(observed) = observed else {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' appeared during missing-live revival"
+            )));
+        };
+        if current.binding_id != observed.binding_id
+            || !Arc::ptr_eq(&current.registry, &observed.registry)
+        {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' changed during missing-live revival"
+            )));
+        }
+        if current.provision_claim.is_some() {
+            return Err(MobError::Internal(format!(
+                "operation-registry binding for session '{child_session_id}' still has an exact provision claim during missing-live revival"
+            )));
+        }
+        let revived = match observed.parent_owner(&child_session_id) {
+            None => RevivedSessionOpsBinding::Generated,
+            Some(owner_bridge_session_id) => {
+                match Self::classify_parent_owner_context(
+                    &current.registry,
+                    owner_bridge_session_id,
+                    &child_session_id,
+                )? {
+                    ParentOwnerContextState::Live(operation_id) => {
+                        return Ok(RevivedSessionOpsBinding::RetainedParentOwner {
+                            owner_bridge_session_id: owner_bridge_session_id.clone(),
+                            operation_id,
+                        });
+                    }
+                    ParentOwnerContextState::Ended {
+                        terminalized_operation_id,
+                    } => RevivedSessionOpsBinding::ParentOwnerEnded {
+                        owner_bridge_session_id: owner_bridge_session_id.clone(),
+                        terminalized_operation_id,
+                    },
+                }
+            }
+        };
+        bindings.insert(
+            member_key,
+            Self::new_generic_session_binding(
+                child_session_id,
+                generated_owner_session_id,
+                generated_registry,
+            ),
+        );
+        Ok(revived)
+    }
+
+    /// Decide whether a preserved parent owner context can still own
+    /// `child_session_id`'s mob-child operation, terminalizing an operation
+    /// the same coordinator left mid-retirement.
+    ///
+    /// A registry that is no longer its owner's live lifecycle authority
+    /// (sealed by a ReloadRequired discard, or retired with its owner) is an
+    /// ended owner context even while it still lists a non-terminal
+    /// operation: its recovered successor, not this revival, owns that
+    /// operation, so it is neither continued nor mutated here.
+    fn classify_parent_owner_context(
+        registry: &Arc<dyn OpsLifecycleRegistry>,
+        owner_bridge_session_id: &SessionId,
+        child_session_id: &SessionId,
+    ) -> Result<ParentOwnerContextState, MobError> {
+        match registry
+            .owner_admission()
+            .map_err(|error| MobError::Internal(error.to_string()))?
+        {
+            OpsOwnerAdmission::Open => {}
+            OpsOwnerAdmission::Sealed | OpsOwnerAdmission::Retired => {
+                return Ok(ParentOwnerContextState::Ended {
+                    terminalized_operation_id: None,
+                });
+            }
+        }
+        let source = OperationSource::session_child(child_session_id.clone());
+        let live = registry
+            .list_operations()
+            .map_err(|error| MobError::Internal(error.to_string()))?
+            .into_iter()
+            .filter(|snapshot| {
+                snapshot.kind == OperationKind::MobMemberChild
+                    && snapshot.operation_source.as_ref() == Some(&source)
+                    && !Self::snapshot_is_terminal(snapshot)
+            })
+            .collect::<Vec<_>>();
+        match live.as_slice() {
+            [] => Ok(ParentOwnerContextState::Ended {
+                terminalized_operation_id: None,
+            }),
+            [snapshot]
+                if snapshot.status == OperationStatus::Running
+                    && &snapshot.owner_session_id == owner_bridge_session_id =>
+            {
+                Ok(ParentOwnerContextState::Live(snapshot.id.clone()))
+            }
+            [snapshot]
+                if snapshot.status == OperationStatus::Retiring
+                    && &snapshot.owner_session_id == owner_bridge_session_id =>
+            {
+                Self::complete_parent_operation_retirement(registry, &snapshot.id)?;
+                Ok(ParentOwnerContextState::Ended {
+                    terminalized_operation_id: Some(snapshot.id.clone()),
+                })
+            }
+            [snapshot] => Err(MobError::Internal(format!(
+                "parent-owned operation '{}' for session '{child_session_id}' is {:?} under owner '{}' (witnessed owner '{owner_bridge_session_id}'); refusing to rebind or re-own it",
+                snapshot.id, snapshot.status, snapshot.owner_session_id
+            ))),
+            _ => Err(MobError::Internal(format!(
+                "parent registry holds multiple live mob child operations [{}] for session '{child_session_id}'; refusing to rebind or re-own it",
+                Self::format_operation_ids(
+                    &live
+                        .iter()
+                        .map(|snapshot| snapshot.id.clone())
+                        .collect::<Vec<_>>()
+                )
+            ))),
+        }
+    }
+
+    fn complete_parent_operation_retirement(
+        registry: &Arc<dyn OpsLifecycleRegistry>,
+        operation_id: &OperationId,
+    ) -> Result<(), MobError> {
+        match registry.request_retire(operation_id) {
+            Ok(()) => {}
+            Err(error)
+                if Self::invalid_transition_is_idempotent(
+                    registry,
+                    OperationLifecycleAction::RetireRequested,
+                    &error,
+                )? => {}
+            Err(error) => return Err(MobError::Internal(error.to_string())),
+        }
+        match registry.mark_retired(operation_id) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if Self::invalid_transition_is_idempotent(
+                    registry,
+                    OperationLifecycleAction::RetireCompleted,
+                    &error,
+                )? =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(MobError::Internal(error.to_string())),
+        }
     }
 
     pub(crate) fn bind_member_registry(
@@ -3025,11 +3799,923 @@ mod tests {
         assert!(replacement.snapshot(&operation_id).unwrap().is_none());
     }
 
+    /// A published binding installed from a coordinator's spawn-time owner
+    /// context (owner != member session) plus its provisioned operation in
+    /// the coordinator's registry.
+    async fn published_owner_context_binding(
+        adapter: &MobOpsAdapter,
+    ) -> (
+        SessionId,
+        SessionId,
+        Arc<RuntimeOpsLifecycleRegistry>,
+        OperationId,
+    ) {
+        let child = SessionId::new();
+        let owner = SessionId::new();
+        let owner_registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        adapter
+            .bind_session_registry(
+                child.clone(),
+                owner.clone(),
+                Arc::clone(&owner_registry) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect("bind coordinator owner context");
+        let operation_id = adapter
+            .mark_member_provisioned(&child, "mob/member/w")
+            .await
+            .expect("publish coordinator-owned operation");
+        (child, owner, owner_registry, operation_id)
+    }
+
+    #[tokio::test]
+    async fn explicit_resume_restore_retains_published_owner_context_binding() {
+        let adapter = MobOpsAdapter::new();
+        let (child, owner, owner_registry, operation_id) =
+            published_owner_context_binding(&adapter).await;
+        let before = adapter
+            .capture_session_binding_witness(&child)
+            .expect("owner-context binding witness");
+        let own_registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+
+        let restored = adapter
+            .restore_session_binding_for_explicit_resume(
+                child.clone(),
+                child.clone(),
+                Arc::clone(&own_registry) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect("published owner-context binding is retained");
+        assert_eq!(
+            restored,
+            ExplicitResumeSessionBindingRestore::RetainedOwnerContext {
+                owner_bridge_session_id: owner,
+            }
+        );
+        assert_eq!(
+            adapter.capture_session_binding_witness(&child),
+            Some(before),
+            "the retained binding is the exact same incarnation"
+        );
+
+        adapter
+            .mark_member_retired(&MemberRef::from_bridge_session_id(child.clone()))
+            .await
+            .expect("retire through the retained coordinator binding");
+        let snapshot = owner_registry
+            .snapshot(&operation_id)
+            .unwrap()
+            .expect("coordinator-owned operation");
+        assert_eq!(snapshot.status, OperationStatus::Retired);
+        assert!(
+            own_registry.list_operations().unwrap().is_empty(),
+            "the member's own registry never gains the operation"
+        );
+        assert!(!adapter.has_session_binding_for_test(&child));
+    }
+
+    #[tokio::test]
+    async fn explicit_resume_restore_retains_owner_context_binding_with_terminal_operation() {
+        let adapter = MobOpsAdapter::new();
+        let (child, owner, owner_registry, operation_id) =
+            published_owner_context_binding(&adapter).await;
+        owner_registry
+            .request_retire(&operation_id)
+            .expect("coordinator requests retirement");
+        owner_registry
+            .mark_retired(&operation_id)
+            .expect("coordinator terminalizes the child operation");
+        let before = adapter
+            .capture_session_binding_witness(&child)
+            .expect("owner-context binding witness");
+
+        let restored = adapter
+            .restore_session_binding_for_explicit_resume(
+                child.clone(),
+                child.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect("owner-context binding is retained regardless of operation terminality");
+        assert_eq!(
+            restored,
+            ExplicitResumeSessionBindingRestore::RetainedOwnerContext {
+                owner_bridge_session_id: owner,
+            }
+        );
+        assert_eq!(
+            adapter.capture_session_binding_witness(&child),
+            Some(before)
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_resume_restore_rejects_unpublished_or_claimed_owner_context_binding() {
+        let adapter = MobOpsAdapter::new();
+        let unpublished = SessionId::new();
+        adapter
+            .bind_session_registry(
+                unpublished.clone(),
+                SessionId::new(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect("bind unpublished owner context");
+        let before = adapter.capture_session_binding_witness(&unpublished);
+        let error = adapter
+            .restore_session_binding_for_explicit_resume(
+                unpublished.clone(),
+                unpublished.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect_err("an unpublished owner-context binding fails closed");
+        assert!(error.to_string().contains("different operation-registry"));
+        assert_eq!(
+            adapter.capture_session_binding_witness(&unpublished),
+            before
+        );
+
+        let (claimed, _, _, _) = published_owner_context_binding(&adapter).await;
+        let prepared = adapter
+            .prepare_member_provision_operation(&claimed, "mob/member/w")
+            .await
+            .expect("hold a live provision claim");
+        let error = adapter
+            .restore_session_binding_for_explicit_resume(
+                claimed.clone(),
+                claimed.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect_err("a claimed owner-context binding fails closed");
+        assert!(error.to_string().contains("different operation-registry"));
+        prepared
+            .abort("test releases the claim")
+            .expect("release claim");
+    }
+
+    #[test]
+    fn explicit_resume_restore_rejects_self_owned_binding_with_other_registry() {
+        let adapter = MobOpsAdapter::new();
+        let child = SessionId::new();
+        adapter
+            .bind_session_registry(
+                child.clone(),
+                child.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect("bind self-owned registry A");
+        let before = adapter.capture_session_binding_witness(&child);
+        let error = adapter
+            .restore_session_binding_for_explicit_resume(
+                child.clone(),
+                child.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect_err("a stale self-owned registry incarnation fails closed");
+        assert!(error.to_string().contains("different operation-registry"));
+        assert_eq!(adapter.capture_session_binding_witness(&child), before);
+    }
+
+    #[test]
+    fn explicit_resume_restore_establishes_then_recognizes_generated_binding() {
+        let adapter = MobOpsAdapter::new();
+        let child = SessionId::new();
+        let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        assert_eq!(
+            adapter
+                .restore_session_binding_for_explicit_resume(
+                    child.clone(),
+                    child.clone(),
+                    Arc::clone(&registry),
+                )
+                .expect("absent binding is established"),
+            ExplicitResumeSessionBindingRestore::EstablishedGenerated
+        );
+        let established = adapter.capture_session_binding_witness(&child);
+        assert!(established.is_some());
+        assert_eq!(
+            adapter
+                .restore_session_binding_for_explicit_resume(
+                    child.clone(),
+                    child.clone(),
+                    Arc::clone(&registry),
+                )
+                .expect("identical generated binding is an exact retry"),
+            ExplicitResumeSessionBindingRestore::GeneratedAlreadyCurrent
+        );
+        assert_eq!(adapter.capture_session_binding_witness(&child), established);
+    }
+
+    #[test]
+    fn explicit_resume_restore_rejects_generated_owner_mismatch() {
+        let adapter = MobOpsAdapter::new();
+        let child = SessionId::new();
+        let error = adapter
+            .restore_session_binding_for_explicit_resume(
+                child.clone(),
+                SessionId::new(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect_err("a generated owner other than the member session is rejected");
+        assert!(error.to_string().contains("not the member session"));
+        assert!(!adapter.has_session_binding_for_test(&child));
+    }
+
+    #[tokio::test]
+    async fn explicit_resume_release_retains_parent_owned_binding_and_clears_self_owned() {
+        let adapter = MobOpsAdapter::new();
+        let (child, owner, _owner_registry, _operation_id) =
+            published_owner_context_binding(&adapter).await;
+        let parent_owned = adapter
+            .capture_session_binding_witness(&child)
+            .expect("parent-owned witness");
+        assert_eq!(
+            adapter
+                .release_session_binding_for_explicit_resume(&child, Some(parent_owned.clone()))
+                .expect("release parent-owned binding"),
+            ExplicitResumeSessionBindingRelease::RetainedParentOwner {
+                owner_bridge_session_id: owner,
+            }
+        );
+        assert_eq!(
+            adapter.capture_session_binding_witness(&child),
+            Some(parent_owned),
+            "the coordinator-owned binding outlives the member's attachment"
+        );
+
+        let self_owned = SessionId::new();
+        adapter
+            .bind_session_registry(
+                self_owned.clone(),
+                self_owned.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect("bind self-owned registry");
+        let witness = adapter.capture_session_binding_witness(&self_owned);
+        assert_eq!(
+            adapter
+                .release_session_binding_for_explicit_resume(&self_owned, witness)
+                .expect("release self-owned binding"),
+            ExplicitResumeSessionBindingRelease::Cleared
+        );
+        assert!(!adapter.has_session_binding_for_test(&self_owned));
+        assert_eq!(
+            adapter
+                .release_session_binding_for_explicit_resume(&self_owned, None)
+                .expect("absent binding"),
+            ExplicitResumeSessionBindingRelease::Absent
+        );
+    }
+
+    #[tokio::test]
+    async fn revival_keeps_live_parent_owner_binding_and_replays_its_operation() {
+        let adapter = MobOpsAdapter::new();
+        let (child, owner, owner_registry, operation_id) =
+            published_owner_context_binding(&adapter).await;
+        let observed = adapter
+            .capture_session_binding_witness(&child)
+            .expect("parent-owned witness");
+        let own_registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+
+        assert_eq!(
+            adapter
+                .bind_session_registry_for_revival(
+                    child.clone(),
+                    Some(&observed),
+                    child.clone(),
+                    Arc::clone(&own_registry) as Arc<dyn OpsLifecycleRegistry>,
+                )
+                .expect("live parent owner context is kept"),
+            RevivedSessionOpsBinding::RetainedParentOwner {
+                owner_bridge_session_id: owner,
+                operation_id: operation_id.clone(),
+            }
+        );
+        assert_eq!(
+            adapter.capture_session_binding_witness(&child),
+            Some(observed),
+            "the exact coordinator-owned binding is kept"
+        );
+        let replayed = adapter
+            .mark_member_provisioned(&child, "mob/member/w")
+            .await
+            .expect("revival replays the coordinator's operation");
+        assert_eq!(replayed, operation_id);
+        assert_eq!(owner_registry.list_operations().unwrap().len(), 1);
+        assert!(own_registry.list_operations().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn revival_self_owns_member_when_parent_operation_already_ended() {
+        for owner_gone in [false, true] {
+            let adapter = MobOpsAdapter::new();
+            let (child, owner, owner_registry, operation_id) =
+                published_owner_context_binding(&adapter).await;
+            if owner_gone {
+                owner_registry
+                    .terminate_owner("coordinator unregistered".to_string())
+                    .expect("owner registry terminates its operations");
+            } else {
+                owner_registry.request_retire(&operation_id).unwrap();
+                owner_registry.mark_retired(&operation_id).unwrap();
+            }
+            let status = owner_registry
+                .snapshot(&operation_id)
+                .unwrap()
+                .unwrap()
+                .status;
+            let observed = adapter.capture_session_binding_witness(&child);
+            let own_registry: Arc<dyn OpsLifecycleRegistry> =
+                Arc::new(RuntimeOpsLifecycleRegistry::new());
+
+            assert_eq!(
+                adapter
+                    .bind_session_registry_for_revival(
+                        child.clone(),
+                        observed.as_ref(),
+                        child.clone(),
+                        Arc::clone(&own_registry),
+                    )
+                    .expect("ended owner context falls back to self-owned"),
+                RevivedSessionOpsBinding::ParentOwnerEnded {
+                    owner_bridge_session_id: owner,
+                    terminalized_operation_id: None,
+                },
+                "owner_gone={owner_gone}"
+            );
+            assert!(
+                adapter
+                    .binding_registry_for_test(&child)
+                    .is_some_and(|registry| Arc::ptr_eq(&registry, &own_registry)),
+                "owner_gone={owner_gone}: the member is bound to its own registry"
+            );
+            let self_owned = adapter
+                .mark_member_provisioned(&child, "mob/member/w")
+                .await
+                .expect("self-owned operation");
+            assert_ne!(self_owned, operation_id);
+            assert_eq!(
+                own_registry
+                    .snapshot(&self_owned)
+                    .unwrap()
+                    .unwrap()
+                    .owner_session_id,
+                child
+            );
+            let parent = owner_registry.list_operations().unwrap();
+            assert_eq!(parent.len(), 1, "owner_gone={owner_gone}: {parent:?}");
+            assert_eq!(parent[0].status, status, "owner_gone={owner_gone}");
+        }
+    }
+
+    #[tokio::test]
+    async fn revival_terminalizes_parent_operation_left_mid_retirement() {
+        let adapter = MobOpsAdapter::new();
+        let (child, owner, owner_registry, operation_id) =
+            published_owner_context_binding(&adapter).await;
+        owner_registry.request_retire(&operation_id).unwrap();
+        let observed = adapter.capture_session_binding_witness(&child);
+        let own_registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(RuntimeOpsLifecycleRegistry::new());
+
+        assert_eq!(
+            adapter
+                .bind_session_registry_for_revival(
+                    child.clone(),
+                    observed.as_ref(),
+                    child.clone(),
+                    Arc::clone(&own_registry),
+                )
+                .expect("retiring parent operation is terminalized"),
+            RevivedSessionOpsBinding::ParentOwnerEnded {
+                owner_bridge_session_id: owner,
+                terminalized_operation_id: Some(operation_id.clone()),
+            }
+        );
+        let snapshot = owner_registry.snapshot(&operation_id).unwrap().unwrap();
+        assert!(snapshot.terminal);
+        assert_eq!(snapshot.status, OperationStatus::Retired);
+        assert!(
+            adapter
+                .binding_registry_for_test(&child)
+                .is_some_and(|registry| Arc::ptr_eq(&registry, &own_registry))
+        );
+    }
+
+    #[tokio::test]
+    async fn revival_rejects_ambiguous_or_unreplayable_parent_operations() {
+        // (live status of the extra operation, retire the original first,
+        // register the extra under another owner)
+        for (extra_status, retire_original, foreign_owner) in [
+            (OperationStatus::Running, false, false),
+            (OperationStatus::Provisioning, true, false),
+            (OperationStatus::Running, true, true),
+            // Mid-retirement under ANOTHER owner: the witnessed owner never
+            // owned it, so revival must not finish that retirement.
+            (OperationStatus::Retiring, true, true),
+        ] {
+            let adapter = MobOpsAdapter::new();
+            let (child, owner, owner_registry, operation_id) =
+                published_owner_context_binding(&adapter).await;
+            if retire_original {
+                owner_registry.request_retire(&operation_id).unwrap();
+                owner_registry.mark_retired(&operation_id).unwrap();
+            }
+            let extra = OperationId::new();
+            owner_registry
+                .register_operation(OperationSpec {
+                    id: extra.clone(),
+                    kind: OperationKind::MobMemberChild,
+                    owner_session_id: if foreign_owner {
+                        SessionId::new()
+                    } else {
+                        owner.clone()
+                    },
+                    display_name: "mob/member/w".to_string(),
+                    source_label: "mob_member".to_string(),
+                    operation_source: Some(OperationSource::session_child(child.clone())),
+                    child_session_id: Some(child.clone()),
+                    expect_peer_channel: true,
+                })
+                .unwrap();
+            if matches!(
+                extra_status,
+                OperationStatus::Running | OperationStatus::Retiring
+            ) {
+                owner_registry.provisioning_succeeded(&extra).unwrap();
+            }
+            if extra_status == OperationStatus::Retiring {
+                owner_registry.request_retire(&extra).unwrap();
+            }
+            let observed = adapter.capture_session_binding_witness(&child);
+
+            adapter
+                .bind_session_registry_for_revival(
+                    child.clone(),
+                    observed.as_ref(),
+                    child.clone(),
+                    Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+                )
+                .expect_err("an ambiguous or unreplayable parent operation fails closed");
+            assert_eq!(
+                adapter.capture_session_binding_witness(&child),
+                observed,
+                "{extra_status:?} foreign_owner={foreign_owner}: the binding is left untouched"
+            );
+            let extra_snapshot = owner_registry.snapshot(&extra).unwrap().unwrap();
+            assert!(
+                !extra_snapshot.terminal && extra_snapshot.status == extra_status,
+                "{extra_status:?} foreign_owner={foreign_owner}: nothing is transitioned on the refusal path: {extra_snapshot:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn revival_treats_sealed_owner_registry_as_ended_owner_context() {
+        // A ReloadRequired discard seals the coordinator's registry without
+        // terminal transitions; its recovered successor owns the operation.
+        for leave_retiring in [false, true] {
+            let adapter = MobOpsAdapter::new();
+            let (child, owner, owner_registry, operation_id) =
+                published_owner_context_binding(&adapter).await;
+            if leave_retiring {
+                owner_registry.request_retire(&operation_id).unwrap();
+            }
+            let status = owner_registry
+                .snapshot(&operation_id)
+                .unwrap()
+                .unwrap()
+                .status;
+            owner_registry
+                .seal_owner_for_reload_required_discard_for_test()
+                .expect("seal the coordinator's registry");
+            assert_eq!(
+                owner_registry.owner_admission().unwrap(),
+                OpsOwnerAdmission::Sealed
+            );
+            let observed = adapter.capture_session_binding_witness(&child);
+            let own_registry: Arc<dyn OpsLifecycleRegistry> =
+                Arc::new(RuntimeOpsLifecycleRegistry::new());
+
+            assert_eq!(
+                adapter
+                    .bind_session_registry_for_revival(
+                        child.clone(),
+                        observed.as_ref(),
+                        child.clone(),
+                        Arc::clone(&own_registry),
+                    )
+                    .expect("a sealed owner registry is an ended owner context"),
+                RevivedSessionOpsBinding::ParentOwnerEnded {
+                    owner_bridge_session_id: owner,
+                    terminalized_operation_id: None,
+                },
+                "leave_retiring={leave_retiring}"
+            );
+            let snapshot = owner_registry.snapshot(&operation_id).unwrap().unwrap();
+            assert!(
+                !snapshot.terminal && snapshot.status == status,
+                "leave_retiring={leave_retiring}: the sealed registry's operation is neither continued nor mutated: {snapshot:?}"
+            );
+            assert!(
+                adapter
+                    .binding_registry_for_test(&child)
+                    .is_some_and(|registry| Arc::ptr_eq(&registry, &own_registry)),
+                "leave_retiring={leave_retiring}: the member is bound to its own registry"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_rollback_clears_parent_owned_binding_and_settles_its_operation() {
+        let adapter = MobOpsAdapter::new();
+        let (child, owner, owner_registry, operation_id) =
+            published_owner_context_binding(&adapter).await;
+        let witness = adapter.capture_session_binding_witness(&child);
+        assert_eq!(
+            adapter
+                .clear_session_binding_for_spawn_rollback(&child, witness, Some(&operation_id))
+                .expect("spawn rollback releases the parent-owned binding"),
+            SpawnRollbackSessionBindingRelease::ClearedParentOwner {
+                owner_bridge_session_id: owner,
+                settlement: ParentOperationSettlement::Terminalized(operation_id.clone()),
+            }
+        );
+        assert!(!adapter.has_session_binding_for_test(&child));
+        let snapshot = owner_registry.snapshot(&operation_id).unwrap().unwrap();
+        assert!(snapshot.terminal, "{snapshot:?}");
+        assert_eq!(snapshot.status, OperationStatus::Retired);
+        // The session can now be bound strictly under another owner.
+        adapter
+            .bind_session_registry(
+                child.clone(),
+                child.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect("a later spawn binds the session under another owner");
+
+        // A sealed coordinator registry is left to its successor.
+        let (sealed_child, sealed_owner, sealed_registry, sealed_operation) =
+            published_owner_context_binding(&adapter).await;
+        sealed_registry
+            .seal_owner_for_reload_required_discard_for_test()
+            .unwrap();
+        let witness = adapter.capture_session_binding_witness(&sealed_child);
+        assert_eq!(
+            adapter
+                .clear_session_binding_for_spawn_rollback(
+                    &sealed_child,
+                    witness,
+                    Some(&sealed_operation)
+                )
+                .expect("sealed owner registry"),
+            SpawnRollbackSessionBindingRelease::ClearedParentOwner {
+                owner_bridge_session_id: sealed_owner,
+                settlement: ParentOperationSettlement::OwnerRegistryClosed(
+                    OpsOwnerAdmission::Sealed
+                ),
+            }
+        );
+        assert!(!adapter.has_session_binding_for_test(&sealed_child));
+        assert_eq!(
+            sealed_registry
+                .snapshot(&sealed_operation)
+                .unwrap()
+                .unwrap()
+                .status,
+            OperationStatus::Running
+        );
+
+        // An operation that is not this child's under the witnessed owner
+        // fails closed and leaves the binding in place.
+        let (foreign_child, _, foreign_registry, _) =
+            published_owner_context_binding(&adapter).await;
+        let foreign = OperationId::new();
+        foreign_registry
+            .register_operation(OperationSpec {
+                id: foreign.clone(),
+                kind: OperationKind::MobMemberChild,
+                owner_session_id: SessionId::new(),
+                display_name: "mob/member/other".to_string(),
+                source_label: "mob_member".to_string(),
+                operation_source: Some(OperationSource::session_child(foreign_child.clone())),
+                child_session_id: Some(foreign_child.clone()),
+                expect_peer_channel: true,
+            })
+            .unwrap();
+        foreign_registry.provisioning_succeeded(&foreign).unwrap();
+        let witness = adapter.capture_session_binding_witness(&foreign_child);
+        adapter
+            .clear_session_binding_for_spawn_rollback(
+                &foreign_child,
+                witness.clone(),
+                Some(&foreign),
+            )
+            .expect_err("a foreign operation is never settled");
+        assert_eq!(
+            adapter.capture_session_binding_witness(&foreign_child),
+            witness
+        );
+        assert!(
+            !foreign_registry
+                .snapshot(&foreign)
+                .unwrap()
+                .unwrap()
+                .terminal
+        );
+
+        // Self-owned bindings are simply cleared.
+        let self_owned = SessionId::new();
+        adapter
+            .bind_session_registry(
+                self_owned.clone(),
+                self_owned.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .unwrap();
+        let witness = adapter.capture_session_binding_witness(&self_owned);
+        assert_eq!(
+            adapter
+                .clear_session_binding_for_spawn_rollback(&self_owned, witness, None)
+                .unwrap(),
+            SpawnRollbackSessionBindingRelease::Cleared
+        );
+        assert_eq!(
+            adapter
+                .clear_session_binding_for_spawn_rollback(&self_owned, None, None)
+                .unwrap(),
+            SpawnRollbackSessionBindingRelease::Absent
+        );
+    }
+
+    #[tokio::test]
+    async fn repoint_moves_live_parent_owner_context_to_the_successor_session() {
+        let adapter = MobOpsAdapter::new();
+        let (superseded, owner, owner_registry, operation_id) =
+            published_owner_context_binding(&adapter).await;
+        let successor = SessionId::new();
+
+        let repointed = adapter
+            .repoint_parent_owned_session_binding(&superseded, &successor)
+            .expect("live owner context moves to the successor");
+        let SessionRepointOpsBinding::TransferredParentOwner {
+            owner_bridge_session_id,
+            retired_operation_id,
+            successor_operation_id,
+        } = repointed
+        else {
+            panic!("expected a transfer, got {repointed:?}");
+        };
+        assert_eq!(owner_bridge_session_id, owner);
+        assert_eq!(retired_operation_id, operation_id);
+        let retired = owner_registry.snapshot(&operation_id).unwrap().unwrap();
+        assert_eq!(retired.status, OperationStatus::Retired);
+        let successor_operation = owner_registry
+            .snapshot(&successor_operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(successor_operation.status, OperationStatus::Running);
+        assert_eq!(successor_operation.owner_session_id, owner);
+        assert_eq!(successor_operation.display_name, retired.display_name);
+        assert_eq!(
+            successor_operation.operation_source,
+            Some(OperationSource::session_child(successor.clone()))
+        );
+        assert!(!adapter.has_session_binding_for_test(&superseded));
+
+        // The successor's rebuild continues the coordinator's operation.
+        let observed = adapter
+            .capture_session_binding_witness(&successor)
+            .expect("successor is bound under the coordinator");
+        let own_registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        assert_eq!(
+            adapter
+                .bind_session_registry_for_revival(
+                    successor.clone(),
+                    Some(&observed),
+                    successor.clone(),
+                    Arc::clone(&own_registry) as Arc<dyn OpsLifecycleRegistry>,
+                )
+                .expect("the successor rebuild keeps the coordinator owner"),
+            RevivedSessionOpsBinding::RetainedParentOwner {
+                owner_bridge_session_id: owner.clone(),
+                operation_id: successor_operation_id.clone(),
+            }
+        );
+        assert_eq!(
+            adapter
+                .mark_member_provisioned(&successor, &retired.display_name)
+                .await
+                .expect("the rebuild replays the successor operation"),
+            successor_operation_id
+        );
+        assert!(own_registry.list_operations().unwrap().is_empty());
+        // The published successor binding is retained by the post-commit
+        // owner-context restore instead of being re-owned.
+        assert_eq!(
+            adapter
+                .restore_session_binding_for_explicit_resume(
+                    successor.clone(),
+                    successor.clone(),
+                    Arc::clone(&own_registry) as Arc<dyn OpsLifecycleRegistry>,
+                )
+                .expect("post-commit restore keeps the moved owner context"),
+            ExplicitResumeSessionBindingRestore::RetainedOwnerContext {
+                owner_bridge_session_id: owner,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn repoint_drops_superseded_binding_when_owner_context_ended_or_successor_bound() {
+        // Ended owner context: the successor is left to its self-owned bind.
+        let adapter = MobOpsAdapter::new();
+        let (superseded, owner, owner_registry, operation_id) =
+            published_owner_context_binding(&adapter).await;
+        owner_registry.request_retire(&operation_id).unwrap();
+        owner_registry.mark_retired(&operation_id).unwrap();
+        let successor = SessionId::new();
+        assert_eq!(
+            adapter
+                .repoint_parent_owned_session_binding(&superseded, &successor)
+                .unwrap(),
+            SessionRepointOpsBinding::ParentOwnerEnded {
+                owner_bridge_session_id: owner,
+                terminalized_operation_id: None,
+            }
+        );
+        assert!(!adapter.has_session_binding_for_test(&superseded));
+        assert!(!adapter.has_session_binding_for_test(&successor));
+        assert_eq!(owner_registry.list_operations().unwrap().len(), 1);
+
+        // Live owner context, but the successor already has its own binding:
+        // it is never overwritten, the old operation is still settled.
+        let (superseded, owner, owner_registry, operation_id) =
+            published_owner_context_binding(&adapter).await;
+        let successor = SessionId::new();
+        let successor_registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(RuntimeOpsLifecycleRegistry::new());
+        adapter
+            .bind_session_registry(
+                successor.clone(),
+                successor.clone(),
+                Arc::clone(&successor_registry),
+            )
+            .unwrap();
+        let successor_witness = adapter.capture_session_binding_witness(&successor);
+        assert_eq!(
+            adapter
+                .repoint_parent_owned_session_binding(&superseded, &successor)
+                .unwrap(),
+            SessionRepointOpsBinding::SuccessorAlreadyBound {
+                owner_bridge_session_id: owner,
+                retired_operation_id: operation_id.clone(),
+            }
+        );
+        assert_eq!(
+            owner_registry
+                .snapshot(&operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            OperationStatus::Retired
+        );
+        assert!(!adapter.has_session_binding_for_test(&superseded));
+        assert_eq!(
+            adapter.capture_session_binding_witness(&successor),
+            successor_witness
+        );
+        assert_eq!(owner_registry.list_operations().unwrap().len(), 1);
+
+        // Ambiguous parent state fails closed and leaves everything as it was.
+        let (superseded, owner, owner_registry, operation_id) =
+            published_owner_context_binding(&adapter).await;
+        let extra = OperationId::new();
+        owner_registry
+            .register_operation(OperationSpec {
+                id: extra.clone(),
+                kind: OperationKind::MobMemberChild,
+                owner_session_id: owner,
+                display_name: "mob/member/w".to_string(),
+                source_label: "mob_member".to_string(),
+                operation_source: Some(OperationSource::session_child(superseded.clone())),
+                child_session_id: Some(superseded.clone()),
+                expect_peer_channel: true,
+            })
+            .unwrap();
+        owner_registry.provisioning_succeeded(&extra).unwrap();
+        let witness = adapter.capture_session_binding_witness(&superseded);
+        let successor = SessionId::new();
+        adapter
+            .repoint_parent_owned_session_binding(&superseded, &successor)
+            .expect_err("ambiguous parent operations fail closed");
+        assert_eq!(
+            adapter.capture_session_binding_witness(&superseded),
+            witness
+        );
+        assert!(!adapter.has_session_binding_for_test(&successor));
+        for id in [&operation_id, &extra] {
+            assert_eq!(
+                owner_registry.snapshot(id).unwrap().unwrap().status,
+                OperationStatus::Running
+            );
+        }
+        assert_eq!(
+            adapter
+                .repoint_parent_owned_session_binding(&SessionId::new(), &successor)
+                .unwrap(),
+            SessionRepointOpsBinding::NoRetainedBinding
+        );
+    }
+
+    #[tokio::test]
+    async fn revival_supersedes_self_owned_binding_and_fails_closed_on_drift() {
+        let adapter = MobOpsAdapter::new();
+        let child = SessionId::new();
+        let stale: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        adapter
+            .bind_session_registry(child.clone(), child.clone(), Arc::clone(&stale))
+            .unwrap();
+        let observed = adapter.capture_session_binding_witness(&child);
+        let fresh: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        assert_eq!(
+            adapter
+                .bind_session_registry_for_revival(
+                    child.clone(),
+                    observed.as_ref(),
+                    child.clone(),
+                    Arc::clone(&fresh),
+                )
+                .expect("self-owned binding is superseded"),
+            RevivedSessionOpsBinding::Generated
+        );
+        assert!(
+            adapter
+                .binding_registry_for_test(&child)
+                .is_some_and(|registry| Arc::ptr_eq(&registry, &fresh))
+        );
+
+        let appeared = adapter
+            .bind_session_registry_for_revival(
+                child.clone(),
+                None,
+                child.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect_err("a binding that appeared after observation fails closed");
+        assert!(
+            appeared
+                .to_string()
+                .contains("appeared during missing-live revival")
+        );
+        let changed = adapter
+            .bind_session_registry_for_revival(
+                child.clone(),
+                observed.as_ref(),
+                child.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect_err("a replaced binding fails closed");
+        assert!(
+            changed
+                .to_string()
+                .contains("changed during missing-live revival")
+        );
+
+        let (claimed, _, _, _) = published_owner_context_binding(&adapter).await;
+        let claimed_witness = adapter.capture_session_binding_witness(&claimed);
+        let prepared = adapter
+            .prepare_member_provision_operation(&claimed, "mob/member/w")
+            .await
+            .expect("hold a live provision claim");
+        let error = adapter
+            .bind_session_registry_for_revival(
+                claimed.clone(),
+                claimed_witness.as_ref(),
+                claimed.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+            )
+            .expect_err("a claimed binding fails closed");
+        assert!(error.to_string().contains("exact provision claim"));
+        prepared.abort("test releases the claim").unwrap();
+
+        let unbound = SessionId::new();
+        assert_eq!(
+            adapter
+                .bind_session_registry_for_revival(
+                    unbound.clone(),
+                    None,
+                    unbound.clone(),
+                    Arc::new(RuntimeOpsLifecycleRegistry::new()) as Arc<dyn OpsLifecycleRegistry>,
+                )
+                .expect("absent binding is established"),
+            RevivedSessionOpsBinding::Generated
+        );
+    }
+
     #[test]
     fn explicit_resume_ops_cleanup_cannot_remove_replacement_binding() {
         let adapter = MobOpsAdapter::new();
         let session_id = SessionId::new();
-        let owner_session_id = SessionId::new();
+        // Self-owned: the binding's registry is the member's own and goes
+        // away with its retired attachment.
+        let owner_session_id = session_id.clone();
         adapter
             .bind_session_registry(
                 session_id.clone(),
@@ -3041,7 +4727,7 @@ mod tests {
             .capture_session_binding_witness(&session_id)
             .expect("capture old binding witness");
         adapter
-            .clear_session_binding_for_explicit_resume(&session_id, Some(old.clone()))
+            .release_session_binding_for_explicit_resume(&session_id, Some(old.clone()))
             .expect("clear exact old binding");
 
         adapter
@@ -3057,7 +4743,7 @@ mod tests {
         assert_ne!(replacement, old);
 
         let error = adapter
-            .clear_session_binding_for_explicit_resume(&session_id, Some(old))
+            .release_session_binding_for_explicit_resume(&session_id, Some(old))
             .expect_err("stale explicit-resume cleanup must not clear replacement binding");
         assert!(error.to_string().contains("changed during explicit-resume"));
         assert_eq!(
@@ -3122,7 +4808,7 @@ mod tests {
         assert_eq!(old.binding_id, rebound.binding_id);
         assert_ne!(old, rebound);
         adapter
-            .clear_session_binding_for_explicit_resume(&session_id, Some(old))
+            .release_session_binding_for_explicit_resume(&session_id, Some(old))
             .expect_err("old retirement cannot clear rebound registry");
         assert_eq!(
             adapter.capture_session_binding_witness(&session_id),
@@ -3134,7 +4820,7 @@ mod tests {
     async fn reload_rebind_rejects_replacement_and_claimed_binding() {
         let adapter = MobOpsAdapter::new();
         let session_id = SessionId::new();
-        let owner_session_id = SessionId::new();
+        let owner_session_id = session_id.clone();
         let old_registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
         adapter
             .bind_session_registry(
@@ -3169,12 +4855,15 @@ mod tests {
         assert!(claimed_error.to_string().contains("exact provision claim"));
         drop(prepared);
 
-        adapter
-            .clear_session_binding_for_explicit_resume(
-                &session_id,
-                adapter.capture_session_binding_witness(&session_id),
-            )
-            .expect("clear exact old binding");
+        assert_eq!(
+            adapter
+                .release_session_binding_for_explicit_resume(
+                    &session_id,
+                    adapter.capture_session_binding_witness(&session_id),
+                )
+                .expect("clear exact old binding"),
+            ExplicitResumeSessionBindingRelease::Cleared
+        );
         adapter
             .bind_session_registry(
                 session_id.clone(),

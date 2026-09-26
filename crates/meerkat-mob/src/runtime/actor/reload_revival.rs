@@ -371,6 +371,8 @@ impl MobActor {
                                 receipt.operation_id,
                                 receipt.session_origin,
                                 receipt.rollback_authority,
+                                // A failed warm revival keeps the member seated.
+                                super::super::provisioner::RollbackOrigin::RevivalOrRebuild,
                             ),
                             publication,
                         }

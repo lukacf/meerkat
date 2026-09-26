@@ -619,9 +619,13 @@ from its content:
 | Prompt carrying any other typed append (a `system` row), a synthetic refresh-projection notice, or turn metadata only a fresh turn can apply | follow-up only | Never joins the running turn. |
 
 A synthetic refresh-projection notice is one the next boundary's notice
-refresh replaces (`background_job` and `auth_reauth_required` notices, and
-`mcp_pending` notices whose blocks are not `persisted`); written into a running
-turn it would vanish from later requests, so it takes the follow-up turn.
+refresh replaces: `background_job` and `mcp_pending` notices whose blocks are
+not `persisted` (for example shell job progress), and `auth_reauth_required`
+notices. Written into a running turn it would vanish from later requests, so it
+takes the follow-up turn. A `background_job` notice whose block is `persisted`
+(the durable completion record of a detached `fork_off` or council job) is not
+a refresh projection: it is durable history and eligible for in-turn
+delivery.
 Turn metadata that only a fresh turn applies is everything else a runtime turn
 start honours: System prompts, skill references, a tool overlay, additional
 instructions, request-local context, model, provider or auth routing,

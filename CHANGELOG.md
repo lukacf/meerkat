@@ -56,10 +56,12 @@ them.
   `terminated` for a `max_run_secs` autokill (live or re-linked after a
   restart), or `failed`. The notice is delivered to the forker's session as a
   runtime prompt input with steer handling and the idempotency key
-  `fork_off:<job_id>`: an idle forker runs exactly one turn that sees it, a
-  busy forker runs exactly one follow-up turn after its current turn (the
-  running turn's own later model calls do not see it), and a
-  forker that is not live is revived through its mob first. The outcome names
+  `fork_off:<job_id>`: a forker in the middle of a turn sees it at that
+  turn's next model call as a durable in-turn append (saved once, committed
+  with the turn, no second turn; exactly one follow-up turn only if the turn
+  ends before another model call), an idle forker runs exactly one wake turn
+  that sees it, and a forker that is not live is revived through its mob
+  first. The outcome names
   the child and has a `status`: `completed` (with `bounded_result`, `usage`,
   `turns`, `tool_calls`), `failed` (with `error`), `max_run_elapsed` (with
   `max_run_secs` and any `retirement_error`), `supervisor_stopped`, or
@@ -328,8 +330,10 @@ them.
     `live_boundary_delivery`.
   - Behaviour-only: a Steer prompt carrying typed conversation appends whose
     roles are all `system_notice`, `user` or `injected_context`, none of which
-    is a synthetic refresh-projection notice (`background_job`,
-    `auth_reauth_required`, or `mcp_pending` without `persisted` blocks), and
+    is a synthetic refresh-projection notice (`background_job` or
+    `mcp_pending` without `persisted` blocks, or `auth_reauth_required`; a
+    persisted `background_job` notice, the detached completion record, is
+    durable and eligible), and
     whose turn metadata carries only the handling mode, execution kind and
     transcript identity, is now written into the RUNNING turn's transcript at
     the next cooperative model boundary and committed with that run, instead

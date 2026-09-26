@@ -197,8 +197,10 @@ council. How the sealed result reaches the caller depends on the host:
   system notice (the header "Background council job `<job_id>` finished
   (`completed` or `failed`):", with the outcome as the typed block's `detail`
   and `persisted: true`). It is delivered as a runtime input with the
-  idempotency key `council:<job_id>`: an idle convener runs one turn that sees
-  it, and a busy one runs exactly one follow-up turn after its current turn. A
+  idempotency key `council:<job_id>`: a convener in the middle of a turn sees
+  it at that turn's next model call, saved once and with no second turn (one
+  follow-up turn only if the turn ends before another model call), and an
+  idle convener runs one wake turn that sees it. A
   convener that is no longer live (the runtime retired its idle executor) is
   revived first: through its mob when it is a mob member, or through the
   host's `DetachedOwnerHost` when it is a plain session. The status is

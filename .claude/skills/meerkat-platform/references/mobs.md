@@ -598,9 +598,11 @@ once in the forker's transcript as a durable `BackgroundJob` system notice
 (header "Background fork_off job <id> finished (<status>):" with status
 `completed`, `terminated` for an autokill, or `failed`; the outcome JSON is the
 typed block's `detail`, with `persisted: true`), delivered as a runtime input with
-steer handling and idempotency key `fork_off:<job_id>`: an idle forker runs one
-turn that sees it, a busy one runs exactly one follow-up turn after its
-current turn (not in-turn), and a non-live forker is revived through its mob first. It is
+steer handling and idempotency key `fork_off:<job_id>`: a forker mid-turn sees
+it at that turn's next model call (a durable in-turn append, saved once, no
+second turn; one follow-up turn only if the turn ends first), an idle forker
+runs one wake turn that sees it, and a non-live forker is revived through its
+mob first. It is
 readable in later turns and through session history even after the child is
 retired. The outcome status is `completed` (with `bounded_result`, `usage`,
 `turns`, `tool_calls`), `failed` (child retired), `max_run_elapsed` (run

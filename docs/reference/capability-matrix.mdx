@@ -97,7 +97,8 @@ member on any runtime-backed host, or any session on the JSON-RPC host, which
 installs a `DetachedOwnerHost`), the `council` agent tool returns
 `status: "running"` with a `job_id`; the structured outcome is recorded once
 in the convener's transcript as a durable `BackgroundJob` system notice, which
-wakes an idle convener. On a one-shot host (`rkat run` without
+joins a running convener's turn at its next model call or wakes an idle
+convener for one turn. On a one-shot host (`rkat run` without
 `--keep-alive`), or for a plain-session convener on a host without that hook
 (`blocked_because: "no_owner_revival_host"`), the call blocks and returns it
 through the ordinary tool-result channel. `fork_off` follows the same split. Cleanup debt is deliberately not a

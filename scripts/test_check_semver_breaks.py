@@ -628,29 +628,11 @@ class NotesBaselineTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertIn("--report and --tool-exit-code are required", result.stderr)
 
-    def post_release_gate(self, report: str, exit_code: str) -> subprocess.CompletedProcess[str]:
-        # Measured against the stamped workspace version, the report holds
-        # only what changed since it; the notes under test are Unreleased.
-        return self.run_cli(
-            changelog(
-                "## [Unreleased]\n\n### Fixed\n\n- A fix after the release.\n\n",
-                STAMPED_23,
-                STAMPED_22,
-            ),
-            "--report",
-            str(FIXTURES / report),
-            "--tool-exit-code",
-            exit_code,
-        )
-
-    def test_post_release_notes_without_new_breaks_are_green(self) -> None:
-        result = self.post_release_gate("report-clean-two-crates.txt", "0")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_new_breaks_after_the_release_must_be_declared_under_unreleased(self) -> None:
-        result = self.post_release_gate("report-meerkat-sqlite-0.8.22.txt", "1")
-        self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertIn("`## [Unreleased]` has no `### Breaking` heading", result.stderr)
+    # End to end (selection, then the analyser on the report a measurement
+    # against the SELECTED baseline yields) lives in
+    # scripts/test-semver-baseline.sh, where the selection runs in scratch
+    # repositories; an analyser-only case here would pass on the pre-fix
+    # selection too.
 
 
 class MeasuredTests(unittest.TestCase):

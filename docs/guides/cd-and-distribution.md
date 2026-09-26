@@ -92,8 +92,10 @@ new notes gather under a non-empty `## [Unreleased]` above it; those notes
 declare the breaks since that release, so once HEAD has moved past its tag
 the gate measures against the workspace version's own tag instead
 (`scripts/semver-baseline.sh`). That is also the state `make release-preflight`
-checks. Such a tree is not evidence for the released version, so Release
-semver readiness measures it without uploading an attestation.
+checks. Such a tree is not evidence for the released version: Release semver
+readiness measures it without uploading an attestation, and the release
+workflow's own measurement (`MEERKAT_SEMVER_REQUIRE_RELEASE_TREE=1`) refuses
+it outright, so main's tip can never publish as the tagged version.
 
 1. **Measured.** Every crate the release publishes was either rebuilt and
    compared, or proven identical to the baseline release. Only crates whose

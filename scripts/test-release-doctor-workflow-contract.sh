@@ -79,7 +79,6 @@ MEASUREMENT_STEP_IF = (
     "            github.event.inputs.semver_evidence_job_id == '' &&\n"
     "            github.event.inputs.release_tag == ''\n"
     "          }}\n"
-    "        run: make semver-breaks\n"
 )
 SLO_LINE = (
     "            --slo-seconds ${{ github.event_name == 'workflow_dispatch'"
@@ -121,8 +120,7 @@ elif name == "evidence-if-single-line":
 elif name == "measurement-on-tags":
     replace_once(
         MEASUREMENT_STEP_IF,
-        "      - name: Verify every reported break is named and the notes are stamped\n"
-        "        run: make semver-breaks\n",
+        "      - name: Verify every reported break is named and the notes are stamped\n",
     )
 elif name == "slo-relaxed":
     replace_once(SLO_LINE, SLO_LINE.replace("'1800'", "'3600'"))

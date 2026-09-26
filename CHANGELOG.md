@@ -49,7 +49,8 @@ them.
   release tree itself, the tagged commit, and trees whose bump landed without
   stamped notes keep the published baseline. Release semver readiness no
   longer uploads an attestation for such a post-release tree, because it is
-  not evidence for the released version.
+  not evidence for the released version, and the release workflow's own
+  measurement refuses one outright.
 
 - Full-fresh BuildBuddy validation no longer runs out of its 50-minute SLO
   on integration-fast. The Native submitter waited for the `//...` prebuild

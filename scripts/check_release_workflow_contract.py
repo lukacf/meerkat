@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_WORKFLOW = Path(".github/workflows/release.yml")
+READINESS_WORKFLOW = Path(".github/workflows/release-semver-readiness.yml")
 TAG_SLO_SECONDS = 1800
 
 SEMVER_GATE_JOB = "release_semver_gate"
@@ -38,6 +39,12 @@ REGISTRY_JOB = "publish_registries"
 EVIDENCE_ARTIFACT_PREFIX = "meerkat-semver-attestation-main-"
 # The long measurement the tag path must never rerun.
 MEASUREMENT_COMMAND = "make semver-breaks"
+# The release's own measurement must refuse a post-release tree: measured
+# against its own tag it would pass and publish main's tip as that version.
+RELEASE_TREE_ENV = "MEERKAT_SEMVER_REQUIRE_RELEASE_TREE"
+READINESS_JOB = "semver"
+NOTES_STEP_ID = "notes"
+NOTES_OUTPUT = "baseline"
 PUBLIC_VERIFIER = "scripts/verify-rust-release-public.py"
 
 
@@ -125,6 +132,7 @@ def parse_mapping(lines: list[str], indent: int) -> dict[str, str]:
 @dataclass
 class Step:
     fields: dict[str, str]
+    lines: list[str] = field(default_factory=list)
 
     @property
     def name(self) -> str:
@@ -137,6 +145,34 @@ class Step:
     @property
     def run(self) -> str:
         return self.fields.get("run", "")
+
+    @property
+    def env(self) -> dict[str, str]:
+        """The step's `env:` mapping, values unquoted."""
+        for index, line in enumerate(self.lines):
+            match = KEY_LINE.match(line)
+            if match and len(match.group(1)) == 8 and match.group(2) == "env":
+                nested: list[str] = []
+                for candidate in self.lines[index + 1 :]:
+                    if candidate.strip() and _indent(candidate) <= 8:
+                        break
+                    nested.append(candidate)
+                return {
+                    key: value.strip().strip("'\"")
+                    for key, value in parse_mapping(nested, 10).items()
+                }
+        return {}
+
+    def written_outputs(self) -> set[str]:
+        """Output names the step's `run:` writes into `$GITHUB_OUTPUT`."""
+        names: set[str] = set()
+        for line in self.run.splitlines():
+            if "GITHUB_OUTPUT" not in line:
+                continue
+            match = re.search(r"""echo\s+["']?([A-Za-z_][A-Za-z0-9_-]*)=""", line)
+            if match:
+                names.add(match.group(1))
+        return names
 
 
 def job_steps(block: list[str]) -> list[Step]:
@@ -153,13 +189,13 @@ def job_steps(block: list[str]) -> list[Step]:
             break
         if STEP_START.match(line):
             if current is not None:
-                steps.append(Step(parse_mapping(current, 8)))
+                steps.append(Step(parse_mapping(current, 8), current))
             current = ["        " + line[8:]]
             continue
         if current is not None:
             current.append(line)
     if current is not None:
-        steps.append(Step(parse_mapping(current, 8)))
+        steps.append(Step(parse_mapping(current, 8), current))
     if not steps:
         raise ContractError("job defines no steps")
     return steps
@@ -188,6 +224,9 @@ class EventContext:
     ref: str = "refs/tags/v0.0.0"
     inputs: dict[str, str] = field(default_factory=dict)
     needs_result: str = "success"
+    # `<step id>.<output>` -> value; an output a step never wrote reads as an
+    # empty string, exactly as GitHub evaluates it.
+    step_outputs: dict[str, str] = field(default_factory=dict)
 
     def resolve(self, path: str) -> str:
         if path == "github.event_name":
@@ -206,6 +245,9 @@ class EventContext:
         # same assumption `needs_result` makes for upstream jobs.
         if re.fullmatch(r"steps\.[A-Za-z0-9_-]+\.(?:outcome|conclusion)", path):
             return self.needs_result
+        output = re.fullmatch(r"steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)", path)
+        if output:
+            return self.step_outputs.get(f"{output.group(1)}.{output.group(2)}", "")
         raise UnsupportedExpression(
             f"context `{path}` is not modelled by the release doctor"
         )
@@ -445,6 +487,12 @@ def check_semver_evidence(text: str) -> list[str]:
     for step in steps:
         if MEASUREMENT_COMMAND not in step.run:
             continue
+        if step.env.get(RELEASE_TREE_ENV) != "1":
+            violations.append(
+                f"step `{step.name}` runs `{MEASUREMENT_COMMAND}` without "
+                f"`{RELEASE_TREE_ENV}: \"1\"`, so a post-release tree (notes above the "
+                "stamped version) would pass and publish as the tagged version"
+            )
         for context in (TAG_PUSH, PACKAGE_RECOVERY):
             if step_runs(step, context):
                 violations.append(
@@ -528,9 +576,79 @@ def check_registry_slo(text: str) -> list[str]:
     return violations
 
 
+def _readiness_push(needed: str, baseline: str) -> EventContext:
+    return EventContext(
+        label=f"a main push with needed={needed!r} and notes baseline {baseline!r}",
+        event_name="push",
+        ref="refs/heads/main",
+        step_outputs={"unpublished.needed": needed, f"{NOTES_STEP_ID}.{NOTES_OUTPUT}": baseline},
+    )
+
+
+def check_readiness_attestation(text: str) -> list[str]:
+    """Only a release tree becomes release evidence (release-semver-readiness.yml).
+
+    A post-release tree is measured against its own tag, so its green result
+    says nothing about the breaks since the release before. `release_semver_gate`
+    trusts the main-push attestation by tree and version alone, so the
+    attestation and its upload must run for a release tree and never for a
+    post-release one, keyed on the output the classifying step really writes.
+    """
+    block = job_block(text, READINESS_JOB)
+    steps = job_steps(block)
+    violations: list[str] = []
+
+    notes = [step for step in steps if step.fields.get("id") == NOTES_STEP_ID]
+    if len(notes) != 1:
+        violations.append(
+            f"job `{READINESS_JOB}` has {len(notes)} steps with `id: {NOTES_STEP_ID}`; "
+            "exactly one must classify the measured notes"
+        )
+    else:
+        written = notes[0].written_outputs()
+        if NOTES_OUTPUT not in written:
+            violations.append(
+                f"step `{notes[0].name}` writes {sorted(written) or 'no outputs'} to "
+                f"$GITHUB_OUTPUT, not `{NOTES_OUTPUT}`, which the attestation is gated on"
+            )
+        if not step_runs(notes[0], _readiness_push("true", "published")):
+            violations.append(f"step `{notes[0].name}` does not run when a measurement is needed")
+
+    attestation = [step for step in steps if "attestation.json" in step.run]
+    upload = [
+        step
+        for step in steps
+        if "upload-artifact" in step.fields.get("uses", "")
+        and EVIDENCE_ARTIFACT_PREFIX in step.fields.get("with", "")
+    ]
+    if not attestation:
+        violations.append(f"job `{READINESS_JOB}` has no step that writes attestation.json")
+    if not upload:
+        violations.append(
+            f"job `{READINESS_JOB}` has no step that uploads the "
+            f"`{EVIDENCE_ARTIFACT_PREFIX}<tree>` artifact"
+        )
+    release_tree = _readiness_push("true", "published")
+    post_release = _readiness_push("true", "workspace-version")
+    not_needed = _readiness_push("false", "published")
+    for step in attestation + upload:
+        if not step_runs(step, release_tree):
+            violations.append(f"step `{step.name}` does not run on {release_tree.label}")
+        for context in (post_release, not_needed):
+            if step_runs(step, context):
+                violations.append(f"step `{step.name}` also runs on {context.label}")
+    return violations
+
+
 CHECKS: dict[str, Callable[[str], list[str]]] = {
     "semver-evidence": check_semver_evidence,
     "registry-slo": check_registry_slo,
+}
+
+# Checks of release-semver-readiness.yml; run them by name with
+# `--workflow .github/workflows/release-semver-readiness.yml`.
+READINESS_CHECKS: dict[str, Callable[[str], list[str]]] = {
+    "readiness-attestation": check_readiness_attestation,
 }
 
 
@@ -538,7 +656,7 @@ def run_checks(text: str, names: Iterable[str]) -> list[str]:
     violations: list[str] = []
     for name in names:
         try:
-            violations.extend(CHECKS[name](text))
+            violations.extend({**CHECKS, **READINESS_CHECKS}[name](text))
         except ContractError as error:
             violations.append(f"{name}: {error}")
     return violations
@@ -555,9 +673,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "checks",
         nargs="*",
-        choices=[*CHECKS, "all"],
+        choices=[*CHECKS, *READINESS_CHECKS, "all"],
         default=["all"],
-        help="which contract checks to run (default: all)",
+        help="which contract checks to run (default: all release.yml checks)",
     )
     args = parser.parse_args(argv)
     names = list(CHECKS) if "all" in args.checks else args.checks

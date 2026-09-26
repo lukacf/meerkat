@@ -27,6 +27,8 @@
 #   MEERKAT_SEMVER_BASELINE_VERSION      override the baseline version (default:
 #                                        the newest meerkat-core version on crates.io,
 #                                        or the workspace version after its release)
+#   MEERKAT_SEMVER_REQUIRE_RELEASE_TREE  "1" refuses a post-release tree (the release
+#                                        workflow's own measurement sets it)
 #   MEERKAT_SEMVER_BASELINE_RUSTDOC_DIR  use this directory of baseline rustdoc
 #                                        JSON (manifest.json + <crate>.json)
 #                                        instead of downloading the release asset

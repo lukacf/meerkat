@@ -534,6 +534,12 @@ jobs:
             github.event.inputs.semver_evidence_job_id == '' &&
             github.event.inputs.release_tag == ''
           }}
+        env:
+          # A post-release tree (notes under `## [Unreleased]` above the
+          # stamped workspace version) is measured against that version's own
+          # tag and would pass, then publish main's tip as the tagged version.
+          # The release's own measurement refuses that classification.
+          MEERKAT_SEMVER_REQUIRE_RELEASE_TREE: "1"
         run: make semver-breaks
 
       - name: Verify exact-tree pre-tag semver evidence

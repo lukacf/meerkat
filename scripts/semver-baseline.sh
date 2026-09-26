@@ -22,6 +22,11 @@
 #   semver_changelog                 path to the CHANGELOG.md under test
 #   workspace_version                workspace.package.version of HEAD
 #   MEERKAT_SEMVER_BASELINE_VERSION  optional explicit baseline override
+#   MEERKAT_SEMVER_REQUIRE_RELEASE_TREE  "1" refuses a post-release tree: the
+#                                    release workflow's own measurement sets it,
+#                                    because a tree whose notes follow the
+#                                    stamped version is not that version's
+#                                    release and must never publish as it
 # Git commands run in the current directory, which must be the repository.
 #
 # Outputs (variables set on success):
@@ -37,6 +42,31 @@ semver_published_version() {
         -H 'User-Agent: meerkat-semver-breaks (https://github.com/lukacf/meerkat)' \
         'https://crates.io/api/v1/crates/meerkat-core' \
         | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["crate"]["max_version"])'
+}
+
+# Make origin's tag $1 local. Returns 0 when fetched, 2 when origin has no such
+# tag, and 1 (after saying why) when origin could not be asked: an offline
+# machine or a fork without the tag is not evidence the tag does not exist.
+semver_fetch_release_tag() {
+    local tag="$1" output status
+    if output="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+    case "$status" in
+        0) ;;
+        2) return 2 ;;
+        *)
+            echo "error: could not ask origin whether ${tag} exists (git ls-remote exited ${status}): ${output}" >&2
+            return 1
+            ;;
+    esac
+    if ! output="$(git fetch --no-tags origin "+refs/tags/${tag}:refs/tags/${tag}" 2>&1)"; then
+        echo "error: origin has ${tag} but fetching it failed: ${output}" >&2
+        return 1
+    fi
+    return 0
 }
 
 # Returns non-zero, after explaining why on stderr, when no baseline applies.
@@ -60,17 +90,37 @@ resolve_semver_baseline() {
             ;;
     esac
 
+    local release_tag="v${workspace_version}"
+    if [[ "$notes_baseline" == "workspace-version" && "${MEERKAT_SEMVER_REQUIRE_RELEASE_TREE:-}" == "1" ]]; then
+        echo "error: this is a post-release tree: its pending \`## [Unreleased]\` notes sit above the stamped" >&2
+        echo "       ${workspace_version} section, so it is not the ${workspace_version} release and must not publish as it." >&2
+        echo "       Release the tree whose notes are stamped for the version it publishes (the release commit" >&2
+        echo "       cargo-release makes), or ${release_tag} itself." >&2
+        return 1
+    fi
+
     if [[ -z "$baseline_version" && "$notes_baseline" == "workspace-version" ]]; then
-        local release_tag="v${workspace_version}"
-        local release_commit head_commit
+        local release_commit head_commit fetch_status shallow newest_published
         if ! git rev-parse -q --verify "refs/tags/${release_tag}^{commit}" >/dev/null 2>&1; then
-            git fetch --no-tags origin "+refs/tags/${release_tag}:refs/tags/${release_tag}" \
-                >/dev/null 2>&1 || true
+            if semver_fetch_release_tag "$release_tag"; then
+                fetch_status=0
+            else
+                fetch_status=$?
+            fi
+            case "$fetch_status" in
+                0) ;;
+                2)
+                    echo "error: the pending \`## [Unreleased]\` notes sit above the stamped ${workspace_version} section," >&2
+                    echo "       but ${release_tag} is not tagged, locally or on origin. If this is the ${workspace_version}" >&2
+                    echo "       release commit, those notes belong to ${workspace_version}: move them into its stamped" >&2
+                    echo "       section. Otherwise they follow ${release_tag}: measure them once it is tagged." >&2
+                    return 1
+                    ;;
+                *) return 1 ;;
+            esac
         fi
         if ! release_commit="$(git rev-parse -q --verify "refs/tags/${release_tag}^{commit}")"; then
-            echo "error: the pending \`## [Unreleased]\` notes follow the stamped ${workspace_version} release," >&2
-            echo "       so they declare the breaks since ${release_tag}, but ${release_tag} is not tagged yet." >&2
-            echo "       Measure them once ${release_tag} exists, or set MEERKAT_SEMVER_BASELINE_VERSION." >&2
+            echo "error: ${release_tag} does not name a commit" >&2
             return 1
         fi
         if ! head_commit="$(git rev-parse -q --verify 'HEAD^{commit}')"; then
@@ -81,12 +131,31 @@ resolve_semver_baseline() {
         # the published baseline below applies exactly as it did before.
         if [[ "$release_commit" != "$head_commit" ]]; then
             if ! git merge-base --is-ancestor "$release_commit" "$head_commit"; then
-                echo "error: the pending \`## [Unreleased]\` notes follow the stamped ${workspace_version} release," >&2
-                echo "       but ${release_tag} is not an ancestor of HEAD, so it is not the release they follow." >&2
+                shallow="$(git rev-parse --is-shallow-repository 2>/dev/null || echo unknown)"
+                if [[ "$shallow" != "false" ]]; then
+                    echo "error: this clone is shallow (or its depth is unknown), so it cannot tell whether" >&2
+                    echo "       ${release_tag} is an ancestor of HEAD. Fetch full history (git fetch --unshallow," >&2
+                    echo "       or actions/checkout with fetch-depth: 0) and measure again." >&2
+                else
+                    echo "error: the pending \`## [Unreleased]\` notes sit above the stamped ${workspace_version} section," >&2
+                    echo "       but ${release_tag} is not an ancestor of HEAD, so it is not the release they follow." >&2
+                fi
                 return 1
             fi
             baseline_version="$workspace_version"
             post_release=true
+            # The next release commit is measured against crates.io's newest
+            # release, not this tag; say so when the two differ.
+            if newest_published="$(semver_published_version 2>/dev/null)" && [[ -n "$newest_published" ]]; then
+                if [[ "$newest_published" != "$workspace_version" ]]; then
+                    echo "warning: crates.io's newest meerkat-core is ${newest_published}, not ${workspace_version} (unpublished," >&2
+                    echo "         yanked, or a published prerelease). These notes are measured against ${release_tag}, but" >&2
+                    echo "         the next release commit is measured against ${newest_published}, so this run may not predict it." >&2
+                fi
+            else
+                echo "warning: could not read crates.io's newest meerkat-core to compare with ${release_tag}; the next" >&2
+                echo "         release commit is measured against it, so this run may not predict that measurement." >&2
+            fi
             return 0
         fi
     fi

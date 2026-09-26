@@ -323,10 +323,14 @@ input, and admits the child's one turn. The child runs turn-driven whatever
 its role's default runtime mode, like a `delegate` helper. What happens next
 depends on whether the host can deliver a completion after the call returns.
 
-**Detached.** A host delivers detached completions when it declares it can and
-has a runtime to admit them. A host built with a runtime adapter declares it by
-default: the JSON-RPC, REST, and MCP servers and MobKit. `rkat run
---keep-alive` and `rkat mob deploy --surface rpc` declare it too. There
+**Detached.** A call runs detached when three things hold: the host declares
+it can deliver later, it has a runtime to admit the completion, and the caller
+can be made live again to receive it. A host built with a runtime adapter
+declares delivery by default (the JSON-RPC, REST, and MCP servers and
+MobKit), and so do `rkat run --keep-alive` and `rkat mob deploy --surface
+rpc`. The caller can be revived when it is a member of a mob the host manages
+(its mob revives it) or when the host installs a `DetachedOwnerHost` (the
+JSON-RPC host does). A `fork_off` caller is always a mob member. There
 `fork_off` returns without waiting for the child's turn:
 
 ```json
@@ -388,9 +392,11 @@ run` without `--keep-alive` and the other one-shot `rkat mob` commands. There
 result (`bounded_result`, `usage`, `turns`, `tool_calls`, and the child's
 identity and sessions). A child that does not complete is a tool error whose
 text carries the same outcome. A blocking result names why it blocked in
-`blocked_because`: `host_declared_unavailable`, or `no_runtime_adapter` for a
+`blocked_because`: `host_declared_unavailable`; `no_runtime_adapter` for a
 host that declares detached delivery but has no runtime (which also logs an
-error).
+error); or `no_owner_revival_host` for a caller that is a plain session on a
+host without a `DetachedOwnerHost`. A blocking call leaves no detached job
+owed, so no result can be lost.
 
 Neither form has a default deadline: the child runs for as long as its task
 needs. The agent loop's default tool deadline does not cut a blocking call. An
@@ -443,13 +449,14 @@ store is durable and whose `MobMcpState` was built with `into_shared()` (a
 state wrapped in a plain `Arc::new` never runs it), and it retries after the
 earliest observed lease expiry;
 `MobMcpState::relink_detached_councils` runs the re-link explicitly. Blocking, `council` returns the sealed outcome as its tool
-result, with `blocked_because`. A convener that is a mob member and is not
-live is revived through its mob; a convener that is a plain session is made
-live through the host's `DetachedOwnerHost`, which the JSON-RPC host installs.
-On a host without one (REST, or a `rkat run --keep-alive` session whose idle
-executor was retired), a completion for a top-level convener that is not live
-is refused by the runtime and not recorded; the job stays owed and a later
-re-link delivers it once the convener is live. Its own `timeout_seconds` bounds it in both
+result, with `blocked_because`. A detached convener that is not live is
+revived first: through its mob when it is a mob member, or through the host's
+`DetachedOwnerHost` when it is a plain session. A plain-session convener on a
+host without that hook (a top-level REST, MCP-server, or `rkat run
+--keep-alive` session) is not given the detached route at all: its council
+runs in the call and returns with `blocked_because: "no_owner_revival_host"`.
+`MobMcpState::detached_delivery_blocked_because_for(owner)` reports the route
+for a given caller. Its own `timeout_seconds` bounds it in both
 forms, and the agent loop's default tool deadline does not. See
 [Temporary Councils](/guides/temporary-councils#agent-tool).
 

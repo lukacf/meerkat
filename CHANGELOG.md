@@ -763,7 +763,15 @@ them.
   binding but then tried to re-bind it under the worker's own session. It now
   keeps the published coordinator-owned binding, and the worker's operation
   stays in the coordinator's registry. Self-owned bindings, unpublished or
-  claimed bindings, and actor startup are still checked strictly.
+  claimed bindings, and actor startup are still checked strictly. The same
+  applies when such a worker has to be rebuilt: if its actor or attachment
+  was lost while the mob was stopped, or its next turn revives it after the
+  runtime retired its idle executor, it used to come back owning itself and
+  left the coordinator's child operation running with nothing behind it. The
+  rebuilt or revived worker now continues the coordinator's same operation.
+  If the coordinator's context has ended (its child operation is terminal or
+  left mid-retirement, or its session is gone), the worker is rebound as
+  self-owned and the coordinator's operation is finished, not left open.
 - The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
   and 033 (the office demo) pass again and run in pull-request CI. A new
   "Example web suites" lane builds the `sdks/web` wasm runtime once with the

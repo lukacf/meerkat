@@ -3999,6 +3999,22 @@ impl SessionBackend {
         result
     }
 
+    fn log_explicit_resume_binding_release(
+        session_id: &SessionId,
+        release: &super::ops_adapter::ExplicitResumeSessionBindingRelease,
+    ) {
+        if let super::ops_adapter::ExplicitResumeSessionBindingRelease::RetainedParentOwner {
+            owner_bridge_session_id,
+        } = release
+        {
+            tracing::debug!(
+                member_session_id = %session_id,
+                owner_bridge_session_id = %owner_bridge_session_id,
+                "attachment retirement kept the coordinator-owned operation binding of a parent-owned member"
+            );
+        }
+    }
+
     async fn retire_exact_attachment_for_explicit_resume_owned(
         &self,
         session_id: &SessionId,
@@ -4049,10 +4065,15 @@ impl SessionBackend {
                     Ok(()) | Err(SessionError::NotFound { .. }) => {
                         self.remove_runtime_session_state(session_id, observed_sidecar.as_ref())
                             .await;
-                        self.ops_adapter.clear_session_binding_for_explicit_resume(
+                        Self::log_explicit_resume_binding_release(
                             session_id,
-                            observed_ops_binding,
-                        )?;
+                            &self
+                                .ops_adapter
+                                .release_session_binding_for_explicit_resume(
+                                    session_id,
+                                    observed_ops_binding,
+                                )?,
+                        );
                         Ok(true)
                     }
                     Err(error) => Err(error.into()),
@@ -4097,8 +4118,15 @@ impl SessionBackend {
 
             self.remove_runtime_session_state(session_id, observed_sidecar.as_ref())
                 .await;
-            self.ops_adapter
-                .clear_session_binding_for_explicit_resume(session_id, observed_ops_binding)?;
+            Self::log_explicit_resume_binding_release(
+                session_id,
+                &self
+                    .ops_adapter
+                    .release_session_binding_for_explicit_resume(
+                        session_id,
+                        observed_ops_binding,
+                    )?,
+            );
             match adapter
                 .current_executor_attachment_witness(session_id)
                 .await
@@ -11069,16 +11097,42 @@ impl MobProvisioner for SessionBackend {
                     "SessionBackend::provision_member binding generated owner session registry"
                 );
                 if missing_live_revival {
-                    backend.ops_adapter.release_superseded_session_binding_for_revival(
-                        &created_bridge_session_id,
+                    // Rebind under the owner context observed before the
+                    // revival: a parent-owned member keeps its coordinator
+                    // owner and registry while that context is live, and
+                    // falls back to the generated self-owned binding only
+                    // through the typed ended-owner branch.
+                    let revived = backend.ops_adapter.bind_session_registry_for_revival(
+                        created_bridge_session_id.clone(),
                         superseded_ops_binding.as_ref(),
+                        generated_owner_session_id,
+                        registry,
+                    )?;
+                    if let super::ops_adapter::RevivedSessionOpsBinding::ParentOwnerEnded {
+                        owner_bridge_session_id,
+                        terminalized_operation_id,
+                    } = &revived
+                    {
+                        tracing::info!(
+                            bridge_session_id = %created_bridge_session_id,
+                            owner_bridge_session_id = %owner_bridge_session_id,
+                            terminalized_operation_id = ?terminalized_operation_id,
+                            "missing-live revival found the parent owner context ended; the member is now self-owned"
+                        );
+                    } else {
+                        tracing::debug!(
+                            bridge_session_id = %created_bridge_session_id,
+                            revived = ?revived,
+                            "SessionBackend::provision_member rebound revived session registry"
+                        );
+                    }
+                } else {
+                    backend.ops_adapter.bind_session_registry(
+                        created_bridge_session_id.clone(),
+                        generated_owner_session_id,
+                        registry,
                     )?;
                 }
-                backend.ops_adapter.bind_session_registry(
-                    created_bridge_session_id.clone(),
-                    generated_owner_session_id,
-                    registry,
-                )?;
                 tracing::debug!(
                     bridge_session_id = %created_bridge_session_id,
                     "SessionBackend::provision_member bound generated owner session registry"
@@ -11280,8 +11334,13 @@ impl MobProvisioner for SessionBackend {
                     "retained cleanup refusal reached execution: {reason}"
                 ))),
             }?;
-            self.ops_adapter
-                .clear_session_binding_for_explicit_resume(&session_id, ops_binding)
+            Self::log_explicit_resume_binding_release(
+                &session_id,
+                &self
+                    .ops_adapter
+                    .release_session_binding_for_explicit_resume(&session_id, ops_binding)?,
+            );
+            Ok(())
         }
         .await;
         match outcome {
@@ -11417,8 +11476,13 @@ impl MobProvisioner for SessionBackend {
                 )
                 .await?;
         }
-        self.ops_adapter
-            .clear_session_binding_for_explicit_resume(&session_id, ops_binding)
+        Self::log_explicit_resume_binding_release(
+            &session_id,
+            &self
+                .ops_adapter
+                .release_session_binding_for_explicit_resume(&session_id, ops_binding)?,
+        );
+        Ok(())
     }
 
     async fn retire_member(

@@ -48127,8 +48127,6 @@ async fn assert_parent_owned_crew_worker_retained(
     context: &str,
     expect_live_operation: bool,
 ) {
-    use meerkat_core::ops_lifecycle::{OperationKind, OperationSource};
-
     let identity = &worker.identity;
     assert_eq!(
         adapter
@@ -48137,7 +48135,46 @@ async fn assert_parent_owned_crew_worker_retained(
         Some(worker.attachment.clone()),
         "{context}: parent-owned worker '{identity}' must keep its exact attachment"
     );
+    assert_parent_owned_crew_worker_operation_owner(
+        adapter,
+        worker,
+        context,
+        expect_live_operation,
+    )
+    .await;
+}
+
+/// The worker's mob-child operation is still the exact one in its
+/// coordinator's registry under the coordinator's owner tuple (the
+/// coordinator's registry holds no second operation for it), and the
+/// worker's own registry never gains a competing self-owned operation.
+#[cfg(feature = "runtime-adapter")]
+async fn assert_parent_owned_crew_worker_operation_owner(
+    adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    worker: &ParentOwnedCrewWorker,
+    context: &str,
+    expect_live_operation: bool,
+) {
+    use meerkat_core::ops_lifecycle::{OperationKind, OperationSource};
+
+    let identity = &worker.identity;
     let source = OperationSource::session_child(worker.session_id.clone());
+    let owner_operations = worker
+        .owner_registry
+        .list_operations()
+        .expect("list owner registry operations")
+        .into_iter()
+        .filter(|operation| {
+            operation.kind == OperationKind::MobMemberChild
+                && operation.operation_source.as_ref() == Some(&source)
+        })
+        .map(|operation| operation.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owner_operations,
+        vec![worker.operation_id.clone()],
+        "{context}: the coordinator's registry holds exactly the original operation for '{identity}'"
+    );
     let snapshot = worker
         .owner_registry
         .snapshot(&worker.operation_id)
@@ -48461,6 +48498,561 @@ async fn whole_crew_stop_resume_keeps_binding_after_parent_terminalized_worker_o
         Some(meerkat_core::ops_lifecycle::OperationStatus::Retired),
         "the coordinator's terminal verdict is preserved"
     );
+}
+
+/// How a stopped or idle parent-owned worker loses its live incarnation
+/// behind the mob's back. `ActorOnly` is a fail-closed service discard that
+/// leaves the machine attachment and sidecar behind; `ActorAndAttachment` is
+/// the runtime's own idle teardown (the #1190 shape), which also unregisters
+/// the executor and retires the worker's own operation registry.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Clone, Copy, Debug)]
+enum LostWorkerIncarnation {
+    ActorOnly,
+    ActorAndAttachment,
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn lose_worker_incarnation(
+    service: &Arc<MockSessionService>,
+    adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    session_id: &SessionId,
+    loss: LostWorkerIncarnation,
+) {
+    MobSessionService::discard_live_session(service.as_ref(), session_id)
+        .await
+        .expect("discard the worker's live actor");
+    assert!(
+        !service
+            .live_session_actor_registered(session_id)
+            .await
+            .expect("observe the exact actor registry"),
+        "{loss:?}: the worker's actor is gone"
+    );
+    if matches!(loss, LostWorkerIncarnation::ActorAndAttachment) {
+        adapter
+            .unregister_session(session_id)
+            .await
+            .expect("runtime unregisters the worker's executor");
+        assert!(
+            !adapter.contains_session(session_id).await,
+            "{loss:?}: the worker's registration is gone"
+        );
+    }
+}
+
+/// Explicit resume rebuilt the worker: it is Active and serves through a new
+/// exact attachment.
+#[cfg(feature = "runtime-adapter")]
+async fn assert_parent_owned_crew_worker_rebuilt(
+    handle: &MobHandle,
+    adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    worker: &ParentOwnedCrewWorker,
+    context: &str,
+) {
+    let identity = &worker.identity;
+    let attachment = adapter
+        .current_executor_attachment_witness(&worker.session_id)
+        .await
+        .unwrap_or_else(|| panic!("{context}: '{identity}' was rebuilt with an attachment"));
+    assert_ne!(
+        attachment, worker.attachment,
+        "{context}: '{identity}' lost its incarnation, so resume must replace its attachment"
+    );
+    let status = handle
+        .member_status(identity)
+        .await
+        .expect("rebuilt worker status");
+    assert_eq!(
+        status.status,
+        crate::runtime::handle::MobMemberStatus::Active,
+        "{context}: '{identity}' must be rebuilt, not recorded Broken: {status:?}"
+    );
+}
+
+/// Typed fallback when the preserved owner context has ended: the parent's
+/// operation for the worker is terminal with `parent_status` and the parent's
+/// registry gained no replacement operation, while the rebuilt worker holds
+/// exactly one live self-owned mob-child operation in its own registry.
+/// Returns that operation and the registry that owns it.
+#[cfg(feature = "runtime-adapter")]
+async fn assert_worker_self_owned_after_parent_owner_ended(
+    adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    worker: &ParentOwnedCrewWorker,
+    context: &str,
+    parent_status: meerkat_core::ops_lifecycle::OperationStatus,
+) -> (
+    meerkat_core::ops_lifecycle::OperationId,
+    Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+) {
+    use meerkat_core::ops_lifecycle::{OperationKind, OperationSource, OperationStatus};
+
+    let identity = &worker.identity;
+    let source = OperationSource::session_child(worker.session_id.clone());
+    let matching = |registry: &Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>| {
+        registry
+            .list_operations()
+            .expect("list operations")
+            .into_iter()
+            .filter(|operation| {
+                operation.kind == OperationKind::MobMemberChild
+                    && operation.operation_source.as_ref() == Some(&source)
+            })
+            .collect::<Vec<_>>()
+    };
+    let parent = matching(&worker.owner_registry);
+    assert_eq!(
+        parent
+            .iter()
+            .map(|operation| &operation.id)
+            .collect::<Vec<_>>(),
+        vec![&worker.operation_id],
+        "{context}: the ended owner's registry must not gain a replacement operation for '{identity}': {parent:?}"
+    );
+    assert!(
+        parent[0].terminal && parent[0].status == parent_status,
+        "{context}: the parent's operation for '{identity}' must be terminal {parent_status:?}: {:?}",
+        parent[0]
+    );
+    let own_registry = Arc::clone(
+        adapter
+            .prepare_local_session_bindings(worker.session_id.clone())
+            .await
+            .expect("worker's own runtime bindings")
+            .ops_lifecycle(),
+    );
+    let own = matching(&own_registry);
+    assert!(
+        matches!(
+            own.as_slice(),
+            [operation]
+                if !operation.terminal
+                    && operation.status == OperationStatus::Running
+                    && operation.owner_session_id == worker.session_id
+        ),
+        "{context}: '{identity}' must be self-owned by exactly one live operation: {own:?}"
+    );
+    (own[0].id.clone(), own_registry)
+}
+
+/// Downstream regression: the whole crew is stopped and, while it is
+/// stopped, a parent-owned worker's actor (or its whole attachment) is lost,
+/// so the same-handle resume must REBUILD the worker. The rebuilt worker is
+/// rebound under the preserved coordinator owner and registry: the
+/// coordinator's exact mob-child operation stays the live one, and the
+/// worker never takes ownership of itself.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn whole_crew_stop_resume_rebuild_keeps_parent_owned_worker_owner() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    let (lead_session_id, lead_attachment) = spawn_self_owned_crew_lead(&handle, &adapter).await;
+    let coordinator = handle
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("external coordinator owner context");
+    let actor_lost = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-actor-lost",
+        crate::MobRuntimeMode::TurnDriven,
+        coordinator.clone(),
+    )
+    .await;
+    let attachment_lost = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-attachment-lost",
+        crate::MobRuntimeMode::TurnDriven,
+        coordinator.clone(),
+    )
+    .await;
+    let autonomous_actor_lost = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-auto-actor-lost",
+        crate::MobRuntimeMode::AutonomousHost,
+        coordinator,
+    )
+    .await;
+
+    whole_crew_stop(&handle, "stop crew").await;
+    lose_worker_incarnation(
+        &service,
+        &adapter,
+        &actor_lost.session_id,
+        LostWorkerIncarnation::ActorOnly,
+    )
+    .await;
+    lose_worker_incarnation(
+        &service,
+        &adapter,
+        &attachment_lost.session_id,
+        LostWorkerIncarnation::ActorAndAttachment,
+    )
+    .await;
+    lose_worker_incarnation(
+        &service,
+        &adapter,
+        &autonomous_actor_lost.session_id,
+        LostWorkerIncarnation::ActorOnly,
+    )
+    .await;
+    whole_crew_resume(&handle, "resume crew with lost worker incarnations").await;
+
+    assert_eq!(
+        adapter
+            .current_executor_attachment_witness(&lead_session_id)
+            .await,
+        Some(lead_attachment),
+        "self-owned control keeps its exact attachment"
+    );
+    for worker in [&actor_lost, &attachment_lost, &autonomous_actor_lost] {
+        assert_parent_owned_crew_worker_rebuilt(&handle, &adapter, worker, "after rebuild").await;
+        assert_parent_owned_crew_worker_operation_owner(&adapter, worker, "after rebuild", true)
+            .await;
+    }
+    handle
+        .member(&actor_lost.identity)
+        .await
+        .expect("rebuilt turn-driven worker")
+        .internal_turn("post-rebuild turn")
+        .await
+        .expect("rebuilt parent-owned worker accepts input");
+    assert_parent_owned_crew_worker_operation_owner(
+        &adapter,
+        &actor_lost,
+        "after a post-rebuild turn",
+        true,
+    )
+    .await;
+    // Retirement routes through the preserved binding: it retires the
+    // coordinator's exact operation, not a self-owned one.
+    for worker in [&actor_lost, &attachment_lost, &autonomous_actor_lost] {
+        retire_parent_owned_crew_worker(&handle, worker).await;
+    }
+}
+
+/// #1190 missing-live revival of a parent-owned worker: the runtime retires
+/// the idle worker's executor (or only its actor goes away) and the worker's
+/// next turn revives it. The revival rebinds under the preserved coordinator
+/// owner and registry instead of making the worker own itself.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn member_turn_revival_keeps_parent_owned_worker_owner() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    service.set_return_exact_run_result(true);
+    spawn_self_owned_crew_lead(&handle, &adapter).await;
+    let coordinator = handle
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("external coordinator owner context");
+    let torn_down = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-runtime-teardown",
+        crate::MobRuntimeMode::TurnDriven,
+        coordinator.clone(),
+    )
+    .await;
+    let actor_lost = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-actor-lost",
+        crate::MobRuntimeMode::TurnDriven,
+        coordinator,
+    )
+    .await;
+    lose_worker_incarnation(
+        &service,
+        &adapter,
+        &torn_down.session_id,
+        LostWorkerIncarnation::ActorAndAttachment,
+    )
+    .await;
+    lose_worker_incarnation(
+        &service,
+        &adapter,
+        &actor_lost.session_id,
+        LostWorkerIncarnation::ActorOnly,
+    )
+    .await;
+
+    for worker in [&torn_down, &actor_lost] {
+        let spec = BoundedResultSpec::new("revived-turn", 256).expect("bounded spec");
+        let turn = handle
+            .start_work_for_identity_bounded(
+                worker.identity.clone(),
+                WorkSpec::new(
+                    ContentInput::Text("next turn".to_string()),
+                    WorkOrigin::Internal,
+                ),
+                HandlingMode::Queue,
+                spec.clone(),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("'{}' revives for its next turn: {error:?}", worker.identity)
+            });
+        let result = tokio::time::timeout(WHOLE_CREW_LIFECYCLE_TIMEOUT, turn.wait_bounded(spec))
+            .await
+            .expect("revived turn completes")
+            .expect("revived turn succeeds");
+        assert_eq!(result.result().result().text(), "next turn");
+        assert!(
+            adapter
+                .current_executor_attachment_witness(&worker.session_id)
+                .await
+                .is_some(),
+            "'{}' serves through an attachment after revival",
+            worker.identity
+        );
+        assert_parent_owned_crew_worker_operation_owner(&adapter, worker, "after revival", true)
+            .await;
+    }
+    for worker in [&torn_down, &actor_lost] {
+        retire_parent_owned_crew_worker(&handle, worker).await;
+    }
+}
+
+/// The preserved owner context can no longer be used when the worker is
+/// rebuilt: the coordinator already terminalized the worker's operation, left
+/// it mid-retirement, or its own session (and registry) is gone. Resume does
+/// not register a replacement operation under the ended owner and does not
+/// leave the parent's operation non-terminal: it terminalizes the parent's
+/// operation through the registry when needed and binds the worker
+/// self-owned.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn whole_crew_resume_rebuild_self_owns_worker_when_parent_owner_context_ended() {
+    use meerkat_core::ops_lifecycle::OperationStatus;
+
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    spawn_self_owned_crew_lead(&handle, &adapter).await;
+    let coordinator = handle
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("external coordinator owner context");
+    let gone_coordinator = handle
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("coordinator whose session goes away");
+    let gone_coordinator_session = gone_coordinator.owner_bridge_session_id.clone();
+    let terminal = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-parent-terminal",
+        crate::MobRuntimeMode::TurnDriven,
+        coordinator.clone(),
+    )
+    .await;
+    let retiring = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-parent-retiring",
+        crate::MobRuntimeMode::TurnDriven,
+        coordinator,
+    )
+    .await;
+    let owner_gone = spawn_parent_owned_crew_worker(
+        &handle,
+        &adapter,
+        "w-owner-gone",
+        crate::MobRuntimeMode::TurnDriven,
+        gone_coordinator,
+    )
+    .await;
+
+    whole_crew_stop(&handle, "stop crew").await;
+    terminal
+        .owner_registry
+        .request_retire(&terminal.operation_id)
+        .expect("coordinator requests retirement");
+    terminal
+        .owner_registry
+        .mark_retired(&terminal.operation_id)
+        .expect("coordinator terminalizes the worker's operation");
+    retiring
+        .owner_registry
+        .request_retire(&retiring.operation_id)
+        .expect("coordinator leaves the worker's operation mid-retirement");
+    MobSessionService::discard_live_session(service.as_ref(), &gone_coordinator_session)
+        .await
+        .expect("discard the gone coordinator's session");
+    adapter
+        .unregister_session(&gone_coordinator_session)
+        .await
+        .expect("the gone coordinator's registration is retired");
+    assert_eq!(
+        owner_gone
+            .owner_registry
+            .snapshot(&owner_gone.operation_id)
+            .expect("read gone owner's operation")
+            .map(|snapshot| snapshot.status),
+        Some(OperationStatus::Terminated),
+        "retiring the owner's registration terminated its child operation"
+    );
+    for worker in [&terminal, &retiring, &owner_gone] {
+        lose_worker_incarnation(
+            &service,
+            &adapter,
+            &worker.session_id,
+            LostWorkerIncarnation::ActorOnly,
+        )
+        .await;
+    }
+    whole_crew_resume(&handle, "resume crew after the owner contexts ended").await;
+
+    let mut self_owned = Vec::new();
+    for (worker, parent_status) in [
+        (&terminal, OperationStatus::Retired),
+        (&retiring, OperationStatus::Retired),
+        (&owner_gone, OperationStatus::Terminated),
+    ] {
+        assert_parent_owned_crew_worker_rebuilt(&handle, &adapter, worker, "after rebuild").await;
+        self_owned.push((
+            worker,
+            assert_worker_self_owned_after_parent_owner_ended(
+                &adapter,
+                worker,
+                "after rebuild",
+                parent_status,
+            )
+            .await,
+        ));
+    }
+    for (worker, (operation_id, own_registry)) in self_owned {
+        tokio::time::timeout(
+            WHOLE_CREW_LIFECYCLE_TIMEOUT,
+            handle.retire(worker.identity.clone()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("retire '{}' timed out", worker.identity))
+        .unwrap_or_else(|error| panic!("retire '{}' failed: {error:?}", worker.identity));
+        // Retirement unregisters the worker's own runtime first, which may
+        // terminate its self-owned operation before the ops retirement runs.
+        let snapshot = own_registry
+            .snapshot(&operation_id)
+            .expect("read self-owned operation")
+            .expect("self-owned operation stays observable");
+        assert!(
+            snapshot.terminal
+                && matches!(
+                    snapshot.status,
+                    OperationStatus::Retired | OperationStatus::Terminated
+                ),
+            "retiring '{}' terminalizes its self-owned operation: {snapshot:?}",
+            worker.identity
+        );
+    }
+}
+
+/// A resumed provision that revived a parent-owned member under its live
+/// coordinator owner is rolled back (for example because its finalization
+/// failed). The rollback retires the member's new attachment but keeps the
+/// coordinator-owned binding, so the next revival still rebinds under the
+/// coordinator instead of re-owning the member and orphaning its operation.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn resumed_provision_rollback_keeps_parent_owned_binding_for_the_next_revival() {
+    use meerkat_core::ops_lifecycle::{OperationKind, OperationSource, OperationStatus};
+
+    let service = Arc::new(MockSessionService::new());
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+    service.set_runtime_adapter(Arc::clone(&adapter));
+    let backend = Arc::new(super::provisioner::SessionBackend::new(
+        service.clone(),
+        Some(Arc::clone(&adapter)),
+        None,
+    ));
+    let session = Session::new();
+    let session_id = session.id().clone();
+    service.replace_live_session(session).await;
+    service
+        .discard_live_session(&session_id)
+        .await
+        .expect("discard fixture actor");
+    let coordinator = SessionId::new();
+    let coordinator_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
+        Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+    let mut spawn = retained_resume_request(&service, &session_id).await;
+    spawn.owner_bridge_session_id = Some(coordinator.clone());
+    spawn.ops_registry = Some(Arc::clone(&coordinator_registry));
+    spawn.generated_self_owned_operation_owner = None;
+    let spawned = backend
+        .provision_member(spawn)
+        .await
+        .expect("provision the member under the coordinator's owner context");
+    let coordinator_operation = spawned.operation_id.clone();
+    let parent_operations = || {
+        coordinator_registry
+            .list_operations()
+            .expect("list coordinator operations")
+            .into_iter()
+            .filter(|operation| {
+                operation.kind == OperationKind::MobMemberChild
+                    && operation.operation_source
+                        == Some(OperationSource::session_child(session_id.clone()))
+            })
+            .map(|operation| (operation.id, operation.status))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        parent_operations(),
+        vec![(coordinator_operation.clone(), OperationStatus::Running)]
+    );
+
+    for attempt in 1..=2 {
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("the member's actor goes away");
+        adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("the runtime retires the member's executor");
+        let mut revival = retained_resume_request(&service, &session_id).await;
+        revival.runtime_revival_intent =
+            super::provisioner::RuntimeRevivalIntent::MissingLiveMaterialization;
+        let revived = backend
+            .provision_member(revival)
+            .await
+            .unwrap_or_else(|error| panic!("attempt {attempt}: revival provisions: {error:?}"));
+        assert_eq!(
+            revived.operation_id, coordinator_operation,
+            "attempt {attempt}: the revival replays the coordinator's operation"
+        );
+        let authority = revived
+            .rollback_authority
+            .clone()
+            .expect("resumed provision carries rollback authority");
+        backend
+            .restore_resumed_member(
+                &revived.member_ref,
+                &revived.operation_id,
+                revived.session_origin,
+                &authority,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("attempt {attempt}: rollback settles: {error:?}"));
+        assert!(
+            backend.ops_binding_present_for_test(&session_id),
+            "attempt {attempt}: the rollback keeps the coordinator-owned binding"
+        );
+        assert!(
+            backend
+                .ops_binding_registry_for_test(&session_id)
+                .is_some_and(|registry| Arc::ptr_eq(&registry, &coordinator_registry)),
+            "attempt {attempt}: the kept binding still points at the coordinator's registry"
+        );
+        assert_eq!(
+            parent_operations(),
+            vec![(coordinator_operation.clone(), OperationStatus::Running)],
+            "attempt {attempt}: the coordinator's operation stays the one live operation"
+        );
+    }
 }
 
 #[tokio::test]

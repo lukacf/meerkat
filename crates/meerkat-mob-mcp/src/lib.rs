@@ -1734,11 +1734,13 @@ impl MobMcpState {
         if self.claim_fork_relink(&mob_id) {
             let service = self.session_service.clone();
             let runtime = self.runtime_adapter.clone();
+            let owner_host = self.detached_owner_host();
             let restored_before_ms = self.created_at_ms;
             tokio::spawn(async move {
                 let reports = crate::fork_relink::relink_mob_fork_children(
                     Arc::clone(&service),
                     runtime.clone(),
+                    owner_host.clone(),
                     &mob_id,
                     &handle,
                     restored_before_ms,
@@ -1750,6 +1752,7 @@ impl MobMcpState {
                 let reports = crate::fork_relink::redeliver_when_owners_revivable(
                     service,
                     runtime,
+                    owner_host,
                     &mob_id,
                     &handle,
                     restored_before_ms,

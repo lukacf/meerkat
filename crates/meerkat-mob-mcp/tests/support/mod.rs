@@ -1016,3 +1016,69 @@ impl meerkat_mob::store::TemporaryCouncilStore for PanicOnceCouncilStore {
         self.inner.list_all().await
     }
 }
+
+/// Rendered provider requests, to count the turns that saw a completion
+/// record.
+#[derive(Clone, Default)]
+pub struct SeenRequests(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl SeenRequests {
+    pub fn record(&self, request: &LlmRequest) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{:?}", request.messages));
+    }
+
+    /// Provider requests whose context held `marker`: with no later turn of
+    /// the owner, the turns the completion record woke.
+    pub fn turns_that_saw(&self, marker: &str) -> usize {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|rendered| rendered.contains(marker))
+            .count()
+    }
+}
+
+/// A host owner hook for these tests. A real host attaches the session's
+/// executor the way its own next turn does (the RPC host uses
+/// `SessionRuntime::ensure_runtime_executor`); this one stands in for that
+/// by reviving the session through the mob that seats it, and counts the
+/// calls.
+pub struct MobBackedOwnerHost {
+    handle: meerkat_mob::MobHandle,
+    identity: AgentIdentity,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl MobBackedOwnerHost {
+    pub fn new(handle: meerkat_mob::MobHandle, identity: &str) -> Arc<Self> {
+        Arc::new(Self {
+            handle,
+            identity: AgentIdentity::from(identity),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_mob_mcp::DetachedOwnerHost for MobBackedOwnerHost {
+    async fn ensure_owner_live(
+        &self,
+        _session_id: &meerkat_core::SessionId,
+    ) -> Result<(), meerkat_mob_mcp::DetachedOwnerError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.handle
+            .ensure_member_live(&self.identity)
+            .await
+            .map_err(|error| meerkat_mob_mcp::DetachedOwnerError::Failed {
+                detail: error.to_string(),
+            })
+    }
+}

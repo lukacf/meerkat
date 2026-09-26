@@ -897,29 +897,36 @@ them.
   catalog default chain, removed in 0.8.37), so after upgrading every `rkat`
   command failed with "model_fallback.enabled = true requires a nonempty
   explicit chain", and REST/RPC/MCP startup refused the realm. Loading a
-  persisted document now turns that shape into fallback disabled - no unreviewed
-  backup model is ever used - and reports the typed
+  persisted document now ignores that table (it counts as no fallback policy,
+  as the equal-to-default table did in 0.8.36), so the realm inherits its
+  parent's explicit fallback policy and fallback is off if there is none. No
+  unreviewed backup model is ever used. The load reports the typed
   `ConfigWarning::LegacyModelFallbackDefault`. Loading never rewrites the
-  file; the next config write persists `enabled = false`. Writes that introduce
-  `enabled = true` with an empty chain are still rejected.
+  file; the next config write drops the legacy `enabled` key. Writes that
+  introduce `enabled = true` with an empty chain on a document that did not
+  already have it are still rejected.
 - Config documents that set `use_catalog_default_chain` under
   `[model_fallback]` (documented through 0.8.36) no longer fail every command
   and REST/RPC/MCP startup with "unknown field". Loads ignore the key and
-  report `ConfigWarning::LegacyModelFallbackCatalogChain`; fallback follows only
-  `enabled` and an explicit chain. The key is never written back, and writes
-  that introduce it are still rejected.
+  report `ConfigWarning::LegacyModelFallbackCatalogChain`. Without other
+  settings the table counts as no fallback policy, so the realm inherits its
+  parent's explicit policy, off if there is none. The key is never written
+  back, and writes that introduce it are still rejected.
 - Config patches merge onto the document as persisted. Adding a
   `[[model_fallback.chain]]` target by `rkat config patch` (or a REST/RPC/MCP
-  patch) to a pre-0.8.37 `enabled = true` document now keeps fallback on
-  instead of saving `enabled = false`. Any other patch of such a document saves
-  `enabled = false` and reports the warning.
+  patch) to a pre-0.8.37 `enabled = true` document now keeps `enabled = true`
+  and turns fallback on. Any other patch of such a document drops the legacy
+  `enabled` key and reports the warning.
 - `rkat` prints each typed config warning on stderr once per file, naming the
   file, without changing the exit status, on every path that reads a persisted
   config: `load_config` commands, `rkat mob run/deploy`,
-  `rkat config get/set/patch`, `rkat auth login`, and the credential bootstrap
-  that can rewrite `~/.rkat/config.toml` before the config loads. A
-  `~/.rkat/config.toml` that no document puts on the realm chain (no
-  `[realm.global]`) is not reported.
+  `rkat config get/patch`, `rkat auth login`, and the credential bootstrap
+  when it rewrites `~/.rkat/config.toml` before the config loads.
+  `rkat config set` replaces the file without reading it and prints nothing.
+  When a config is composed, `~/.rkat/config.toml` is reported only if it is
+  on the realm's inheritance chain; operations on it directly
+  (`rkat auth login`, `rkat config get --realm global`, the bootstrap rewrite)
+  report it regardless.
 - The `shell` schema no longer advertises values the tool rejects:
   `timeout_secs` declares a minimum of 1, and `background` is offered only when
   durable background jobs are available, instead of failing with "requested

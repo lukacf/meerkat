@@ -882,10 +882,11 @@ mod tests {
 
     /// Read-modify-write of a legacy document (for example `auth login`
     /// writing a binding into the pre-0.8.37 global doc) must not be bricked:
-    /// the merged result still has the legacy shape, so the write persists
-    /// fallback disabled and reports the warning.
+    /// the merged result still has the legacy shape, so the write persists the
+    /// normalized "no fallback policy" form (the `enabled` key dropped, so the
+    /// document keeps inheriting) and reports the warning.
     #[tokio::test]
-    async fn file_store_patch_over_legacy_model_fallback_default_persists_disabled()
+    async fn file_store_patch_over_legacy_model_fallback_default_persists_no_policy()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("config.toml");
@@ -898,7 +899,7 @@ mod tests {
         let (preview, preview_warnings) = store
             .patch_preview(&ConfigDelta(serde_json::json!({ "max_tokens": 1234 })))
             .await?;
-        assert_eq!(preview.model_fallback.enabled, Some(false));
+        assert_eq!(preview.model_fallback.enabled, None);
         assert_eq!(
             preview_warnings,
             vec![crate::config::ConfigWarning::LegacyModelFallbackDefault]
@@ -913,16 +914,28 @@ mod tests {
             .patch_with_warnings(ConfigDelta(serde_json::json!({ "max_tokens": 1234 })))
             .await?;
         assert_eq!(updated.max_tokens, Some(1234));
-        assert_eq!(updated.model_fallback.enabled, Some(false));
+        assert_eq!(updated.model_fallback.enabled, None);
         assert_eq!(
             patch_warnings,
             vec![crate::config::ConfigWarning::LegacyModelFallbackDefault]
         );
-        let persisted: Config = toml::from_str(&tokio::fs::read_to_string(&path).await?)?;
-        assert_eq!(persisted.model_fallback.enabled, Some(false));
+        let persisted_text = tokio::fs::read_to_string(&path).await?;
+        let persisted_raw: toml::Table = toml::from_str(&persisted_text)?;
+        assert!(
+            persisted_raw
+                .get("model_fallback")
+                .and_then(|table| table.get("enabled"))
+                .is_none(),
+            "the persisted doc drops the legacy `enabled` key: {persisted_text}"
+        );
+        let persisted: Config = toml::from_str(&persisted_text)?;
+        assert_eq!(
+            persisted.model_fallback,
+            crate::config::ModelFallbackConfig::default()
+        );
 
         let (reloaded, warnings) = store.get_with_warnings().await?;
-        assert_eq!(reloaded.model_fallback.enabled, Some(false));
+        assert_eq!(reloaded.model_fallback.enabled, None);
         assert!(
             warnings.is_empty(),
             "the rewritten document is no longer legacy"
@@ -1140,6 +1153,95 @@ mod tests {
                 .await?
                 .model_fallback
                 .is_enabled()
+        );
+        Ok(())
+    }
+
+    /// A 0.8.36 workspace realm doc under a global doc with a reviewed
+    /// explicit chain: the legacy child table is no policy, so the child keeps
+    /// the parent's chain (as in 0.8.36) and the child's doc is reported.
+    #[tokio::test]
+    async fn effective_reader_legacy_child_inherits_parent_explicit_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::connection::RealmId;
+
+        let temp = tempfile::tempdir()?;
+        let global_dir = temp.path().join("global");
+        tokio::fs::create_dir_all(&global_dir).await?;
+        tokio::fs::write(
+            global_dir.join("config.toml"),
+            "[realm.global]\n\n[model_fallback]\nenabled = true\n\n[[model_fallback.chain]]\nmodel = \"backup-openai\"\nprovider = \"openai\"\n",
+        )
+        .await?;
+        let reader = EffectiveConfigReader::new(Arc::new(FileDocSource {
+            root: temp.path().to_path_buf(),
+        }));
+
+        for (realm, legacy_doc, warning) in [
+            (
+                "child",
+                "[realm.child]\nparent = \"global\"\n\n[model_fallback]\nenabled = true\n",
+                crate::config::ConfigWarning::LegacyModelFallbackDefault,
+            ),
+            (
+                "catalog-child",
+                "[realm.catalog-child]\nparent = \"global\"\n\n[model_fallback]\nuse_catalog_default_chain = true\n",
+                crate::config::ConfigWarning::LegacyModelFallbackCatalogChain,
+            ),
+        ] {
+            let child_dir = temp.path().join(realm);
+            tokio::fs::create_dir_all(&child_dir).await?;
+            tokio::fs::write(child_dir.join("config.toml"), legacy_doc).await?;
+            let child = RealmId::parse(realm)?;
+
+            let (config, warnings) = reader.effective_config_with_warnings(&child).await?;
+            assert!(config.model_fallback.is_enabled(), "{realm}");
+            assert_eq!(config.model_fallback.chain.len(), 1, "{realm}");
+            assert_eq!(config.model_fallback.chain[0].model, "backup-openai");
+            config.validate(*crate::model_profile::test_catalog::TEST_CATALOG)?;
+            assert_eq!(
+                warnings,
+                vec![RealmConfigWarning {
+                    realm: child.clone(),
+                    warning,
+                }],
+                "{realm}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A top-level legacy doc with no parent has no explicit policy to
+    /// inherit: fallback is off, with the typed warning.
+    #[tokio::test]
+    async fn effective_reader_top_level_legacy_doc_is_off_with_warning()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::connection::RealmId;
+
+        let temp = tempfile::tempdir()?;
+        let global_dir = temp.path().join("global");
+        tokio::fs::create_dir_all(&global_dir).await?;
+        tokio::fs::write(
+            global_dir.join("config.toml"),
+            "[realm.global]\n\n[model_fallback]\nenabled = true\n",
+        )
+        .await?;
+        let reader = EffectiveConfigReader::new(Arc::new(FileDocSource {
+            root: temp.path().to_path_buf(),
+        }));
+
+        let (config, warnings) = reader
+            .effective_config_with_warnings(&RealmId::global())
+            .await?;
+        assert!(!config.model_fallback.is_enabled());
+        assert!(config.model_fallback.chain.is_empty());
+        config.validate(*crate::model_profile::test_catalog::TEST_CATALOG)?;
+        assert_eq!(
+            warnings,
+            vec![RealmConfigWarning {
+                realm: RealmId::global(),
+                warning: crate::config::ConfigWarning::LegacyModelFallbackDefault,
+            }]
         );
         Ok(())
     }

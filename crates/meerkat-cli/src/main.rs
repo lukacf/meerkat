@@ -20706,7 +20706,7 @@ mod tests {
 
     /// The credential-read bootstrap runs before `load_config` and rewrites the
     /// global doc when a `global` OAuth token still needs its binding section.
-    /// That write persists the normalized policy, so the bootstrap must report
+    /// That write persists the normalized no-policy form, so the bootstrap must report
     /// the warning itself; without a rewrite it reports nothing.
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
@@ -20762,9 +20762,9 @@ mod tests {
             toml::from_str(&std::fs::read_to_string(&global_doc).expect("reread"))
                 .expect("rewritten global doc parses strictly");
         assert_eq!(
-            rewritten.model_fallback.enabled,
-            Some(false),
-            "the provisioning write persisted the normalized policy"
+            rewritten.model_fallback,
+            meerkat_core::config::ModelFallbackConfig::default(),
+            "the provisioning write persisted the normalized no-policy form"
         );
         assert!(
             cli_config_warning_reported(&global_doc, ConfigWarning::LegacyModelFallbackDefault),

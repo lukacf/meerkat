@@ -11246,7 +11246,8 @@ mod tests {
         );
 
         // Read-modify-write over the legacy head doc succeeds (the load half
-        // normalized it) and persists fallback disabled.
+        // normalized it) and persists the no-policy form (fallback off here,
+        // since nothing is inherited).
         let Json(after_patch) = patch_config(
             State(state),
             Json(PatchConfigRequest::Wrapped {
@@ -11257,7 +11258,8 @@ mod tests {
         .await
         .expect("patch over a legacy head doc");
         assert_eq!(after_patch.config.max_tokens, Some(3072));
-        assert_eq!(after_patch.config.model_fallback.enabled, Some(false));
+        assert_eq!(after_patch.config.model_fallback.enabled, None);
+        assert!(!after_patch.config.model_fallback.is_enabled());
     }
 
     /// Following the legacy warning's advice through the REST patch API: a

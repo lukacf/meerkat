@@ -244,12 +244,20 @@ unknown fallback key (including the removed `use_catalog_default_chain`) is
 rejected.
 
 Config files written by rkat 0.8.36 and earlier still load. If one has
-`enabled = true` with no chain, or `use_catalog_default_chain`, fallback is off
-for it and `rkat` prints a warning on stderr naming the file, once per command.
-Every command that reads the file prints it, including `rkat config get/set/patch`,
-`rkat mob run/deploy` and `rkat auth login`. The file is not rewritten until the
-next config write, which saves `enabled = false`. `rkat config patch` merges
-onto the file as written, so adding a chain keeps fallback on:
+`enabled = true` with no chain, or `use_catalog_default_chain`, that
+`[model_fallback]` setting is ignored: the realm inherits its parent's explicit
+fallback policy, and fallback is off if there is none. `rkat` prints a warning
+on stderr naming the file, once per command, on commands that read the file:
+commands that load the config (such as `rkat run`), `rkat config get`,
+`rkat config patch`, `rkat mob run/deploy` and `rkat auth login`.
+`rkat config set` replaces the file without reading it, so it prints nothing.
+`~/.rkat/config.toml` is reported when it is on the realm's inheritance chain,
+and on commands that operate on it directly (`rkat auth login`,
+`rkat config get --realm global`, and the credential setup that rewrites it).
+The file is not rewritten until the next config write, which drops the legacy
+setting. To silence the warning, delete the `[model_fallback]` table, or add an
+explicit `[[model_fallback.chain]]`. `rkat config patch` merges onto the file as
+written, so adding a chain keeps `enabled = true` and turns fallback on:
 
 ```bash
 rkat config patch --json '{"model_fallback":{"chain":[{"model":"gpt-5.5","provider":"openai"}]}}'

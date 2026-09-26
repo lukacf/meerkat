@@ -1064,9 +1064,11 @@ Operational rules to remember:
 
 - Explicit `enabled = false` wins over an inherited table. Writes reject
   unknown fallback keys (including `use_catalog_default_chain` and
-  scope/expiry/revert) and `enabled = true` with an empty chain. Persisted
-  pre-0.8.37 files with either legacy shape still load, with fallback off and a
-  typed `ConfigWarning`; rkat prints it on stderr.
+  scope/expiry/revert) and newly introduced `enabled = true` with an empty
+  chain. Persisted pre-0.8.37 files with either legacy shape still load: the
+  legacy setting is ignored (the table counts as absent, so it inherits the
+  parent's explicit policy, off if none), with a typed `ConfigWarning`; rkat
+  prints it on stderr.
 - Policy defaults: cross_provider=false, min_context_headroom=0.10,
   require_tool_parity=true, trigger_after_attempts=3,
   triggers=["capacity","provider_unavailable"].

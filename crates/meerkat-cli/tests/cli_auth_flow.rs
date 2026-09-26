@@ -766,12 +766,22 @@ fn rkat_prompt_loads_legacy_model_fallback_default_with_warning() {
         "the legacy-default warning prints exactly once; stderr:\n{stderr}"
     );
     let warning = warning_lines[0];
-    for needle in ["0.8.37", "enabled = false", "[[model_fallback.chain]]"] {
+    for needle in [
+        "0.8.37",
+        "ignored",
+        "inherits",
+        "delete the [model_fallback] table",
+        "[[model_fallback.chain]]",
+    ] {
         assert!(
             warning.contains(needle),
             "warning must mention {needle}; line: {warning}"
         );
     }
+    assert!(
+        !warning.contains("enabled = false"),
+        "an explicit `enabled = false` would block inheritance; line: {warning}"
+    );
     assert!(
         warning.contains(&global_doc.display().to_string()),
         "warning names the document to fix; line: {warning}"
@@ -890,9 +900,16 @@ fn rkat_config_get_and_patch_print_legacy_model_fallback_warning() {
     let persisted: toml::Value =
         toml::from_str(&std::fs::read_to_string(&realm_doc).expect("reread")).expect("toml");
     assert_eq!(
-        persisted["model_fallback"]["enabled"].as_bool(),
-        Some(false),
+        persisted["max_tokens"].as_integer(),
+        Some(1234),
         "{persisted}"
+    );
+    assert!(
+        persisted
+            .get("model_fallback")
+            .and_then(|table| table.get("enabled"))
+            .is_none(),
+        "an unrelated patch persists the normalized no-policy form; {persisted}"
     );
 
     std::fs::write(&realm_doc, legacy_doc).expect("restore legacy realm doc");
@@ -936,7 +953,8 @@ fn rkat_config_get_and_patch_print_legacy_model_fallback_warning() {
 
 /// The credential-read bootstrap runs BEFORE `load_config` and rewrites the
 /// global doc when a migrated `global` OAuth token still needs its binding
-/// section. On a legacy global doc that write persists `enabled = false`, so
+/// section. On a legacy global doc that write persists the normalized
+/// no-policy form (the `enabled` key dropped), so
 /// the bootstrap itself must print the warning; `load_config` no longer sees
 /// the legacy shape afterwards.
 #[test]
@@ -988,11 +1006,13 @@ fn rkat_prompt_prints_legacy_warning_when_credential_bootstrap_rewrites_global_d
 
     let rewritten = std::fs::read_to_string(&global_doc).expect("read global doc");
     let persisted: toml::Value = toml::from_str(&rewritten).expect("toml");
-    assert_eq!(
-        persisted["model_fallback"]["enabled"].as_bool(),
-        Some(false),
+    assert!(
+        persisted
+            .get("model_fallback")
+            .and_then(|table| table.get("enabled"))
+            .is_none(),
         "the bootstrap provisioning write must have run and persisted the \
-         normalized policy; doc:\n{rewritten}\nstderr:\n{stderr}"
+         normalized no-policy form; doc:\n{rewritten}\nstderr:\n{stderr}"
     );
     let lines = legacy_fallback_warning_lines(&stderr);
     assert_eq!(

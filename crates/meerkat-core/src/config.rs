@@ -1588,12 +1588,17 @@ impl ModelFallbackConfig {
     ///
     /// Through 0.8.36 the config template wrote `enabled = true` with no
     /// chain, meaning "use the catalog default chain". 0.8.37 removed that
-    /// chain, so such a document is loaded with fallback disabled (never an
-    /// unreviewed backup model) and a typed warning. Only persisted-document
-    /// loads call this; writes keep [`Self::validate`]'s strict rejection.
+    /// chain, so such a table is loaded as NO fallback policy (`enabled`
+    /// unset), with a typed warning. That keeps 0.8.36 inheritance: the
+    /// table then equalled the default and was a no-op under
+    /// [`Config::merge`], so a child realm inherited its parent's policy.
+    /// The effective policy is the parent's explicit one, or off if there is
+    /// none; fallback never uses anything but explicit chain entries.
+    /// Only persisted-document loads call this; writes keep
+    /// [`Self::validate`]'s strict rejection.
     pub fn normalize_persisted(&mut self) -> Option<ConfigWarning> {
         if self.has_legacy_default_shape() {
-            self.enabled = Some(false);
+            self.enabled = None;
             return Some(ConfigWarning::LegacyModelFallbackDefault);
         }
         None
@@ -2827,12 +2832,14 @@ pub enum ConfigWarning {
     /// `[model_fallback] enabled = true` without any `[[model_fallback.chain]]`
     /// target: the config-template default through 0.8.36, when an empty
     /// chain meant the catalog default chain. 0.8.37 removed that chain and
-    /// made fallback explicit, so the loaded policy is disabled.
+    /// made fallback explicit, so the table loads as no fallback policy: it
+    /// inherits the parent realm's explicit policy, off if there is none.
     LegacyModelFallbackDefault,
     /// `use_catalog_default_chain` under `[model_fallback]`: documented through
     /// 0.8.36 to restore the catalog default chain, which 0.8.37 removed. The
-    /// key is ignored on load and dropped by the next write; fallback follows
-    /// only `enabled` and an explicit chain.
+    /// key is ignored on load and dropped by the next write; without other
+    /// settings the table is no fallback policy and inherits the parent
+    /// realm's explicit policy, off if there is none.
     LegacyModelFallbackCatalogChain,
 }
 
@@ -2842,15 +2849,19 @@ impl std::fmt::Display for ConfigWarning {
             Self::LegacyModelFallbackDefault => f.write_str(
                 "model_fallback.enabled = true with no [[model_fallback.chain]] was the \
                  config default before 0.8.37 (it meant the removed catalog fallback chain); \
-                 model fallback is disabled for this config. Set `enabled = false` under \
-                 [model_fallback] to silence this warning, or add a reviewed \
-                 [[model_fallback.chain]] target to keep fallback on",
+                 this [model_fallback] table is ignored, so the config inherits the parent \
+                 realm's explicit fallback policy (fallback is off if there is none). To \
+                 silence this warning, delete the [model_fallback] table, or add a reviewed \
+                 [[model_fallback.chain]] target to enable fallback here",
             ),
             Self::LegacyModelFallbackCatalogChain => f.write_str(
                 "model_fallback.use_catalog_default_chain was removed in 0.8.37 together with \
-                 the catalog fallback chain; it is ignored, and the next config write drops it. \
-                 Model fallback uses only `enabled = true` with a reviewed \
-                 [[model_fallback.chain]] target. Remove the key to silence this warning",
+                 the catalog fallback chain; the key is ignored and the next config write \
+                 drops it, so unless this [model_fallback] table sets its own policy the \
+                 config inherits the parent realm's explicit fallback policy (fallback is off \
+                 if there is none). To silence this warning, delete the key (or the whole \
+                 [model_fallback] table), or add a reviewed [[model_fallback.chain]] target \
+                 to enable fallback here",
             ),
         }
     }
@@ -4946,15 +4957,22 @@ enabled = false
     /// The config template shipped through 0.8.36 wrote `[model_fallback]
     /// enabled = true` with no chain (then: "use the catalog default chain").
     /// 0.8.37 removed the catalog chain, so a persisted document with that
-    /// shape must still LOAD: fallback off, one typed warning, never an
-    /// unreviewed backup model.
+    /// shape must still LOAD, as NO fallback policy (the absent table), with
+    /// one typed warning: never an unreviewed backup model, and never an
+    /// explicit override of an inherited policy (in 0.8.36 this table equalled
+    /// the default and was a no-op under inheritance).
     #[test]
-    fn test_legacy_model_fallback_default_loads_disabled_with_typed_warning() {
+    fn test_legacy_model_fallback_default_loads_as_no_policy_with_typed_warning() {
         let (config, warnings) =
             Config::from_persisted_toml("[model_fallback]\nenabled = true\n").unwrap();
 
+        assert_eq!(
+            config.model_fallback,
+            ModelFallbackConfig::default(),
+            "the legacy table loads as no fallback policy"
+        );
+        assert_eq!(config.model_fallback.enabled, None);
         assert!(!config.model_fallback.is_enabled());
-        assert!(config.model_fallback.chain.is_empty());
         assert_eq!(warnings, vec![ConfigWarning::LegacyModelFallbackDefault]);
         config
             .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
@@ -4964,11 +4982,18 @@ enabled = false
         for needle in [
             "model_fallback.enabled = true",
             "0.8.37",
-            "enabled = false",
+            "ignored",
+            "inherits",
+            "off if there is none",
+            "delete the [model_fallback] table",
             "[[model_fallback.chain]]",
         ] {
             assert!(rendered.contains(needle), "{needle} missing: {rendered}");
         }
+        assert!(
+            !rendered.contains("enabled = false"),
+            "an explicit `enabled = false` would block inheritance; not advised: {rendered}"
+        );
     }
 
     /// 0.8.36 and earlier documented `use_catalog_default_chain` under
@@ -4979,32 +5004,40 @@ enabled = false
     #[test]
     fn test_legacy_use_catalog_default_chain_loads_ignored_with_typed_warning() {
         let with_chain = "[model_fallback]\nenabled = true\nuse_catalog_default_chain = true\n\n[[model_fallback.chain]]\nmodel = \"backup-openai\"\nprovider = \"openai\"\n";
-        // (document, fallback enabled after load, chain length, also the
-        // legacy enabled-without-chain default)
+        // (document, `enabled` after load, chain length, also the legacy
+        // enabled-without-chain default). Without an explicit chain every
+        // legacy shape loads as NO policy (`None`), which inherits.
         for (text, enabled, chain_len, legacy_default) in [
             (
                 "[model_fallback]\nuse_catalog_default_chain = true\n",
-                false,
+                None,
                 0,
                 false,
             ),
             (
                 "[model_fallback]\nuse_catalog_default_chain = false\n",
-                false,
+                None,
                 0,
                 false,
             ),
             (
                 "[model_fallback]\nenabled = true\nuse_catalog_default_chain = true\n",
-                false,
+                None,
                 0,
                 true,
             ),
-            (with_chain, true, 1, false),
+            (with_chain, Some(true), 1, false),
         ] {
             let (config, warnings) =
                 Config::from_persisted_toml(text).expect("a persisted legacy key must load");
-            assert_eq!(config.model_fallback.is_enabled(), enabled, "{text}");
+            assert_eq!(config.model_fallback.enabled, enabled, "{text}");
+            if enabled.is_none() {
+                assert_eq!(
+                    config.model_fallback,
+                    ModelFallbackConfig::default(),
+                    "{text}: a legacy table without a chain is the absent table"
+                );
+            }
             assert_eq!(config.model_fallback.chain.len(), chain_len, "{text}");
             assert_eq!(
                 warnings.first(),
@@ -5030,10 +5063,14 @@ enabled = false
         for needle in [
             "use_catalog_default_chain",
             "0.8.37",
+            "ignored",
+            "inherits",
+            "off if there is none",
             "[[model_fallback.chain]]",
         ] {
             assert!(rendered.contains(needle), "{needle} missing: {rendered}");
         }
+        assert!(!rendered.contains("enabled = false"), "{rendered}");
         // A wrongly typed legacy value is still a parse error.
         assert!(
             Config::from_persisted_toml("[model_fallback]\nuse_catalog_default_chain = 1\n")
@@ -5088,8 +5125,49 @@ enabled = false
             .expect("merged legacy layer validates");
     }
 
+    /// Layered loads (SDK / MobKit `merge_toml_str`): a legacy layer over a
+    /// base with an explicit chain is a no-op for fallback, as in 0.8.36, and
+    /// still reports the typed warning. Over no explicit policy it is off.
     #[test]
-    fn test_compose_effective_config_normalizes_legacy_model_fallback_default() {
+    fn test_merge_toml_str_legacy_layers_keep_inherited_explicit_chain() {
+        let base = "[model_fallback]\nenabled = true\n\n[[model_fallback.chain]]\nmodel = \"backup-openai\"\n";
+        for (legacy, expected) in [
+            (
+                "[model_fallback]\nenabled = true\n",
+                vec![ConfigWarning::LegacyModelFallbackDefault],
+            ),
+            (
+                "[model_fallback]\nuse_catalog_default_chain = true\n",
+                vec![ConfigWarning::LegacyModelFallbackCatalogChain],
+            ),
+        ] {
+            let mut config = Config::default();
+            assert!(
+                config
+                    .merge_toml_str_with_warnings(base)
+                    .unwrap()
+                    .is_empty()
+            );
+            let warnings = config.merge_toml_str_with_warnings(legacy).unwrap();
+            assert_eq!(warnings, expected, "{legacy}");
+            assert!(config.model_fallback.is_enabled(), "{legacy}");
+            assert_eq!(config.model_fallback.chain.len(), 1, "{legacy}");
+            assert_eq!(config.model_fallback.chain[0].model, "backup-openai");
+
+            let mut top_level = Config::default();
+            let warnings = top_level.merge_toml_str_with_warnings(legacy).unwrap();
+            assert_eq!(warnings, expected, "{legacy}");
+            assert!(!top_level.model_fallback.is_enabled(), "{legacy}");
+            assert!(top_level.model_fallback.chain.is_empty(), "{legacy}");
+        }
+    }
+
+    /// A 0.8.36 child realm doc carries `[model_fallback] enabled = true` (the
+    /// old bool was always serialized). In 0.8.36 that table equalled the
+    /// default, so the child inherited its parent's explicit chain; it must
+    /// still do so, never replacing a reviewed inherited chain with "off".
+    #[test]
+    fn test_compose_effective_config_legacy_child_inherits_parent_explicit_chain() {
         use crate::connection::RealmId;
         let head = RealmId::parse("child").unwrap();
         let mut parent: Config = toml::from_str(
@@ -5114,9 +5192,11 @@ enabled = false
         let effective =
             compose_effective_config(&docs, &std::collections::BTreeMap::new(), &head).unwrap();
         assert!(
-            !effective.model_fallback.is_enabled(),
-            "the legacy child table replaces the inherited policy and is off"
+            effective.model_fallback.is_enabled(),
+            "the legacy child table is no policy, so the parent's explicit chain is inherited"
         );
+        assert_eq!(effective.model_fallback.chain.len(), 1);
+        assert_eq!(effective.model_fallback.chain[0].model, "backup-openai");
         effective
             .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
             .expect("composed config validates");

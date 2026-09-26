@@ -2,7 +2,8 @@
  * Typed event hierarchy for the Meerkat streaming API.
  *
  * Events form a discriminated union on the `type` field (snake_case to match
- * the wire protocol).  All other fields use idiomatic camelCase.
+ * the wire protocol). Adapter fields use idiomatic camelCase; owner-authored
+ * lifecycle identity retains its generated wire shape.
  * Missing semantic fields remain absent during parsing so partial streaming
  * payloads do not become authoritative SDK state.
  * Malformed known event payloads are preserved as `malformed_event` frames
@@ -32,7 +33,20 @@
 import type { ContentBlock, ContentInput, SchemaWarning, SkillKey } from "./types.js";
 import { KNOWN_AGENT_EVENT_TYPES } from "./generated/events.js";
 import { MeerkatError } from "./generated/errors.js";
-import type { LlmProviderErrorKind, LlmProviderErrorRetryability } from "./generated/event_types.js";
+import type {
+  LlmProviderErrorKind,
+  LlmProviderErrorRetryability,
+  TranscriptMessageIdentity,
+} from "./generated/event_types.js";
+
+// Owner lineage keeps the generated wire shape, including optional/null facts.
+export type {
+  TranscriptMessageIdentity,
+  RealtimeMessageOrigin,
+  LiveContextObservationId,
+  ObjectiveId,
+  LiveChannelId,
+} from "./generated/event_types.js";
 
 // ---------------------------------------------------------------------------
 // Shared value types
@@ -161,6 +175,7 @@ export interface RunStartedEvent {
   readonly type: "run_started";
   readonly sessionId: string;
   readonly prompt: ContentInput;
+  readonly identity?: TranscriptMessageIdentity;
 }
 
 export interface RunCompletedEvent {
@@ -171,6 +186,7 @@ export interface RunCompletedEvent {
   readonly extractionRequired?: boolean;
   readonly usage: Usage;
   readonly terminalCauseKind?: TurnTerminalCauseKind;
+  readonly identity?: TranscriptMessageIdentity;
 }
 
 export interface ExtractionSucceededEvent {
@@ -255,6 +271,7 @@ export interface RunFailedEvent {
   readonly error: string;
   readonly terminalCauseKind?: TurnTerminalCauseKind;
   readonly errorReport?: AgentErrorReport | null;
+  readonly identity?: TranscriptMessageIdentity;
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +748,31 @@ function requireRecordField(raw: Record<string, unknown>, field: string): Record
     throw new Error(`${field} must be object`);
   }
   return value;
+}
+
+function transcriptIdentityField(raw: Record<string, unknown>): { identity?: TranscriptMessageIdentity } {
+  if (!hasOwn(raw, "identity")) return {};
+  const identity = requireRecordField(raw, "identity");
+  for (const field of ["interaction_id", "run_id", "objective_id"]) {
+    if (hasOwn(identity, field) && identity[field] !== null) requireStringField(identity, field);
+  }
+  if (hasOwn(identity, "realtime_origin") && identity.realtime_origin !== null) {
+    const origin = requireRecordField(identity, "realtime_origin");
+    requireNonNegativeIntegerField(origin, "canonical_row_sequence");
+    requireStringField(origin, "channel_id");
+    requireStringField(origin, "session_id");
+    if (hasOwn(origin, "provider_item_ids")) {
+      const items = origin.provider_item_ids;
+      if (!Array.isArray(items) || items.some(item => typeof item !== "string")) {
+        throw new Error("identity.realtime_origin.provider_item_ids must be strings");
+      }
+    }
+    if (hasOwn(origin, "context_observation_id") && origin.context_observation_id !== null) {
+      const observation = requireRecordField(origin, "context_observation_id");
+      for (const field of ["channel_id", "namespace", "nonce"]) requireStringField(observation, field);
+    }
+  }
+  return { identity: identity as TranscriptMessageIdentity };
 }
 
 function requireOneOf<T extends string>(
@@ -1332,7 +1374,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
   switch (type) {
     // Session lifecycle
     case "run_started":
-      return { type, sessionId: requireStringField(raw, "session_id"), prompt: parseContentInput(raw.prompt) };
+      return { type, sessionId: requireStringField(raw, "session_id"), prompt: parseContentInput(raw.prompt), ...transcriptIdentityField(raw) };
     case "run_completed":
       return {
         type,
@@ -1342,6 +1384,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         ...(raw.extraction_required !== undefined ? { extractionRequired: Boolean(raw.extraction_required) } : {}),
         usage: parseUsage(raw.usage),
         ...terminalCauseKindField(raw),
+        ...transcriptIdentityField(raw),
       };
     case "extraction_succeeded": {
       const rawWarnings = Array.isArray(raw.schema_warnings) ? raw.schema_warnings : undefined;
@@ -1377,6 +1420,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         error: errorReport?.message ?? requireStringField(raw, "error"),
         ...terminalCauseKindField(raw),
         ...(hasOwn(raw, "error_report") ? { errorReport: errorReport ?? null } : {}),
+        ...transcriptIdentityField(raw),
       };
     }
 

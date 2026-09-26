@@ -550,6 +550,11 @@ export type {
 export type {
   AgentEvent,
   CoreAgentEvent,
+  TranscriptMessageIdentity,
+  RealtimeMessageOrigin,
+  LiveContextObservationId,
+  ObjectiveId,
+  LiveChannelId,
   StreamEvent,
   ScopedAgentEvent,
   StreamScopeFrame,

@@ -33,6 +33,14 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .errors import MeerkatError
 from .generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
+from .generated.event_types import (
+    LiveChannelId,
+    LiveContextObservationId,
+    ObjectiveId,
+    RealtimeMessageOrigin,
+    RunId,
+    TranscriptMessageIdentity,
+)
 
 if TYPE_CHECKING:
     from .types import SkillKey
@@ -137,6 +145,7 @@ class RunStarted(Event):
 
     session_id: str = ""
     prompt: ContentInput = ""
+    identity: TranscriptMessageIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +158,7 @@ class RunCompleted(Event):
     terminal_cause_kind: TurnTerminalCauseKind | None = None
     structured_output: Any = None
     extraction_required: bool = False
+    identity: TranscriptMessageIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +272,7 @@ class RunFailed(Event):
     error: str = ""
     terminal_cause_kind: TurnTerminalCauseKind | None = None
     error_report: AgentErrorReport | None = None
+    identity: TranscriptMessageIdentity | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1208,6 +1219,33 @@ _NUMBER_FIELDS = {
 _BOOL_FIELDS = {"is_error", "extraction_required"}
 
 
+def _parse_transcript_identity(value: Any) -> TranscriptMessageIdentity:
+    """Validate owner lineage without filling optional facts or changing spelling."""
+    if not isinstance(value, dict):
+        raise ValueError("identity must be object")
+    for name in ("interaction_id", "run_id", "objective_id"):
+        if name in value and value[name] is not None and not isinstance(value[name], str):
+            raise ValueError(f"identity.{name} must be string or null")
+    origin = value.get("realtime_origin")
+    if origin is not None:
+        if not isinstance(origin, dict):
+            raise ValueError("identity.realtime_origin must be object or null")
+        _require_non_negative_int(origin, "canonical_row_sequence")
+        _require_str(origin, "channel_id")
+        _require_str(origin, "session_id")
+        if "provider_item_ids" in origin:
+            items = origin["provider_item_ids"]
+            if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
+                raise ValueError("identity.realtime_origin.provider_item_ids must be strings")
+        observation = origin.get("context_observation_id")
+        if observation is not None:
+            if not isinstance(observation, dict):
+                raise ValueError("identity.realtime_origin.context_observation_id must be object or null")
+            for name in ("channel_id", "namespace", "nonce"):
+                _require_str(observation, name)
+    return cast(TranscriptMessageIdentity, value)
+
+
 def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
     required: dict[str, tuple[str, ...]] = {
         "run_started": ("session_id", "prompt"),
@@ -1374,7 +1412,9 @@ def parse_event(raw: dict[str, Any]) -> Event:
         # Build kwargs, injecting parsed Usage where needed
         kwargs: dict[str, Any] = {}
         for f in cls.__dataclass_fields__:
-            if f == "usage":
+            if f == "identity" and f in raw:
+                kwargs[f] = _parse_transcript_identity(raw[f])
+            elif f == "usage":
                 if cls is TurnCompleted and raw.get("usage") is None:
                     kwargs["usage"] = None
                 else:

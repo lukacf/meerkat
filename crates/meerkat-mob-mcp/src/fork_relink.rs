@@ -73,10 +73,13 @@ pub enum ForkRelinkAction {
     /// The forker is gone (retired, or its session archived or deleted), so
     /// the outcome can never be delivered.
     OwnerGone,
-    /// The forker cannot be revived to receive the outcome yet, for a
-    /// reason that clears on its own. The automatic pass delivers again once
-    /// it has.
-    AwaitingOwner(OwnerRevivalDeferral),
+    /// The owner, a member of mob `mob_id`, cannot be revived to receive the
+    /// outcome yet, for a reason that clears on its own. The automatic pass
+    /// delivers again once it has, waiting on that mob.
+    AwaitingOwner {
+        mob_id: MobId,
+        reason: OwnerRevivalDeferral,
+    },
     /// Delivery failed.
     Failed(String),
 }
@@ -119,6 +122,29 @@ impl RelinkDelivery {
         }
     }
 
+    /// The handle of mob `mob_id`: the child's own (`child_handle`), or one
+    /// of [`Self::owner_mobs`] or the managed mobs now.
+    async fn mob_handle(&self, mob_id: &MobId, child_handle: &MobHandle) -> Option<MobHandle> {
+        if child_handle.mob_id() == mob_id {
+            return Some(child_handle.clone());
+        }
+        if let Some(found) = self
+            .owner_mobs
+            .iter()
+            .find(|candidate| candidate.mob_id() == mob_id)
+        {
+            return Some(found.clone());
+        }
+        match &self.managed_mobs {
+            Some(managed) => managed
+                .handles()
+                .await
+                .into_iter()
+                .find(|candidate| candidate.mob_id() == mob_id),
+            None => None,
+        }
+    }
+
     /// The member seated on `owner_session_id` in a mob other than
     /// `child_mob`, among [`Self::owner_mobs`] and the managed mobs now.
     async fn member_elsewhere(
@@ -145,6 +171,22 @@ impl RelinkDelivery {
         }
         None
     }
+}
+
+/// Wait until one of `owners` may be revivable in its mob. `false` at once
+/// when none can be any more, or `owners` is empty.
+async fn any_owner_revivable(owners: Vec<(MobHandle, OwnerRevivalDeferral)>, attempt: u32) -> bool {
+    use futures::StreamExt as _;
+    let mut waits: futures::stream::FuturesUnordered<_> = owners
+        .into_iter()
+        .map(|(owner_mob, reason)| async move { reason.cleared(&owner_mob, attempt).await })
+        .collect();
+    while let Some(revivable) = waits.next().await {
+        if revivable {
+            return true;
+        }
+    }
+    false
 }
 
 /// A live view of the mobs a host manages (see
@@ -224,7 +266,7 @@ pub async fn relink_restored_fork_children(
             .await;
             let awaiting_owner = mob_reports
                 .iter()
-                .any(|report| matches!(report.action, ForkRelinkAction::AwaitingOwner(_)));
+                .any(|report| matches!(report.action, ForkRelinkAction::AwaitingOwner { .. }));
             if claimed && awaiting_owner {
                 // This call holds the mob's one automatic re-link, so it
                 // also owns delivering again once a deferred forker
@@ -252,13 +294,13 @@ pub async fn relink_restored_fork_children(
 }
 
 /// Deliver again the outcomes `reports` could not deliver because the
-/// forker could not be revived yet ([`ForkRelinkAction::AwaitingOwner`]),
-/// each time that clears: the mob starts running, or the operation in
-/// progress on the forker has had time to finish. Returns the final report
-/// of every child in `reports`. Waiting ends when the mob completes, is
-/// destroyed or its actor is gone (its members are gone with it), or after
-/// [`MAX_OWNER_REVIVAL_WAITS`] waits. Delivery is idempotent per job, so
-/// nothing is recorded twice.
+/// owner could not be revived yet ([`ForkRelinkAction::AwaitingOwner`]),
+/// each time that clears in the OWNER's mob (which may not be the child's):
+/// it starts running, or the operation in progress on the owner has had time
+/// to finish. Returns the final report of every child in `reports`. Waiting
+/// ends when no owner mob can run again (each completed, was destroyed, lost
+/// its actor or is no longer managed), or after [`MAX_OWNER_REVIVAL_WAITS`]
+/// waits. Delivery is idempotent per job, so nothing is recorded twice.
 pub(crate) async fn redeliver_when_owners_revivable(
     service: Arc<dyn meerkat_mob::MobSessionService>,
     delivery: RelinkDelivery,
@@ -268,30 +310,34 @@ pub(crate) async fn redeliver_when_owners_revivable(
     mut reports: Vec<ForkRelinkReport>,
 ) -> Vec<ForkRelinkReport> {
     for attempt in 0..MAX_OWNER_REVIVAL_WAITS {
-        let awaiting: std::collections::BTreeMap<String, OwnerRevivalDeferral> = reports
+        let awaiting: BTreeMap<String, (MobId, OwnerRevivalDeferral)> = reports
             .iter()
             .filter_map(|report| match &report.action {
-                ForkRelinkAction::AwaitingOwner(reason) => {
-                    Some((report.job_id.clone(), reason.clone()))
+                ForkRelinkAction::AwaitingOwner { mob_id, reason } => {
+                    Some((report.job_id.clone(), (mob_id.clone(), reason.clone())))
                 }
                 _ => None,
             })
             .collect();
-        // An operation in progress clears without a run transition, so it
-        // paces the wait when any child waits on one.
-        let Some(reason) = awaiting
-            .values()
-            .find(|reason| {
-                matches!(
-                    reason,
-                    OwnerRevivalDeferral::LifecycleOperationPending { .. }
-                )
-            })
-            .or_else(|| awaiting.values().next())
-        else {
+        if awaiting.is_empty() {
             break;
-        };
-        if !reason.cleared(handle, attempt).await {
+        }
+        // Wait on each owner's own mob (read afresh), until one of them may
+        // revive its owner.
+        let mut owners = Vec::new();
+        for (owner_mob, reason) in awaiting.values() {
+            if owners.iter().any(
+                |(known, known_reason): &(MobHandle, OwnerRevivalDeferral)| {
+                    known.mob_id() == owner_mob && known_reason == reason
+                },
+            ) {
+                continue;
+            }
+            if let Some(owner_handle) = delivery.mob_handle(owner_mob, handle).await {
+                owners.push((owner_handle, reason.clone()));
+            }
+        }
+        if !any_owner_revivable(owners, attempt).await {
             break;
         }
         let retried = relink_mob_fork_children_where(
@@ -861,9 +907,10 @@ async fn deliver(
             ForkRelinkAction::OwnerGone
         }
         Err(crate::detached_delivery::DetachedCompletionError::OwnerRevivalDeferred {
+            mob_id,
             reason,
             ..
-        }) => ForkRelinkAction::AwaitingOwner(reason),
+        }) => ForkRelinkAction::AwaitingOwner { mob_id, reason },
         Err(error) => ForkRelinkAction::Failed(error.to_string()),
     }
 }

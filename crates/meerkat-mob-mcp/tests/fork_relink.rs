@@ -871,9 +871,12 @@ async fn relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
         .expect("the child is visited");
     assert_eq!(
         report.action,
-        ForkRelinkAction::AwaitingOwner(OwnerRevivalDeferral::MobNotRunning {
-            phase: meerkat_mob::MobState::Stopped
-        })
+        ForkRelinkAction::AwaitingOwner {
+            mob_id: fixture.source_mob_id(),
+            reason: OwnerRevivalDeferral::MobNotRunning {
+                phase: meerkat_mob::MobState::Stopped
+            },
+        }
     );
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(completion_records(&fixture, &owner, &job_id).await, 0);
@@ -1722,6 +1725,86 @@ async fn a_job_owner_in_a_mob_inserted_later_is_revived_through_it() {
     assert!(
         runtime.contains_session(&owner).await,
         "the owner was revived through its mob"
+    );
+    fixture.teardown().await;
+}
+
+/// A job in mob A (running) whose owner is a member of mob B, stopped with
+/// the owner not live. Delivery defers on B, and the re-link waits on B, not
+/// on the child's mob: while A runs, no attempts are spent, and when only B
+/// resumes the outcome is delivered, once (lifecycle review: the wait was on
+/// the child's running mob, so all attempts were spent at once and nothing
+/// was left waiting when B resumed).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let (owner_handle, owner) = seat_unmanaged_owner(&fixture).await;
+    let job_id = "job-owner-in-a-stopped-mob".to_string();
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec("stopped-owner-mob-child"),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    assert!(matches!(
+        run.outcome().await,
+        Some(ForkChildRunOutcome::Completed(_))
+    ));
+    // The "restart": the owner's mob B comes back stopped, the owner not
+    // live; the child's mob A runs.
+    owner_handle.stop().await.expect("stop the owner's mob");
+    let runtime = fixture.runtime_adapter.clone().expect("runtime-backed");
+    runtime
+        .unregister_session(&owner)
+        .await
+        .expect("the owner is not live after the restart");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+        fixture.service.clone(),
+        Some(Arc::clone(&runtime)),
+        meerkat_mob::MobControlPrincipal::Owner,
+    ));
+    restarted
+        .mob_insert_handle(owner_handle.mob_id().clone(), owner_handle.clone())
+        .await;
+    restarted
+        .mob_insert_handle(fixture.source_mob_id(), handle.clone())
+        .await;
+
+    // Long enough for a wait on the running mob A to spend every attempt.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 0);
+
+    // Only the owner's mob resumes.
+    owner_handle.resume().await.expect("resume the owner's mob");
+    await_completion_record(&fixture, &owner, &job_id).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        completion_records(&fixture, &owner, &job_id).await,
+        1,
+        "delivered exactly once"
+    );
+    assert!(
+        completion_record_text(&fixture, &owner, &job_id)
+            .await
+            .contains(CHILD_REPLY)
     );
     fixture.teardown().await;
 }

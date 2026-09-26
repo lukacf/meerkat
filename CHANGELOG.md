@@ -337,6 +337,17 @@ them.
   listening), `ForkJobRecord::durable_terminal_result`,
   and `TemporaryCouncilJobBinding` (`job_id`, `owner_session_id`,
   `settled_at`).
+- `meerkat-mob-mcp`: the optional owner hook `DetachedOwnerHost`
+  (`ensure_owner_live`), `DetachedOwnerError` (`OwnerGone`, `Failed`;
+  `#[non_exhaustive]`), `deliver_detached_completion_to_session` (asks the
+  hook to make a plain-session owner live on a runtime refusal and retries
+  once), `deliver_detached_completion_to_member_when_revivable` (waits out a
+  deferred member revival, bounded), and
+  `MobMcpState::with_detached_owner_host`, `set_detached_owner_host` and
+  `detached_owner_host`. `meerkat-rpc`:
+  `detached_owner::RpcDetachedOwnerHost`, which `compose_rpc_mob_state`
+  installs, so the RPC host revives a top-level session owner through the
+  same path its own next turn takes.
 - `meerkat-runtime`: `PromptInput::detached_job_completed`, the prompt input
   that carries one durable completion notice with steer handling.
 - `meerkat-core`: `ToolDeadlineSource` (`OwnerDefault`, `PerToolOverride`;
@@ -446,6 +457,14 @@ them.
   the truncation-marker length; `council` `max_rounds` 1 to 16,
   `max_exchanges` 1 to 64, `max_result_bytes` 256 to 65536, and
   `timeout_seconds` 1 to 86400 (the forked-participant TTL ceiling).
+- Live delivery of a detached completion reaches owners that are not live.
+  The live custodian waits out a deferred owner revival (the owner's mob is
+  not running, or a lifecycle operation is still reviving it) and then
+  delivers once, bounded like the re-link. A detached council whose convener
+  is a plain session rather than a mob member asks the host's
+  `DetachedOwnerHost` to make it live; the JSON-RPC host installs one, so a
+  top-level RPC session that convened a council gets one record and one wake
+  turn even after its idle executor was retired.
 - Member status never waits for the member's running turn.
   `MobHandle::member_status` (and so RPC `mob/member_status`,
   `mob_check_member`, and the operator tool `member_status`) still tries the
@@ -627,6 +646,12 @@ them.
   binding. Warm revival now releases that superseded binding by exact compare
   before binding the new registration; a binding that changed meanwhile still
   fails closed. A detached `fork_off` made this the common case.
+- A `council` never seated its participants on the JSON-RPC host or the
+  persistent mob CLI host: their `MobSessionService` wrappers
+  (`RpcMobSessionService`, `MobCliSessionService`) did not forward
+  `forked_participant_source_runtime` to the wrapped persistent service, so
+  every participant was rejected as having no source runtime. Every wrapper
+  forwards it now.
 - A `council` called without `council_id` failed to seat any participant: the
   derived id was `agent:<uuid>`, and the `:` is illegal in the temporary mob's
   comms names. The derived id is now `agent-<uuid>`.
@@ -721,6 +746,17 @@ them.
   `pattern`, supported formats, `minItems` 0 or 1) are sent as before, and a
   schema without rejected keywords is sent byte-identical. OpenAI,
   OpenAI-compatible and Gemini requests are unchanged.
+### Known limitations
+
+- A detached council's convener that is a plain session is revived live only
+  on hosts that install a `DetachedOwnerHost` (the JSON-RPC host does). A REST
+  top-level convener, and a `rkat run --keep-alive` top-level convener whose
+  idle executor the runtime retired, receive the council result through the
+  restart re-link, not live.
+- One-shot `rkat run` (without `--keep-alive`) keeps blocking `fork_off` and
+  `council`, with `blocked_because: "host_declared_unavailable"` in the
+  result.
+
 ## [0.8.42] - 2026-09-24
 
 ### Added

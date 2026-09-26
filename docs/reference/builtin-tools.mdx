@@ -443,7 +443,12 @@ store is durable and whose `MobMcpState` was built with `into_shared()` (a
 state wrapped in a plain `Arc::new` never runs it), and it retries after the
 earliest observed lease expiry;
 `MobMcpState::relink_detached_councils` runs the re-link explicitly. Blocking, `council` returns the sealed outcome as its tool
-result, with `blocked_because`. Its own `timeout_seconds` bounds it in both
+result, with `blocked_because`. A convener that is a mob member and is not
+live is revived through its mob; a convener that is a plain session is made
+live through the host's `DetachedOwnerHost`, which the JSON-RPC host installs.
+On a host without one (REST, or a `rkat run --keep-alive` session whose idle
+executor was retired), a top-level convener receives the result through the
+restart re-link instead of live. Its own `timeout_seconds` bounds it in both
 forms, and the agent loop's default tool deadline does not. See
 [Temporary Councils](/guides/temporary-councils#agent-tool).
 
@@ -451,7 +456,10 @@ An embedding host declares the capability on its `MobMcpState`
 (`with_detached_completion_delivery` / `set_detached_completion_delivery` with
 `DetachedCompletionDelivery::Available` or `Unavailable`). The default follows
 the presence of a runtime adapter, and `detached_delivery_blocked_because`
-reports why the tools would block.
+reports why the tools would block. A host whose detached-job owners can be
+plain sessions installs a `DetachedOwnerHost` (`with_detached_owner_host`) so
+their results can be delivered live after the runtime retired an idle
+executor.
 
 ### Forked children belong to their forker
 

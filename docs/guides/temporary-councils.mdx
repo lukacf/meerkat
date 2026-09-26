@@ -197,8 +197,12 @@ council. How the sealed result reaches the caller depends on the host:
   and `persisted: true`). It is delivered as a runtime input with the
   idempotency key `council:<job_id>`: an idle convener runs one turn that sees
   it, and a busy one runs exactly one follow-up turn after its current turn. A
-  convener that is a mob member and is no longer live (the runtime retired its
-  idle executor) is revived through its mob first. The status is
+  convener that is no longer live (the runtime retired its idle executor) is
+  revived first: through its mob when it is a mob member, or through the
+  host's `DetachedOwnerHost` when it is a plain session (the JSON-RPC host
+  installs one). A REST top-level convener, or a `rkat run --keep-alive` one
+  whose executor was retired, receives the result through the restart re-link
+  instead. The status is
   **`failed`** when the exit reason is a failure (`participant_seating_failed`,
   `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`); the
   record still carries the full sealed outcome, and bound-limited ends

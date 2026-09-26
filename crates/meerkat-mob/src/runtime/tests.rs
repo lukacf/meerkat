@@ -21941,6 +21941,76 @@ async fn an_abandoned_armed_fork_run_retires_its_child() {
     );
 }
 
+/// A fork in its source's own turn owes its job to that source: a job bound
+/// to any other session is refused, typed, before anything is forked or
+/// seated (the restart re-link takes the forker for the owner). Bound to the
+/// source's own session, the same fork is admitted.
+#[tokio::test]
+async fn a_caller_turn_fork_refuses_a_job_bound_to_another_session() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("owner-bound-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let child = AgentIdentity::from("owner-bound-child");
+    let sessions_before = service.persisted_sessions.read().await.len();
+    let elsewhere = SessionId::new();
+    let refused = handle
+        .fork_member_then_run_detached(
+            &a,
+            bounded_fork_child_spec(&child),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            Some(ForkJobBinding {
+                job_id: "job-bound-elsewhere".to_string(),
+                owner_session_id: elsewhere.clone(),
+            }),
+        )
+        .await;
+    match refused {
+        Err(BoundedMemberRunError::Admission(MobError::ForkJobOwnerNotSource {
+            source_member_id,
+            owner_session_id,
+            ..
+        })) => {
+            assert_eq!(source_member_id, a);
+            assert_eq!(owner_session_id, elsewhere);
+        }
+        other => panic!("expected ForkJobOwnerNotSource, got {other:?}"),
+    }
+    assert!(handle.get_member(&child).await.unwrap().is_none());
+    assert_eq!(
+        service.persisted_sessions.read().await.len(),
+        sessions_before,
+        "nothing was forked"
+    );
+
+    let own_session = handle
+        .resolve_bridge_session_id(&a)
+        .await
+        .expect("source session");
+    let (fork, run) = handle
+        .fork_member_then_run_detached(
+            &a,
+            bounded_fork_child_spec(&child),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            Some(ForkJobBinding {
+                job_id: "job-bound-to-the-source".to_string(),
+                owner_session_id: own_session,
+            }),
+        )
+        .await
+        .expect("a job bound to the source's own session is admitted");
+    assert_eq!(fork.agent_identity, child);
+    let _ = run.outcome().await;
+}
+
 /// A detached fork call dropped while its child's spawn is in flight leaves
 /// no child behind (lifecycle review: a relieved fork_off task is aborted at
 /// its next await, and the actor seats the child anyway). The seat finishes
@@ -68743,6 +68813,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::ForkMemberProvisionFailed { .. } => "fork_member_provision_failed".to_string(),
         MobError::InvalidBoundedHelperResult { .. } => "invalid_bounded_helper_result".to_string(),
+        MobError::ForkJobOwnerNotSource { .. } => "fork_job_owner_not_source".to_string(),
         MobError::BoundedHelperResultUnavailable { .. } => {
             "bounded_helper_result_unavailable".to_string()
         }

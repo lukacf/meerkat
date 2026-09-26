@@ -1791,6 +1791,20 @@ async fn a_deferred_owner_in_another_mob_is_waited_on_in_its_own_mob() {
     // Long enough for a wait on the running mob A to spend every attempt.
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(completion_records(&fixture, &owner, &job_id).await, 0);
+    // The deferral is observed: it waits on B, the owner's mob.
+    let reports = restarted.relink_restored_fork_children().await;
+    assert_eq!(
+        reports
+            .iter()
+            .find(|report| report.job_id == job_id)
+            .map(|report| report.action.clone()),
+        Some(ForkRelinkAction::AwaitingOwner {
+            mob_id: owner_handle.mob_id().clone(),
+            reason: OwnerRevivalDeferral::MobNotRunning {
+                phase: meerkat_mob::MobState::Stopped,
+            },
+        })
+    );
 
     // Only the owner's mob resumes.
     owner_handle.resume().await.expect("resume the owner's mob");

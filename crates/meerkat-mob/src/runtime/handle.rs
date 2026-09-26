@@ -1931,6 +1931,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         // would invent a modeled spawn cause that MobMachine never observed.
         MobError::ForkMemberProvisionFailed { .. }
         | MobError::InvalidBoundedHelperResult { .. }
+        | MobError::ForkJobOwnerNotSource { .. }
         | MobError::BoundedHelperResultUnavailable { .. }
         | MobError::BoundedHelperRetirementFailed { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
@@ -13255,6 +13256,11 @@ impl MobHandle {
     /// dropped before it returns leaves no child behind: once the child's
     /// spawn is under way, seating and turn admission finish on a task of
     /// their own and the child, which nobody holds, is retired.
+    ///
+    /// With [`meerkat_core::DurableForkSourceAdmission::CallerTurn`] the fork
+    /// is its source's, so a `job` must be bound to the source member's own
+    /// session; any other owner is refused with
+    /// [`MobError::ForkJobOwnerNotSource`] before anything is forked.
     #[allow(clippy::too_many_arguments)]
     pub async fn fork_member_then_run_detached(
         &self,
@@ -13268,6 +13274,21 @@ impl MobHandle {
         job: Option<ForkJobBinding>,
     ) -> Result<(ForkMemberResult, ForkChildRun), BoundedMemberRunError> {
         let result_label: String = result_label.into();
+        // A fork in its source's own turn is its source's: the re-link after
+        // a restart relies on that owner (a job bound elsewhere would be
+        // taken for an owner that is gone). Refused before any fork or seat.
+        if source_admission == meerkat_core::DurableForkSourceAdmission::CallerTurn
+            && let Some(job) = job.as_ref()
+            && let Some(source_session_id) = self.resolve_bridge_session_id(source_identity).await
+            && source_session_id != job.owner_session_id
+        {
+            return Err(MobError::ForkJobOwnerNotSource {
+                source_member_id: source_identity.clone(),
+                source_session_id,
+                owner_session_id: job.owner_session_id.clone(),
+            }
+            .into());
+        }
         if let Some(job) = job {
             member.fork_job = Some(ForkJobRecord {
                 job_id: job.job_id,

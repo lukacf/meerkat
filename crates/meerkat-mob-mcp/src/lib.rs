@@ -417,7 +417,7 @@ pub struct MobMcpState {
     /// every managed-mob operation fails closed rather than using ephemeral
     /// capability custody under a caller-requested durable root.
     persistent_storage_setup_error: Option<String>,
-    mobs: RwLock<BTreeMap<MobId, ManagedMob>>,
+    mobs: Arc<RwLock<BTreeMap<MobId, ManagedMob>>>,
     /// Bumped whenever the managed-mob handle set gains or loses an entry.
     /// Interval-free observers (e.g. mobkit's agent-event stream reconcilers)
     /// await this instead of polling `mob_handles_snapshot` on a timer. The
@@ -542,7 +542,7 @@ impl MobMcpState {
             external_tools_provider: None,
             persistent_storage_root: None,
             persistent_storage_setup_error: None,
-            mobs: RwLock::new(BTreeMap::new()),
+            mobs: Arc::new(RwLock::new(BTreeMap::new())),
             mob_set_epoch: tokio::sync::watch::Sender::new(0),
             implicit_mob_locks: Mutex::new(HashMap::new()),
             workgraph_flow_custodies: Mutex::new(HashMap::new()),
@@ -1784,7 +1784,7 @@ impl MobMcpState {
         self.schedule_temporary_council_recovery();
         if self.claim_fork_relink(&mob_id) {
             let service = self.session_service.clone();
-            let delivery = crate::fork_relink::RelinkDelivery::from_state(self).await;
+            let delivery = crate::fork_relink::RelinkDelivery::from_state(self);
             let restored_before_ms = self.created_at_ms;
             tokio::spawn(async move {
                 let reports = crate::fork_relink::relink_mob_fork_children(
@@ -1818,22 +1818,10 @@ impl MobMcpState {
         }
     }
 
-    /// The handles of every mob this state manages now, without restoring
-    /// (the re-link's possible owner mobs).
-    pub(crate) async fn managed_mob_handles(&self) -> Vec<MobHandle> {
-        self.mobs
-            .read()
-            .await
-            .values()
-            .map(|managed| {
-                managed
-                    .handle
-                    .clone()
-                    .with_command_authority(CommandAuthority::principal(
-                        self.console_principal.clone(),
-                    ))
-            })
-            .collect()
+    /// The mobs this state manages, as a live view the re-link reads afresh
+    /// each time it looks up a job's owner (a mob inserted later is found).
+    pub(crate) fn managed_mobs(&self) -> crate::fork_relink::ManagedMobs {
+        crate::fork_relink::ManagedMobs::new(Arc::clone(&self.mobs), self.console_principal.clone())
     }
 
     pub(crate) fn runtime_adapter_for_relink(

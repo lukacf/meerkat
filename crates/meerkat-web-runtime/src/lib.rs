@@ -3180,6 +3180,9 @@ pub fn close_subscription(stream_id: &str) -> Result<(), JsValue> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
     #[cfg(not(target_arch = "wasm32"))]
     use super::{Credentials, build_bootstrap_config, extract_verify_and_parse_mobpack};
     use super::{
@@ -3203,7 +3206,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use super::{helper_result_payload, spawn_member_result_payload};
     #[cfg(not(target_arch = "wasm32"))]
-    use meerkat::{SessionService, SessionServiceControlExt};
+    use meerkat::SessionServiceControlExt;
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat_core::Config;
     #[cfg(not(target_arch = "wasm32"))]
@@ -3359,14 +3362,12 @@ capabilities = [{capability_values}]
 
     #[cfg(target_arch = "wasm32")]
     async fn init_test_runtime() {
-        let init = init_runtime_from_config(
-            &json!({
-                "anthropic_api_key": "sk-test",
-                "model": "claude-sonnet-4-5"
-            })
-            .to_string(),
-        );
-        assert!(init.await.is_ok());
+        let config = json!({
+            "anthropic_api_key": "sk-test",
+            "model": "claude-sonnet-4-5"
+        })
+        .to_string();
+        assert!(init_runtime_from_config(&config).await.is_ok());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

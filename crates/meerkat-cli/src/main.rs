@@ -10811,12 +10811,8 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
-        let runtime = self.inner.comms_runtime(session_id).await.ok_or_else(|| {
-            meerkat_core::comms::StreamError::NotFound(format!("session {session_id}"))
-        })?;
-        runtime.stream(meerkat_core::comms::StreamScope::Session(
-            session_id.clone(),
-        ))
+        meerkat_mob::MobSessionService::subscribe_session_events(self.inner.as_ref(), session_id)
+            .await
     }
 
     fn supports_persistent_sessions(&self) -> bool {
@@ -11224,6 +11220,19 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         meerkat_mob::MobSessionService::load_revivable_retired_session(
             self.inner.as_ref(),
             session_id,
+        )
+        .await
+    }
+
+    async fn publish_boundary_appends_discarded_for_actor(
+        &self,
+        actor_witness: &meerkat::LiveSessionActorWitness,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::publish_boundary_appends_discarded_for_actor(
+            self.inner.as_ref(),
+            actor_witness,
+            discarded,
         )
         .await
     }
@@ -14220,12 +14229,8 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
-        let runtime = self.inner.comms_runtime(session_id).await.ok_or_else(|| {
-            meerkat_core::comms::StreamError::NotFound(format!("session {session_id}"))
-        })?;
-        runtime.stream(meerkat_core::comms::StreamScope::Session(
-            session_id.clone(),
-        ))
+        meerkat_mob::MobSessionService::subscribe_session_events(self.inner.as_ref(), session_id)
+            .await
     }
 
     fn supports_persistent_sessions(&self) -> bool {
@@ -14631,6 +14636,19 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
             message_count,
             tool_access_policy,
             target,
+        )
+        .await
+    }
+
+    async fn publish_boundary_appends_discarded_for_actor(
+        &self,
+        actor_witness: &meerkat::LiveSessionActorWitness,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::publish_boundary_appends_discarded_for_actor(
+            self.inner.as_ref(),
+            actor_witness,
+            discarded,
         )
         .await
     }
@@ -27108,6 +27126,144 @@ default_model = "gpt-5.4"
             child_policy, parent_policy,
             "spawn must propagate the exact factory-resolved parent policy"
         );
+    }
+
+    #[cfg(feature = "mob")]
+    fn boundary_discard_wrapper_request() -> CreateSessionRequest {
+        let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        ));
+        CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "gpt-5.4".to_string(),
+            prompt: "seed".to_string().into(),
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
+            max_tokens: Some(32),
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                    llm_override,
+                )),
+                ..SessionBuildOptions::default()
+            }),
+            labels: None,
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    async fn assert_boundary_discard_wrapper_publication(
+        service: &dyn meerkat_mob::MobSessionService,
+        witness: meerkat::LiveSessionActorWitness,
+    ) {
+        use futures::{FutureExt, StreamExt};
+        use meerkat_core::event::BoundaryAppendsDiscarded;
+
+        let session_id = witness.session_id().clone();
+        let mut events =
+            meerkat_mob::MobSessionService::subscribe_session_events(service, &session_id)
+                .await
+                .unwrap();
+        let discarded = BoundaryAppendsDiscarded {
+            session_id: session_id.clone(),
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+        };
+        service
+            .publish_boundary_appends_discarded_for_actor(&witness, &discarded)
+            .await
+            .expect("wrapper must forward to the exact publication owner");
+        let published = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.source_session_id(), Some(&session_id));
+        assert!(matches!(published.payload,
+            AgentEvent::BoundaryAppendsDiscarded(value) if value == discarded));
+
+        let registry = meerkat_session::LiveSessionActorRegistry::default();
+        let other = registry
+            .insert_and_publish(
+                &meerkat::LiveSessionActorWitnessSlot::default(),
+                session_id.clone(),
+                meerkat_core::TransientTurnContextStateHandle::new(),
+            )
+            .unwrap();
+        assert!(matches!(
+            service.publish_boundary_appends_discarded_for_actor(&other, &discarded).await,
+            Err(meerkat_core::service::SessionError::NotFound { id }) if id == session_id
+        ));
+        let mut mismatch = discarded;
+        mismatch.session_id = SessionId::new();
+        assert!(matches!(
+            service
+                .publish_boundary_appends_discarded_for_actor(&witness, &mismatch)
+                .await,
+            Err(meerkat_core::service::SessionError::Agent(_))
+        ));
+        assert!(events.next().now_or_never().is_none());
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn run_mob_session_service_forwards_boundary_discard_to_exact_actor() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .shell(false);
+        let inner = Arc::new(build_cli_service(factory, Config::default(), None));
+        let wrapper = RunMobSessionService::new(Arc::clone(&inner));
+        let created = wrapper
+            .create_session(boundary_discard_wrapper_request())
+            .await
+            .unwrap();
+        let witness = inner
+            .live_session_actor_witness(&created.session_id)
+            .await
+            .unwrap();
+        assert_boundary_discard_wrapper_publication(&wrapper, witness).await;
+    }
+
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    #[tokio::test]
+    async fn mob_cli_session_service_forwards_boundary_discard_to_exact_actor() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = sqlite_session_store(&temp);
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&store),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        );
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(store)
+            .builtins(false)
+            .shell(false);
+        let (inner, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            temp.path().join("config_state.json"),
+            None,
+            None,
+        );
+        let wrapper = MobCliSessionService::new(Arc::clone(&inner));
+        let session = Session::new();
+        let bindings = runtime_adapter
+            .prepare_bindings(session.id().clone())
+            .await
+            .unwrap();
+        let mut request = boundary_discard_wrapper_request();
+        let build = request.build.as_mut().unwrap();
+        build.resume_session = Some(session);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
+        let created = wrapper.create_session(request).await.unwrap();
+        let witness = inner
+            .live_session_actor_witness(&created.session_id)
+            .await
+            .unwrap();
+        assert_boundary_discard_wrapper_publication(&wrapper, witness).await;
     }
 
     /// Regression (0.8.42): `delegate` from plain `rkat run` failed with

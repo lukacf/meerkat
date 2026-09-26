@@ -23,7 +23,7 @@ IDENTITY = {
     },
 }
 EVENTS = [
-    ({"type": "run_started", "session_id": "session-1", "prompt": "hello"}, RunStarted),
+    ({"type": "run_started", "session_id": "session-1", "input": {"kind": "content", "content": "hello"}}, RunStarted),
     (
         {
             "type": "run_completed",
@@ -142,9 +142,92 @@ def test_identity_support_types_are_public_generated_contracts():
         "ObjectiveId",
         "LiveChannelId",
         "RunId",
+        "RunInput",
     ]:
         assert getattr(meerkat, name) is getattr(event_types, name)
+    assert get_type_hints(RunStarted)["input"] == event_types.RunInput
     assert (
         get_type_hints(RunStarted)["identity"]
         == event_types.TranscriptMessageIdentity | None
     )
+
+
+@pytest.mark.parametrize("run_input", [
+    {"kind": "content", "content": "hello"},
+    {"kind": "content", "content": [{"type": "text", "text": "hello"}]},
+    {"kind": "pending_tool_results"},
+])
+def test_run_started_parses_runtime_input_without_fabricating_prompt(run_input):
+    raw = {
+        "type": "run_started",
+        "session_id": "session-1",
+        "input": deepcopy(run_input),
+        "identity": deepcopy(IDENTITY),
+    }
+    event = parse_event(raw)
+    assert isinstance(event, RunStarted)
+    assert event.input == run_input
+    assert event.identity == IDENTITY
+    assert "prompt" not in event.__dataclass_fields__
+
+
+@pytest.mark.parametrize("input_fields", [
+    {},
+    {"prompt": "old wire payload"},
+    {"input": None},
+    {"input": "hello"},
+    {"input": {}},
+    {"input": {"kind": "unknown"}},
+    {"input": {"kind": "content"}},
+    {"input": {"kind": "content", "content": None}},
+    {"input": {"kind": "content", "content": 7}},
+    {"input": {"kind": "content", "content": ["invalid block"]}},
+])
+def test_run_started_rejects_missing_or_malformed_runtime_input(input_fields):
+    raw = {"type": "run_started", "session_id": "session-1", **input_fields}
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
+
+
+@pytest.mark.parametrize("block", [
+    {"type": "text", "text": "hello"},
+    {"type": "image", "media_type": "image/png", "source": "inline", "data": "aGVsbG8="},
+    {"type": "image", "media_type": "image/png", "source": "blob", "blob_id": "blob-1"},
+    {"type": "video", "media_type": "video/mp4", "duration_ms": 12, "source": "inline", "data": "aGVsbG8="},
+    {"type": "video", "media_type": "video/mp4", "duration_ms": 12, "source": "uri", "uri": "https://example.test/video.mp4"},
+    {"type": "structured", "data": {"ready": True}},
+    {"type": "structured", "data": None},
+    {"type": "skill_context", "skill_key": {"source_uuid": "00000000-0000-4000-8000-000000000001", "skill_name": "test-skill"}, "text": "skill body"},
+])
+def test_run_started_preserves_each_core_content_block_variant(block):
+    run_input = {"kind": "content", "content": [deepcopy(block)]}
+    event = parse_event({"type": "run_started", "session_id": "s", "input": run_input})
+    assert isinstance(event, RunStarted)
+    assert event.input == run_input
+
+
+@pytest.mark.parametrize("block", [
+    {},
+    {"type": "unknown"},
+    {"type": "text"},
+    {"type": "text", "text": 7},
+    {"type": "image", "media_type": "image/png", "source": "inline"},
+    {"type": "image", "media_type": "image/png", "source": "blob", "blob_id": 7},
+    {"type": "image", "media_type": "image/png", "source": "uri", "uri": "https://example.test/image.png"},
+    {"type": "video", "media_type": "video/mp4", "duration_ms": -1, "source": "inline", "data": "aGVsbG8="},
+    {"type": "video", "media_type": "video/mp4", "duration_ms": True, "source": "uri", "uri": "https://example.test/video.mp4"},
+    {"type": "video", "media_type": "video/mp4", "duration_ms": 1, "source": "uri", "uri": None},
+    {"type": "structured"},
+    {"type": "skill_context", "skill_key": {}, "text": "skill body"},
+    {"type": "skill_context", "skill_key": {"sourceUuid": "00000000-0000-4000-8000-000000000001", "skillName": "test-skill"}, "text": "skill body"},
+    {"type": "skill_context", "skill_key": {"source_uuid": "invalid", "skill_name": "test-skill"}, "text": "skill body"},
+    {"type": "skill_context", "skill_key": {"source_uuid": "00000000-0000-4000-8000-000000000001", "skill_name": "Invalid--skill"}, "text": "skill body"},
+])
+def test_run_started_rejects_malformed_core_content_block_variants(block):
+    raw = {"type": "run_started", "session_id": "s", "input": {"kind": "content", "content": [block]}}
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw

@@ -73,7 +73,8 @@ them.
   `MeerkatMachineInput`, `MeerkatMachineInputVariant`, kernel `Input` and
   `InputKind` gain `ResolveAbandonedCompletionResult`, with the new kernel
   `inputs::ResolveAbandonedCompletionResult` payload.
-  `MeerkatMachineEffect`, kernel `Effect` and `EffectKind` gain
+  `MeerkatMachineEffect`, `MeerkatMachineEffectVariant` (in both
+  meerkat-runtime and meerkat-machine-schema), kernel `Effect` and `EffectKind` gain
   `AbandonedCompletionResultResolved`, with the new kernel
   `effects::AbandonedCompletionResultResolved` payload. Exhaustive matches
   must handle the new variants. `TransitionId` gains
@@ -100,6 +101,12 @@ them.
   exact recipient set and original run association; it cannot borrow a newer
   run's terminal or change that run's correlation.
 
+- Python `RunStarted` now exposes required `session_id` and typed `input:
+  RunInput` fields matching the runtime wire contract, replacing the obsolete
+  `prompt` field. Match `input["kind"]` for caller content or pending tool
+  results; a continuation has no prompt. Direct constructors must supply both
+  fields. Legacy prompt-only payloads are reported as malformed events.
+
 ### Added
 
 - `meerkat_core::lifecycle::CoreExecutor::publish_boundary_appends_discarded(&mut self, &BoundaryAppendsDiscarded) -> Result<(), CoreExecutorError>`
@@ -122,6 +129,12 @@ them.
 
 ### Fixed
 
+- Agent event inventories now include discarded boundary appends and every
+  core event discriminator, so version-matched SDK streams retain these events.
+  RPC and CLI session wrappers forward discard publication to the exact actor.
+  CLI mob subscriptions observe the canonical session stream independently of
+  peer-comms configuration. The local mob-MCP service publishes discard events
+  with ordered per-actor event sequences.
 - Member-host shutdown cancels outstanding event polls and refuses late
   successful pages from the stopped observation. After a current host-status
   failure, the next authenticated observation re-derives wired-peer trust

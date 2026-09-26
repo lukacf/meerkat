@@ -888,13 +888,64 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             session_id: SessionId::new(),
             record: rewrite_record_fixture(),
         },
+        AgentEvent::BoundaryAppendApplied {
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            input_id: meerkat_core::lifecycle::InputId::new(),
+            content: ContentInput::Text("background job finished".to_string()),
+            append_count: 1,
+            notices: vec![],
+            transcript_start: Some(3),
+        },
+        AgentEvent::BoundaryAppendsDiscarded(meerkat_core::event::BoundaryAppendsDiscarded {
+            session_id: SessionId::new(),
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+        }),
     ];
 
     for event in events {
         let kind = meerkat_core::agent_event_type(&event);
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["type"], kind, "core mapping must match serialization");
         assert!(
             KNOWN_AGENT_EVENT_TYPES.contains(&kind),
             "documented event catalog missing {kind}"
+        );
+    }
+
+    let documented: std::collections::BTreeSet<_> =
+        KNOWN_AGENT_EVENT_TYPES.iter().copied().collect();
+    assert_eq!(
+        documented.len(),
+        KNOWN_AGENT_EVENT_TYPES.len(),
+        "documented event catalog contains duplicate discriminators"
+    );
+
+    // Compare the entire core-derived union, including variants without a
+    // hand-authored value above. New core variants must reach every SDK's
+    // fail-closed inventory, even when the fixture list has not grown yet.
+    #[cfg(feature = "schema")]
+    {
+        let schema = serde_json::to_value(schemars::schema_for!(AgentEvent)).unwrap();
+        let variants = schema["oneOf"]
+            .as_array()
+            .expect("AgentEvent must have a tagged schema union");
+        let core_discriminators: std::collections::BTreeSet<_> = variants
+            .iter()
+            .map(|variant| {
+                variant["properties"]["type"]["const"]
+                    .as_str()
+                    .expect("every core event variant must have a wire discriminator")
+            })
+            .collect();
+        assert_eq!(
+            core_discriminators.len(),
+            variants.len(),
+            "core event variants must have distinct wire discriminators"
+        );
+        assert_eq!(
+            documented, core_discriminators,
+            "documented event catalog must equal the complete core event schema"
         );
     }
 }

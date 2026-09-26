@@ -1246,6 +1246,7 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "assistant_image_appended",
   "tool_call_requested",
   "tool_result_received",
+  "server_tool_content",
   "turn_completed",
   "turn_usage_accounting_unmeasured",
   "turn_usage_accounting_identity_disputed",
@@ -1257,6 +1258,10 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "compaction_failed",
   "budget_warning",
   "retrying",
+  "model_fallback_staged",
+  "model_fallback_committed",
+  "model_fallback_skipped",
+  "model_fallback_target_failed",
   "skills_resolved",
   "skill_resolution_failed",
   "interaction_complete",
@@ -1266,9 +1271,11 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "tool_config_changed",
   "background_job_completed",
   "transcript_rewrite_committed",
+  "transcript_rewrite_audit_receipt_committed",
   "peer_content_ingested",
   "provider_cache_breakpoints_discarded",
-  "boundary_append_applied"
+  "boundary_append_applied",
+  "boundary_appends_discarded"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];

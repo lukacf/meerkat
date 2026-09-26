@@ -62,7 +62,7 @@ struct RecoveryFixture {
 }
 
 impl RecoveryFixture {
-    async fn new(label: &str) -> Self {
+    async fn new(label: &str, drop_status_replies: bool) -> Self {
         let host = support::spawn_scripted_host_peer(label).await;
         let receiver = Arc::new(
             support::spawn_peer_comms_endpoint(&format!("{label}-remote"), true, None).await,
@@ -71,9 +71,11 @@ impl RecoveryFixture {
         host.bind_member_endpoint("remote", Arc::clone(&receiver));
         let controlling = support::create_controlling_mob(label).await;
         let report = controlling.bind_scripted(&host).await;
-        // The tests explicitly supply current status completions. Do not let
-        // a background status response independently retry the held scenario.
-        host.drop_next_host_status_replies(u64::MAX);
+        if drop_status_replies {
+            // The outage test explicitly supplies current completions. A
+            // successful background response must not retry the held install.
+            host.drop_next_host_status_replies(u64::MAX);
+        }
         controlling
             .handle
             .spawn_spec(SpawnMemberSpec::new("worker", "local"))
@@ -179,6 +181,53 @@ impl RecoveryFixture {
         (next, state)
     }
 
+    async fn observe_healthy_host_status(&self, parked: ParkedActor) -> ParkedActor {
+        use crate::runtime::bridge_protocol::{
+            BridgeCommand, BridgeHostStatusPayload, BridgeHostStatusResponse,
+            BridgeProtocolVersion, decode_bridge_payload,
+        };
+
+        let handle = &self.controlling.handle;
+        let bridge = &handle.supervisor_bridge;
+        let authority = bridge.authority().await;
+        let peer = self.host.endpoint.self_descriptor();
+        let supervisor = bridge
+            .supervisor_spec_for_authority_and_recipient(&authority, &peer)
+            .await
+            .expect("current supervisor peer");
+        let command = BridgeCommand::HostStatus(BridgeHostStatusPayload {
+            supervisor: supervisor.into(),
+            epoch: self.epoch,
+            binding_generation: self.expected.binding_generation,
+            protocol_version: BridgeProtocolVersion::V4,
+            mob_id: self.expected.mob_id.clone(),
+        });
+        let value = bridge
+            .send_bridge_command_as_authority(&authority, &peer, &command, Duration::from_secs(10))
+            .await
+            .expect("healthy host returns an authenticated status reply");
+        let status: BridgeHostStatusResponse =
+            decode_bridge_payload(&command, value, "stale-binding control status")
+                .expect("typed host status");
+        handle
+            .command_tx
+            .send(RoutedMobCommand::internal(
+                MobCommand::HostStatusPollCompleted {
+                    host_id: self.expected.host_id.clone(),
+                    binding_epoch: self.epoch,
+                    binding_generation: self.expected.binding_generation,
+                    binding_incarnation: 1,
+                    result: Ok(status),
+                },
+            ))
+            .await
+            .expect("queue authenticated current status");
+        let (next, entered) = ParkedActor::enqueue(handle).await;
+        parked.release().await;
+        entered.await.expect("current status processed");
+        next
+    }
+
     async fn receiver_trusts_sender(&self) -> bool {
         let sender_id = self.sender.peer_id().expect("sender peer id");
         self.receiver
@@ -194,7 +243,7 @@ impl RecoveryFixture {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn same_boot_token_after_current_status_failure_reinstalls_routes_before_recovery() {
     let _serial = lock_real_comms_tests();
-    let fixture = RecoveryFixture::new("same-boot-outage").await;
+    let fixture = RecoveryFixture::new("same-boot-outage", true).await;
     let parked = ParkedActor::enter(&fixture.controlling.handle).await;
     let (parked, initial) = fixture.observe_same_token(parked, None).await;
     assert!(initial.pending_route_installs.is_empty());
@@ -302,9 +351,13 @@ async fn same_boot_token_after_current_status_failure_reinstalls_routes_before_r
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stale_binding_status_failure_preserves_same_token_route_convergence() {
     let _serial = lock_real_comms_tests();
-    let fixture = RecoveryFixture::new("stale-binding-outage").await;
+    // Keep periodic replies healthy: dropped replies would become unrelated
+    // current-binding timeout failures after ten seconds. Establish the same
+    // authenticated status source so periodic successes cannot change the
+    // freshness reason while this stale-failure control is being asserted.
+    let fixture = RecoveryFixture::new("stale-binding-outage", false).await;
     let parked = ParkedActor::enter(&fixture.controlling.handle).await;
-    let (parked, _) = fixture.observe_same_token(parked, None).await;
+    let parked = fixture.observe_healthy_host_status(parked).await;
     let installs_before = fixture.host.install_peer_trust_count();
     let handle = &fixture.controlling.handle;
     let before = handle
@@ -312,6 +365,7 @@ async fn stale_binding_status_failure_preserves_same_token_route_convergence() {
         .host(&fixture.expected.host_id)
         .expect("host was observed");
     assert_eq!(before.reachability, WireReachability::Reachable);
+    assert_eq!(before.freshness_reason, "host_status_ack");
 
     // Fence zero predates this fixture's first bind (incarnation one). Keep
     // the durable epoch and generation current so only this fence rejects it.

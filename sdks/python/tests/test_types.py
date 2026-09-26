@@ -4910,9 +4910,9 @@ def test_match_case_text_delta():
 
 
 def test_match_case_run_started():
-    event = parse_event({"type": "run_started", "session_id": "s1", "prompt": "yo"})
+    event = parse_event({"type": "run_started", "session_id": "s1", "input": {"kind": "content", "content": "yo"}})
     match event:
-        case RunStarted(session_id=sid, prompt=p):
+        case RunStarted(session_id=sid, input={"kind": "content", "content": p}):
             assert sid == "s1"
             assert p == "yo"
         case _:

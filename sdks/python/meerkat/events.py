@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
+from uuid import UUID
 
 from .errors import MeerkatError
 from .generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
@@ -39,6 +40,7 @@ from .generated.event_types import (
     ObjectiveId,
     RealtimeMessageOrigin,
     RunId,
+    RunInput,
     TranscriptMessageIdentity,
 )
 
@@ -143,8 +145,8 @@ class Event:
 class RunStarted(Event):
     """Agent run has started."""
 
-    session_id: str = ""
-    prompt: ContentInput = ""
+    session_id: str
+    input: RunInput
     identity: TranscriptMessageIdentity | None = None
 
 
@@ -1246,9 +1248,70 @@ def _parse_transcript_identity(value: Any) -> TranscriptMessageIdentity:
     return cast(TranscriptMessageIdentity, value)
 
 
+def _validate_run_input_block(block: Any) -> None:
+    """Validate the core ContentBlock union without projecting its payload."""
+    if not isinstance(block, dict):
+        raise ValueError("input content block must be object")
+    kind = block.get("type")
+    if kind == "text":
+        _require_str(block, "text")
+    elif kind in {"image", "video"}:
+        _require_str(block, "media_type")
+        source = block.get("source")
+        if kind == "video":
+            duration = _require_non_negative_int(block, "duration_ms")
+            if duration > 2**64 - 1:
+                raise ValueError("video duration_ms exceeds u64")
+        if source == "inline":
+            _require_str(block, "data")
+        elif kind == "image" and source == "blob":
+            _require_str(block, "blob_id")
+        elif kind == "video" and source == "uri":
+            _require_str(block, "uri")
+        else:
+            raise ValueError("input content block has unsupported media source")
+    elif kind == "structured":
+        if "data" not in block:
+            raise ValueError("structured input content requires data")
+    elif kind == "skill_context":
+        key = block.get("skill_key")
+        if not isinstance(key, dict):
+            raise ValueError("skill context requires skill_key")
+        UUID(_require_str(key, "source_uuid"))
+        name = _require_str(key, "skill_name")
+        if (
+            not name
+            or name.startswith("-")
+            or name.endswith("-")
+            or "--" in name
+            or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789-" for char in name)
+        ):
+            raise ValueError("skill context requires a canonical skill_name")
+        _require_str(block, "text")
+    else:
+        raise ValueError("input content block must have a known type")
+
+
+def _parse_run_input(value: Any) -> RunInput:
+    """Preserve the runtime input variant, including promptless continuations."""
+    if not isinstance(value, dict):
+        raise ValueError("input must be object")
+    kind = value.get("kind")
+    if kind == "content":
+        content = value.get("content")
+        if not isinstance(content, str):
+            if not isinstance(content, list):
+                raise ValueError("input.content must be string or content block list")
+            for block in content:
+                _validate_run_input_block(block)
+    elif kind != "pending_tool_results":
+        raise ValueError("input.kind must be a known run input variant")
+    return cast(RunInput, value)
+
+
 def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
     required: dict[str, tuple[str, ...]] = {
-        "run_started": ("session_id", "prompt"),
+        "run_started": ("session_id", "input"),
         "run_completed": ("session_id", "result", "usage"),
         "extraction_succeeded": ("session_id", "structured_output"),
         "extraction_failed": ("session_id", "last_output", "attempts", "reason"),
@@ -1333,9 +1396,8 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
     for field_name in required.get(event_type, ()):
         if field_name == "usage":
             _parse_usage(raw.get("usage"))
-        elif field_name == "prompt":
-            if "prompt" not in raw:
-                raise ValueError("prompt is required")
+        elif field_name == "input" and event_type == "run_started":
+            _parse_run_input(raw.get("input"))
         elif field_name == "skills":
             _parse_skill_key_list(raw.get("skills"))
         elif field_name in {"patch", "envelope"}:
@@ -1412,7 +1474,9 @@ def parse_event(raw: dict[str, Any]) -> Event:
         # Build kwargs, injecting parsed Usage where needed
         kwargs: dict[str, Any] = {}
         for f in cls.__dataclass_fields__:
-            if f == "identity" and f in raw:
+            if f == "input" and cls is RunStarted:
+                kwargs[f] = _parse_run_input(raw.get(f))
+            elif f == "identity" and f in raw:
                 kwargs[f] = _parse_transcript_identity(raw[f])
             elif f == "usage":
                 if cls is TurnCompleted and raw.get("usage") is None:

@@ -4400,6 +4400,13 @@ impl CoreCommsRuntime for LocalCommsRuntime {
 struct LocalSessionActor {
     comms: Arc<LocalCommsRuntime>,
     witness: meerkat_session::LiveSessionActorWitness,
+    // The lock covers sequence allocation and broadcast send together, so
+    // concurrent publishers cannot send allocated sequences out of order.
+    #[allow(
+        clippy::mutex_integer,
+        reason = "serializes allocation and publication"
+    )]
+    next_event_seq: std::sync::Mutex<u64>,
 }
 
 struct LocalSessionService {
@@ -4562,6 +4569,7 @@ impl LocalSessionService {
                 LocalSessionActor {
                     comms,
                     witness: witness.clone(),
+                    next_event_seq: std::sync::Mutex::new(1),
                 },
             );
             witness
@@ -4609,9 +4617,10 @@ impl SessionService for LocalSessionService {
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
-        if !self.sessions.read().await.contains_key(id) {
-            return Err(SessionError::NotFound { id: id.clone() });
-        }
+        let sessions = self.sessions.read().await;
+        let actor = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         // System messages are transcript entries, not request-local prompt
         // decoration. This lightweight local service retains their identity
         // separately and keeps the conversational prompt byte-exact.
@@ -4624,7 +4633,10 @@ impl SessionService for LocalSessionService {
             current
         };
         if let Some(event_tx) = event_tx {
-            let mut seq = 1u64;
+            let mut seq = actor
+                .next_event_seq
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _ = event_tx.send(EventEnvelope::new_session(
                 id.clone(),
                 next_seq(&mut seq),
@@ -4907,6 +4919,52 @@ impl SessionServiceHistoryExt for LocalSessionService {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobSessionService for LocalSessionService {
+    async fn publish_boundary_appends_discarded_for_actor(
+        &self,
+        actor_witness: &meerkat_session::LiveSessionActorWitness,
+        discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+    ) -> Result<(), SessionError> {
+        if discarded.session_id != *actor_witness.session_id() {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(
+                    "boundary discard session does not match the exact actor".to_string(),
+                ),
+            ));
+        }
+        // Hold the registry boundary through publication so a predecessor
+        // cannot resolve the event channel of a replacement actor.
+        let sessions = self.sessions.read().await;
+        let actor = sessions
+            .get(actor_witness.session_id())
+            .filter(|actor| actor.witness.eq(actor_witness) && actor_witness.is_live())
+            .ok_or_else(|| SessionError::NotFound {
+                id: actor_witness.session_id().clone(),
+            })?;
+        if discarded.input_ids.is_empty() {
+            return Ok(());
+        }
+        let event_txs = self.event_txs.read().await;
+        let event_tx =
+            event_txs
+                .get(actor_witness.session_id())
+                .ok_or_else(|| SessionError::NotFound {
+                    id: actor_witness.session_id().clone(),
+                })?;
+        let mut next_seq = actor
+            .next_event_seq
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let event = EventEnvelope::new_session(
+            actor_witness.session_id().clone(),
+            *next_seq,
+            None,
+            AgentEvent::BoundaryAppendsDiscarded(discarded.clone()),
+        );
+        *next_seq += 1;
+        let _ = event_tx.send(event);
+        Ok(())
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         _source_session_id: &meerkat_core::SessionId,
@@ -8606,6 +8664,135 @@ mod tests {
             Some(1),
             "archive must retain ordinary System transcript entries"
         );
+    }
+
+    #[tokio::test]
+    async fn local_session_service_publishes_boundary_discard_with_exact_actor_and_sequence() {
+        use futures::{FutureExt, StreamExt};
+        use meerkat_core::event::BoundaryAppendsDiscarded;
+
+        let service = LocalSessionService::new();
+        let request = || CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: None,
+            labels: None,
+        };
+        let slot = meerkat_session::LiveSessionActorWitnessSlot::default();
+        let created = service
+            .create_session_with_actor_slot(request(), &slot)
+            .await
+            .unwrap();
+        let witness = slot.witness().unwrap();
+        let session_id = created.session_id;
+        let mut events =
+            meerkat_mob::MobSessionService::subscribe_session_events(&service, &session_id)
+                .await
+                .unwrap();
+        let discarded = BoundaryAppendsDiscarded {
+            session_id: session_id.clone(),
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+        };
+        let mut last_seq = 0;
+        for _ in 0..2 {
+            service
+                .start_turn(
+                    &session_id,
+                    StartTurnRequest {
+                        injected_context: Vec::new(),
+                        prompt: "continue".to_string().into(),
+                        system_prompt: None,
+                        event_tx: None,
+                        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                            HandlingMode::Queue,
+                            None,
+                            None,
+                        ),
+                    },
+                )
+                .await
+                .unwrap();
+            for _ in 0..4 {
+                let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(event.seq, last_seq + 1);
+                last_seq = event.seq;
+            }
+            service
+                .publish_boundary_appends_discarded_for_actor(&witness, &discarded)
+                .await
+                .expect("local session owner must publish an exact discard");
+            let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.seq, last_seq + 1);
+            last_seq = event.seq;
+            assert_eq!(event.source_session_id(), Some(&session_id));
+            assert!(matches!(event.payload,
+                AgentEvent::BoundaryAppendsDiscarded(value) if value == discarded));
+        }
+        let mut mismatch = discarded.clone();
+        mismatch.session_id = SessionId::new();
+        assert!(matches!(
+            service
+                .publish_boundary_appends_discarded_for_actor(&witness, &mismatch)
+                .await,
+            Err(SessionError::Agent(_))
+        ));
+        let mut empty = discarded.clone();
+        empty.input_ids.clear();
+        service
+            .publish_boundary_appends_discarded_for_actor(&witness, &empty)
+            .await
+            .unwrap();
+        assert!(events.next().now_or_never().is_none());
+
+        assert!(
+            service
+                .discard_live_session_actor_under_runtime_turn_boundary(&witness)
+                .await
+                .unwrap()
+        );
+        let mut replacement = request();
+        replacement.build = Some(meerkat_core::service::SessionBuildOptions {
+            resume_session: Some(Session::with_id(session_id.clone())),
+            ..Default::default()
+        });
+        let replacement_slot = meerkat_session::LiveSessionActorWitnessSlot::default();
+        service
+            .create_session_with_actor_slot(replacement, &replacement_slot)
+            .await
+            .unwrap();
+        let current = replacement_slot.witness().unwrap();
+        let mut current_events =
+            meerkat_mob::MobSessionService::subscribe_session_events(&service, &session_id)
+                .await
+                .unwrap();
+        assert!(matches!(
+            service.publish_boundary_appends_discarded_for_actor(&witness, &discarded).await,
+            Err(SessionError::NotFound { id }) if id == session_id
+        ));
+        assert!(current_events.next().now_or_never().is_none());
+        service
+            .publish_boundary_appends_discarded_for_actor(&current, &discarded)
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), current_events.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event.payload,
+            AgentEvent::BoundaryAppendsDiscarded(value) if value == discarded));
     }
 
     #[tokio::test]

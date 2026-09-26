@@ -377,6 +377,53 @@ async fn failed_completion_exact_payload_finalizes_the_real_producer_batch() {
 }
 
 #[tokio::test]
+async fn current_run_abandoned_receipt_finalizes_without_rewriting_live_correlation() {
+    let fixture = Fixture::failed_batch().await;
+    fixture.pending().await;
+    let shared = fixture.driver.lock().await.shared_dsl_authority();
+    let before = shared.lock().unwrap().state().clone();
+    assert_eq!(
+        before.runtime_completion_result_run_id,
+        Some(mm::RunId::from_domain(&fixture.run_id))
+    );
+    assert!(!before.runtime_completion_result_resolved);
+    {
+        let entry = fixture.driver.lock().await;
+        let witness = entry
+            .input_terminal_completion_authorization_witness(&fixture.inputs)
+            .unwrap();
+        assert_eq!(
+            owner::machine_abandoned_completion_error_for_batch(&entry, &witness).unwrap(),
+            Some(meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                FAILURE
+            ))
+        );
+    }
+    let gate = Arc::new(crate::tokio::sync::Mutex::new(()));
+    resolve_machine_terminal_completion_waiters(
+        &fixture.driver,
+        None,
+        gate.lock_owned().await,
+        &fixture.carrier,
+        &fixture.inputs,
+        &fixture.run_id,
+        FAILURE.to_owned(),
+    )
+    .await
+    .unwrap();
+    let finalized = fixture.finalized().await;
+    assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
+    assert_live_run_unchanged(&before, shared.lock().unwrap().state());
+    // Durable receipt phase owns finalization. Reading it again is idempotent
+    // even though receipt classification leaves the run-result slot unchanged.
+    drain_recovered_input_terminal_completions(&fixture.driver, None, &mut NoExecution)
+        .await
+        .unwrap();
+    assert_eq!(finalized, fixture.finalized().await);
+    assert_live_run_unchanged(&before, shared.lock().unwrap().state());
+}
+
+#[tokio::test]
 async fn failed_completion_without_waiters_still_finalizes_durable_receipts() {
     let fixture = Fixture::failed_batch().await;
     let gate = Arc::new(crate::tokio::sync::Mutex::new(()));
@@ -582,6 +629,13 @@ async fn abandoned_completion_generated_authority_rejects_wrong_facts() {
 #[tokio::test]
 async fn failed_completion_receipt_write_fault_retains_carrier_then_retries_atomically() {
     let fixture = Fixture::failed_batch().await;
+    let shared = fixture.driver.lock().await.shared_dsl_authority();
+    let live_before = shared.lock().unwrap().state().clone();
+    assert_eq!(
+        live_before.runtime_completion_result_run_id,
+        Some(mm::RunId::from_domain(&fixture.run_id))
+    );
+    assert!(!live_before.runtime_completion_result_resolved);
     let before = fixture
         .inputs
         .iter()
@@ -616,6 +670,7 @@ async fn failed_completion_receipt_write_fault_retains_carrier_then_retries_atom
     )
     .await;
     assert!(result.is_err());
+    assert_live_run_unchanged(&live_before, shared.lock().unwrap().state());
     assert_eq!(
         before,
         fixture

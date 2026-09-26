@@ -348,10 +348,12 @@ impl PromptInput {
     ///
     /// The record (a `BackgroundJob` system notice with `persisted: true`) is
     /// the turn's only content, carried as a typed runtime append with no user
-    /// text. An idle owner therefore runs one real turn that sees it; a
-    /// running owner gets exactly one follow-up turn after its current turn
-    /// ends. The append is committed to the transcript with the run, like any
-    /// turn content. `idempotency_key` names the job, so
+    /// text. An idle owner therefore runs one real turn that sees it. A
+    /// running owner takes it as a durable steer: it joins the running turn
+    /// and the turn's next model call sees it; only if the turn ends before
+    /// another model call does the owner get one follow-up turn with it. The
+    /// append is committed to the transcript with the run, like any turn
+    /// content. `idempotency_key` names the job, so
     /// the record is admitted and written exactly once however often delivery
     /// is retried, and the durable input survives a restart once admitted.
     pub fn detached_job_completed(
@@ -2234,6 +2236,36 @@ mod tests {
         assert_eq!(
             projection_conversation_appends(&projection, semantics).len(),
             2
+        );
+    }
+
+    /// A detached job's completion record joins a running owner's turn: the
+    /// persisted notice is not a refresh projection and the completion's
+    /// turn metadata is trivial, so admission plans a durable in-turn append.
+    #[test]
+    fn detached_job_completion_joins_a_running_turn() {
+        use crate::meerkat_machine::dsl::AdmissionTurnAppendShape;
+        let notice = meerkat_core::types::SystemNoticeMessage::persisted_background_job(
+            "fork_off",
+            "job-7",
+            meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+            r#"{"text":"done"}"#.to_string(),
+        );
+        let input = Input::Prompt(PromptInput::detached_job_completed(
+            "fork_off:job-7",
+            notice,
+        ));
+        assert_eq!(
+            admission_turn_append_shape(&input),
+            AdmissionTurnAppendShape::InTurnEligible
+        );
+        let semantics = crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+            &input, false,
+        )
+        .expect("running steer admission");
+        assert_eq!(
+            semantics.live_boundary_delivery(),
+            Some(crate::ingress_types::LiveBoundaryDeliveryClass::DurableAppend)
         );
     }
 

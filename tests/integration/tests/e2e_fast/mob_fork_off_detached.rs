@@ -662,11 +662,13 @@ impl LlmClient for MidTurnScript {
                     child_replied.store(true, std::sync::atomic::Ordering::SeqCst);
                     return scripted_text(&model, CHILD_REPLY);
                 }
-                if wake {
-                    return scripted_text(&model, WAKE_REPLY);
-                }
                 if !last_user.contains(MID_TURN_PROMPT) {
                     return scripted_text(&model, FOLLOW_UP_REPLY);
+                }
+                // A turn after the forker's own turn finished (a follow-up
+                // wake) acknowledges; the running turn goes by stage.
+                if wake && rendered.contains(FORK_DONE) {
+                    return scripted_text(&model, WAKE_REPLY);
                 }
                 match request_stage(&rendered) {
                     0 => scripted_tool_call(
@@ -711,15 +713,11 @@ fn request_stage(rendered: &str) -> usize {
     }
 }
 
-/// A completion that arrives while the forker's turn is still running is not
-/// lost and not duplicated: it is recorded once and the forker runs exactly
-/// one follow-up turn that sees it right after its current turn ends. (The
-/// running turn's own later model calls do not see it: the input's main
-/// text is empty and its only content is the typed append, which the
-/// request-only mid-turn steer lane does not carry, so admission queues it
-/// for the next run.)
+/// A completion that arrives while the forker's turn is still running joins
+/// that turn: the running turn's next model call carries the record, it is
+/// saved once, and no follow-up turn runs for it.
 #[tokio::test(flavor = "multi_thread")]
-async fn e2e_fast_detached_completion_during_a_running_turn_is_delivered_once_after_it() {
+async fn e2e_fast_detached_completion_during_a_running_turn_joins_it() {
     let temp = tempfile::TempDir::new().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let client: Arc<dyn LlmClient> = Arc::new(MidTurnScript {
@@ -751,15 +749,29 @@ async fn e2e_fast_detached_completion_during_a_running_turn_is_delivered_once_af
     let job_id = started["job_id"].as_str().expect("job id").to_string();
     wait_for_single_record(&router, &parent_session, &job_id).await;
 
+    // Give a (wrong) follow-up turn time to run before counting.
     tokio::time::sleep(Duration::from_millis(500)).await;
+    let record = format!("Background fork_off job {job_id} finished (");
     let requests = requests.lock().unwrap().clone();
-    let wake_turns = requests
+    let in_turn = requests
         .iter()
-        .filter(|(_, rendered, wake)| *wake && rendered.contains(&job_id))
+        .filter(|(last_user, rendered, _)| {
+            last_user.contains(MID_TURN_PROMPT)
+                && rendered.contains(&record)
+                && !rendered.contains(FORK_DONE)
+        })
         .count();
     assert_eq!(
-        wake_turns, 1,
-        "one follow-up turn sees the completion: {requests:#?}"
+        in_turn, 1,
+        "the running turn's next model call carries the record: {requests:#?}"
+    );
+    let after_turn = requests
+        .iter()
+        .filter(|(_, rendered, _)| rendered.contains(&record) && rendered.contains(FORK_DONE))
+        .count();
+    assert_eq!(
+        after_turn, 0,
+        "no follow-up turn runs for it: {requests:#?}"
     );
     wait_for_single_record(&router, &parent_session, &job_id).await;
     let _ = mob_state.mob_destroy(&mob_id).await;

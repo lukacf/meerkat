@@ -2574,7 +2574,7 @@ fn build_tool_defs_with_profile_support(
         tool_def(
             TOOL_FORK_OFF,
             "Fork yourself into a durable child that runs one task from your committed transcript.\n\n\
-             Usually the call returns at once with status \"running\", the child's agent_identity and a job_id, and the child works in the background. When it finishes, its outcome (bounded final text, or the error) is written into your transcript as a System entry \"Background fork_off job <job_id> finished\", which you can refer back to on later turns. If you are mid-turn at that point it arrives right after your current turn ends; if you are idle you get a new turn with it. On hosts that cannot deliver later (one-shot runs) the call instead waits and returns the result directly.\n\n\
+             Usually the call returns at once with status \"running\", the child's agent_identity and a job_id, and the child works in the background. When it finishes, its outcome (bounded final text, or the error) is written into your transcript as a System entry \"Background fork_off job <job_id> finished\", which you can refer back to on later turns. If you are mid-turn at that point, your next model call in the same turn sees it (or, if your turn ends before another model call, you get one follow-up turn with it); if you are idle you get a new turn with it. On hosts that cannot deliver later (one-shot runs) the call instead waits and returns the result directly.\n\n\
              There is no default deadline; set max_run_secs to have the child's run cancelled and the child retired after that long. The child and anything it forks belong to you: check them with mob_check_member, list them with mob_list_members, and end them with mob_retire_member (retiring a member retires its descendants). A child whose turn fails is retired automatically; a finished child stays seated until you retire it, so retire children you no longer need.",
             typed_schema::<ForkOffArgs>(),
         ),
@@ -2594,9 +2594,9 @@ fn build_tool_defs_with_profile_support(
              idempotency key across retries. Usually the call returns at once with status \
              \"running\", the council_id and a job_id, and the sealed result is written into \
              your transcript as a System entry \"Background council job <job_id> finished\" when \
-             the council ends: right after your current turn if you are mid-turn then, or in a \
-             new turn if you are idle. On one-shot hosts the call waits and returns the result \
-             directly. \
+             the council ends: at your next model call if you are mid-turn then (or in one \
+             follow-up turn if your turn ends first), or in a new turn if you are idle. On \
+             one-shot hosts the call waits and returns the result directly. \
              timeout_seconds is the council's own deadline.",
             typed_schema::<CouncilArgs>(),
         ),
@@ -3352,7 +3352,7 @@ fn spawn_detached_completion_custodian<F>(
 /// caller can check on or end the job.
 fn detached_started_note(tool: &'static str, job_id: &str, control: &str) -> String {
     format!(
-        "Running in the background. When it ends, the result is added to your conversation as \"Background {tool} job {job_id} finished\": right after your current turn if you are mid-turn, or in a new turn if you are idle. Nothing is waiting on it: continue with other work. {control}"
+        "Running in the background. When it ends, the result is added to your conversation as \"Background {tool} job {job_id} finished\": at your next model call if you are mid-turn (or in one follow-up turn if your turn ends first), or in a new turn if you are idle. Nothing is waiting on it: continue with other work. {control}"
     )
 }
 

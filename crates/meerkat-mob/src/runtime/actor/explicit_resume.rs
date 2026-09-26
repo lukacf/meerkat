@@ -321,6 +321,7 @@ impl MobActor {
                 .compaction_curator_override
                 .clone(),
             context: None,
+            fork_source: None,
             labels: Some(entry.labels.clone()),
             additional_instructions: None,
             shell_env: None,

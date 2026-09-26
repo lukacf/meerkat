@@ -629,6 +629,11 @@ pub struct AgentBuildConfig {
     /// Opaque application context for custom `SessionAgentBuilder` implementations.
     /// Not consumed by the standard build pipeline.
     pub app_context: Option<serde_json::Value>,
+    /// Typed source of a fork-derived member build, set only by the mob
+    /// runtime when it seats a durable fork as a member. Like `app_context`,
+    /// it is for custom `SessionAgentBuilder` implementations (host build
+    /// callbacks) and not consumed by the standard build pipeline.
+    pub fork_source: Option<meerkat_core::ForkBuildSource>,
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
     pub additional_instructions: Option<Vec<String>>,
@@ -808,6 +813,7 @@ impl std::fmt::Debug for AgentBuildConfig {
                 &self.skill_engine_override.is_some(),
             )
             .field("app_context", &self.app_context.is_some())
+            .field("fork_source", &self.fork_source)
             .field("additional_instructions", &self.additional_instructions)
             .field("wait_for_mcp", &self.wait_for_mcp)
             .field("mcp_servers", &self.mcp_servers)
@@ -896,6 +902,7 @@ impl AgentBuildConfig {
             hook_engine_override: None,
             skill_engine_override: None,
             app_context: None,
+            fork_source: None,
             additional_instructions: None,
             wait_for_mcp: false,
             mcp_servers: Vec::new(),
@@ -1025,6 +1032,7 @@ impl AgentBuildConfig {
             .clone_from(&build.silent_comms_intents);
         self.max_inline_peer_notifications = build.max_inline_peer_notifications;
         self.app_context = build.app_context.clone();
+        self.fork_source = build.fork_source.clone();
         self.additional_instructions = build.additional_instructions.clone();
         self.initial_metadata_entries = build.initial_metadata_entries.clone();
         self.initial_tool_filter = build.initial_tool_filter.clone();
@@ -1099,6 +1107,7 @@ impl AgentBuildConfig {
             silent_comms_intents: self.silent_comms_intents.clone(),
             max_inline_peer_notifications: self.max_inline_peer_notifications,
             app_context: self.app_context.clone(),
+            fork_source: self.fork_source.clone(),
             additional_instructions: self.additional_instructions.clone(),
             initial_metadata_entries: self.initial_metadata_entries.clone(),
             initial_tool_filter: self.initial_tool_filter.clone(),

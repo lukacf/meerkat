@@ -35,6 +35,53 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_core::SessionBuildOptions` and `meerkat::AgentBuildConfig` gain the
+  public field `fork_source: Option<ForkBuildSource>`. Struct literals must
+  supply it (`None` outside the mob runtime, or use `..Default::default()` for
+  `SessionBuildOptions`). `AgentBuildConfig::apply_session_build_options` and
+  `to_session_build_options` carry it both ways, so a host build callback that
+  wraps `FactoryAgentBuilder` (MobKit's `callback/build_agent`) receives it on
+  `CreateSessionRequest.build`.
+
+### Added
+
+- `meerkat_core::ForkBuildSource` (re-exported as `meerkat::ForkBuildSource`)
+  names the source of a fork-derived member build: `source_member`, the
+  source's durable `MobMemberBinding`, and `source_session_id`, the session its
+  transcript was forked from. It is `#[non_exhaustive]` and serializable (serde
+  and, with the `schema` feature, JSON Schema) so a host can forward it; build
+  it with `ForkBuildSource::new`. The mob runtime sets it only when it seats a
+  durable fork as a member.
+- `meerkat_mob::ForkBuildInheritance`, the opaque build inputs a fork-derived
+  member inherits from its source (application context, application labels,
+  retained per-spawn tool overlay and the typed source), minted by the source's
+  own mob with `MobHandle::fork_build_inheritance(&source, &source_session_id)`.
+  `SpawnMemberSpec::with_fork_build_inheritance` attaches one to a
+  capability-attached participant spawn
+  (`MobHandle::spawn_attached_forked_participant`), which checks that it names
+  the capability's own source member and source session; every other spawn
+  refuses a spec that carries one.
+
+### Fixed
+
+- A fork-derived member is built with its source member's build inputs. A
+  `fork_off` child (caller-turn and quiescent `MobHandle::fork_member*` forks)
+  and a local temporary-council participant used to reach the host build
+  callback with bare mob labels, no application context, no source reference
+  and no per-spawn tool overlay, so a host that resolves tools and instructions
+  by identity built a generic member (HomeCore: a calendar fork with 92 of
+  calendar's 150 tools, without its calendar, display, picture-schedule or
+  `memory` tools). Its tools block also differed from the forker's, so the
+  child could not reuse the forker's cached prompt prefix. The child's build
+  now carries the source's application context (read from the source session's
+  durable build state) and application labels verbatim, with the child's own
+  member identity in the standard mob labels, the source's retained per-spawn
+  overlay, and `fork_source`. The child keeps its own roster, comms and
+  runtime identity. Delegate helpers, live-delegation workers and ordinary
+  spawns are unchanged.
+
 ## [0.8.44] - 2026-09-26
 
 ### Breaking

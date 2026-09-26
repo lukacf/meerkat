@@ -4729,7 +4729,16 @@ pub struct MobHandle {
     pub(super) explicit_resume_operations: Arc<ResumeOperationRegistry>,
     /// Read-only view of the actor's per-member admission lanes (#1102).
     pub(super) member_admission_backlog: Arc<MemberAdmissionBacklogGauge>,
+    /// Read-only view of the actor's retained per-spawn tool overlays. The
+    /// actor is the sole writer; a durable fork reads its source's overlay
+    /// here to seat the child with the source's exact tool set.
+    pub(super) per_spawn_external_tools: PerSpawnExternalTools,
 }
+
+/// Per-member retained per-spawn tool overlays (`SpawnMemberSpec::external_tools`),
+/// written only by the mob actor and shared read-only with its handles.
+pub(super) type PerSpawnExternalTools =
+    Arc<tokio::sync::RwLock<BTreeMap<AgentIdentity, Arc<dyn meerkat_core::AgentToolDispatcher>>>>;
 
 impl MobHandle {
     /// Install or replace the embedder's pre-flow target-provisioning barrier.
@@ -5176,6 +5185,16 @@ pub struct SpawnMemberSpec {
     /// caller-supplied arguments.
     pub(crate) spawned_by: Option<AgentIdentity>,
     pub(crate) fork_job: Option<crate::runtime::ForkJobRecord>,
+    /// Typed lineage of a fork-derived member, carried into its seating build
+    /// as `SessionBuildOptions::fork_source`. Set only when the runtime applies
+    /// a [`super::ForkBuildInheritance`] while seating a durable fork; never
+    /// taken from caller-supplied arguments, and refused on any other spawn.
+    pub(crate) fork_source: Option<meerkat_core::ForkBuildSource>,
+    /// Source build inheritance attached through
+    /// [`SpawnMemberSpec::with_fork_build_inheritance`], applied (and consumed)
+    /// by the capability-attached spawn after it proves the inheritance names
+    /// the capability's own source.
+    pub(crate) fork_build_inheritance: Option<super::ForkBuildInheritance>,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -5221,6 +5240,8 @@ impl std::fmt::Debug for SpawnMemberSpec {
                     .as_ref()
                     .map(|association| association.association_key()),
             )
+            .field("fork_source", &self.fork_source)
+            .field("fork_build_inheritance", &self.fork_build_inheritance)
             .finish()
     }
 }
@@ -5258,7 +5279,24 @@ impl SpawnMemberSpec {
             forked_participant_attachment: None,
             spawned_by: None,
             fork_job: None,
+            fork_source: None,
+            fork_build_inheritance: None,
         }
+    }
+
+    /// Seat this capability-attached participant with its source member's
+    /// build inputs (see [`super::ForkBuildInheritance`]), obtained from the
+    /// source member's own mob with [`MobHandle::fork_build_inheritance`].
+    ///
+    /// Honored only by [`MobHandle::spawn_attached_forked_participant`] for a
+    /// local capability whose source member and source session the
+    /// inheritance names. Every other spawn refuses a spec that carries one:
+    /// the durable fork paths of [`MobHandle`] resolve their own source's
+    /// inheritance, and a fresh spawn is not a fork.
+    #[must_use]
+    pub fn with_fork_build_inheritance(mut self, inheritance: super::ForkBuildInheritance) -> Self {
+        self.fork_build_inheritance = Some(inheritance);
+        self
     }
 
     /// Place this member on a bound member host (multi-host mobs §7.3).
@@ -12999,6 +13037,13 @@ impl MobHandle {
         if &member.identity == source_identity {
             return Err(MobError::MemberAlreadyExists(member.identity.clone()));
         }
+        if member.fork_build_inheritance.is_some() {
+            return Err(MobError::WiringError(
+                "a durable member fork resolves its own source's build inheritance; the spawn \
+                 request may not carry one"
+                    .to_string(),
+            ));
+        }
         if member.placement.is_some() {
             return Err(MobError::WiringError(
                 "durable fork resume currently requires the source session store's controlling host"
@@ -13030,6 +13075,103 @@ impl MobHandle {
             source_admission,
         };
         Ok((source_session_id, fork_target))
+    }
+
+    /// The build inputs a fork of `source_identity`'s session
+    /// `source_session_id` inherits (see [`super::ForkBuildInheritance`]).
+    ///
+    /// This mob's durable fork paths resolve it themselves. It is public for a
+    /// surface that seats a capability-attached participant in another mob
+    /// (a temporary council): the capability is forked here, at the source's
+    /// own mob, and the participant is seated there with
+    /// [`SpawnMemberSpec::with_fork_build_inheritance`].
+    ///
+    /// `source_session_id` must be the source member's current session, the
+    /// one the fork was taken from. A source that has since moved to another
+    /// session has another build, so the request is refused rather than
+    /// answered with inputs that do not match the fork.
+    pub async fn fork_build_inheritance(
+        &self,
+        source_identity: &AgentIdentity,
+        source_session_id: &meerkat_core::SessionId,
+    ) -> Result<super::ForkBuildInheritance, MobError> {
+        self.admit_control_scope(mob_dsl::ControlScope::SendCommand)
+            .await?;
+        match self.resolve_bridge_session_id(source_identity).await {
+            Some(current) if &current == source_session_id => {}
+            Some(current) => {
+                return Err(MobError::WiringError(format!(
+                    "fork source '{source_identity}' now runs session '{current}', not the \
+                     forked session '{source_session_id}'"
+                )));
+            }
+            None => {
+                return Err(MobError::ForkSourceUnavailable {
+                    source_member_id: source_identity.to_string(),
+                    cause: crate::error::ForkSourceUnavailableCause::NoSession,
+                });
+            }
+        }
+        self.resolve_fork_build_inheritance(source_identity, source_session_id)
+            .await
+    }
+
+    /// Resolve the source's build inheritance from this mob's own records:
+    /// the roster entry (role and application labels), the actor's retained
+    /// per-spawn overlay, and the application context the source session's
+    /// current build persisted in its durable build state.
+    async fn resolve_fork_build_inheritance(
+        &self,
+        source_identity: &AgentIdentity,
+        source_session_id: &meerkat_core::SessionId,
+    ) -> Result<super::ForkBuildInheritance, MobError> {
+        let (role, labels) = {
+            let roster = self.roster.read().await;
+            let entry = roster
+                .get(source_identity)
+                .ok_or_else(|| MobError::MemberNotFound(source_identity.clone()))?;
+            (entry.role.clone(), entry.labels.clone())
+        };
+        let external_tools = self
+            .per_spawn_external_tools
+            .read()
+            .await
+            .get(source_identity)
+            .cloned();
+        // The durable build state is the source's own record of the context
+        // its current build ran with (the factory persists it at every build).
+        // A source with no loadable durable session has no persisted context;
+        // whether such a source can be forked at all is the fork owner's call.
+        let app_context = match self
+            .session_service
+            .load_persisted_session(source_session_id)
+            .await?
+        {
+            Some(session) => session
+                .try_build_state()
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "fork source session '{source_session_id}' has a corrupt durable build \
+                         state: {error}"
+                    ))
+                })?
+                .and_then(|state| state.app_context),
+            None => None,
+        };
+        let source = meerkat_core::ForkBuildSource::new(
+            meerkat_core::MobMemberBinding {
+                mob_id: self.definition.id.as_str().to_string(),
+                role: role.as_str().to_string(),
+                member: source_identity.as_str().to_string(),
+            },
+            source_session_id.clone(),
+        );
+        Ok(super::ForkBuildInheritance::new(
+            source,
+            app_context,
+            labels,
+            external_tools,
+        ))
     }
 
     /// Seat an already committed durable fork as a new mob member through the
@@ -13158,14 +13300,14 @@ impl MobHandle {
     async fn fork_member_with_source_admission(
         &self,
         source_identity: &AgentIdentity,
-        member: SpawnMemberSpec,
+        mut member: SpawnMemberSpec,
         message_count: Option<usize>,
         source_admission: meerkat_core::DurableForkSourceAdmission,
     ) -> Result<ForkMemberResult, MobError> {
         let fork = self
             .fork_source_session(
                 source_identity,
-                &member,
+                &mut member,
                 message_count,
                 source_admission,
                 None,
@@ -13180,10 +13322,14 @@ impl MobHandle {
     /// source session this admission resolves (the one the transcript is
     /// forked from), or the fork is refused with
     /// [`MobError::ForkJobOwnerNotSource`] before anything is forked.
+    ///
+    /// The child inherits its source's build inputs: `member` leaves with the
+    /// source's [`super::ForkBuildInheritance`] applied, resolved before the
+    /// fork commits so a failure leaves nothing durable behind.
     async fn fork_source_session(
         &self,
         source_identity: &AgentIdentity,
-        member: &SpawnMemberSpec,
+        member: &mut SpawnMemberSpec,
         message_count: Option<usize>,
         source_admission: meerkat_core::DurableForkSourceAdmission,
         caller_turn_job_owner: Option<&meerkat_core::SessionId>,
@@ -13202,6 +13348,9 @@ impl MobHandle {
                 owner_session_id: owner_session_id.clone(),
             });
         }
+        self.resolve_fork_build_inheritance(source_identity, &source_session_id)
+            .await?
+            .apply_to(member);
         if source_admission == meerkat_core::DurableForkSourceAdmission::Quiescent {
             self.refuse_fork_source_with_admitted_work(source_identity, &source_session_id)
                 .await?;
@@ -13383,7 +13532,7 @@ impl MobHandle {
         let session_fork = self
             .fork_source_session(
                 source_identity,
-                &member,
+                &mut member,
                 message_count,
                 source_admission,
                 caller_turn_job_owner.as_ref(),

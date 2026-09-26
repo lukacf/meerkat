@@ -1568,6 +1568,10 @@ struct CreateSessionRecord {
     override_shell: ToolCategoryOverride,
     mob_member_binding: Option<meerkat_core::MobMemberBinding>,
     app_context: Option<serde_json::Value>,
+    fork_source: Option<meerkat_core::ForkBuildSource>,
+    /// Names of the tools the build's composed `external_tools` surface, in
+    /// catalog order (the per-spawn overlay composed with mob-owned tools).
+    external_tool_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3231,6 +3235,21 @@ impl MockSessionService {
                 .set_session_metadata(metadata)
                 .expect("mock session metadata should serialize");
         }
+        // Mirror the factory, which persists every build's application context
+        // in the session's durable build state (a fork reads its source's
+        // context from there).
+        if let Some(app_context) = req
+            .build
+            .as_ref()
+            .and_then(|build| build.app_context.clone())
+        {
+            session
+                .set_build_state(meerkat_core::SessionBuildState {
+                    app_context: Some(app_context),
+                    ..Default::default()
+                })
+                .expect("mock session build state should serialize");
+        }
         let _authority_guard = self.resume_authority_gate.lock().await;
         self.live_session_data
             .write()
@@ -3306,6 +3325,22 @@ impl MockSessionService {
                     .build
                     .as_ref()
                     .and_then(|build| build.app_context.clone()),
+                fork_source: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.fork_source.clone()),
+                external_tool_names: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.external_tools.as_ref())
+                    .map(|tools| {
+                        tools
+                            .tools()
+                            .iter()
+                            .map(|tool| tool.name.as_str().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             });
 
         let mcp_server_names: Vec<String> = req
@@ -23360,6 +23395,295 @@ async fn fork_member_then_run_detached_reports_completion_and_records_the_spawne
         Some(source_identity),
         "a caller-turn fork records its source as the child's owner"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Fork-derived members are built with their source's build inputs
+// ---------------------------------------------------------------------------
+
+/// A per-spawn overlay with fixed tool names, standing in for a host's local
+/// tools (HomeCore's calendar tools, MobKit's per-spawn `memory` recorder).
+struct FixedOverlayTools(Vec<&'static str>);
+
+#[async_trait]
+impl AgentToolDispatcher for FixedOverlayTools {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+        self.0
+            .iter()
+            .map(|name| {
+                Arc::new(meerkat_core::ToolDef {
+                    name: (*name).into(),
+                    description: format!("{name} overlay tool"),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    provenance: None,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        Err(ToolError::not_found(call.name))
+    }
+}
+
+const FORK_SOURCE_OVERLAY_TOOLS: [&str; 2] = ["calendar_create_event", "memory"];
+
+fn fork_source_app_context() -> serde_json::Value {
+    serde_json::json!({"domain": "calendar", "grants": ["calendar.write"]})
+}
+
+fn fork_source_app_labels() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("domain".to_string(), "calendar".to_string()),
+        ("tier".to_string(), "gold".to_string()),
+    ])
+}
+
+/// Spawn a settled, turn-driven fork source that carries every per-build input
+/// a host resolves a member from: application context, application labels and
+/// a per-spawn tool overlay. Returns the source's bridge session.
+async fn spawn_fork_source_with_build_inputs(
+    handle: &MobHandle,
+    source_identity: &AgentIdentity,
+) -> SessionId {
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), source_identity.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    spec.initial_message = Some(ContentInput::Text("source context".to_string()));
+    spec.context = Some(fork_source_app_context());
+    spec.labels = Some(fork_source_app_labels());
+    spec.external_tools = Some(Arc::new(FixedOverlayTools(
+        FORK_SOURCE_OVERLAY_TOOLS.to_vec(),
+    )));
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn fork source with build inputs");
+    let session = handle
+        .resolve_bridge_session_id(source_identity)
+        .await
+        .expect("fork source bridge session");
+    wait_for_fork_source_settled(handle, &session).await;
+    session
+}
+
+/// The last recorded build of `member`.
+async fn last_member_build(
+    service: &MockSessionService,
+    member: &AgentIdentity,
+) -> CreateSessionRecord {
+    service
+        .recorded_create_requests()
+        .await
+        .into_iter()
+        .rev()
+        .find(|record| {
+            record
+                .mob_member_binding
+                .as_ref()
+                .is_some_and(|binding| binding.member == member.as_str())
+        })
+        .unwrap_or_else(|| panic!("no recorded build for member '{member}'"))
+}
+
+/// The child's build must be the source's, bar the child's own identity: the
+/// source's application context and labels verbatim (standard labels naming
+/// the child), the typed source reference, and the source's exact tool
+/// overlay in the same order.
+async fn assert_child_built_as_source(
+    service: &MockSessionService,
+    source_identity: &AgentIdentity,
+    source_session: &SessionId,
+    child_identity: &AgentIdentity,
+) {
+    let source = last_member_build(service, source_identity).await;
+    let child = last_member_build(service, child_identity).await;
+
+    assert_eq!(source.app_context, Some(fork_source_app_context()));
+    assert_eq!(
+        child.app_context, source.app_context,
+        "the child's build carries the source's application context verbatim"
+    );
+
+    let mut expected_labels = source.peer_meta_labels.clone();
+    for (key, value) in fork_source_app_labels() {
+        assert_eq!(expected_labels.get(&key), Some(&value));
+    }
+    expected_labels.insert("agent_identity".to_string(), child_identity.to_string());
+    expected_labels.insert("meerkat_id".to_string(), child_identity.to_string());
+    assert_eq!(
+        child.peer_meta_labels, expected_labels,
+        "the child's labels are the source's, with the child's own member identity"
+    );
+
+    assert_eq!(source.fork_source, None, "the source itself is no fork");
+    assert_eq!(
+        child.fork_source,
+        Some(meerkat_core::ForkBuildSource::new(
+            meerkat_core::MobMemberBinding {
+                mob_id: "test-mob".to_string(),
+                role: "worker".to_string(),
+                member: source_identity.to_string(),
+            },
+            source_session.clone(),
+        )),
+        "the child's build names its source member and source session"
+    );
+
+    for tool in FORK_SOURCE_OVERLAY_TOOLS {
+        assert!(
+            source.external_tool_names.iter().any(|name| name == tool),
+            "the source's build carries its overlay tool '{tool}': {:?}",
+            source.external_tool_names
+        );
+    }
+    assert_eq!(
+        child.external_tool_names, source.external_tool_names,
+        "the child's per-spawn tool surface is exactly the source's, in order"
+    );
+}
+
+/// Regression (HomeCore run-32): a `fork_off` child of `domain:calendar` was
+/// built with bare mob labels, no application context and no per-spawn
+/// overlay, so its host built a generic member (92 of calendar's 150 tools).
+/// The `fork_off` composition (caller-turn detached fork) seats the child with
+/// the source's build inputs.
+#[tokio::test]
+async fn caller_turn_fork_child_is_built_with_the_source_build_inputs() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let source_identity = AgentIdentity::from("fork-build-caller-source");
+    let source_session = spawn_fork_source_with_build_inputs(&handle, &source_identity).await;
+
+    let child_identity = AgentIdentity::from("fork-build-caller-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            None,
+        )
+        .await
+        .expect("caller-turn fork seats the child");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), run.outcome()).await;
+
+    assert_child_built_as_source(&service, &source_identity, &source_session, &child_identity)
+        .await;
+}
+
+/// The external (`Quiescent`) fork contract seats its child the same way.
+#[tokio::test]
+async fn quiescent_fork_child_is_built_with_the_source_build_inputs() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_identity = AgentIdentity::from("fork-build-quiescent-source");
+    let source_session = spawn_fork_source_with_build_inputs(&handle, &source_identity).await;
+
+    let child_identity = AgentIdentity::from("fork-build-quiescent-child");
+    let mut child = SpawnMemberSpec::new(ProfileName::from("worker"), child_identity.clone());
+    child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .fork_member(&source_identity, child, None)
+        .await
+        .expect("quiescent fork seats the child");
+
+    assert_child_built_as_source(&service, &source_identity, &source_session, &child_identity)
+        .await;
+}
+
+/// Delegate helpers and ordinary spawns have their own spec: they carry no
+/// fork source and none of another member's build inputs. A spawn request
+/// cannot dress itself up as a fork by attaching a source's inheritance, and a
+/// durable fork resolves its own source's inheritance rather than a caller's.
+#[tokio::test]
+async fn delegate_and_spawned_children_are_not_built_as_forks() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let source_identity = AgentIdentity::from("fork-build-plain-source");
+    let source_session = spawn_fork_source_with_build_inputs(&handle, &source_identity).await;
+
+    let spawned = AgentIdentity::from("fork-build-plain-spawned");
+    let mut spawned_spec = SpawnMemberSpec::new(ProfileName::from("worker"), spawned.clone());
+    spawned_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spawned_spec)
+        .await
+        .expect("an ordinary spawn seats its member");
+
+    let helper = AgentIdentity::from("fork-build-plain-helper");
+    handle
+        .spawn_helper(
+            helper.clone(),
+            "summarize this",
+            HelperOptions {
+                role_name: Some(ProfileName::from("worker")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                ..HelperOptions::default()
+            },
+            "fork-build-plain-helper-result",
+            256,
+        )
+        .await
+        .expect("a delegate helper runs");
+
+    for member in [&spawned, &helper] {
+        let build = last_member_build(&service, member).await;
+        assert_eq!(build.fork_source, None, "'{member}' is not a fork");
+        assert_eq!(build.app_context, None, "'{member}' has no source context");
+        assert!(
+            !build.peer_meta_labels.contains_key("domain"),
+            "'{member}' carries none of the source's labels: {:?}",
+            build.peer_meta_labels
+        );
+        for tool in FORK_SOURCE_OVERLAY_TOOLS {
+            assert!(
+                !build.external_tool_names.iter().any(|name| name == tool),
+                "'{member}' does not inherit the source's overlay tool '{tool}'"
+            );
+        }
+    }
+
+    let inheritance = handle
+        .fork_build_inheritance(&source_identity, &source_session)
+        .await
+        .expect("the source's own mob mints its build inheritance");
+    assert_eq!(inheritance.app_context(), Some(&fork_source_app_context()));
+    assert_eq!(inheritance.labels(), &fork_source_app_labels());
+    assert!(inheritance.has_external_tools());
+
+    let disguised = AgentIdentity::from("fork-build-plain-disguised");
+    let mut disguised_spec = SpawnMemberSpec::new(ProfileName::from("worker"), disguised.clone())
+        .with_fork_build_inheritance(inheritance.clone());
+    disguised_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    assert!(
+        matches!(
+            handle.spawn_spec(disguised_spec).await,
+            Err(MobError::WiringError(_))
+        ),
+        "a plain spawn refuses a fork build inheritance"
+    );
+    assert!(handle.get_member(&disguised).await.unwrap().is_none());
+
+    let forked = AgentIdentity::from("fork-build-plain-forked");
+    let mut forked_spec = SpawnMemberSpec::new(ProfileName::from("worker"), forked.clone())
+        .with_fork_build_inheritance(inheritance);
+    forked_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    assert!(
+        matches!(
+            handle
+                .fork_member(&source_identity, forked_spec, None)
+                .await,
+            Err(MobError::WiringError(_))
+        ),
+        "a durable fork refuses a caller-attached inheritance before it forks"
+    );
+    assert!(handle.get_member(&forked).await.unwrap().is_none());
 }
 
 /// Same deadline hazard for `delegate`: a helper whose caller stops waiting

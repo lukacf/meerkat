@@ -7522,6 +7522,7 @@ impl MobBuilder {
                 command_tx: command_tx.clone(),
                 command_rx,
             };
+            let per_spawn_external_tools: super::handle::PerSpawnExternalTools = Arc::default();
             let preview_handle = MobHandle {
                 // Explicit launch-site mint (A16): the building process IS the
                 // owning operator; surfaces rebind clones per console principal.
@@ -7546,6 +7547,10 @@ impl MobBuilder {
                 flow_target_provisioner: Arc::clone(&flow_target_provisioner),
                 explicit_resume_operations: Arc::clone(&explicit_resume_operations),
                 member_admission_backlog: Arc::clone(&member_admission_backlog),
+                // One overlay map for the preview, the actor and the launched
+                // handle: restored members' tools keep this handle, and a
+                // durable fork through any of them reads the same overlays.
+                per_spawn_external_tools: Arc::clone(&per_spawn_external_tools),
             };
             // session_service is still live here (not consumed until start_runtime_with_components)
 
@@ -7720,6 +7725,9 @@ impl MobBuilder {
                 }
             }
 
+            // The overlays restored members were rebuilt with, retained in the
+            // map the preview handle (and so their tools) already share.
+            *per_spawn_external_tools.write().await = per_spawn_external_tools_seed;
             Self::start_runtime_with_components(
                 definition,
                 wiring,
@@ -7740,7 +7748,7 @@ impl MobBuilder {
                 storage.forked_participants.clone(),
                 notify_orchestrator_on_resume,
                 recovered_direct_member_adoption_pending,
-                per_spawn_external_tools_seed,
+                per_spawn_external_tools,
                 retired_event_index,
                 retirement_started_event_index,
                 // Respawn is a live helper composition, not a durable replacement
@@ -9283,7 +9291,7 @@ impl MobBuilder {
                 forked_participant_store,
                 notify_orchestrator_on_resume,
                 false,
-                BTreeMap::new(),
+                Arc::default(),
                 HashSet::new(),
                 HashSet::new(),
                 HashSet::new(),
@@ -9328,7 +9336,7 @@ impl MobBuilder {
         forked_participant_store: Option<Arc<dyn crate::store::ForkedParticipantStore>>,
         notify_orchestrator_on_resume: bool,
         recovered_direct_member_adoption_pending: bool,
-        per_spawn_external_tools: BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>,
+        per_spawn_external_tools: super::handle::PerSpawnExternalTools,
         retired_event_index: HashSet<String>,
         retirement_started_event_index: HashSet<String>,
         preserved_respawn_topology_event_index: HashSet<String>,
@@ -9408,6 +9416,7 @@ impl MobBuilder {
                 flow_target_provisioner: Arc::clone(&flow_target_provisioner),
                 explicit_resume_operations: Arc::clone(&explicit_resume_operations),
                 member_admission_backlog: Arc::clone(&member_admission_backlog),
+                per_spawn_external_tools: Arc::clone(&per_spawn_external_tools),
             };
             // Row #320: the orphan budget is MobMachine state (seeded once in
             // `start_runtime` from `definition.limits.max_orphaned_turns`); the
@@ -9695,7 +9704,7 @@ impl MobBuilder {
                 phase_watch_tx: phase_watch_tx_actor,
                 default_external_tools_provider,
                 identity_local_external_tools_provider,
-                per_spawn_external_tools: tokio::sync::RwLock::new(per_spawn_external_tools),
+                per_spawn_external_tools,
                 spawn_base_prompt_source,
                 spawn_member_customizer,
                 realm_profile_store,

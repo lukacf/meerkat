@@ -714,6 +714,7 @@ impl MobActor {
             external_tools,
             compaction_curator_override: None,
             context: None,
+            fork_source: None,
             labels: Some(work.entry.labels.clone()),
             additional_instructions: None,
             shell_env: None,

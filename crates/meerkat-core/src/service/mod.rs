@@ -571,6 +571,39 @@ impl WorkGraphNamespaceGrant {
     }
 }
 
+/// Typed lineage of a fork-derived member build.
+///
+/// The mob runtime sets this only when it seats a member whose transcript is a
+/// durable fork of another member's session: a `fork_off` child, a
+/// `MobHandle::fork_member*` child, or a temporary-council participant forked
+/// from its convener's member. Fresh spawns, delegate helpers and resumes of
+/// ordinary members never carry it.
+///
+/// A host build callback uses it to resolve the child exactly as its source
+/// (the same grants, tools, instructions and skills), which is also what makes
+/// the source's cached request prefix reusable by the child. The child keeps its
+/// own roster, comms and runtime identity; this names where it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ForkBuildSource {
+    /// Durable mob-member identity of the member the child was forked from.
+    pub source_member: crate::MobMemberBinding,
+    /// The source member's session the child's transcript was forked from.
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub source_session_id: SessionId,
+}
+
+impl ForkBuildSource {
+    pub fn new(source_member: crate::MobMemberBinding, source_session_id: SessionId) -> Self {
+        Self {
+            source_member,
+            source_session_id,
+        }
+    }
+}
+
 /// Optional build-time options used by factory-backed session builders.
 #[derive(Clone)]
 pub struct SessionBuildOptions {
@@ -721,6 +754,14 @@ pub struct SessionBuildOptions {
     /// Uses `Value` rather than `Box<RawValue>` because `SessionBuildOptions`
     /// must be `Clone` and `Box<RawValue>` does not implement `Clone`.
     pub app_context: Option<serde_json::Value>,
+    /// Typed source of a fork-derived member build (see [`ForkBuildSource`]).
+    ///
+    /// Set only by the mob runtime when it seats a durable fork as a member;
+    /// `None` for every other build. Not consumed by the standard build
+    /// pipeline: it is for custom `SessionAgentBuilder` implementations (host
+    /// build callbacks) that resolve a member's tools and instructions by
+    /// identity.
+    pub fork_source: Option<ForkBuildSource>,
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
     pub additional_instructions: Option<Vec<String>>,
@@ -1514,6 +1555,7 @@ impl Default for SessionBuildOptions {
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             app_context: None,
+            fork_source: None,
             additional_instructions: None,
             initial_metadata_entries: BTreeMap::new(),
             initial_tool_filter: None,
@@ -1590,6 +1632,7 @@ impl std::fmt::Debug for SessionBuildOptions {
                 &self.max_inline_peer_notifications,
             )
             .field("app_context", &self.app_context.is_some())
+            .field("fork_source", &self.fork_source)
             .field("additional_instructions", &self.additional_instructions)
             .field("initial_metadata_entries", &self.initial_metadata_entries)
             .field("initial_tool_filter", &self.initial_tool_filter.is_some())

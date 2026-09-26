@@ -2446,6 +2446,41 @@ impl CouncilRun {
             // turn-driven regardless of the template profile's mode: an
             // autonomous inbox loop cannot serve a tracked bounded turn.
             spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+            // The branch is a fork of its source member, so it is built with
+            // the source's build inputs (application context, labels, per-spawn
+            // tool overlay, typed fork source), minted by the source's own mob
+            // for exactly this fork. A host-owned capability's branch is built
+            // on its member host, which the in-process overlay cannot reach.
+            if matches!(
+                capability.owner_route(),
+                ForkedParticipantOwnerRoute::Local { .. }
+            ) {
+                let Some(remaining) = self.remaining() else {
+                    return Err(TemporaryCouncilExitReason::DeadlineExceeded);
+                };
+                let inheritance = match tokio::time::timeout(
+                    remaining,
+                    source.fork_build_inheritance(
+                        capability.source_identity(),
+                        &capability.provenance().source_session_id,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(inheritance)) => inheritance,
+                    Ok(Err(error)) => {
+                        return Err(TemporaryCouncilExitReason::ParticipantSeatingFailed {
+                            participant_order: custody.order,
+                            detail: format!(
+                                "source member '{}' build inheritance is unavailable: {error}",
+                                custody.source_identity
+                            ),
+                        });
+                    }
+                    Err(_) => return Err(TemporaryCouncilExitReason::DeadlineExceeded),
+                };
+                spec = spec.with_fork_build_inheritance(inheritance);
+            }
             let Some(remaining) = self.remaining() else {
                 return Err(TemporaryCouncilExitReason::DeadlineExceeded);
             };

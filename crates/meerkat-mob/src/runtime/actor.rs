@@ -5020,6 +5020,9 @@ struct DeferredResumeProvision {
     compaction_curator_override: Option<Arc<dyn meerkat_core::CompactionCurator>>,
     context: Option<serde_json::Value>,
     labels: Option<std::collections::BTreeMap<String, String>>,
+    /// Typed fork lineage for a durable fork's seating build; `None` for
+    /// every other resume (explicit resume, warm revival).
+    fork_source: Option<meerkat_core::ForkBuildSource>,
     additional_instructions: Option<Vec<String>>,
     shell_env: Option<std::collections::HashMap<String, String>>,
     inherited_tool_filter: Option<meerkat_core::InheritedToolVisibilityAuthority>,
@@ -5116,6 +5119,7 @@ impl DeferredResumeProvision {
             compaction_curator_override,
             context,
             labels,
+            fork_source,
             additional_instructions,
             shell_env,
             inherited_tool_filter,
@@ -5175,6 +5179,7 @@ impl DeferredResumeProvision {
         config.override_web_search = web_search_override;
         config.application_tool_policy = application_tool_policy;
         config.tool_consequence_policy_registry = tool_consequence_policy_registry;
+        config.fork_source = fork_source;
         if let Some(client) = default_llm_client {
             config.llm_client_override = Some(client);
         }
@@ -6894,9 +6899,10 @@ pub(super) struct MobActor {
     /// written only in the spawn/respawn commit path (provisioning failure
     /// never inserts), replaced or cleared by respawn replacement semantics,
     /// and removed at disposal. RwLock: `dispose_remove_from_roster` runs on
-    /// `&self`.
-    pub(super) per_spawn_external_tools:
-        tokio::sync::RwLock<BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>>,
+    /// `&self`. Shared read-only with this mob's handles (the actor is the
+    /// sole writer) so a durable fork can hand its child the source's overlay
+    /// (see `ForkBuildInheritance`).
+    pub(super) per_spawn_external_tools: super::handle::PerSpawnExternalTools,
     /// R3 case-3 base-prompt seam for placed spawns (ADJ-2). `None` ⇒
     /// case-3 remote spawns fail typed at spec compile.
     pub(super) spawn_base_prompt_source:
@@ -13683,6 +13689,7 @@ impl MobActor {
             flow_target_provisioner: Arc::clone(&self.flow_target_provisioner),
             explicit_resume_operations: Arc::clone(&self.explicit_resume_operations),
             member_admission_backlog: Arc::clone(&self.member_admission_backlog),
+            per_spawn_external_tools: Arc::clone(&self.per_spawn_external_tools),
         }
     }
 
@@ -28062,6 +28069,38 @@ impl MobActor {
                 );
             }
         }
+        // Fork build lineage is authored only by fork seating: the durable
+        // fork paths apply their source's inheritance before this spawn, and
+        // the capability-attached spawn applies (and consumes) an inheritance
+        // it proved against the capability. An inheritance still attached
+        // here was never proved, and a fork source on any other spawn would
+        // dress a non-fork up as one.
+        if spec.fork_build_inheritance.is_some() {
+            reject_spawn_before_custody!(
+                "fork_build_inheritance_unproven",
+                MobError::WiringError(format!(
+                    "spawn source '{}' may not carry a fork build inheritance; only a \
+                     capability-attached spawn of the inheritance's own source applies one",
+                    spawn_source.as_str()
+                ))
+            );
+        }
+        if spec.fork_source.is_some()
+            && !matches!(
+                spawn_source,
+                super::handle::SpawnSource::PersistedForkResume
+                    | super::handle::SpawnSource::AttachedForkedParticipant
+            )
+        {
+            reject_spawn_before_custody!(
+                "fork_source_spawn_source",
+                MobError::WiringError(format!(
+                    "spawn source '{}' is not a durable fork seating and may not carry a fork \
+                     build source",
+                    spawn_source.as_str()
+                ))
+            );
+        }
         // Multi-host §7.3: a placed spawn takes the remote materialization
         // lane wholesale (compile → digest-authorized ladder open at enqueue
         // → bridge dispatch → ack-fed remote commit).
@@ -28135,6 +28174,9 @@ impl MobActor {
             forked_participant_attachment: _,
             spawned_by,
             fork_job,
+            fork_source,
+            // Refused above: fork seating consumes its inheritance first.
+            fork_build_inheritance: _,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
@@ -28434,6 +28476,7 @@ impl MobActor {
                             compaction_curator_override: compaction_curator_override.clone(),
                             context,
                             labels: labels.clone(),
+                            fork_source: fork_source.clone(),
                             additional_instructions,
                             shell_env,
                             inherited_tool_filter: inherited_tool_filter.clone(),
@@ -28530,6 +28573,7 @@ impl MobActor {
                     config.application_tool_policy = application_tool_policy.clone();
                     config.tool_consequence_policy_registry =
                         self.tool_consequence_policy_registry.clone();
+                    config.fork_source = fork_source.clone();
                     if let Some(ref client) = self.default_llm_client {
                         config.llm_client_override = Some(client.clone());
                     }
@@ -28631,6 +28675,9 @@ impl MobActor {
             config.override_web_search = tool_category_overrides.web_search;
             config.application_tool_policy = application_tool_policy.clone();
             config.tool_consequence_policy_registry = self.tool_consequence_policy_registry.clone();
+            // Fork lineage rides only fork seatings, which resume; a fresh
+            // spawn carries `None` here.
+            config.fork_source = fork_source;
             if let Some(ref client) = self.default_llm_client {
                 config.llm_client_override = Some(client.clone());
             }
@@ -29956,6 +30003,12 @@ impl MobActor {
             // refuses placement; a placed spawn never carries one.
             spawned_by: _,
             fork_job: _,
+            // Fork lineage is in-process build input the local seating paths
+            // own; ordinary spawn ingress refuses it before the placed lane,
+            // and a host-owned capability refuses an inheritance at
+            // validation.
+            fork_source: _,
+            fork_build_inheritance: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -31381,6 +31434,9 @@ impl MobActor {
             forked_participant_attachment: _,
             spawned_by: _,
             fork_job: _,
+            // A policy auto-spawn is fresh: `SpawnMemberSpec::new` sets neither.
+            fork_source: _,
+            fork_build_inheritance: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -33451,6 +33507,11 @@ impl MobActor {
             None,
         ) {
             reject!(error);
+        }
+        // Proven above to name this capability's own source member and source
+        // session: the branch is built with its source's inputs.
+        if let Some(inheritance) = spec.fork_build_inheritance.take() {
+            inheritance.apply_to(&mut spec);
         }
 
         // The source-owner service is composed against the capability's EXACT

@@ -1477,12 +1477,20 @@ fn compile_build_script(relative: &str, scratch: &Path) -> PathBuf {
         .arg(&binary)
         .arg(&source);
     if cfg!(target_os = "linux") {
-        // Same linker policy as the Cargo runs above: the rules_rust rustc in
-        // the Bazel runfiles has no bundled `gcc-ld`, and 1.90+ defaults to
-        // the self-contained linker on x86_64-unknown-linux-gnu, so the bare
-        // invocation fails with "the self-contained linker was requested, but
-        // it wasn't found in the target's sysroot" (2026-09-23 unit lane).
-        rustc.arg("-Clinker=cc").arg("-Clink-self-contained=no");
+        // The rules_rust rustc in the Bazel runfiles has no bundled `gcc-ld`,
+        // and 1.90+ defaults to the self-contained linker on
+        // x86_64-unknown-linux-gnu, so the bare invocation fails with "the
+        // self-contained linker was requested, but it wasn't found in the
+        // target's sysroot" (2026-09-23 unit lane): link through `cc`, not
+        // self-contained. That alone still asks `cc` for LLD
+        // (`-fuse-ld=lld`), which a host without a system `ld.lld` (the
+        // GitHub-hosted runner of the nightly feature matrix) cannot satisfy:
+        // "collect2: fatal error: cannot find 'ld'". Turning the LLD linker
+        // feature off links with the host's default `ld` everywhere.
+        rustc
+            .arg("-Clinker=cc")
+            .arg("-Clink-self-contained=no")
+            .arg("-Clinker-features=-lld");
     }
     let output = rustc
         .output()

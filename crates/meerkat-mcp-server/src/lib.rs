@@ -3050,12 +3050,7 @@ async fn handle_meerkat_config(
             let patch = input.patch.ok_or_else(|| {
                 ToolCallError::invalid_params("patch is required for action=patch")
             })?;
-            let current = state
-                .config_runtime
-                .get()
-                .await
-                .map_err(map_config_runtime_error)?;
-            let preview = apply_patch_preview(&current.config, patch.clone())?;
+            let preview = apply_patch_preview(&state.config_runtime, &patch).await?;
             validate_config_for_commit(&preview)?;
             let snapshot = state
                 .config_runtime
@@ -3161,10 +3156,21 @@ fn map_workgraph_tool_error(error: meerkat::WorkGraphToolError) -> ToolCallError
     ToolCallError::new(code, error.message, None)
 }
 
-fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ToolCallError> {
-    // Single owner of RFC-7386 patch semantics: meerkat-core.
-    meerkat_core::apply_config_patch_preview(config, patch)
-        .map_err(|e| ToolCallError::invalid_params(format!("{e}")))
+async fn apply_patch_preview(
+    config_runtime: &meerkat_core::ConfigRuntime,
+    patch: &Value,
+) -> Result<Config, ToolCallError> {
+    // Single owner of patch semantics: meerkat-core. The preview is what the
+    // store's patch commits (the delta merges onto the persisted document).
+    config_runtime
+        .patch_preview(&ConfigDelta(patch.clone()))
+        .await
+        .map_err(|err| match err {
+            ConfigRuntimeError::Config(error @ meerkat_core::config::ConfigError::Json(_)) => {
+                ToolCallError::invalid_params(format!("{error}"))
+            }
+            other => map_config_runtime_error(other),
+        })
 }
 
 fn canonical_skill_keys(

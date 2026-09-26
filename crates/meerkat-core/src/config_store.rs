@@ -1,6 +1,6 @@
 //! Config store abstraction.
 
-use crate::config::{Config, ConfigDelta, ConfigError, ConfigWarning};
+use crate::config::{Config, ConfigDelta, ConfigError, ConfigWarning, PersistedConfigDocument};
 use crate::model_profile::ModelCatalog;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -47,6 +47,34 @@ pub trait ConfigStore: Send + Sync {
     /// Optional metadata to expose on config APIs.
     fn metadata(&self) -> Option<ConfigStoreMetadata> {
         None
+    }
+
+    /// Like [`Self::get`], also returning the typed load warnings for legacy
+    /// shapes the persisted document carried (see
+    /// [`Config::from_persisted_toml`]). Default: no warnings.
+    async fn get_with_warnings(&self) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        Ok((self.get().await?, Vec::new()))
+    }
+
+    /// The config [`Self::patch`] would write for `delta`, without persisting
+    /// it, plus the warnings that write would raise. Surfaces validate this
+    /// preview before committing. Default: the delta merged onto
+    /// [`Self::get`] via [`apply_config_patch_preview`].
+    async fn patch_preview(
+        &self,
+        delta: &ConfigDelta,
+    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        apply_config_patch_preview(&self.get().await?, delta.0.clone())
+            .map(|config| (config, Vec::new()))
+    }
+
+    /// Like [`Self::patch`], also returning the typed warnings for legacy
+    /// state the write normalized or dropped. Default: no warnings.
+    async fn patch_with_warnings(
+        &self,
+        delta: ConfigDelta,
+    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        Ok((self.patch(delta).await?, Vec::new()))
     }
 }
 
@@ -139,13 +167,15 @@ impl EffectiveConfigReader {
         &self,
         head: &crate::connection::RealmId,
     ) -> Result<Config, ConfigError> {
-        self.effective_config_with_warnings(head)
-            .await
-            .map(|(config, _)| config)
+        let (config, warnings) = self.effective_config_with_warnings(head).await?;
+        report_realm_config_warnings_once(&warnings);
+        Ok(config)
     }
 
     /// Like [`Self::effective_config`], also returning the typed load warnings
-    /// raised by each composed realm document, in fetch order.
+    /// raised by each composed realm document, in fetch order. Documents that
+    /// are fetched but not on the resolved chain (the implicit `global` tail
+    /// when no document declares `[realm.global]`) are not reported.
     pub async fn effective_config_with_warnings(
         &self,
         head: &crate::connection::RealmId,
@@ -205,8 +235,9 @@ impl EffectiveConfigReader {
             docs.insert(global, doc);
         }
 
-        let config = crate::config::compose_effective_config(&docs, &raw_docs, head)?;
-        Ok((config, warnings))
+        Ok(compose_reporting_chain_warnings(
+            &docs, &raw_docs, head, warnings,
+        )?)
     }
 
     /// Like [`Self::effective_config`], but the HEAD realm's document is supplied
@@ -222,9 +253,25 @@ impl EffectiveConfigReader {
         head: &crate::connection::RealmId,
         head_config: Config,
     ) -> Result<Config, ConfigError> {
+        let (config, warnings) = self
+            .effective_config_over_head_with_warnings(head, head_config)
+            .await?;
+        report_realm_config_warnings_once(&warnings);
+        Ok(config)
+    }
+
+    /// Like [`Self::effective_config_over_head`], also returning the typed load
+    /// warnings raised by the fetched ANCESTOR documents on the resolved chain.
+    /// The caller owns the head config, so it reports the head's own warnings.
+    pub async fn effective_config_over_head_with_warnings(
+        &self,
+        head: &crate::connection::RealmId,
+        head_config: Config,
+    ) -> Result<(Config, Vec<RealmConfigWarning>), ConfigError> {
         use crate::connection::{MAX_REALM_CHAIN_DEPTH, RealmId};
         use std::collections::{BTreeMap, BTreeSet};
 
+        let mut warnings: Vec<RealmConfigWarning> = Vec::new();
         let mut docs: BTreeMap<RealmId, Config> = BTreeMap::new();
         // The head's VALUES come from the caller's in-memory config (authoritative
         // — it may post-date the on-disk doc, e.g. a ConfigRuntime snapshot). Its
@@ -257,7 +304,13 @@ impl EffectiveConfigReader {
             if !seen.insert(realm.clone()) {
                 continue;
             }
-            if let Some(doc) = self.source.config_for_realm(&realm).await? {
+            if let Some((doc, doc_warnings)) =
+                self.source.config_for_realm_with_warnings(&realm).await?
+            {
+                warnings.extend(doc_warnings.into_iter().map(|warning| RealmConfigWarning {
+                    realm: realm.clone(),
+                    warning,
+                }));
                 if let Some(parent) = doc
                     .realm
                     .get(realm.as_str())
@@ -274,18 +327,55 @@ impl EffectiveConfigReader {
 
         let global = RealmId::global();
         if seen.insert(global.clone())
-            && let Some(doc) = self.source.config_for_realm(&global).await?
+            && let Some((doc, doc_warnings)) =
+                self.source.config_for_realm_with_warnings(&global).await?
         {
+            warnings.extend(doc_warnings.into_iter().map(|warning| RealmConfigWarning {
+                realm: global.clone(),
+                warning,
+            }));
             if let Some(raw) = self.source.raw_config_for_realm(&global).await? {
                 raw_docs.insert(global.clone(), raw);
             }
             docs.insert(global, doc);
         }
 
-        Ok(crate::config::compose_effective_config(
-            &docs, &raw_docs, head,
+        Ok(compose_reporting_chain_warnings(
+            &docs, &raw_docs, head, warnings,
         )?)
     }
+}
+
+/// Log composed-document warnings once per realm per process for callers
+/// that do not report them to an operator (server surfaces compose on every
+/// request).
+fn report_realm_config_warnings_once(warnings: &[RealmConfigWarning]) {
+    static REPORTED: std::sync::Mutex<
+        std::collections::BTreeSet<(crate::connection::RealmId, ConfigWarning)>,
+    > = std::sync::Mutex::new(std::collections::BTreeSet::new());
+    for RealmConfigWarning { realm, warning } in warnings {
+        let first = REPORTED
+            .lock()
+            .map(|mut reported| reported.insert((realm.clone(), *warning)))
+            .unwrap_or(true);
+        if first {
+            tracing::warn!(%realm, %warning, "normalized persisted realm config document");
+        }
+    }
+}
+
+/// Compose `head`'s effective config and keep only the warnings of documents
+/// on the resolved chain: a fetched document the composition does not fold
+/// has no effect, so its legacy shapes are not the operator's problem here.
+fn compose_reporting_chain_warnings(
+    docs: &std::collections::BTreeMap<crate::connection::RealmId, Config>,
+    raw_docs: &std::collections::BTreeMap<crate::connection::RealmId, toml::Value>,
+    head: &crate::connection::RealmId,
+    mut warnings: Vec<RealmConfigWarning>,
+) -> Result<(Config, Vec<RealmConfigWarning>), crate::connection::RealmChainError> {
+    let (config, chain) = crate::config::compose_effective_config_with_chain(docs, raw_docs, head)?;
+    warnings.retain(|warning| chain.realms().contains(&warning.realm));
+    Ok((config, warnings))
 }
 
 /// In-memory config store for ephemeral settings.
@@ -359,6 +449,24 @@ impl ConfigStore for TaggedConfigStore {
     fn metadata(&self) -> Option<ConfigStoreMetadata> {
         Some(self.metadata.clone())
     }
+
+    async fn get_with_warnings(&self) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        self.inner.get_with_warnings().await
+    }
+
+    async fn patch_preview(
+        &self,
+        delta: &ConfigDelta,
+    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        self.inner.patch_preview(delta).await
+    }
+
+    async fn patch_with_warnings(
+        &self,
+        delta: ConfigDelta,
+    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        self.inner.patch_with_warnings(delta).await
+    }
 }
 
 /// File-backed config store with optional bootstrap template.
@@ -404,22 +512,20 @@ impl FileConfigStore {
         &self.path
     }
 
-    /// Load the document like [`ConfigStore::get`], also returning the typed
-    /// warnings for legacy shapes it normalized (see
-    /// [`Config::from_persisted_toml`]). The file is never rewritten by a load;
-    /// a later write persists the normalized value.
-    pub async fn get_with_warnings(&self) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+    /// Read the document as persisted (legacy keys removed, legacy value
+    /// shapes kept). Loads normalize it; patches merge onto it.
+    async fn read_persisted(&self) -> Result<PersistedConfigDocument, ConfigError> {
         if self.create_if_missing {
             self.ensure_exists().await?;
         }
 
         if !tokio::fs::try_exists(&self.path).await? {
-            return Ok((Config::default(), Vec::new()));
+            return Ok(PersistedConfigDocument::absent());
         }
 
         let bytes = tokio::fs::read(&self.path).await?;
         let content = String::from_utf8(bytes).map_err(ConfigError::Utf8)?;
-        Config::from_persisted_toml(&content)
+        PersistedConfigDocument::parse(&content)
     }
 
     async fn ensure_exists(&self) -> Result<(), ConfigError> {
@@ -442,6 +548,31 @@ impl ConfigStore for FileConfigStore {
         let (config, warnings) = self.get_with_warnings().await?;
         report_config_load_warnings_once(&self.path, &warnings);
         Ok(config)
+    }
+
+    /// The file is never rewritten by a load; a later write persists the
+    /// normalized value.
+    async fn get_with_warnings(&self) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        Ok(self.read_persisted().await?.into_loaded())
+    }
+
+    /// The delta merges onto the document AS PERSISTED, so a patch that adds
+    /// a chain to a pre-0.8.37 `enabled = true` document keeps fallback on.
+    async fn patch_preview(
+        &self,
+        delta: &ConfigDelta,
+    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        self.read_persisted().await?.apply_patch(delta.0.clone())
+    }
+
+    async fn patch_with_warnings(
+        &self,
+        delta: ConfigDelta,
+    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        let (updated, warnings) = self.patch_preview(&delta).await?;
+        updated.validate(self.catalog)?;
+        self.set(updated.clone()).await?;
+        Ok((updated, warnings))
     }
 
     async fn set(&self, config: Config) -> Result<(), ConfigError> {
@@ -468,11 +599,8 @@ impl ConfigStore for FileConfigStore {
     }
 
     async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
-        let mut value = serde_json::to_value(self.get().await?).map_err(ConfigError::Json)?;
-        merge_patch(&mut value, delta.0);
-        let updated: Config = serde_json::from_value(value).map_err(ConfigError::Json)?;
-        updated.validate(self.catalog)?;
-        self.set(updated.clone()).await?;
+        let (updated, warnings) = self.patch_with_warnings(delta).await?;
+        report_config_load_warnings_once(&self.path, &warnings);
         Ok(updated)
     }
 }
@@ -754,7 +882,8 @@ mod tests {
 
     /// Read-modify-write of a legacy document (for example `auth login`
     /// writing a binding into the pre-0.8.37 global doc) must not be bricked:
-    /// the load half normalizes, so the write persists fallback disabled.
+    /// the merged result still has the legacy shape, so the write persists
+    /// fallback disabled and reports the warning.
     #[tokio::test]
     async fn file_store_patch_over_legacy_model_fallback_default_persists_disabled()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -766,17 +895,159 @@ mod tests {
             *crate::model_profile::test_catalog::TEST_CATALOG,
         );
 
-        let updated = store
-            .patch(ConfigDelta(serde_json::json!({ "max_tokens": 1234 })))
+        let (preview, preview_warnings) = store
+            .patch_preview(&ConfigDelta(serde_json::json!({ "max_tokens": 1234 })))
+            .await?;
+        assert_eq!(preview.model_fallback.enabled, Some(false));
+        assert_eq!(
+            preview_warnings,
+            vec![crate::config::ConfigWarning::LegacyModelFallbackDefault]
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await?,
+            LEGACY_MODEL_FALLBACK_DOC,
+            "a preview never writes"
+        );
+
+        let (updated, patch_warnings) = store
+            .patch_with_warnings(ConfigDelta(serde_json::json!({ "max_tokens": 1234 })))
             .await?;
         assert_eq!(updated.max_tokens, Some(1234));
         assert_eq!(updated.model_fallback.enabled, Some(false));
+        assert_eq!(
+            patch_warnings,
+            vec![crate::config::ConfigWarning::LegacyModelFallbackDefault]
+        );
+        let persisted: Config = toml::from_str(&tokio::fs::read_to_string(&path).await?)?;
+        assert_eq!(persisted.model_fallback.enabled, Some(false));
 
         let (reloaded, warnings) = store.get_with_warnings().await?;
         assert_eq!(reloaded.model_fallback.enabled, Some(false));
         assert!(
             warnings.is_empty(),
             "the rewritten document is no longer legacy"
+        );
+        Ok(())
+    }
+
+    /// Following the legacy warning's own advice by PATCH ("add a
+    /// [[model_fallback.chain]] target") must keep fallback on: the delta is
+    /// merged onto the RAW persisted document, and only a merged result that
+    /// still has the legacy shape is normalized.
+    #[tokio::test]
+    async fn file_store_patch_adding_chain_to_legacy_default_keeps_fallback_enabled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("config.toml");
+        tokio::fs::write(&path, LEGACY_MODEL_FALLBACK_DOC).await?;
+        let store = FileConfigStore::new(
+            path.clone(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        );
+
+        let (updated, warnings) = store
+            .patch_with_warnings(ConfigDelta(serde_json::json!({
+                "model_fallback": {
+                    "chain": [{ "model": "backup-openai", "provider": "openai" }]
+                }
+            })))
+            .await?;
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(updated.model_fallback.enabled, Some(true));
+        assert_eq!(updated.model_fallback.chain.len(), 1);
+
+        let persisted: Config = toml::from_str(&tokio::fs::read_to_string(&path).await?)?;
+        assert_eq!(persisted.model_fallback.enabled, Some(true));
+        assert_eq!(persisted.model_fallback.chain.len(), 1);
+        let (reloaded, warnings) = store.get_with_warnings().await?;
+        assert!(reloaded.model_fallback.is_enabled());
+        assert!(warnings.is_empty(), "no warning once the chain is present");
+        Ok(())
+    }
+
+    /// A persisted `use_catalog_default_chain` (documented through 0.8.36)
+    /// loads; the next write drops it; a write that INTRODUCES it is refused.
+    #[tokio::test]
+    async fn file_store_loads_legacy_catalog_chain_key_and_rejects_writes_introducing_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("config.toml");
+        let legacy = "max_tokens = 99\n\n[model_fallback]\nuse_catalog_default_chain = true\n";
+        tokio::fs::write(&path, legacy).await?;
+        let store = FileConfigStore::new(
+            path.clone(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        );
+
+        let loaded = store.get().await?;
+        assert!(!loaded.model_fallback.is_enabled());
+        assert_eq!(loaded.max_tokens, Some(99));
+        let (_, warnings) = store.get_with_warnings().await?;
+        assert_eq!(
+            warnings,
+            vec![crate::config::ConfigWarning::LegacyModelFallbackCatalogChain]
+        );
+        assert_eq!(tokio::fs::read_to_string(&path).await?, legacy);
+
+        let error = store
+            .patch(ConfigDelta(serde_json::json!({
+                "model_fallback": { "use_catalog_default_chain": true }
+            })))
+            .await
+            .expect_err("a write introducing the removed key is refused");
+        assert!(
+            error.to_string().contains("use_catalog_default_chain"),
+            "{error}"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await?,
+            legacy,
+            "a refused write leaves the document untouched"
+        );
+
+        let (updated, warnings) = store
+            .patch_with_warnings(ConfigDelta(serde_json::json!({ "max_tokens": 1234 })))
+            .await?;
+        assert_eq!(updated.max_tokens, Some(1234));
+        assert_eq!(
+            warnings,
+            vec![crate::config::ConfigWarning::LegacyModelFallbackCatalogChain],
+            "the write that drops the ignored key reports it"
+        );
+        let rewritten = tokio::fs::read_to_string(&path).await?;
+        assert!(
+            !rewritten.contains("use_catalog_default_chain"),
+            "the next write drops the ignored key: {rewritten}"
+        );
+        let _: Config = toml::from_str(&rewritten)?;
+        Ok(())
+    }
+
+    /// The implicit `global` tail is fetched even when no document declares
+    /// `[realm.global]`, but then it is not composed; its load warnings must
+    /// not be reported for a doc that plays no part in the effective config.
+    #[tokio::test]
+    async fn effective_reader_skips_warnings_for_global_doc_outside_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::connection::RealmId;
+
+        let temp = tempfile::tempdir()?;
+        let global_dir = temp.path().join("global");
+        tokio::fs::create_dir_all(&global_dir).await?;
+        tokio::fs::write(global_dir.join("config.toml"), LEGACY_MODEL_FALLBACK_DOC).await?;
+        let child_dir = temp.path().join("child");
+        tokio::fs::create_dir_all(&child_dir).await?;
+        tokio::fs::write(child_dir.join("config.toml"), "max_tokens = 77\n").await?;
+
+        let reader = EffectiveConfigReader::new(Arc::new(FileDocSource {
+            root: temp.path().to_path_buf(),
+        }));
+        let child = RealmId::parse("child")?;
+        let (config, warnings) = reader.effective_config_with_warnings(&child).await?;
+        assert_eq!(config.max_tokens, Some(77));
+        assert!(
+            warnings.is_empty(),
+            "global is not on the chain, so its doc is not reported: {warnings:?}"
         );
         Ok(())
     }

@@ -338,9 +338,35 @@ Use `enabled = false` to disable an inherited policy. A nondefault child
 fallback table replaces the inherited table as a whole. Omitted tables and
 empty/default-valued tables inherit; explicit `enabled = false` is nondefault
 and therefore replaces the parent.
-A chain alone never enables fallback. `enabled = true` with an empty chain is
-invalid. Unknown fallback keys, including the removed `use_catalog_default_chain`
-and unsupported scope/expiry/revert options, are rejected.
+A chain alone never enables fallback.
+
+Writes and loads treat two legacy shapes differently:
+
+- **Writes are strict.** A config set or patch (CLI, REST, RPC, MCP, SDK stores)
+  that results in `enabled = true` with an empty chain is rejected, and so is
+  any unknown fallback key, including the removed `use_catalog_default_chain`
+  and unsupported scope/expiry/revert options.
+- **Loads of persisted documents are lenient** for the two shapes that config
+  files written by rkat 0.8.36 and earlier can contain. The document still
+  loads, model fallback is off for it, and the surface reports a typed warning
+  (`ConfigWarning`) naming the file. `rkat` prints it once per file on stderr
+  without changing the exit status; servers log it once per file.
+
+| Persisted shape | Loaded as | Warning |
+| --- | --- | --- |
+| `[model_fallback] enabled = true` with no `[[model_fallback.chain]]` (the template default through 0.8.36, then meaning the catalog default chain) | `enabled = false` | `LegacyModelFallbackDefault` |
+| `use_catalog_default_chain` under `[model_fallback]` (documented through 0.8.36) | key ignored; `enabled` and `chain` apply as usual, so fallback stays off without an explicit chain | `LegacyModelFallbackCatalogChain` |
+
+Both warnings mean the removed catalog chain is no longer used and no backup
+model runs unless you configure one. A load never rewrites the file. The next
+write to that document saves the loaded form: `enabled = false`, and no
+`use_catalog_default_chain`. A patch merges onto the document as persisted, so a
+patch that adds a `[[model_fallback.chain]]` target to an `enabled = true`
+document keeps fallback on; any other patch saves `enabled = false` and reports
+the warning. To silence a warning, set `enabled = false` (or add a chain) and
+remove `use_catalog_default_chain`. Only realms on the resolved inheritance
+chain are reported: `~/.rkat/config.toml` is reported only when some document
+declares `[realm.global]`.
 
 Explicit `brain_swap` requests are independent of automatic fallback settings.
 Target discovery uses the effective model catalog, configured realm routes,

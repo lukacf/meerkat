@@ -164,6 +164,16 @@ impl ConfigRuntime {
         })
     }
 
+    /// The config [`Self::patch`] would commit for `delta`, without writing
+    /// it (see [`ConfigStore::patch_preview`]). Surfaces validate this preview
+    /// before committing, so it merges exactly as the store's patch does.
+    pub async fn patch_preview(&self, delta: &ConfigDelta) -> Result<Config, ConfigRuntimeError> {
+        let _guard = self.process_lock.lock().await;
+        let _file_lock = self.acquire_file_lock().await?;
+        let (preview, _) = self.store.patch_preview(delta).await?;
+        Ok(preview)
+    }
+
     /// Apply JSON merge patch with optional generation check.
     pub async fn patch(
         &self,

@@ -4279,12 +4279,7 @@ async fn patch_config(
         } => (patch, expected_generation),
         PatchConfigRequest::Direct(patch) => (patch, None),
     };
-    let current = state
-        .config_runtime
-        .get()
-        .await
-        .map_err(config_runtime_err_to_api)?;
-    let preview = apply_patch_preview(&current.config, delta.clone())?;
+    let preview = apply_patch_preview(&state, &delta).await?;
     validate_config_for_commit_with_roots(
         &preview,
         state.context_root.as_deref(),
@@ -4347,10 +4342,19 @@ fn validate_config_for_commit_with_roots(
     Ok(())
 }
 
-fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ApiError> {
-    // Single owner of RFC-7386 patch semantics: meerkat-core.
-    meerkat_core::apply_config_patch_preview(config, patch)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid patch: {e}")))
+async fn apply_patch_preview(state: &AppState, patch: &Value) -> Result<Config, ApiError> {
+    // Single owner of patch semantics: meerkat-core. The preview is what the
+    // store's patch commits (the delta merges onto the persisted document).
+    state
+        .config_runtime
+        .patch_preview(&ConfigDelta(patch.clone()))
+        .await
+        .map_err(|err| match err {
+            meerkat_core::ConfigRuntimeError::Config(
+                error @ meerkat_core::config::ConfigError::Json(_),
+            ) => ApiError::BadRequest(format!("Invalid patch: {error}")),
+            other => config_runtime_err_to_api(other),
+        })
 }
 
 /// Spawn a task that forwards events from an mpsc receiver to the broadcast channel,
@@ -11254,6 +11258,55 @@ mod tests {
         .expect("patch over a legacy head doc");
         assert_eq!(after_patch.config.max_tokens, Some(3072));
         assert_eq!(after_patch.config.model_fallback.enabled, Some(false));
+    }
+
+    /// Following the legacy warning's advice through the REST patch API: a
+    /// delta that adds a chain merges onto the PERSISTED head doc, so fallback
+    /// stays on (the preview validates exactly what the store commits).
+    #[tokio::test]
+    async fn patch_adding_chain_to_legacy_fallback_default_keeps_fallback_enabled() {
+        let temp = TempDir::new().unwrap();
+        let user_root = temp.path().join("user");
+        let config_dir = user_root.join(".rkat");
+        tokio::fs::create_dir_all(&config_dir).await.unwrap();
+        let config_path = config_dir.join("config.toml");
+        tokio::fs::write(&config_path, "[model_fallback]\nenabled = true\n")
+            .await
+            .unwrap();
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.selection = RealmSelection::Explicit {
+            realm_id: meerkat_core::RealmId::global().to_string(),
+        };
+        bootstrap.realm.state_root = Some(temp.path().join("realms"));
+        bootstrap.context.context_root = Some(temp.path().to_path_buf());
+        bootstrap.context.user_config_root = Some(user_root);
+        let state = AppState::load_from_with_bootstrap(temp.path().to_path_buf(), bootstrap, false)
+            .await
+            .expect("legacy fallback default must not refuse startup");
+
+        let Json(after_patch) = patch_config(
+            State(state),
+            Json(PatchConfigRequest::Wrapped {
+                patch: serde_json::json!({
+                    "model_fallback": {
+                        "chain": [{ "model": "gpt-5.5", "provider": "openai" }]
+                    }
+                }),
+                expected_generation: None,
+            }),
+        )
+        .await
+        .expect("adding a chain to a legacy head doc");
+        assert_eq!(after_patch.config.model_fallback.enabled, Some(true));
+        assert_eq!(after_patch.config.model_fallback.chain.len(), 1);
+        let (persisted, warnings) =
+            meerkat_core::FileConfigStore::new(config_path, meerkat_models::canonical())
+                .get_with_warnings()
+                .await
+                .unwrap();
+        assert!(persisted.model_fallback.is_enabled());
+        assert_eq!(persisted.model_fallback.chain.len(), 1);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     /// Writes stay strict: a config write that introduces

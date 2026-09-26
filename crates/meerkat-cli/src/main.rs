@@ -4861,9 +4861,9 @@ async fn resolve_config_store(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create realm config directory: {e}"))?;
     Ok((
-        Arc::new(FileConfigStore::new(
+        Arc::new(CliConfigDocStore::new(
             config_path,
-            meerkat_models::canonical(),
+            scope.locator.realm.clone(),
         )),
         base_dir,
     ))
@@ -4892,10 +4892,15 @@ fn cli_global_config_path(scope: &RuntimeScope) -> PathBuf {
 // otherwise non-all-provider `rkat` builds compile it dead.
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn cli_global_config_store(scope: &RuntimeScope) -> Arc<dyn ConfigStore> {
-    Arc::new(FileConfigStore::new(
+    Arc::new(cli_global_config_doc_store(scope))
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+fn cli_global_config_doc_store(scope: &RuntimeScope) -> CliConfigDocStore {
+    CliConfigDocStore::new(
         cli_global_config_path(scope),
-        meerkat_models::canonical(),
-    ))
+        meerkat_core::connection::RealmId::global(),
+    )
 }
 
 /// Shared filesystem [`meerkat_core::RealmConfigSource`] for this scope, mapping
@@ -4922,39 +4927,143 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
     Ok((config, root))
 }
 
-/// Operator-facing line for a typed config load warning, naming the document
-/// to edit.
+/// Operator-facing line for a typed config warning, naming the document to
+/// edit.
 fn render_config_load_warning(
-    scope: &RuntimeScope,
-    warning: &meerkat_core::RealmConfigWarning,
+    doc: &Path,
+    realm: &meerkat_core::connection::RealmId,
+    warning: meerkat_core::ConfigWarning,
 ) -> String {
-    let path = cli_filesystem_realm_config_source(scope).config_doc_path(&warning.realm);
     format!(
-        "warning: config {} (realm '{}'): {}",
-        path.display(),
-        warning.realm,
-        warning.warning
+        "warning: config {} (realm '{realm}'): {warning}",
+        doc.display()
     )
 }
 
-/// Print config load warnings to stderr, each at most once per process: a
-/// single command may load its config several times. Never affects the exit
-/// status.
+/// Documents and warnings the CLI warning sink has already printed.
+static CLI_REPORTED_CONFIG_WARNINGS: std::sync::Mutex<
+    std::collections::BTreeSet<(PathBuf, meerkat_core::ConfigWarning)>,
+> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// The CLI's single sink for typed config warnings: prints each warning for
+/// a document to stderr at most once per process (a command may read a
+/// document several times) and never affects the exit status. rkat's tracing
+/// filter is off by default, so every CLI path that loads or rewrites a
+/// persisted config document reports here: `load_config`, the mob deploy
+/// loader, and every [`CliConfigDocStore`] read/patch (`config get/set/patch`,
+/// `auth login`, the credential-read bootstrap).
+fn report_cli_config_warnings(
+    doc: &Path,
+    realm: &meerkat_core::connection::RealmId,
+    warnings: &[meerkat_core::ConfigWarning],
+) {
+    for &warning in warnings {
+        let first = CLI_REPORTED_CONFIG_WARNINGS
+            .lock()
+            .map(|mut reported| reported.insert((doc.to_path_buf(), warning)))
+            .unwrap_or(true);
+        if first {
+            eprintln!("{}", render_config_load_warning(doc, realm, warning));
+        }
+    }
+}
+
+#[cfg(test)]
+fn cli_config_warning_reported(doc: &Path, warning: meerkat_core::ConfigWarning) -> bool {
+    CLI_REPORTED_CONFIG_WARNINGS
+        .lock()
+        .map(|reported| reported.contains(&(doc.to_path_buf(), warning)))
+        .unwrap_or(false)
+}
+
+/// Report realm-keyed warnings from inheritance composition through the CLI
+/// sink, resolving each realm to its document.
 fn report_config_load_warnings(
     scope: &RuntimeScope,
     warnings: &[meerkat_core::RealmConfigWarning],
 ) {
-    static REPORTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
-        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let source = cli_filesystem_realm_config_source(scope);
     for warning in warnings {
-        let line = render_config_load_warning(scope, warning);
-        let first = REPORTED
-            .lock()
-            .map(|mut reported| reported.insert(line.clone()))
-            .unwrap_or(true);
-        if first {
-            eprintln!("{line}");
+        report_cli_config_warnings(
+            &source.config_doc_path(&warning.realm),
+            &warning.realm,
+            &[warning.warning],
+        );
+    }
+}
+
+/// A realm's own persisted config document as the CLI reads and writes it:
+/// a [`FileConfigStore`] whose load and patch warnings go to the CLI sink.
+struct CliConfigDocStore {
+    inner: FileConfigStore,
+    realm: meerkat_core::connection::RealmId,
+}
+
+impl CliConfigDocStore {
+    fn new(path: PathBuf, realm: meerkat_core::connection::RealmId) -> Self {
+        Self {
+            inner: FileConfigStore::new(path, meerkat_models::canonical()),
+            realm,
         }
+    }
+
+    fn report(&self, warnings: &[meerkat_core::ConfigWarning]) {
+        report_cli_config_warnings(self.inner.path(), &self.realm, warnings);
+    }
+
+    /// Load without reporting, for a caller that reports only if it goes on
+    /// to rewrite the document (see [`Self::report`]).
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    async fn get_unreported(
+        &self,
+    ) -> Result<(Config, Vec<meerkat_core::ConfigWarning>), meerkat_core::config::ConfigError> {
+        self.inner.get_with_warnings().await
+    }
+}
+
+#[async_trait::async_trait]
+impl ConfigStore for CliConfigDocStore {
+    async fn get(&self) -> Result<Config, meerkat_core::config::ConfigError> {
+        self.get_with_warnings().await.map(|(config, _)| config)
+    }
+
+    async fn set(&self, config: Config) -> Result<(), meerkat_core::config::ConfigError> {
+        self.inner.set(config).await
+    }
+
+    async fn patch(&self, delta: ConfigDelta) -> Result<Config, meerkat_core::config::ConfigError> {
+        self.patch_with_warnings(delta)
+            .await
+            .map(|(config, _)| config)
+    }
+
+    fn metadata(&self) -> Option<meerkat_core::ConfigStoreMetadata> {
+        self.inner.metadata()
+    }
+
+    async fn get_with_warnings(
+        &self,
+    ) -> Result<(Config, Vec<meerkat_core::ConfigWarning>), meerkat_core::config::ConfigError> {
+        let (config, warnings) = self.inner.get_with_warnings().await?;
+        self.report(&warnings);
+        Ok((config, warnings))
+    }
+
+    async fn patch_preview(
+        &self,
+        delta: &ConfigDelta,
+    ) -> Result<(Config, Vec<meerkat_core::ConfigWarning>), meerkat_core::config::ConfigError> {
+        // A preview persists nothing, so it reports nothing.
+        self.inner.patch_preview(delta).await
+    }
+
+    async fn patch_with_warnings(
+        &self,
+        delta: ConfigDelta,
+    ) -> Result<(Config, Vec<meerkat_core::ConfigWarning>), meerkat_core::config::ConfigError> {
+        let (config, warnings) = self.inner.patch_with_warnings(delta).await?;
+        self.report(&warnings);
+        Ok((config, warnings))
     }
 }
 
@@ -6777,11 +6886,15 @@ async fn migrate_one_legacy_login_credential(
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn ensure_migrated_global_oauth_sections_provisioned(
     token_store: &dyn meerkat_providers::auth_store::TokenStore,
-    config_store: &dyn ConfigStore,
+    config_store: &CliConfigDocStore,
 ) {
     use meerkat_providers::auth_store::TokenKey;
-    let mut config = match config_store.get().await {
-        Ok(config) => config,
+    // This runs before `load_config` and may rewrite the global doc, which
+    // persists any load normalization. Report the load warnings when it
+    // does; otherwise the doc is reported (or not) by composition, which
+    // skips a global doc that is not on the realm chain.
+    let (mut config, load_warnings) = match config_store.get_unreported().await {
+        Ok(loaded) => loaded,
         Err(e) => {
             tracing::warn!(error = %e, "skipping migrated global OAuth section provisioning (config read failed)");
             return;
@@ -6810,8 +6923,13 @@ async fn ensure_migrated_global_oauth_sections_provisioned(
             }
         }
     }
-    if changed && let Err(e) = config_store.set(config).await {
-        tracing::warn!(error = %e, "failed to persist migrated global OAuth section");
+    if changed {
+        match config_store.set(config).await {
+            Ok(()) => config_store.report(&load_warnings),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to persist migrated global OAuth section");
+            }
+        }
     }
 }
 
@@ -6872,9 +6990,8 @@ async fn prepare_credential_reads_with_persistence(
     // raw global head doc.
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     {
-        let config_store = cli_global_config_store(scope);
-        ensure_migrated_global_oauth_sections_provisioned(store.as_ref(), config_store.as_ref())
-            .await;
+        let config_store = cli_global_config_doc_store(scope);
+        ensure_migrated_global_oauth_sections_provisioned(store.as_ref(), &config_store).await;
     }
     #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
     let _ = scope;
@@ -18499,7 +18616,9 @@ async fn load_deploy_runtime_config(
         let file_bytes = std::fs::read(&config_path).map_err(|err| {
             anyhow::anyhow!("failed reading config '{}': {err}", config_path.display())
         })?;
-        apply_toml_delta_layer(&mut head, &file_bytes, &config_path.display().to_string())?;
+        let head_warnings =
+            apply_toml_delta_layer(&mut head, &file_bytes, &config_path.display().to_string())?;
+        report_cli_config_warnings(&config_path, &scope.locator.realm, &head_warnings);
     }
 
     // Compose the parent chain + implicit `global` tail OVER the head doc, so a
@@ -18508,10 +18627,12 @@ async fn load_deploy_runtime_config(
     // path (load_config). Without this the non-RPC deploy surface would build
     // members from the head realm's raw config only — re-introducing the
     // credential-write-to-global / read-from-head split this feature removes.
-    let mut config = meerkat_core::EffectiveConfigReader::new(cli_realm_config_source(scope))
-        .effective_config_over_head(&scope.locator.realm, head)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed composing realm config chain: {err}"))?;
+    let (mut config, ancestor_warnings) =
+        meerkat_core::EffectiveConfigReader::new(cli_realm_config_source(scope))
+            .effective_config_over_head_with_warnings(&scope.locator.realm, head)
+            .await
+            .map_err(|err| anyhow::anyhow!("failed composing realm config chain: {err}"))?;
+    report_config_load_warnings(scope, &ancestor_warnings);
 
     config
         .apply_env_overrides()
@@ -18629,16 +18750,18 @@ fn deploy_runtime_provides_capability(
     matches!(capability, CapabilityId::SessionCompaction) && cfg!(feature = "session-compaction")
 }
 
+/// Merge one persisted TOML layer into `config`, returning its typed load
+/// warnings for the caller to report.
 #[cfg(feature = "mob")]
 fn apply_toml_delta_layer(
     config: &mut Config,
     toml_bytes: &[u8],
     source_label: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<meerkat_core::ConfigWarning>> {
     let text = std::str::from_utf8(toml_bytes)
         .map_err(|err| anyhow::anyhow!("invalid UTF-8 in {source_label}: {err}"))?;
     config
-        .merge_toml_str(text)
+        .merge_toml_str_with_warnings(text)
         .map_err(|err| anyhow::anyhow!("invalid TOML in {source_label}: {err}"))
 }
 
@@ -20518,6 +20641,134 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "bootstrap must copy the legacy token before config composition"
+        );
+    }
+
+    /// `rkat mob run/deploy` never calls `load_config`: its head doc and the
+    /// composed ancestors must still report typed config warnings through the
+    /// CLI sink (rkat's tracing filter is off by default). A global doc that
+    /// is not on the chain is not reported.
+    #[cfg(all(
+        feature = "mob",
+        feature = "anthropic",
+        feature = "openai",
+        feature = "gemini"
+    ))]
+    #[tokio::test]
+    async fn direct_mob_config_load_reports_legacy_config_warnings_through_cli_sink() {
+        use meerkat_core::ConfigWarning;
+        use meerkat_providers::auth_store::TokenStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let scope = test_scope(state_root.clone(), "mob-legacy");
+        let head_doc = meerkat_store::realm_paths_in(&state_root, "mob-legacy").config_path;
+        std::fs::create_dir_all(head_doc.parent().expect("head dir")).expect("mkdir head");
+        std::fs::write(
+            &head_doc,
+            "[model_fallback]\nenabled = true\n\n[realm.mob-legacy]\nparent = \"team\"\n",
+        )
+        .expect("write head doc");
+        let team_doc = meerkat_store::realm_paths_in(&state_root, "team").config_path;
+        std::fs::create_dir_all(team_doc.parent().expect("team dir")).expect("mkdir team");
+        std::fs::write(
+            &team_doc,
+            "[realm.team]\n\n[model_fallback]\nuse_catalog_default_chain = true\n",
+        )
+        .expect("write team doc");
+        let global_doc = cli_global_config_path(&scope);
+        std::fs::create_dir_all(global_doc.parent().expect("global dir")).expect("mkdir global");
+        std::fs::write(&global_doc, "[model_fallback]\nenabled = true\n")
+            .expect("write off-chain global doc");
+
+        let store: Arc<dyn TokenStore> = Arc::new(NonEnumerableTokenStore::new());
+        let config = TEST_CREDENTIAL_READ_PERSISTENCE
+            .scope(
+                test_provider_auth_persistence(store),
+                load_deploy_runtime_config(&scope, CliOverrides::default()),
+            )
+            .await
+            .expect("legacy docs must not brick the mob deploy config loader");
+        assert!(!config.model_fallback.is_enabled());
+        assert!(
+            cli_config_warning_reported(&head_doc, ConfigWarning::LegacyModelFallbackDefault),
+            "the head doc is reported"
+        );
+        assert!(
+            cli_config_warning_reported(&team_doc, ConfigWarning::LegacyModelFallbackCatalogChain),
+            "a composed ancestor doc is reported"
+        );
+        assert!(
+            !cli_config_warning_reported(&global_doc, ConfigWarning::LegacyModelFallbackDefault),
+            "a global doc outside the chain is not reported"
+        );
+    }
+
+    /// The credential-read bootstrap runs before `load_config` and rewrites the
+    /// global doc when a `global` OAuth token still needs its binding section.
+    /// That write persists the normalized policy, so the bootstrap must report
+    /// the warning itself; without a rewrite it reports nothing.
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[tokio::test]
+    async fn credential_bootstrap_reports_legacy_warning_only_when_it_rewrites_global_doc() {
+        use meerkat_core::ConfigWarning;
+        use meerkat_providers::auth_store::{TokenKey, TokenStore};
+
+        let legacy_global = "[model_fallback]\nenabled = true\n\n[realm.global]\n";
+
+        // No global OAuth token: nothing to provision, nothing rewritten.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope(temp.path().join("realms"), "boot-idle");
+        let global_doc = cli_global_config_path(&scope);
+        std::fs::create_dir_all(global_doc.parent().expect("global dir")).expect("mkdir global");
+        std::fs::write(&global_doc, legacy_global).expect("write legacy global doc");
+        let store: Arc<dyn TokenStore> = Arc::new(NonEnumerableTokenStore::new());
+        TEST_CREDENTIAL_READ_PERSISTENCE
+            .scope(
+                test_provider_auth_persistence(store),
+                prepare_credential_reads(&scope),
+            )
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(&global_doc).expect("reread"),
+            legacy_global
+        );
+        assert!(!cli_config_warning_reported(
+            &global_doc,
+            ConfigWarning::LegacyModelFallbackDefault
+        ));
+
+        // A global OAuth token whose binding section is missing: provisioned.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope(temp.path().join("realms"), "boot-provision");
+        let global_doc = cli_global_config_path(&scope);
+        std::fs::create_dir_all(global_doc.parent().expect("global dir")).expect("mkdir global");
+        std::fs::write(&global_doc, legacy_global).expect("write legacy global doc");
+        let store: Arc<dyn TokenStore> = Arc::new(NonEnumerableTokenStore::new());
+        store
+            .save(
+                &TokenKey::parse("global", "openai_oauth").expect("token key"),
+                &openai_oauth_tokens(),
+            )
+            .await
+            .expect("seed global token");
+        TEST_CREDENTIAL_READ_PERSISTENCE
+            .scope(
+                test_provider_auth_persistence(store),
+                prepare_credential_reads(&scope),
+            )
+            .await;
+        let rewritten: Config =
+            toml::from_str(&std::fs::read_to_string(&global_doc).expect("reread"))
+                .expect("rewritten global doc parses strictly");
+        assert_eq!(
+            rewritten.model_fallback.enabled,
+            Some(false),
+            "the provisioning write persisted the normalized policy"
+        );
+        assert!(
+            cli_config_warning_reported(&global_doc, ConfigWarning::LegacyModelFallbackDefault),
+            "the rewriting bootstrap reports the warning"
         );
     }
 
@@ -28864,7 +29115,14 @@ supports_reasoning = true
                 warning: meerkat_core::ConfigWarning::LegacyModelFallbackDefault,
             }]
         );
-        let line = render_config_load_warning(&scope, &warnings[0]);
+        assert!(
+            cli_config_warning_reported(
+                &doc,
+                meerkat_core::ConfigWarning::LegacyModelFallbackDefault
+            ),
+            "load_config reports through the CLI sink, keyed by the document"
+        );
+        let line = render_config_load_warning(&doc, &warnings[0].realm, warnings[0].warning);
         assert!(line.contains(&doc.display().to_string()), "{line}");
         assert!(line.contains("0.8.37"), "{line}");
         assert_eq!(

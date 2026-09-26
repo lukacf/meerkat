@@ -2280,6 +2280,7 @@ impl meerkat_core::RealmConfigSource for FilesystemRealmConfigSource {
         Option<(meerkat_core::Config, Vec<meerkat_core::ConfigWarning>)>,
         meerkat_core::config::ConfigError,
     > {
+        use meerkat_core::ConfigStore;
         match self.present_doc_store(realm).await? {
             Some(store) => store.get_with_warnings().await.map(Some),
             None => Ok(None),

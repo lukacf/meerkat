@@ -135,10 +135,7 @@ impl Config {
     /// as typed [`ConfigWarning`]s instead of failing every later
     /// [`Config::validate`]. Writes do not pass through this and stay strict.
     pub fn from_persisted_toml(content: &str) -> Result<(Self, Vec<ConfigWarning>), ConfigError> {
-        let mut config: Self = toml::from_str(content).map_err(ConfigError::Parse)?;
-        config.reject_unwired_agent_provider_params()?;
-        let warnings = config.normalize_persisted();
-        Ok((config, warnings))
+        Ok(PersistedConfigDocument::parse(content)?.into_loaded())
     }
 
     /// Apply the persisted-document load normalization in place; see
@@ -224,7 +221,7 @@ impl Config {
             && tokio::fs::try_exists(&global_path).await.unwrap_or(false)
         {
             let content = tokio::fs::read_to_string(&global_path).await?;
-            let cfg: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
+            let (cfg, _) = Config::from_persisted_toml(&content)?;
             hooks.append_entries_from(&cfg.hooks);
         }
 
@@ -232,7 +229,7 @@ impl Config {
             && tokio::fs::try_exists(&project_path).await.unwrap_or(false)
         {
             let content = tokio::fs::read_to_string(&project_path).await?;
-            let cfg: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
+            let (cfg, _) = Config::from_persisted_toml(&content)?;
             hooks.append_entries_from(&cfg.hooks);
         }
 
@@ -284,11 +281,24 @@ impl Config {
     }
 
     /// Merge configuration from a TOML string.
+    ///
+    /// The layer is a persisted document: legacy shapes are normalized as in
+    /// [`Config::from_persisted_toml`] and their warnings are logged. Use
+    /// [`Config::merge_toml_str_with_warnings`] to report them to an operator.
     pub fn merge_toml_str(&mut self, content: &str) -> Result<(), ConfigError> {
-        let (file_config, warnings) = Config::from_persisted_toml(content)?;
-        for warning in warnings {
+        for warning in self.merge_toml_str_with_warnings(content)? {
             tracing::warn!(%warning, "normalized persisted config layer");
         }
+        Ok(())
+    }
+
+    /// Like [`Config::merge_toml_str`], returning the typed load warnings of
+    /// the merged layer instead of logging them.
+    pub fn merge_toml_str_with_warnings(
+        &mut self,
+        content: &str,
+    ) -> Result<Vec<ConfigWarning>, ConfigError> {
+        let (file_config, warnings) = Config::from_persisted_toml(content)?;
         let tools_layer = file_config.tools.clone();
         let retry_layer = file_config.retry.clone();
         let self_hosted_layer = file_config.self_hosted.clone();
@@ -302,7 +312,7 @@ impl Config {
         self.merge_self_hosted_from_toml_presence(&parsed, &self_hosted_layer);
         self.merge_provider_tools_from_toml_presence(&parsed, &provider_tools_layer);
         self.merge_skills_from_toml_presence(&parsed, &skills_layer);
-        Ok(())
+        Ok(warnings)
     }
 
     /// Merge another config into this one.
@@ -1582,15 +1592,20 @@ impl ModelFallbackConfig {
     /// unreviewed backup model) and a typed warning. Only persisted-document
     /// loads call this; writes keep [`Self::validate`]'s strict rejection.
     pub fn normalize_persisted(&mut self) -> Option<ConfigWarning> {
-        if self.is_enabled() && self.chain.is_empty() {
+        if self.has_legacy_default_shape() {
             self.enabled = Some(false);
             return Some(ConfigWarning::LegacyModelFallbackDefault);
         }
         None
     }
 
+    /// `enabled = true` with an empty chain: the pre-0.8.37 template default.
+    fn has_legacy_default_shape(&self) -> bool {
+        self.is_enabled() && self.chain.is_empty()
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.is_enabled() && self.chain.is_empty() {
+        if self.has_legacy_default_shape() {
             return Err(ConfigError::Validation(
                 "model_fallback.enabled = true requires a nonempty explicit chain".into(),
             ));
@@ -2814,6 +2829,11 @@ pub enum ConfigWarning {
     /// chain meant the catalog default chain. 0.8.37 removed that chain and
     /// made fallback explicit, so the loaded policy is disabled.
     LegacyModelFallbackDefault,
+    /// `use_catalog_default_chain` under `[model_fallback]`: documented through
+    /// 0.8.36 to restore the catalog default chain, which 0.8.37 removed. The
+    /// key is ignored on load and dropped by the next write; fallback follows
+    /// only `enabled` and an explicit chain.
+    LegacyModelFallbackCatalogChain,
 }
 
 impl std::fmt::Display for ConfigWarning {
@@ -2826,7 +2846,128 @@ impl std::fmt::Display for ConfigWarning {
                  [model_fallback] to silence this warning, or add a reviewed \
                  [[model_fallback.chain]] target to keep fallback on",
             ),
+            Self::LegacyModelFallbackCatalogChain => f.write_str(
+                "model_fallback.use_catalog_default_chain was removed in 0.8.37 together with \
+                 the catalog fallback chain; it is ignored, and the next config write drops it. \
+                 Model fallback uses only `enabled = true` with a reviewed \
+                 [[model_fallback.chain]] target. Remove the key to silence this warning",
+            ),
         }
+    }
+}
+
+/// One persisted config document as written on disk, parsed strictly except
+/// for keys earlier releases persisted, and NOT yet load-normalized.
+///
+/// This is the single owner of the persisted-document load contract:
+/// [`Self::into_loaded`] is what a load returns, and
+/// [`Self::apply_patch`] is what a patch writes (the delta merges onto the
+/// document as persisted, so a patch that repairs a legacy shape keeps the
+/// operator's other values instead of their load-normalized form).
+#[derive(Debug, Clone)]
+pub(crate) struct PersistedConfigDocument {
+    /// The document without its legacy keys; legacy VALUE shapes are kept.
+    config: Config,
+    /// Warnings for legacy keys removed from the document.
+    removed_key_warnings: Vec<ConfigWarning>,
+}
+
+/// Keys under `[model_fallback]` that earlier releases persisted and the
+/// strict schema no longer accepts. Each is removed before strict parsing,
+/// never serialized back, and reported as a typed warning.
+#[derive(Debug, Default)]
+struct LegacyModelFallbackKeys {
+    /// `use_catalog_default_chain` (through 0.8.36). Typed as its old `bool`.
+    use_catalog_default_chain: Option<bool>,
+}
+
+impl LegacyModelFallbackKeys {
+    const USE_CATALOG_DEFAULT_CHAIN: &'static str = "use_catalog_default_chain";
+
+    /// Remove the legacy keys from a parsed document's `[model_fallback]`
+    /// table. A value of the wrong type is a parse error, as it was then.
+    fn take_from(document: &mut toml::Table) -> Result<Self, ConfigError> {
+        let Some(toml::Value::Table(model_fallback)) = document.get_mut("model_fallback") else {
+            return Ok(Self::default());
+        };
+        let use_catalog_default_chain = model_fallback
+            .remove(Self::USE_CATALOG_DEFAULT_CHAIN)
+            .map(toml::Value::try_into::<bool>)
+            .transpose()
+            .map_err(ConfigError::Parse)?;
+        Ok(Self {
+            use_catalog_default_chain,
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.use_catalog_default_chain.is_none()
+    }
+
+    fn warnings(&self) -> Vec<ConfigWarning> {
+        self.use_catalog_default_chain
+            .map(|_| ConfigWarning::LegacyModelFallbackCatalogChain)
+            .into_iter()
+            .collect()
+    }
+}
+
+impl PersistedConfigDocument {
+    /// The document of a store whose file does not exist.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn absent() -> Self {
+        Self {
+            config: Config::default(),
+            removed_key_warnings: Vec::new(),
+        }
+    }
+
+    pub(crate) fn parse(content: &str) -> Result<Self, ConfigError> {
+        let mut document: toml::Table = toml::from_str(content).map_err(ConfigError::Parse)?;
+        let legacy_keys = LegacyModelFallbackKeys::take_from(&mut document)?;
+        // Without legacy keys, parse the original text so errors keep their
+        // source spans; otherwise parse the document with the keys removed.
+        let config: Config = if legacy_keys.is_empty() {
+            toml::from_str(content)
+        } else {
+            document.try_into()
+        }
+        .map_err(ConfigError::Parse)?;
+        config.reject_unwired_agent_provider_params()?;
+        Ok(Self {
+            config,
+            removed_key_warnings: legacy_keys.warnings(),
+        })
+    }
+
+    /// The loaded document: legacy value shapes normalized, all warnings.
+    pub(crate) fn into_loaded(self) -> (Config, Vec<ConfigWarning>) {
+        let Self {
+            mut config,
+            mut removed_key_warnings,
+        } = self;
+        removed_key_warnings.extend(config.normalize_persisted());
+        (config, removed_key_warnings)
+    }
+
+    /// The config a JSON merge patch writes over this document, with the
+    /// warnings for legacy state the write normalizes or drops.
+    ///
+    /// The delta merges onto the document as persisted. The legacy fallback
+    /// default is normalized only when the document had it AND the merged
+    /// result still has it; a write that newly introduces that shape is left
+    /// for [`Config::validate`] to reject.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn apply_patch(
+        &self,
+        patch: serde_json::Value,
+    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        let mut merged = crate::config_store::apply_config_patch_preview(&self.config, patch)?;
+        let mut warnings = self.removed_key_warnings.clone();
+        if self.config.model_fallback.has_legacy_default_shape() {
+            warnings.extend(merged.model_fallback.normalize_persisted());
+        }
+        Ok((merged, warnings))
     }
 }
 
@@ -2845,6 +2986,16 @@ pub fn compose_effective_config(
     raw_docs: &std::collections::BTreeMap<crate::connection::RealmId, toml::Value>,
     head: &crate::connection::RealmId,
 ) -> Result<Config, crate::connection::RealmChainError> {
+    compose_effective_config_with_chain(docs, raw_docs, head).map(|(config, _)| config)
+}
+
+/// [`compose_effective_config`], also returning the resolved chain whose
+/// documents were folded (callers use it to report only composed documents).
+pub(crate) fn compose_effective_config_with_chain(
+    docs: &std::collections::BTreeMap<crate::connection::RealmId, Config>,
+    raw_docs: &std::collections::BTreeMap<crate::connection::RealmId, toml::Value>,
+    head: &crate::connection::RealmId,
+) -> Result<(Config, crate::connection::RealmChain), crate::connection::RealmChainError> {
     use crate::connection::RealmChain;
     // Combined topology: union every fetched doc's realm sections so the chain
     // authority sees each member's parent edge regardless of which doc carried
@@ -2916,7 +3067,7 @@ pub fn compose_effective_config(
     // single-file-multiple-realms model (one doc carrying `[realm.a]`,
     // `[realm.b]`, ... is how the CLI and surfaces resolve a `--realm`/section
     // that is not itself a chain member). Tracked, not gated.
-    Ok(effective)
+    Ok((effective, chain))
 }
 
 /// Serde helpers for `Option<Duration>` with humantime format.
@@ -4762,6 +4913,10 @@ enabled = false
         assert!(enabled.validate().is_err());
         let disabled: ModelFallbackConfig = toml::from_str("enabled = false").unwrap();
         disabled.validate().unwrap();
+        // The typed schema stays strict: this is what every WRITE parses.
+        // Persisted-document LOADS accept `use_catalog_default_chain` as an
+        // ignored legacy key (see
+        // `test_legacy_use_catalog_default_chain_loads_ignored_with_typed_warning`).
         for invalid in [
             "scope = 'turn'",
             "use_catalog_default_chain = true",
@@ -4814,6 +4969,76 @@ enabled = false
         ] {
             assert!(rendered.contains(needle), "{needle} missing: {rendered}");
         }
+    }
+
+    /// 0.8.36 and earlier documented `use_catalog_default_chain` under
+    /// `[model_fallback]`. The catalog chain is gone, so a persisted document
+    /// carrying the key must still LOAD: the key is ignored (never an
+    /// unreviewed backup model), reported as a typed warning, and never
+    /// serialized back. Fallback then follows the ordinary enabled rules.
+    #[test]
+    fn test_legacy_use_catalog_default_chain_loads_ignored_with_typed_warning() {
+        let with_chain = "[model_fallback]\nenabled = true\nuse_catalog_default_chain = true\n\n[[model_fallback.chain]]\nmodel = \"backup-openai\"\nprovider = \"openai\"\n";
+        // (document, fallback enabled after load, chain length, also the
+        // legacy enabled-without-chain default)
+        for (text, enabled, chain_len, legacy_default) in [
+            (
+                "[model_fallback]\nuse_catalog_default_chain = true\n",
+                false,
+                0,
+                false,
+            ),
+            (
+                "[model_fallback]\nuse_catalog_default_chain = false\n",
+                false,
+                0,
+                false,
+            ),
+            (
+                "[model_fallback]\nenabled = true\nuse_catalog_default_chain = true\n",
+                false,
+                0,
+                true,
+            ),
+            (with_chain, true, 1, false),
+        ] {
+            let (config, warnings) =
+                Config::from_persisted_toml(text).expect("a persisted legacy key must load");
+            assert_eq!(config.model_fallback.is_enabled(), enabled, "{text}");
+            assert_eq!(config.model_fallback.chain.len(), chain_len, "{text}");
+            assert_eq!(
+                warnings.first(),
+                Some(&ConfigWarning::LegacyModelFallbackCatalogChain),
+                "{text}: the legacy key is reported"
+            );
+            assert_eq!(
+                warnings.contains(&ConfigWarning::LegacyModelFallbackDefault),
+                legacy_default,
+                "{text}: {warnings:?}"
+            );
+            config
+                .validate(*crate::model_profile::test_catalog::TEST_CATALOG)
+                .expect("the loaded config validates");
+            let rendered = toml::to_string(&config).expect("serialize");
+            assert!(
+                !rendered.contains("use_catalog_default_chain"),
+                "{text}: the legacy key is never serialized back: {rendered}"
+            );
+        }
+
+        let rendered = ConfigWarning::LegacyModelFallbackCatalogChain.to_string();
+        for needle in [
+            "use_catalog_default_chain",
+            "0.8.37",
+            "[[model_fallback.chain]]",
+        ] {
+            assert!(rendered.contains(needle), "{needle} missing: {rendered}");
+        }
+        // A wrongly typed legacy value is still a parse error.
+        assert!(
+            Config::from_persisted_toml("[model_fallback]\nuse_catalog_default_chain = 1\n")
+                .is_err()
+        );
     }
 
     #[test]

@@ -238,9 +238,24 @@ provider = "openai"
 auth_binding = { realm = "global", binding = "openai_oauth" }
 ```
 
-There is no catalog chain. `enabled = true` with no targets is invalid;
-`enabled = false` overrides an inherited enabled table. Unknown fallback
-keys (including the removed `use_catalog_default_chain`) reject.
+There is no catalog chain. Writing `enabled = true` with no targets is
+rejected; `enabled = false` overrides an inherited enabled table. Writing an
+unknown fallback key (including the removed `use_catalog_default_chain`) is
+rejected.
+
+Config files written by rkat 0.8.36 and earlier still load. If one has
+`enabled = true` with no chain, or `use_catalog_default_chain`, fallback is off
+for it and `rkat` prints a warning on stderr naming the file, once per command.
+Every command that reads the file prints it, including `rkat config get/set/patch`,
+`rkat mob run/deploy` and `rkat auth login`. The file is not rewritten until the
+next config write, which saves `enabled = false`. `rkat config patch` merges
+onto the file as written, so adding a chain keeps fallback on:
+
+```bash
+rkat config patch --json '{"model_fallback":{"chain":[{"model":"gpt-5.5","provider":"openai"}]}}'
+```
+
+See [load vs write rules](/concepts/configuration#model-fallback-settings).
 
 Fallback targets include the auth binding identity. Use `auth_binding` on an
 explicit target to retry the same model/provider through a different configured

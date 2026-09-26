@@ -476,14 +476,23 @@ them.
   child's run and retires the child once it has run that long. Omitted means no
   limit.
 - Typed config load warnings (meerkat-core): `ConfigWarning`,
+- Typed config load warnings (meerkat-core): `ConfigWarning`
+  (`LegacyModelFallbackDefault`, `LegacyModelFallbackCatalogChain`),
   `RealmConfigWarning`, `Config::from_persisted_toml`,
-  `Config::normalize_persisted`, `ModelFallbackConfig::normalize_persisted`,
-  `FileConfigStore::get_with_warnings`,
-  `EffectiveConfigReader::effective_config_with_warnings`, and the defaulted
-  trait method `RealmConfigSource::config_for_realm_with_warnings`
-  (`FilesystemRealmConfigSource` implements it). `FileConfigStore::get`,
-  `Config::merge_toml_str` and `compose_effective_config` apply the same load
-  normalization.
+  `Config::normalize_persisted`, `Config::merge_toml_str_with_warnings`,
+  `ModelFallbackConfig::normalize_persisted`,
+  `EffectiveConfigReader::effective_config_with_warnings` and
+  `effective_config_over_head_with_warnings` (both report only realms on the
+  resolved chain), `ConfigRuntime::patch_preview`, the defaulted trait method
+  `RealmConfigSource::config_for_realm_with_warnings`
+  (`FilesystemRealmConfigSource` implements it), and the defaulted
+  `ConfigStore` methods `get_with_warnings`, `patch_preview` and
+  `patch_with_warnings` (`FileConfigStore` and `TaggedConfigStore` implement
+  them). `FileConfigStore::get`, `Config::merge_toml_str`,
+  `Config::load_layered_hooks_from` and `compose_effective_config` apply the
+  same load normalization. REST, RPC and MCP config patch previews now use the
+  store's `patch_preview`, so they validate exactly what the store's patch
+  writes.
 - Cumulative usage reports cached input, cache writes and reasoning. The run
   result's `usage` (what `rkat run --output json` prints), `run_completed.usage`,
   the RPC and REST run results and mob run accounting now carry
@@ -890,10 +899,27 @@ them.
   explicit chain", and REST/RPC/MCP startup refused the realm. Loading a
   persisted document now turns that shape into fallback disabled - no unreviewed
   backup model is ever used - and reports the typed
-  `ConfigWarning::LegacyModelFallbackDefault`; `rkat` prints it to stderr once,
-  naming the file, without changing the exit status. Loading never rewrites the
+  `ConfigWarning::LegacyModelFallbackDefault`. Loading never rewrites the
   file; the next config write persists `enabled = false`. Writes that introduce
   `enabled = true` with an empty chain are still rejected.
+- Config documents that set `use_catalog_default_chain` under
+  `[model_fallback]` (documented through 0.8.36) no longer fail every command
+  and REST/RPC/MCP startup with "unknown field". Loads ignore the key and
+  report `ConfigWarning::LegacyModelFallbackCatalogChain`; fallback follows only
+  `enabled` and an explicit chain. The key is never written back, and writes
+  that introduce it are still rejected.
+- Config patches merge onto the document as persisted. Adding a
+  `[[model_fallback.chain]]` target by `rkat config patch` (or a REST/RPC/MCP
+  patch) to a pre-0.8.37 `enabled = true` document now keeps fallback on
+  instead of saving `enabled = false`. Any other patch of such a document saves
+  `enabled = false` and reports the warning.
+- `rkat` prints each typed config warning on stderr once per file, naming the
+  file, without changing the exit status, on every path that reads a persisted
+  config: `load_config` commands, `rkat mob run/deploy`,
+  `rkat config get/set/patch`, `rkat auth login`, and the credential bootstrap
+  that can rewrite `~/.rkat/config.toml` before the config loads. A
+  `~/.rkat/config.toml` that no document puts on the realm chain (no
+  `[realm.global]`) is not reported.
 - The `shell` schema no longer advertises values the tool rejects:
   `timeout_secs` declares a minimum of 1, and `background` is offered only when
   durable background jobs are available, instead of failing with "requested

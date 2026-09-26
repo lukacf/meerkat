@@ -295,7 +295,7 @@ them.
 - `meerkat-mob-mcp`: the `fork_relink` module (`relink_restored_fork_children`,
   `relink_mob_fork_children`, `relink_child`, `ForkRelinkReport`,
   `ForkRelinkAction` with `Delivered`, `AlreadyDelivered`, `OwnerGone`,
-  `Failed`) and
+  `AwaitingOwner(OwnerRevivalDeferral)`, `Failed`) and
   `MobMcpState::relink_restored_fork_children`, the explicit entry point for
   the post-restore re-link pass.
 - `meerkat-core`: `CoreDispatchDeadline` (`Applies`, `ToolOwned`;
@@ -315,14 +315,16 @@ them.
 - `meerkat-mob-mcp`: the `detached_delivery` module
   (`deliver_detached_completion`, `deliver_detached_completion_to_member`,
   `detached_completion_notice`, `DetachedCompletionDelivered`,
-  `DetachedCompletionError` (`Encode`, `Rejected`, `Runtime`, and `OwnerGone`
-  for an owner that no longer exists), `DetachedDeliveryUnavailable` with
+  `DetachedCompletionError` (`Encode`, `Rejected`, `Runtime`, `OwnerGone` for
+  an owner that no longer exists, and `OwnerRevivalDeferred` for one that
+  cannot be revived yet), `OwnerRevivalDeferral` (`MobNotRunning { phase }`,
+  `LifecycleOperationPending { intent }`), `DetachedDeliveryUnavailable` with
   `HostDeclaredUnavailable` and `NoRuntimeAdapter`),
   `MobMcpState::detached_delivery_blocked_because`, the `council_relink` module
   (`relink_detached_councils`, `relink_council`, `CouncilRelinkReport`), and
   `MobMcpState::relink_detached_councils`, `CouncilRelinkAction`
   (`Delivered`, `AlreadyDelivered`, `AwaitingSeal { claim_lease_expires_at }`,
-  `OwnerGone`, `Failed`), `TemporaryCouncilCoordinator::run_detached`,
+  `OwnerGone`, `AwaitingConvener`, `Failed`), `TemporaryCouncilCoordinator::run_detached`,
   `TemporaryCouncilCoordinator::sweep_unfinished`,
   `TemporaryCouncilRecoverySweep` (`recovered`, `held`), and
   `TemporaryCouncilHeldRecord` (`council_id`, `current_claim_epoch`,
@@ -394,10 +396,13 @@ them.
   (a successor spec keeps the spawner of the incarnation it replaces). It is
   never taken from tool arguments.
 - A `fork_off` call that is cancelled or dropped never strands its child. The
-  handoff happens with no await after the fork returns: a detached call that
-  is dropped once the child is seated still delivers the child's completion
-  to the forker, and a blocking call dropped before the outcome arrives
-  retires the child and its descendants.
+  transcript fork is cancellable; seating the child, admitting its turn and
+  starting its supervisor run on a task the call cannot cancel, and the run
+  comes back armed to retire the child until the caller holds it. A detached
+  call dropped once the child is seated still delivers the child's completion
+  to the forker; a call dropped while the child is being seated, or a blocking
+  call dropped before the outcome arrives, retires the child and its
+  descendants.
 - A detached `fork_off` child survives a host restart with its outcome
   delivery intact. After a host restores its mobs (or inserts a restored mob
   handle, as MobKit does), a one-time re-link pass settles every child whose
@@ -411,7 +416,18 @@ them.
   woken to see it. A job whose completion was already admitted is finished
   and never re-linked, so a child kept seated for later work is not
   cancelled against the old job's limit; a respawn does not carry the job to
-  the successor (ownership still follows the identity).
+  the successor (ownership still follows the identity). The child's reply is
+  read from the job's own part of its transcript, so a completion record of a
+  fork the child made itself never stands in for it. A status read that does
+  not observe the child (the mob's single status lane held by another reader,
+  a slow actor, a failed read) is not taken as "not running": the pass checks
+  the durable transcript for a finished reply and reads again. An owner that
+  cannot be revived yet, because its mob is not running (MobKit restores a
+  cleanly stopped mob Stopped) or a lifecycle operation is still reviving it,
+  is reported as awaiting, and delivery is retried when the mob starts running
+  or after a bounded backoff (at most 16 waits, stopping when the mob ends);
+  councils wait the same way. Reviving a member of a mob that is not running
+  is refused typed as `InvalidTransition { from: <phase>, to: Running }`.
 - A detached council's convener hears back across a restart. The council's
   custody record carries the convener's job; after the post-restore recovery
   sweep, every council from an earlier process whose job is not settled has

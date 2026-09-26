@@ -34261,7 +34261,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && self.input_run_associations.get(recipient).get("value") == run_id)
             }
             guard "finalization_succeeded" { finalization == RuntimeCompletionFinalizationObservation::Succeeded }
-            update {}
+            update {
+                if self.runtime_completion_result_run_id == Some(run_id) {
+                    self.runtime_completion_result_resolved = true;
+                }
+            }
             to Idle
             emit AbandonedCompletionResultResolved {
                 session_id: self.session_id.get("value"),

@@ -33813,7 +33813,8 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedInitializing(owner_input_id, r
     /\ (finalization = "Succeeded")
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44b70bfa2a849e3f
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_179fc8f8207387f5
 
 
 ResolveAbandonedCompletionResultRuntimeApplyFailedIdle(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization) ==
@@ -33825,7 +33826,8 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedIdle(owner_input_id, run_id, c
     /\ (finalization = "Succeeded")
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44b70bfa2a849e3f
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_179fc8f8207387f5
 
 
 ResolveAbandonedCompletionResultRuntimeApplyFailedAttached(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization) ==
@@ -33837,7 +33839,8 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedAttached(owner_input_id, run_i
     /\ (finalization = "Succeeded")
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44b70bfa2a849e3f
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_179fc8f8207387f5
 
 
 ResolveAbandonedCompletionResultRuntimeApplyFailedRunning(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization) ==
@@ -33849,7 +33852,8 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedRunning(owner_input_id, run_id
     /\ (finalization = "Succeeded")
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44b70bfa2a849e3f
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_179fc8f8207387f5
 
 
 ResolveAbandonedCompletionResultRuntimeApplyFailedRetired(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization) ==
@@ -33861,7 +33865,8 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedRetired(owner_input_id, run_id
     /\ (finalization = "Succeeded")
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44b70bfa2a849e3f
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_179fc8f8207387f5
 
 
 ResolveAbandonedCompletionResultRuntimeApplyFailedStopped(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, recipient_input_ids, arg_terminal_outcome, arg_terminal_cause_kind, requires_session_checkpoint, has_interaction_terminal_outbox, finalization) ==
@@ -33873,7 +33878,8 @@ ResolveAbandonedCompletionResultRuntimeApplyFailedStopped(owner_input_id, run_id
     /\ (finalization = "Succeeded")
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44b70bfa2a849e3f
+    /\ runtime_completion_result_resolved' = IF (runtime_completion_result_run_id = Some(run_id)) THEN TRUE ELSE runtime_completion_result_resolved
+    /\ UnchangedFrame_179fc8f8207387f5
 
 
 ResolveCheckpointCompletionResultSucceededInitializing(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization) ==

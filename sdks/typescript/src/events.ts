@@ -30,12 +30,13 @@
  * ```
  */
 
-import type { ContentBlock, ContentInput, SchemaWarning, SkillKey } from "./types.js";
+import type { ContentBlock, SchemaWarning, SkillKey } from "./types.js";
 import { KNOWN_AGENT_EVENT_TYPES } from "./generated/events.js";
 import { MeerkatError } from "./generated/errors.js";
 import type {
   LlmProviderErrorKind,
   LlmProviderErrorRetryability,
+  RunInput,
   TranscriptMessageIdentity,
 } from "./generated/event_types.js";
 
@@ -46,6 +47,7 @@ export type {
   LiveContextObservationId,
   ObjectiveId,
   LiveChannelId,
+  RunInput,
 } from "./generated/event_types.js";
 
 // ---------------------------------------------------------------------------
@@ -174,7 +176,7 @@ export interface ScopedAgentEvent {
 export interface RunStartedEvent {
   readonly type: "run_started";
   readonly sessionId: string;
-  readonly prompt: ContentInput;
+  readonly input: RunInput;
   readonly identity?: TranscriptMessageIdentity;
 }
 
@@ -955,9 +957,74 @@ function parseAgentErrorReport(raw: unknown): AgentErrorReport | null | undefine
   };
 }
 
-function parseContentInput(raw: unknown): ContentInput {
-  if (Array.isArray(raw)) return raw as ContentInput;
-  return String(raw ?? "");
+function validateRunInputBlock(raw: unknown): void {
+  if (!isPlainRecord(raw)) {
+    throw new Error("input content block must be object");
+  }
+  switch (raw.type) {
+    case "text":
+      requireStringField(raw, "text");
+      return;
+    case "image":
+    case "video": {
+      requireStringField(raw, "media_type");
+      if (raw.type === "video") {
+        const duration = requireNumberField(raw, "duration_ms");
+        if (!Number.isInteger(duration) || duration < 0 || duration >= 2 ** 64) {
+          throw new Error("input video duration_ms must be a non-negative u64 integer");
+        }
+      }
+      if (raw.source === "inline") {
+        requireStringField(raw, "data");
+      } else if (raw.type === "image" && raw.source === "blob") {
+        requireStringField(raw, "blob_id");
+      } else if (raw.type === "video" && raw.source === "uri") {
+        requireStringField(raw, "uri");
+      } else {
+        throw new Error("input content block has unsupported media source");
+      }
+      return;
+    }
+    case "structured":
+      if (!hasOwn(raw, "data")) {
+        throw new Error("structured input content requires data");
+      }
+      return;
+    case "skill_context": {
+      const key = requireRecordField(raw, "skill_key");
+      const source = requireStringField(key, "source_uuid");
+      const uuid = source.startsWith("urn:uuid:") ? source.slice(9)
+        : source.startsWith("{") && source.endsWith("}") ? source.slice(1, -1)
+        : source;
+      if (!/^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(uuid)) {
+        throw new Error("skill context requires a valid source_uuid");
+      }
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(requireStringField(key, "skill_name"))) {
+        throw new Error("skill context requires a canonical skill_name");
+      }
+      requireStringField(raw, "text");
+      return;
+    }
+    default:
+      throw new Error("input content block must have a known type");
+  }
+}
+
+function parseRunInput(raw: unknown): RunInput {
+  if (!isPlainRecord(raw)) {
+    throw new Error("input must be object");
+  }
+  if (raw.kind === "content") {
+    if (typeof raw.content !== "string") {
+      if (!Array.isArray(raw.content)) {
+        throw new Error("input.content must be string or content block array");
+      }
+      for (const block of raw.content) validateRunInputBlock(block);
+    }
+  } else if (raw.kind !== "pending_tool_results") {
+    throw new Error("input.kind must be a known run input variant");
+  }
+  return raw as RunInput;
 }
 
 function parseContentBlocks(raw: unknown, legacyText?: unknown): readonly ContentBlock[] {
@@ -1374,7 +1441,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
   switch (type) {
     // Session lifecycle
     case "run_started":
-      return { type, sessionId: requireStringField(raw, "session_id"), prompt: parseContentInput(raw.prompt), ...transcriptIdentityField(raw) };
+      return { type, sessionId: requireStringField(raw, "session_id"), input: parseRunInput(raw.input), ...transcriptIdentityField(raw) };
     case "run_completed":
       return {
         type,

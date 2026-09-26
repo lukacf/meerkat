@@ -52,6 +52,7 @@ pub(crate) struct RuntimeCompletionResultAuthority {
     result_class: crate::meerkat_machine::dsl::RuntimeCompletionResultClass,
     cleanup_observation: crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome,
     correlation: RuntimeCompletionAuthorityCorrelation,
+    receipt_commit_input: Option<Box<crate::meerkat_machine::dsl::MeerkatMachineInput>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -412,7 +413,14 @@ impl RuntimeCompletionResultAuthority {
             result_class,
             cleanup_observation,
             correlation: RuntimeCompletionAuthorityCorrelation::Run,
+            receipt_commit_input: None,
         }
+    }
+
+    pub(crate) fn receipt_commit_input(
+        &self,
+    ) -> Option<&crate::meerkat_machine::dsl::MeerkatMachineInput> {
+        self.receipt_commit_input.as_deref()
     }
 
     pub(crate) fn begin_surface_resolution(self) -> RuntimeCompletionResultAttempt {
@@ -3443,6 +3451,9 @@ impl DriverEntry {
             InputTerminalCompletionBatchKey, InputTerminalCompletionPhase,
             validate_input_terminal_completion_batch,
         };
+        if let DriverEntry::Persistent(driver) = self {
+            driver.require_durability_ready()?;
+        }
         let target = candidate_input_ids.iter().find_map(|input_id| {
             self.as_driver()
                 .stored_input_state(input_id)
@@ -3578,6 +3589,39 @@ impl DriverEntry {
         Ok(())
     }
 
+    fn realize_terminal_receipt_resolution(
+        &self,
+        authorized: &crate::completion::AuthorizedInputTerminalCompletion,
+    ) -> Result<(), RuntimeDriverError> {
+        let Some(input) = authorized.receipt_commit_input() else {
+            return Ok(());
+        };
+        let shared = self.shared_dsl_authority();
+        let result = {
+            let mut authority = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
+                input.clone(),
+            )
+            .map(|_| ())
+        };
+        result.map_err(|error| {
+            let reason = crate::meerkat_machine::dsl_authority::map_error(
+                error,
+                "ResolveAbandonedCompletionResult after durable receipt commit",
+            );
+            match self {
+                DriverEntry::Persistent(driver) => driver.mark_durability_reload_required(
+                    "terminal completion receipt realization",
+                    reason,
+                ),
+                DriverEntry::Ephemeral(_) => RuntimeDriverError::RecoveryCorruption { reason },
+            }
+        })
+    }
+
     pub(crate) async fn finalize_input_terminal_completion_batch(
         &mut self,
         authorized: crate::completion::AuthorizedInputTerminalCompletion,
@@ -3586,6 +3630,9 @@ impl DriverEntry {
             InputTerminalCompletionPhase, interaction_terminal_payload_digest,
             validate_input_terminal_completion_batch,
         };
+        if let DriverEntry::Persistent(driver) = self {
+            driver.require_durability_ready()?;
+        }
         let authorized_witness = authorized.witness().clone();
         if authorized_witness.runtime_id() != self.runtime_id() {
             return Err(RuntimeDriverError::StaleAuthority {
@@ -3728,6 +3775,7 @@ impl DriverEntry {
                     )
                     .await?;
                 }
+                self.realize_terminal_receipt_resolution(&authorized)?;
                 if !has_interaction_terminal_outbox && let DriverEntry::Persistent(driver) = self {
                     driver.archive_terminal_inputs_after_durable_obligations(&input_ids)?;
                 }
@@ -3778,6 +3826,11 @@ impl DriverEntry {
             "terminal completion finalization lost the exact durable CAS",
         )
         .await?;
+        // The exact receipt is durable now. Settle its generated result before
+        // archiving removes the input facts, with no intervening await. A CAS
+        // failure never mutates the live result slot; a retry reevaluates the
+        // matching-run guard without replacing a newer run's correlation.
+        self.realize_terminal_receipt_resolution(&authorized)?;
         if !has_interaction_terminal_outbox && let DriverEntry::Persistent(driver) = self {
             driver.archive_terminal_inputs_after_durable_obligations(&input_ids)?;
         }
@@ -8024,6 +8077,17 @@ pub(crate) async fn machine_stop_runtime(
     }
 }
 
+// Exercise production durability gates in sibling runtime-loop tests using the
+// same one-shot cold-install capability as registration.
+#[cfg(test)]
+pub(crate) fn ready_durability_health_for_test() -> super::DurabilityHealthHandle {
+    let (health, install) = super::durability_health::begin_registration_cold_install();
+    install
+        .mark_ready()
+        .expect("test cold install must publish readiness");
+    health
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9705,30 +9769,43 @@ pub(crate) fn machine_resolve_runtime_completion_result_for_batch(
                 .input_ids()
                 .map(ToString::to_string)
                 .collect::<std::collections::HashSet<_>>();
-            let mut authority = shared
+            let state = shared
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let transition = mm::MeerkatMachineMutator::apply(
-                &mut *authority,
-                mm::MeerkatMachineInput::ResolveAbandonedCompletionResult {
-                    owner_input_id: witness.owner_input_id.to_string(),
-                    run_id: mm::RunId::from_domain(run_id),
-                    candidate_digest: witness.candidate_digest.clone(),
-                    completion_input_ids_digest: witness.completion_input_ids_digest.clone(),
-                    requires_session_checkpoint: witness.requires_session_checkpoint,
-                    has_interaction_terminal_outbox: witness.has_interaction_terminal_outbox,
-                    terminal_outcome: mm::TurnTerminalOutcome::from(outcome),
-                    terminal_cause_kind: mm::TurnTerminalCauseKind::from(cause),
-                    recipient_input_ids: expected_recipients.iter().cloned().collect(),
-                    finalization,
-                },
-            )
-            .map_err(|error| RuntimeDriverError::RecoveryCorruption {
-                reason: crate::meerkat_machine::dsl_authority::map_error(
-                    error,
-                    "ResolveAbandonedCompletionResult",
-                ),
-            })?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state()
+                .clone();
+            let mut preview =
+                mm::MeerkatMachineAuthority::recover_from_state(state).map_err(|error| {
+                    RuntimeDriverError::RecoveryCorruption {
+                        reason: crate::meerkat_machine::dsl_authority::map_error(
+                            error,
+                            "ResolveAbandonedCompletionResult preview",
+                        ),
+                    }
+                })?;
+            // Authorization selects a result without settling live authority.
+            // Carry this exact generated input through the receipt bundle;
+            // only a successful durable finalization may realize it.
+            let receipt_commit_input = mm::MeerkatMachineInput::ResolveAbandonedCompletionResult {
+                owner_input_id: witness.owner_input_id.to_string(),
+                run_id: mm::RunId::from_domain(run_id),
+                candidate_digest: witness.candidate_digest.clone(),
+                completion_input_ids_digest: witness.completion_input_ids_digest.clone(),
+                requires_session_checkpoint: witness.requires_session_checkpoint,
+                has_interaction_terminal_outbox: witness.has_interaction_terminal_outbox,
+                terminal_outcome: mm::TurnTerminalOutcome::from(outcome),
+                terminal_cause_kind: mm::TurnTerminalCauseKind::from(cause),
+                recipient_input_ids: expected_recipients.iter().cloned().collect(),
+                finalization,
+            };
+            let transition =
+                mm::MeerkatMachineMutator::apply(&mut preview, receipt_commit_input.clone())
+                    .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                        reason: crate::meerkat_machine::dsl_authority::map_error(
+                            error,
+                            "ResolveAbandonedCompletionResult",
+                        ),
+                    })?;
             let mut resolved = None;
             for effect in transition.effects() {
                 let mm::MeerkatMachineEffect::AbandonedCompletionResultResolved {
@@ -9781,6 +9858,7 @@ pub(crate) fn machine_resolve_runtime_completion_result_for_batch(
                     *result_class,
                     *cleanup_outcome,
                 );
+                projected.receipt_commit_input = Some(Box::new(receipt_commit_input.clone()));
                 projected.correlation = RuntimeCompletionAuthorityCorrelation::AbandonedInput {
                     owner_input_id: witness.owner_input_id.clone(),
                     recipient_input_ids: witness.input_ids().cloned().collect(),

@@ -106,6 +106,10 @@ them.
   `prompt` field. Match `input["kind"]` for caller content or pending tool
   results; a continuation has no prompt. Direct constructors must supply both
   fields. Legacy prompt-only payloads are reported as malformed events.
+- TypeScript `RunStartedEvent.prompt: ContentInput` is replaced by required
+  `input: RunInput`; `sessionId` remains required. Consumers must inspect
+  `input.kind` to distinguish caller content from pending tool results.
+  Prompt-only wire payloads are malformed events.
 
 ### Added
 
@@ -136,9 +140,11 @@ them.
   peer-comms configuration. The local mob-MCP service publishes discard events
   with ordered per-actor event sequences.
 - Member-host shutdown cancels outstanding event polls and refuses late
-  successful pages from the stopped observation. After a current host-status
-  failure, the next authenticated observation re-derives wired-peer trust
-  obligations even when it carries the previously observed boot token.
+  pages from the stopped observation. A current host-status failure clears
+  the cached boot observation so authenticated recovery reinstalls canonical
+  peer trust even when the boot token is unchanged. Failed installs remain
+  pending until acknowledged; stale binding failures cannot invalidate the
+  current binding.
 - Durable notice history and live boundary events carry the same canonical
   notice rows, exact session/run/input provenance and ordinal in the input's
   complete append list. `transcript_start` reports the application-time image
@@ -157,6 +163,11 @@ them.
 - Failed input receipts retain their retry carrier until exact durable
   finalization succeeds. Recovery checks the abandoned batch's own run and
   failure evidence without replacing a newer run's correlation.
+- Finalizing an abandoned failure resolves its matching run correlation
+  only after the exact receipt is durable. A failed receipt save leaves the
+  live slot and retry carrier unchanged. A subsequent staging refusal can
+  deliver its terminal receipt without replacing a later run's facts or
+  requiring a restart.
 - Retained in-turn appends finalize their durable completion receipt even
   when no process-local completion observer is registered.
 - Run boundary events carry the same interaction, run, objective, and realtime
@@ -167,13 +178,6 @@ them.
   normalization. Optional nonnullable fields retain their authored contract
   instead of becoming required provider arguments, including optional WorkGraph
   scheduling dates. Dispatcher argument validation is unchanged.
-
-- Host shutdown cancels outstanding observation polls and rejects pages that
-  become ready after the owner stops. A current host-status failure clears the
-  cached boot observation so authenticated recovery reinstalls canonical peer
-  trust even when the boot token is unchanged. Failed installs remain pending
-  until acknowledged; stale binding failures cannot invalidate the current
-  binding.
 
 ## [0.8.43] - 2026-09-26
 

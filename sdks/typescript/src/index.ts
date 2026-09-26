@@ -558,6 +558,7 @@ export type {
   StreamEvent,
   ScopedAgentEvent,
   StreamScopeFrame,
+  RunInput,
   RunStartedEvent,
   RunCompletedEvent,
   ExtractionSucceededEvent,

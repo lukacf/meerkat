@@ -18,7 +18,7 @@ const identity = {
   },
 };
 const events = [
-  { type: "run_started", session_id: "session-1", prompt: "hi" },
+  { type: "run_started", session_id: "session-1", input: { kind: "content", content: "hi" } },
   {
     type: "run_completed",
     session_id: "session-1",

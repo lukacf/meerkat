@@ -59,16 +59,39 @@ impl Fixture {
     }
 
     async fn failed_batch_with_cause(failure: CoreApplyFailureCause) -> Self {
+        Self::failed_batch_with_placement(failure, false).await
+    }
+
+    async fn failed_batch_with_placement(
+        failure: CoreApplyFailureCause,
+        registered_placement: bool,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SqliteRuntimeStore::new(dir.path().join("runtime.sqlite")).unwrap());
         let session_id = SessionId::new();
         let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&session_id);
+        let mut persistent = PersistentRuntimeDriver::new(
+            runtime_id.clone(),
+            store.clone(),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        );
+        if registered_placement {
+            persistent
+                .inner_mut()
+                .install_registered_authority_for_test(
+                    mm::SessionId::from_domain(&session_id),
+                    Some(&runtime_id),
+                    Some(1),
+                    Some(mm::Generation::from(1)),
+                    Some(mm::RuntimeEpochId::from(
+                        "abandoned-failure-epoch".to_owned(),
+                    )),
+                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                )
+                .expect("directed terminal fixture requires registered placement");
+        }
         let driver = Arc::new(crate::tokio::sync::Mutex::new(
-            owner::DriverEntry::Persistent(PersistentRuntimeDriver::new(
-                runtime_id.clone(),
-                store.clone(),
-                Arc::new(meerkat_store::MemoryBlobStore::new()),
-            )),
+            owner::DriverEntry::Persistent(persistent),
         ));
         let (inputs, run_id, carrier) = Self::fail_another_batch(&driver, failure).await;
         Self {
@@ -413,14 +436,238 @@ async fn current_run_abandoned_receipt_finalizes_without_rewriting_live_correlat
     .unwrap();
     let finalized = fixture.finalized().await;
     assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
-    assert_live_run_unchanged(&before, shared.lock().unwrap().state());
-    // Durable receipt phase owns finalization. Reading it again is idempotent
-    // even though receipt classification leaves the run-result slot unchanged.
+    let mut resolved = before;
+    resolved.runtime_completion_result_resolved = true;
+    assert_live_run_unchanged(&resolved, shared.lock().unwrap().state());
+    // Finalizing this run's receipt settles its result slot without changing
+    // the correlation or terminal lineage. A repeated drain is idempotent.
     drain_recovered_input_terminal_completions(&fixture.driver, None, &mut NoExecution)
         .await
         .unwrap();
     assert_eq!(finalized, fixture.finalized().await);
-    assert_live_run_unchanged(&before, shared.lock().unwrap().state());
+    assert_live_run_unchanged(&resolved, shared.lock().unwrap().state());
+}
+
+#[tokio::test]
+async fn stage_refusal_terminal_remains_recoverable_after_a_prior_abandoned_failure() {
+    let fixture = Fixture::failed_batch_with_placement(
+        CoreApplyFailureCause::executor_internal(FAILURE),
+        true,
+    )
+    .await;
+    fixture.pending().await;
+    let gate = Arc::new(crate::tokio::sync::Mutex::new(()));
+    resolve_machine_terminal_completion_waiters(
+        &fixture.driver,
+        None,
+        gate.lock_owned().await,
+        &fixture.carrier,
+        &fixture.inputs,
+        &fixture.run_id,
+        FAILURE.to_owned(),
+    )
+    .await
+    .unwrap();
+    let prior_receipts = fixture.finalized().await;
+    assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
+
+    let mut header = PromptInput::new("", None).header;
+    let input_id = header.id.clone();
+    let interaction_id = meerkat_core::interaction::InteractionId(input_id.0);
+    header.source = InputOrigin::Peer {
+        peer_id: "stage-refusal-after-abandoned-failure".into(),
+        display_identity: None,
+        runtime_id: Some(crate::identifiers::LogicalRuntimeId::new(
+            "stage-refusal-after-abandoned-failure",
+        )),
+    };
+    header.idempotency_key = Some(crate::identifiers::IdempotencyKey::new(
+        interaction_id.to_string(),
+    ));
+    header.correlation_id = Some(crate::identifiers::CorrelationId::from_uuid(input_id.0));
+    let input = Input::Peer(PeerInput {
+        header,
+        directed_interaction_id: Some(interaction_id),
+        objective_id: None,
+        system_prompts: Vec::new(),
+        injected_context: Vec::new(),
+        sender_taint: None,
+        convention: Some(PeerConvention::Message),
+        content: "directed input after an abandoned failure".into(),
+        payload: None,
+        handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+    });
+    assert!(
+        fixture
+            .driver
+            .lock()
+            .await
+            .as_driver_mut()
+            .accept_input(input)
+            .await
+            .unwrap()
+            .is_accepted()
+    );
+
+    let mut refused_run = None;
+    for _ in 0..8 {
+        let run_id = RunId::new();
+        let outcome = owner::prepare_runtime_loop_batch_start(
+            &fixture.driver,
+            run_id.clone(),
+            owner::test_authorized_runtime_loop_batch(vec![input_id.clone(), InputId::new()]),
+        )
+        .await
+        .expect("staging refusal must remain a typed non-fatal outcome");
+        let owner::RuntimeLoopBatchStart::StageRefused {
+            abandoned_input_ids,
+            ..
+        } = outcome
+        else {
+            panic!("the unstageable batch must never execute a turn");
+        };
+        if abandoned_input_ids == [input_id.clone()] {
+            refused_run = Some(run_id);
+            break;
+        }
+    }
+    let run_id = refused_run.expect("the generated attempt cap must terminalize the input");
+    assert_ne!(run_id, fixture.run_id);
+    let pending = fixture
+        .store
+        .load_input_state(&fixture.runtime_id, &input_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        pending.state.terminal_completion.unwrap().phase,
+        InputTerminalCompletionPhase::Pending
+    ));
+    assert!(pending.state.interaction_terminal_outbox.is_some());
+
+    let mut entry = fixture.driver.lock().await;
+    let mut batches = entry
+        .interaction_terminal_recovery_batches()
+        .await
+        .unwrap_or_else(|error| {
+            let shared = entry.shared_dsl_authority();
+            let machine = shared.lock().unwrap();
+            panic!(
+                "a finalized abandoned failure must not block the next refused batch: {error}; \
+                 requested_run={run_id} result_run={:?} result_resolved={} turn_terminal_run={:?}",
+                machine.state().runtime_completion_result_run_id,
+                machine.state().runtime_completion_result_resolved,
+                machine.state().turn_terminal_run_id,
+            )
+        });
+    assert_eq!(batches.len(), 1);
+    let batch = batches.remove(0);
+    assert_eq!(batch.input_ids, vec![input_id.clone()]);
+    assert_eq!(batch.batch_key.run_id(), Some(&run_id));
+    owner::machine_recover_runtime_completion_result_correlation(
+        &entry,
+        &run_id,
+        batch.terminal_recovery,
+    )
+    .expect("recover the next stage-refusal terminal correlation");
+    assert!(
+        owner::machine_recover_runtime_completion_result_correlation(
+            &entry,
+            &run_id,
+            crate::input_state::RuntimeCompletionTerminalRecovery::Cancelled,
+        )
+        .is_err(),
+        "recovery must still reject a contradictory terminal overwrite"
+    );
+    let authority = owner::machine_resolve_runtime_completion_result(
+        &entry,
+        Some(&run_id),
+        batch.terminal_observation,
+        mm::RuntimeCompletionFinalizationObservation::Succeeded,
+    )
+    .unwrap();
+    let witness = entry
+        .input_terminal_completion_authorization_witness(&batch.input_ids)
+        .unwrap();
+    let bundle = crate::completion::authorize_runtime_terminal_bundle(
+        &batch.interaction_ids,
+        batch.terminal.as_ref(),
+        authority,
+        witness,
+        batch.completion_error_metadata,
+        None,
+    )
+    .unwrap();
+    let events = bundle.interaction_events().to_vec();
+    assert!(matches!(
+        events.as_slice(),
+        [meerkat_core::event::AgentEvent::InteractionFailed { interaction_id, .. }]
+            if interaction_id.0 == input_id.0
+    ));
+    entry
+        .finalize_input_terminal_completion_batch(bundle.terminal_completion())
+        .await
+        .unwrap();
+    entry
+        .finalize_interaction_terminal_outboxes(
+            &input_id,
+            &events,
+            mm::RuntimeCompletionFinalizationObservation::Succeeded,
+        )
+        .await
+        .unwrap();
+    let receipts = events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt::try_new(
+                event,
+                u64::try_from(index).unwrap() + 1,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    entry
+        .mark_interaction_terminal_outboxes_published(&input_id, &receipts)
+        .await
+        .unwrap();
+    assert!(
+        entry
+            .interaction_terminal_recovery_batches()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        entry
+            .input_terminal_completion_recovery_batches()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(entry);
+
+    let mut completions = crate::completion::CompletionRegistry::new();
+    let handle = completions.register(input_id.clone());
+    completions.resolve_authorized_runtime_terminal_bundle([input_id.clone()], bundle);
+    let completion = handle.try_wait_with_terminal_outcome().await.unwrap();
+    assert_eq!(
+        completion.input_terminal_outcome(),
+        Some(&crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::MaxAttemptsExhausted { attempts: 3 },
+        })
+    );
+    let finalized = fixture
+        .store
+        .load_input_state(&fixture.runtime_id, &input_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        finalized.state.terminal_completion.unwrap().phase,
+        InputTerminalCompletionPhase::Finalized { .. }
+    ));
+    assert_eq!(prior_receipts, fixture.finalized().await);
 }
 
 #[tokio::test]
@@ -698,6 +945,9 @@ async fn failed_completion_receipt_write_fault_retains_carrier_then_retries_atom
     .await
     .unwrap();
     fixture.finalized().await;
+    let mut resolved = live_before;
+    resolved.runtime_completion_result_resolved = true;
+    assert_live_run_unchanged(&resolved, shared.lock().unwrap().state());
     assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
     for waiter in waiters {
         let result = crate::tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
@@ -711,6 +961,211 @@ async fn failed_completion_receipt_write_fault_retains_carrier_then_retries_atom
             error,
             meerkat_core::TurnErrorMetadata::runtime_apply_failure(FAILURE)
         );
+    }
+}
+
+#[tokio::test]
+async fn committed_receipt_rejection_requires_reload_and_preserves_retry_evidence() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let session_id = SessionId::new();
+    let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&session_id);
+    let health = owner::ready_durability_health_for_test();
+    let shared = crate::driver::ephemeral::new_ingress_dsl_authority();
+    let mut persistent = PersistentRuntimeDriver::new_with_control_and_durability_health(
+        runtime_id.clone(),
+        store.clone(),
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+        Arc::new(std::sync::RwLock::new(
+            crate::driver::ephemeral::RuntimeControlProjection::default(),
+        )),
+        shared.clone(),
+        health.clone(),
+    );
+    persistent
+        .inner_mut()
+        .install_registered_authority_for_test(
+            mm::SessionId::from_domain(&session_id),
+            Some(&runtime_id),
+            Some(1),
+            Some(mm::Generation::from(1)),
+            Some(mm::RuntimeEpochId::from(
+                "receipt-rejection-epoch".to_owned(),
+            )),
+            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+        )
+        .unwrap();
+    let driver = Arc::new(crate::tokio::sync::Mutex::new(
+        owner::DriverEntry::Persistent(persistent),
+    ));
+    let (inputs, run_id, carrier) =
+        Fixture::fail_another_batch(&driver, CoreApplyFailureCause::executor_internal(FAILURE))
+            .await;
+    assert!(health.require_ready().is_ok());
+    assert!(
+        !shared
+            .lock()
+            .unwrap()
+            .state()
+            .runtime_completion_result_resolved
+    );
+
+    let entered = Arc::new(crate::tokio::sync::Notify::new());
+    let release = Arc::new(crate::tokio::sync::Notify::new());
+    store.block_next_input_state_batch_cas_after_commit(entered.clone(), release.clone());
+    let gate = Arc::new(crate::tokio::sync::Mutex::new(()));
+    let task = tokio::spawn({
+        let driver = driver.clone();
+        let carrier = carrier.clone();
+        let inputs = inputs.clone();
+        let run_id = run_id.clone();
+        let gate = gate.clone();
+        async move {
+            resolve_machine_terminal_completion_waiters(
+                &driver,
+                None,
+                gate.lock_owned().await,
+                &carrier,
+                &inputs,
+                &run_id,
+                FAILURE.to_owned(),
+            )
+            .await
+        }
+    });
+    crate::tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("receipt CAS must commit before rejection is injected");
+
+    let mut committed = Vec::new();
+    for input_id in &inputs {
+        let row = store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let receipt = row.state.terminal_completion.as_ref().unwrap();
+        assert!(matches!(
+            receipt.phase,
+            InputTerminalCompletionPhase::Finalized { .. }
+        ));
+        assert_eq!(receipt.batch_key.run_id(), Some(&run_id));
+        if receipt.owner_input_id == *input_id {
+            let Some(crate::completion::CompletionOutcome::AbandonedWithError { error, .. }) =
+                receipt.outcome.as_ref()
+            else {
+                panic!("committed owner lost its exact terminal failure");
+            };
+            assert_eq!(
+                *error,
+                meerkat_core::TurnErrorMetadata::runtime_apply_failure(FAILURE)
+            );
+        }
+        committed.push(serde_json::to_vec(&row).unwrap());
+    }
+
+    // Fault injection: shared generated authority loses its registration after
+    // the real store commits, while every recipient remains available. This
+    // forces post-CAS receipt realization to reject without editing DSL state.
+    {
+        let mut machine = shared.lock().unwrap();
+        let state = machine.state().clone();
+        let session_id = state.session_id.clone().unwrap();
+        let transitions = [
+            mm::MeerkatMachineInput::BeginUnregisterSession {
+                session_id: session_id.clone(),
+                agent_runtime_id: state.active_runtime_id.clone(),
+                fence_token: state.active_fence_token,
+                generation: state.active_runtime_generation,
+                runtime_epoch_id: state.active_runtime_epoch_id.clone(),
+            },
+            mm::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
+                session_id: session_id.clone(),
+                forced_abort: false,
+            },
+            mm::MeerkatMachineInput::CommsDrainExitedForUnregister {
+                session_id: session_id.clone(),
+                forced_abort: false,
+            },
+            mm::MeerkatMachineInput::CompletionWaitersResolvedForUnregister {
+                session_id: session_id.clone(),
+            },
+            mm::MeerkatMachineInput::UnregisterSession {
+                session_id,
+                agent_runtime_id: state.active_runtime_id,
+                fence_token: state.active_fence_token,
+                generation: state.active_runtime_generation,
+                runtime_epoch_id: state.active_runtime_epoch_id,
+            },
+        ];
+        for input in transitions {
+            mm::MeerkatMachineMutator::apply(&mut *machine, input).unwrap();
+        }
+        assert!(machine.state().session_id.is_none());
+        for input_id in &inputs {
+            assert!(
+                machine
+                    .state()
+                    .input_phases
+                    .contains_key(&input_id.to_string())
+            );
+        }
+    }
+    release.notify_one();
+    let error = crate::tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("terminal completion receipt realization")
+    );
+    let required = health.require_ready().unwrap_err();
+    assert_eq!(
+        required.operation(),
+        "terminal completion receipt realization"
+    );
+    assert!(required.reason().contains("guard rejected transition"));
+    assert!(
+        !shared
+            .lock()
+            .unwrap()
+            .state()
+            .runtime_completion_result_resolved
+    );
+    assert!(carrier.pending_nondirected_run_terminal().is_some());
+
+    // The finalized rows must not take the ordinary already-finalized shortcut
+    // through a degraded live shell. Retry preserves the carrier and all rows.
+    let retry = resolve_machine_terminal_completion_waiters(
+        &driver,
+        None,
+        gate.lock_owned().await,
+        &carrier,
+        &inputs,
+        &run_id,
+        FAILURE.to_owned(),
+    )
+    .await
+    .unwrap_err();
+    assert!(retry.to_string().contains("durability reload required"));
+    assert_eq!(health.require_ready().unwrap_err(), required);
+    assert!(carrier.pending_nondirected_run_terminal().is_some());
+    let entry = driver.lock().await;
+    assert!(matches!(
+        entry.input_terminal_completion_batch_for_run(&run_id, &inputs),
+        Err(crate::RuntimeDriverError::RecoveryRepairBlocked { .. })
+    ));
+    for (input_id, committed_row) in inputs.iter().zip(committed) {
+        let live_row = entry.as_driver().stored_input_state(input_id).unwrap();
+        assert_eq!(serde_json::to_vec(&live_row).unwrap(), committed_row);
+        let durable_row = store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_vec(&durable_row).unwrap(), committed_row);
     }
 }
 

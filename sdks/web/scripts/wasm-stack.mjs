@@ -329,7 +329,9 @@ export function assertWasmStack(bytes, minBytes = REQUIRED_WASM_STACK_BYTES, lab
     throw new Error(
       `${label}: wasm stack is ${stack.stackBytes} bytes (${stack.layout}, initial stack pointer ` +
         `${stack.initialStackPointer}), below the required ${minBytes}; the runtime overflows it ` +
-        `on its first turn. The build lost \`-C link-arg=-zstack-size=${minBytes}\`.`,
+        `on its first turn. The build's \`-C link-arg=-zstack-size=${minBytes}\` was ` +
+        `overridden (a later -zstack-size, e.g. a config-file target.'cfg(..)'.rustflags ` +
+        `entry) or lost.`,
     );
   }
   return stack;

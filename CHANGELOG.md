@@ -44,9 +44,12 @@ them.
   reads only one rustflags source, so the target flags carrying `-zstack-size`
   in `sdks/web/scripts/build-wasm.mjs` were silently ignored. The fix has
   four parts:
-  - The build folds any ambient `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` into
-    its own flags, passes them through the source Cargo reads first, and
-    verifies the built module's stack.
+  - The build folds any ambient `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` or
+    `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS` into its own flags. It
+    passes the result to Cargo as a `--config
+    target.wasm32-unknown-unknown.rustflags` array, with every rustflags
+    environment variable removed from the build, and verifies the built
+    module's stack.
   - The release package script refuses a packed wasm whose stack, parsed from
     the binary, is below 8 MiB.
   - The same script runs one turn from the packed package in Node.

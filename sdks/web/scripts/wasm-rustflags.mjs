@@ -17,7 +17,10 @@
 // with no rustflags variable left in the build's environment:
 //   - Cargo joins that array with the config files' `target.wasm32-...` and
 //     `target.'cfg(..)'` rustflags, so config-file flags are kept, not dropped;
-//   - no environment source outranks it, so the stack flag always applies;
+//   - no environment variable outranks it. A config-file
+//     `target.'cfg(..)'.rustflags` entry is still appended after it, so a
+//     cfg-keyed `-zstack-size` there wins at link; the post-build stack guard
+//     reports that as "overridden or lost";
 //   - wasm-pack's `cargo install wasm-bindgen-cli` fallback (a host build)
 //     inherits no wasm-only flag, so it never sees `-zstack-size`.
 // One limit, Cargo's own rule: `build.rustflags` applies only when no

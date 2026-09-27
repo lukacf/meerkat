@@ -79746,7 +79746,7 @@ async fn test_ephemeral_stop_delivers_boundary_cancel_before_busy_turns_finish()
         .map(|turn_state| turn_state.snapshot().active_run_id.expect("active run"))
         .collect::<HashSet<_>>();
     assert_eq!(expected_runs.len(), 2);
-    let stop = {
+    let mut stop = {
         let handle = handle.clone();
         tokio::spawn(async move { handle.stop().await })
     };
@@ -79762,11 +79762,18 @@ async fn test_ephemeral_stop_delivers_boundary_cancel_before_busy_turns_finish()
         commands
     })
     .await;
-    let stopped_before_release = stop.is_finished();
+    // Both local members can spend a two-second comms abort grace plus a
+    // one-second activity observation window before reporting retained pending
+    // cleanup. Keep the real provider blocked beyond both members' windows.
+    let stop_before_release = tokio::time::timeout(Duration::from_secs(8), &mut stop).await;
+    let stopped_before_release = stop_before_release.is_ok();
     let cancelled_before_release = cancelled.load(Ordering::SeqCst);
     // Release even on RED so the test leaves no indefinitely blocked actor.
     client.release();
-    let stop_result = tokio::time::timeout(Duration::from_secs(10), stop).await;
+    let stop_result = match stop_before_release {
+        Ok(result) => Ok(result),
+        Err(_) => tokio::time::timeout(Duration::from_secs(10), stop).await,
+    };
     assert_eq!(
         commands.expect(
             "Stop must deliver exact boundary cancellation while member turns are still blocked"
@@ -79775,7 +79782,7 @@ async fn test_ephemeral_stop_delivers_boundary_cancel_before_busy_turns_finish()
     );
     assert!(
         !stopped_before_release,
-        "Stop must await the actual turn boundary"
+        "Stop must retry retained pending cleanup until the actual turn boundary: {stop_result:?}"
     );
     assert_eq!(
         cancelled_before_release, 0,

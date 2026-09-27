@@ -112,9 +112,12 @@ them.
 - Mob Stop and Shutdown observe ephemeral session visibility without waiting
   for a busy agent to export its transcript. Cancellation requests no longer
   queue behind those exports; terminal stop still waits for acknowledged drain.
+  Stop also retries the owner's retained pending cleanup while a current turn
+  is still busy, matching Shutdown's existing retry behavior.
 - The Office renders archived decision text neutrally instead of inferring an
   approval verdict from its wording. Record bullets and knowledge graph fonts
-  render correctly in the browser.
+  render correctly in the browser. Graph, Records and Log keep a readable,
+  scrollable viewport in narrow windows.
 - Shared WASM timers release their JavaScript handles when sleeps or timeouts
   finish or are canceled. Completed runtime work no longer retains discarded
   deadline timers, and the packed Web SDK smoke test exits naturally.
@@ -122,6 +125,7 @@ them.
   cancellation after natural failure repairs the existing terminal event and
   drains its task trackers without attempting to rewrite Failed as Canceled
   or closing the mob actor.
+
 - The release doctor's dispatch-binding check covers more of the ways a
   future edit could let a publishing run bind the wrong ref. It now refuses:
   - a run on the version's tag that names another `release_tag` (a branch,
@@ -137,7 +141,6 @@ them.
   the ref without `refs/heads/` or `refs/tags/`, so `refs/tags/alpha/v<version>`
   is `alpha/v<version>`, not its last path segment. Every new scenario has a
   doctor fixture that goes red when that scenario is removed.
-
 
 ## [0.8.45] - 2026-09-27
 

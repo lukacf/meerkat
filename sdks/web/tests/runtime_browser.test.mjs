@@ -1043,9 +1043,13 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       try {
         beforeToolRelease = await page.evaluate(async () => {
           await window.bounded(window.toolStarted, "current tool batch admission");
+          // Keep the real tool busy beyond the owner's 40 x 25ms observation
+          // window. A retryable pending observation must not settle Stop.
+          const heldAt = performance.now();
+          await new Promise(resolve => setTimeout(resolve, 2_500));
           return {
             stopSettled: window.stopSettled, calls: window.currentTurnToolCalls,
-            events: window.busyEvents.poll(),
+            events: window.busyEvents.poll(), heldForMs: performance.now() - heldAt,
           };
         }).catch(error => { toolObservationError = error.message; });
       } finally { await page.evaluate(() => window.releaseTool?.()); }
@@ -1066,6 +1070,7 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       assert.equal(beforeRelease.calls, 0);
       assert.equal(toolObservationError, undefined);
       assert.equal(beforeToolRelease.calls, 1);
+      assert.ok(beforeToolRelease.heldForMs >= 2_000, "Exercise the real member-drain observation window");
       assert.equal(beforeToolRelease.stopSettled, false, "Stop must await the held current-turn tool batch");
       assert.equal(beforeToolRelease.events.some(event => [
         "tool_execution_completed", "turn_completed", "run_completed", "run_failed",

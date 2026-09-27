@@ -978,6 +978,86 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       assert.equal(requests.length, 0);
     });
 
+    await scenario("busy mob Stop reaches its owner before the provider boundary and prevents tool dispatch", async ({ page, requests, provider }) => {
+      let release;
+      let entered;
+      const started = new Promise(resolve => { entered = resolve; });
+      const gate = new Promise(resolve => { release = resolve; });
+      provider.beforeResponse = async () => {
+        if (requests.length === 1) { entered(); await gate; }
+      };
+      provider.tool = { marker: "BROWSER_BUSY_MOB_STOP", name: "after_stop_probe", input: {} };
+      let beforeRelease;
+      let observationError;
+      try {
+        const spawned = await page.evaluate(async () => {
+          window.afterStopToolCalls = 0;
+          window.runtime.registerTool("after_stop_probe", "Record an observable tool dispatch.", {
+            type: "object", properties: {},
+          }, async () => {
+            window.afterStopToolCalls++;
+            return { content: "BROWSER_TOOL_RAN_AFTER_STOP", is_error: false };
+          });
+          window.busyMob = await window.runtime.createMob({ id: "browser-busy-stop", profiles: {
+            worker: { model: window.model, tools: { comms: true }, runtime_mode: "autonomous_host" },
+          } });
+          const rows = await window.busyMob.spawn([{
+            profile: "worker", agent_identity: "worker", runtime_mode: "autonomous_host",
+            initial_message: "BROWSER_BUSY_MOB_STOP",
+          }]);
+          window.busyEvents = await window.busyMob.subscribeMemberEvents("worker");
+          return rows;
+        });
+        assert.equal(spawned.length, 1);
+        assert.equal(spawned[0].agent_identity, "worker");
+        assert.equal(spawned[0].mob_id, "browser-busy-stop");
+        assert.ok(spawned[0].member_ref);
+        await started;
+        assert.equal(requests.length, 1);
+        // Public event polling is an actor command, not a local JS flag. It
+        // must observe the durable Stop fence while the response is held.
+        // A transcript export queued behind this busy turn blocks both Stop
+        // and this read; a presence-only observation lets cancellation start.
+        beforeRelease = await page.evaluate(async () => {
+          window.stopSettled = false;
+          window.busyStop = window.busyMob.lifecycle("stop").then(
+            value => { window.stopSettled = true; return { value }; },
+            error => { window.stopSettled = true; return { error: window.errorEnvelope(error) }; },
+          );
+          const ledger = await window.bounded((async () => {
+            for (;;) {
+              const events = await window.busyMob.events();
+              if (events.some(event => event.kind.type === "placed_completion_lifecycle_quiesce_started")) return events;
+            }
+          })(), "Stop owner acknowledgement while provider response is held");
+          return { ledger, stopSettled: window.stopSettled, calls: window.afterStopToolCalls };
+        }).catch(error => { observationError = error.message; });
+      } finally { release(); }
+      const terminal = await page.evaluate(async () => {
+        const stop = await window.bounded(window.busyStop, "busy mob Stop terminal after response boundary");
+        const status = await window.busyMob.status();
+        const events = window.busyEvents.poll();
+        const ledger = await window.busyMob.events();
+        window.busyEvents.close();
+        return { stop, status, events, ledger, calls: window.afterStopToolCalls };
+      });
+      console.log("BUSY_MOB_STOP_OBSERVATION", JSON.stringify({
+        beforeRelease, observationError, terminal, providerRequests: requests.length,
+      }));
+      assert.equal(observationError, undefined, "Stop must not wait for busy transcript export before cancellation");
+      assert.equal(beforeRelease.stopSettled, false, "Stop cannot acknowledge terminal drain before the held boundary");
+      assert.equal(beforeRelease.calls, 0);
+      assert.equal(terminal.stop.error, undefined, JSON.stringify(terminal));
+      assert.equal(terminal.stop.value.ok, true);
+      assert.equal(terminal.status.status, "Stopped");
+      assert.equal(terminal.calls, 0, "Stop cancellation must prevent the tool dispatch at the next provider boundary");
+      assert.equal(requests.length, 1, "cancelled tool response must not start a follow-up provider turn");
+      assert.ok(terminal.ledger.some(event => event.kind.type === "mob_stopped"));
+      assert.ok(terminal.events.some(event => event.payload.type === "run_failed"
+        && event.payload.error_report.class === "cancelled"), JSON.stringify(terminal.events));
+      assert.equal(terminal.events.some(event => event.payload.type === "run_completed"), false);
+    });
+
     await scenario("helper callback can create a direct session without lifecycle lock reentrancy", async ({ page, requests, provider }) => {
       provider.tool = { marker: "BROWSER_HELPER_CREATE_SESSION", name: "create_browser_session", input: {} };
       const result = await page.evaluate(async () => {

@@ -742,14 +742,10 @@ body {
   font-size: 10px; color: var(--card-ink-dim);
   padding: 1px 0;
 }
-.case-finding::before { content: "\u2022 "; color: var(--copper); }
+.case-finding::before { content: "\2022\00a0"; color: var(--copper); }
 .case-decision {
-  font-size: 10px; font-weight: 600; padding: 2px 0;
+  font-size: 10px; font-weight: 600; padding: 2px 0; color: var(--card-ink-dim);
 }
-.decision-approved { color: var(--success); }
-.decision-approved::before { content: "\u2713 "; }
-.decision-denied { color: var(--danger); }
-.decision-denied::before { content: "\u2717 "; }
 .case-timeline { margin-top: 2px; }
 .timeline-entry {
   font-size: 9px; padding: 1px 0;

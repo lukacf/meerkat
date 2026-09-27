@@ -1586,6 +1586,24 @@ pub trait MobSessionService:
             })
     }
 
+    /// Observe session-document visibility without requiring its contents.
+    ///
+    /// This is a raw backend observation for MobMachine's shutdown input, not
+    /// an archive verdict or permission to interrupt. The default preserves
+    /// the authoritative metadata seam, including archived filtering and
+    /// read faults. In-memory backends can answer from the registry owning
+    /// export visibility, without queuing a read behind the turn Stop must
+    /// cancel. Wrappers must forward a backend's nonblocking implementation.
+    async fn session_projection_visible(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        Ok(self
+            .load_persisted_session_metadata(session_id)
+            .await?
+            .is_some())
+    }
+
     /// Archive a mob-owned session through the strongest lifecycle authority
     /// this service exposes. Runtime-backed persistent services override this
     /// to require a concrete `MeerkatMachine` archive protocol before writing
@@ -2153,6 +2171,14 @@ where
             )
             .await,
         )
+    }
+
+    async fn session_projection_visible(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::export_session_visible(self, session_id)
+            .await
     }
 
     #[cfg(feature = "runtime-adapter")]

@@ -78,7 +78,11 @@ repo-local `sdks/web` package, or from an installed `@rkat/web` package, into
 
 The approval popup is a demo protocol implemented with a JavaScript tool and
 agent instructions. It is not a security or authorization boundary. Archive
-records also live only in browser memory and disappear on page reload.
+decision outcomes are displayed as written by the archivist, without inferred
+approval verdicts. Records live only in browser memory and disappear on page reload.
+Pause requests cooperative cancellation at agent boundaries and waits for the
+runtime to drain before showing **STOPPED**; an outstanding provider response
+can still delay that drain.
 The static Boss-mode policy is included in every initial role skill, before the
 first turn. Startup does not append it as a later System message; support for
 mid-conversation System messages depends on the selected model.

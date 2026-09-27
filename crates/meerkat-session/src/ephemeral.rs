@@ -2981,6 +2981,28 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .is_some_and(|handle| !handle.command_tx.is_closed())
     }
 
+    /// Observe whether the actor-owned Session document is export-visible.
+    ///
+    /// The live registry is the sole owner of ephemeral export visibility:
+    /// creation installs an entry and archive/removal removes it. Archived
+    /// summary views are deliberately excluded, matching `export_session`.
+    /// This observation holds the same registry lock as export but does not
+    /// queue an actor command behind an in-flight turn. A retained entry whose
+    /// actor exited remains a fault, rather than fabricated absence. The
+    /// result is not a lease on this actor or authority over its metadata.
+    pub async fn export_session_visible(&self, id: &SessionId) -> Result<bool, SessionError> {
+        let sessions = self.sessions.read().await;
+        let Some(handle) = sessions.get(id) else {
+            return Ok(false);
+        };
+        if handle.command_tx.is_closed() {
+            return Err(SessionError::Agent(AgentError::InternalError(
+                "Session task has exited".to_string(),
+            )));
+        }
+        Ok(true)
+    }
+
     /// Abort the registered actor task for `id` while leaving its registry
     /// entry in place, then wait until the actor's command receiver is gone.
     ///
@@ -8658,6 +8680,97 @@ mod runtime_turn_metadata_tests {
                 Arc::clone(handle) as Arc<dyn meerkat_core::handles::SessionContextHandle>
             })
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn export_visibility_preserves_archive_absence_and_exited_actor_faults() {
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references: Arc::new(Mutex::new(Vec::new())),
+                observed_context_texts: Arc::new(Mutex::new(Vec::new())),
+                run_context_counts: Arc::new(Mutex::new(Vec::new())),
+                fail_flow_overlay_set: false,
+                session_context_handle: None,
+            },
+            2,
+        );
+        let request = || CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "metadata-probe-model".to_owned(),
+            prompt: "".into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: None,
+            labels: None,
+        };
+        let unknown = SessionId::new();
+        assert!(
+            !service
+                .export_session_visible(&unknown)
+                .await
+                .expect("absent visibility")
+        );
+        assert!(matches!(
+            service.export_session(&unknown).await,
+            Err(SessionError::NotFound { .. })
+        ));
+        let archived = service
+            .create_session(request())
+            .await
+            .expect("create archived probe")
+            .session_id;
+        assert!(
+            service
+                .export_session_visible(&archived)
+                .await
+                .expect("live visibility")
+        );
+        assert_eq!(
+            service
+                .export_session(&archived)
+                .await
+                .expect("live export")
+                .id(),
+            &archived
+        );
+        service.archive(&archived).await.expect("archive probe");
+        service
+            .read(&archived)
+            .await
+            .expect("archived summary remains readable");
+        assert!(
+            !service
+                .export_session_visible(&archived)
+                .await
+                .expect("archived export visibility")
+        );
+        assert!(matches!(
+            service.export_session(&archived).await,
+            Err(SessionError::NotFound { .. })
+        ));
+        let exited = service
+            .create_session(request())
+            .await
+            .expect("create exit probe")
+            .session_id;
+        assert!(
+            service
+                .abort_live_session_actor_task_for_test(&exited)
+                .await
+        );
+        assert!(!service.live_session_actor_registered(&exited).await);
+        assert!(matches!(
+            service.export_session_visible(&exited).await,
+            Err(SessionError::Agent(AgentError::InternalError(_)))
+        ));
+        assert!(matches!(
+            service.export_session(&exited).await,
+            Err(SessionError::Agent(AgentError::InternalError(_)))
+        ));
     }
 
     #[tokio::test]

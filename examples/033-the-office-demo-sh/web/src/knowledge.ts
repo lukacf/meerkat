@@ -145,9 +145,8 @@ function renderCaseFiles(contentEl: HTMLElement, footerEl: HTMLElement): void {
     if (rec.decisions.length > 0) {
       html += `<div class="case-section-title">DECISIONS</div>`;
       for (const d of rec.decisions) {
-        const isApproved = d.outcome?.toLowerCase().includes("approved");
-        const cls = isApproved ? "decision-approved" : "decision-denied";
-        html += `<div class="case-decision ${cls}">${esc(d.action)} \u2014 ${esc(d.outcome)} (by ${esc(d.by)})</div>`;
+        // Archive outcomes are model-authored text, not approval receipts.
+        html += `<div class="case-decision">${esc(d.action)} - ${esc(d.outcome)} (by ${esc(d.by)})</div>`;
       }
     }
 
@@ -257,7 +256,7 @@ function renderGraph(container: HTMLElement): void {
           height: 20,
           "border-width": 1.5,
           "border-color": "#28231e",
-          "font-family": "'IBM Plex Mono', monospace",
+          "font-family": "IBM Plex Mono, monospace",
           "font-size": "9px",
           color: "#28231e",
           "text-margin-y": 4,
@@ -279,7 +278,7 @@ function renderGraph(container: HTMLElement): void {
           "target-arrow-shape": "triangle",
           "target-arrow-color": "rgba(60, 50, 40, 0.4)",
           "arrow-scale": 0.6,
-          "font-family": "'IBM Plex Mono', monospace",
+          "font-family": "IBM Plex Mono, monospace",
           "font-size": "7px",
           "font-style": "italic",
           color: "rgba(120, 100, 80, 0.7)",

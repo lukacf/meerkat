@@ -268,9 +268,13 @@ async function main() {
       }
       throw Error("Page failed to start");
     }
-    async function test(name, body) {
+    async function test(name, body, { rejectWarnings = false } = {}) {
       const p = await page();
       await p.eval(`(async()=>{${body};check(trace.rejections.length===0,"Unhandled rejection");})()`);
+      if (rejectWarnings) {
+        assert.deepEqual(p.console.filter(entry => ["warning", "error"].includes(entry.type)), [],
+          `${name}: browser warnings/errors`);
+      }
       console.log("PASS", name);
       // Close through the browser connection: a page session's own
       // Page.close reply can be lost when the target tears down its socket
@@ -469,12 +473,32 @@ async function main() {
       click("tabGraph");check(mods.knowledge.inspectGraph().nodes().length===3,"Real graph nodes");
       mods.knowledge.upsertRecord({...record("case-a"),entities:[{name:"Team",type:"company"}],relationships:[{from:"Bob",to:"Team",type:"works_for"}]});
       check(mods.knowledge.inspectGraph().nodes().length===4&&mods.knowledge.inspectGraph().edges().length===2,"Real graph update");
+      check(mods.knowledge.inspectGraph().elements().every(element=>element.style("font-family")==="IBM Plex Mono, monospace"),"Graph font parsed for nodes and edges");
       click("tabLog");check(!mods.knowledge.isKBVisible()&&mods.knowledge.inspectGraph()===null,"Hidden state distinct");
       const before=document.getElementById("kbContent").innerHTML;
       mods.knowledge.upsertRecord(record("case-b","Hidden update"));
       check(mods.knowledge.inspectGraph()===null&&document.getElementById("kbContent").innerHTML===before,"No inactive rebuild");
       cabinet();check(document.getElementById("kbContent").textContent.includes("Hidden update"),"Cabinet opens current Records");
-    `);
+    `, { rejectWarnings: true });
+
+    await test("F10b archive outcomes remain neutral, escaped text", `
+      const outcomes=["approved","denied","pending","not approved","disapproved","accepted","approval granted","<img src=x onerror=alert(1)>"];
+      const action="Review <b>request</b>", by="Sage <archivist>";
+      click("tabCases");
+      mods.knowledge.upsertRecord({...record("neutral-decisions"),decisions:outcomes.map(outcome=>({action,outcome,by}))});
+      const content=document.getElementById("kbContent"), rows=[...content.querySelectorAll(".case-decision")];
+      check(rows.length===outcomes.length,"Every archived outcome is shown");
+      const neutralColor=getComputedStyle(content.querySelector(".case-summary")).color;
+      for(const [i,row] of rows.entries()){
+        check(row.className==="case-decision"&&getComputedStyle(row).color===neutralColor,"No inferred approval class or color");
+        check(row.textContent===action+" - "+outcomes[i]+" (by "+by+")","Archive text stays verbatim");
+        check(["none","normal"].includes(getComputedStyle(row,"::before").content),"No inferred decision glyph or literal Unicode escape");
+        check(row.childElementCount===0,"Archive text cannot inject markup");
+      }
+      const finding=document.createElement("div");finding.className="case-finding";finding.textContent="Stored finding";content.append(finding);
+      const marker=getComputedStyle(finding,"::before").content;
+      check(marker.includes(String.fromCodePoint(0x2022))&&!marker.includes("u2022"),"Finding marker is an actual CSS bullet");
+    `, { rejectWarnings: true });
 
     await test("F11/F13 chronological uncorrelated activity and actual controls", `
       const f=fixture();await boot(f);
@@ -491,7 +515,7 @@ async function main() {
       check(text.indexOf("Synthetic chat")<text.indexOf("Delayed reply"),"Chronological order");
       check(document.querySelectorAll(".scenario-btn").length===6&&["tabLog","tabCases","tabGraph","pauseBtn","startBtn"].every(visible),"Documented controls exist");
     `);
-    console.log("All 17 deterministic regression groups passed (actual TS/DOM; controlled runtime boundaries).");
+    console.log("All 18 deterministic regression groups passed (actual TS/DOM; controlled runtime boundaries).");
     return;
     }
 

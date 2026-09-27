@@ -17341,9 +17341,8 @@ impl MobActor {
                     .await?;
                 let session_projection_visible = self
                     .session_service
-                    .load_persisted_session_metadata(session_id)
-                    .await?
-                    .is_some();
+                    .session_projection_visible(session_id)
+                    .await?;
                 #[cfg(feature = "runtime-adapter")]
                     let runtime_residue_present = match self.runtime_adapter.as_ref() {
                         Some(adapter) => adapter

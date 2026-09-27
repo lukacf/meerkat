@@ -618,6 +618,13 @@ them.
   submitter keeps the Bazel-native all-features clippy lane, which reads the
   prebuild cache. The SLO stays 3000 seconds.
 
+- The Bazel `//crates/xtask:machines_contracts_test` target is sized
+  `large` (900s). Fresh remote runs took 264-274s of the 300s `medium`
+  budget and it timed out in the 2026-09-27 nightly's governance lane. A
+  release tag always runs it fresh, because the version bump changes every
+  crate's rustc_env, so the release run's full BuildBuddy validation could
+  fail on it.
+
 ## [0.8.44] - 2026-09-26
 
 ### Breaking

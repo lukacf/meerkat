@@ -1930,6 +1930,12 @@ for (const pkg of localPackages.values()) {
       attrs.splice(attrs.length - 1, 0, `    tags = ${listExpr([...new Set(tags)].sort())},`);
       if (key === "meerkat" && target.name === "agent_builder_policy_canary") {
         attrs.splice(attrs.length - 1, 0, `    size = "large",`);
+      } else if (key === "xtask" && target.name === "machines_contracts") {
+        // Checks every machine and composition contract. Fresh remote runs
+        // took 264-274s against the 300s "medium" budget and timed out at
+        // 300s in the 2026-09-27 nightly; a release tag always runs it fresh
+        // (the version bump changes every rustc_env).
+        attrs.splice(attrs.length - 1, 0, `    size = "large",`);
       } else if (key === "xtask" && (target.name === "rmat_strict" || target.name === "rmat_audit")) {
         // Strict RMAT walks every workspace source through syn (and now
         // resolves ownership anchors against a full workspace type index);

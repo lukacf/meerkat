@@ -378,7 +378,7 @@ pub use schema::{
 pub use service::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,
     CreateSessionRequest, DeferredPromptPolicy, DurableForkAtTurnBoundary,
-    DurableForkSourceAdmission, DurableSessionForkTarget, ForkCacheInheritance,
+    DurableForkSourceAdmission, DurableSessionForkTarget, ForkBuildSource, ForkCacheInheritance,
     ForkCacheInheritanceInstall, ForkCacheInheritanceUnavailableReason, ForkPoint, ForkPointError,
     LiveFinalTranscriptCommitAtTurnBoundary, MobToolsBuildArgs, MobToolsFactory,
     PublicTurnToolOverlay, SessionBuildOptions, SessionControlError, SessionError,

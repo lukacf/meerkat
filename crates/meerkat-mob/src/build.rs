@@ -61,16 +61,53 @@ pub(crate) fn resolve_profile_mob_operator_access(
     )
 }
 
+/// Keys of the standard mob member labels.
+///
+/// A member's build stamps each of these from the member's own typed
+/// [`meerkat_core::MobMemberBinding`], over any application label of the same
+/// key, so on a build they only ever name the member being built. This is the
+/// one owner of the set: [`stamp_standard_mob_member_labels`] writes exactly
+/// these keys, and a fork-derived member inherits every source label except
+/// these (see `ForkBuildInheritance`), because they name a member: `mob_id`,
+/// `role`, `profile_name`, and `meerkat_id` / `agent_identity`, which an
+/// embedder may also use as the member's durable identity (MobKit does).
+pub(crate) const STANDARD_MOB_MEMBER_LABEL_KEYS: [&str; 5] = [
+    "mob_id",
+    "role",
+    "profile_name",
+    "meerkat_id",
+    "agent_identity",
+];
+
+/// Whether `key` is one of the [`STANDARD_MOB_MEMBER_LABEL_KEYS`].
+pub(crate) fn is_standard_mob_member_label(key: &str) -> bool {
+    STANDARD_MOB_MEMBER_LABEL_KEYS.contains(&key)
+}
+
+/// The standard mob member labels of `binding`, one per
+/// [`STANDARD_MOB_MEMBER_LABEL_KEYS`] entry.
+fn standard_mob_member_labels(
+    binding: &meerkat_core::MobMemberBinding,
+) -> [(&'static str, &str); 5] {
+    let [mob_id, role, profile_name, meerkat_id, agent_identity] = STANDARD_MOB_MEMBER_LABEL_KEYS;
+    [
+        (mob_id, binding.mob_id.as_str()),
+        (role, binding.role.as_str()),
+        (profile_name, binding.role.as_str()),
+        (meerkat_id, binding.member.as_str()),
+        (agent_identity, binding.member.as_str()),
+    ]
+}
+
 fn stamp_standard_mob_member_labels(
     peer_meta: PeerMeta,
     binding: &meerkat_core::MobMemberBinding,
 ) -> PeerMeta {
-    peer_meta
-        .with_label("mob_id", binding.mob_id.as_str())
-        .with_label("role", binding.role.as_str())
-        .with_label("profile_name", binding.role.as_str())
-        .with_label("meerkat_id", binding.member.as_str())
-        .with_label("agent_identity", binding.member.as_str())
+    standard_mob_member_labels(binding)
+        .into_iter()
+        .fold(peer_meta, |peer_meta, (key, value)| {
+            peer_meta.with_label(key, value)
+        })
 }
 
 /// Open profile tool categories for an already-witnessed inherited filter.
@@ -409,6 +446,22 @@ pub async fn build_resumed_agent_config(
         )));
     }
     let mut config = build_agent_config(base).await?;
+    // A rebuild that supplies no application context keeps the context the
+    // session's current build ran with. The factory persists every build's
+    // context in the session's durable build state, so rebuilding with `None`
+    // would erase it: a revived or resumed member would lose its context, and
+    // so would every later fork of it (a fork inherits its source's context
+    // from that state). An explicit context still wins.
+    if config.app_context.is_none() {
+        config.app_context = resumed_session
+            .try_build_state()
+            .map_err(|err| {
+                MobError::Internal(format!(
+                    "invalid durable build state for resumed mob member: {err}"
+                ))
+            })?
+            .and_then(|state| state.app_context);
+    }
     if inherited_tool_filter.is_some() {
         resumed_session.try_tool_visibility_state().map_err(|err| {
             MobError::Internal(format!(
@@ -1662,6 +1715,31 @@ mod tests {
             }),
             "producer must stamp the typed durable mob member binding"
         );
+    }
+
+    #[test]
+    fn standard_mob_member_labels_are_exactly_the_owned_key_set() {
+        let binding = meerkat_core::MobMemberBinding {
+            mob_id: "team".to_string(),
+            role: "worker".to_string(),
+            member: "w-1".to_string(),
+        };
+        let stamped = stamp_standard_mob_member_labels(PeerMeta::default(), &binding);
+        assert_eq!(
+            stamped
+                .labels
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            STANDARD_MOB_MEMBER_LABEL_KEYS
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "the stamp writes exactly the owned standard key set"
+        );
+        for key in STANDARD_MOB_MEMBER_LABEL_KEYS {
+            assert!(is_standard_mob_member_label(key));
+        }
+        assert!(!is_standard_mob_member_label("domain"));
     }
 
     #[tokio::test]

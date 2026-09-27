@@ -2948,6 +2948,8 @@ mod tests {
             effective_model_override: None,
             spawned_by: None,
             fork_job: None,
+            fork_source: None,
+            fork_overlay: Default::default(),
         });
         roster
     }

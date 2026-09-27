@@ -1369,8 +1369,19 @@ async fn run_command(
     for (key, value) in env_overrides {
         child.env(key, value);
     }
+    // The command leads a process group of its own, and dropping it (on a
+    // timeout, or when this future is dropped) kills that whole group:
+    // repo-cargo runs cargo and rustc as its descendants, which killing the
+    // direct child alone would leave running.
+    #[cfg(unix)]
+    child.process_group(0);
+    child.kill_on_drop(true);
+    let child = child
+        .spawn()
+        .map_err(|error| format!("failed to run {display}: {error}"))?;
+    let mut group = ProcessGroupKillOnDrop::new(child.id());
 
-    let output = timeout(Duration::from_secs(timeout_secs), child.output())
+    let output = timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
         .await
         .map_err(|_| {
             format!(
@@ -1379,6 +1390,9 @@ async fn run_command(
             )
         })?
         .map_err(|error| format!("failed to run {display}: {error}"))?;
+    // The command exited and closed its output: what it left running is its
+    // own business.
+    group.disarm();
     let elapsed = started.elapsed();
 
     let combined = combine_output(&output.stdout, &output.stderr);
@@ -1397,6 +1411,39 @@ async fn run_command(
     );
 
     Ok(CompletedCommand { output: combined })
+}
+
+/// Kills a spawned command's process group when dropped, unless disarmed.
+/// The group id is the command's pid, captured at spawn (the command leads
+/// its own group, see [`run_command`]).
+struct ProcessGroupKillOnDrop {
+    pgid: Option<u32>,
+}
+
+impl ProcessGroupKillOnDrop {
+    fn new(pgid: Option<u32>) -> Self {
+        Self { pgid }
+    }
+
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+}
+
+impl Drop for ProcessGroupKillOnDrop {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid.take() {
+            // A group that already exited leaves nothing to kill; kill's
+            // failure then says only that.
+            let _ = StdCommand::new("kill")
+                .args(["-KILL", "--", &format!("-{pgid}")])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
 }
 
 fn inherited_cargo_build_context(key: &std::ffi::OsStr) -> bool {
@@ -6146,10 +6193,11 @@ mod tests {
         ArtifactManifest, ArtifactRequirement, CommandLockMode, CommandSpec, E2eSelection,
         ExecutionMode, Lane, SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler,
         bazel_build_event_provenance, build_commands_for_mode, inherited_cargo_build_context,
-        normalize_command_with_env, order_smoke_specs_for_runtime, plan_for_selection,
-        pre_command_lock_mode, repo_cargo, require_built_by_recorded_invocation,
-        sanitize_artifact_key, scenario_env, scenario_spec, smoke_runtime_class,
-        smoke_test_filter_for_selection, source_revision_key, suite_spec,
+        normalize_command_with_env, order_smoke_specs_for_runtime, parse_cargo_build_requirement,
+        plan_for_selection, pre_command_lock_mode, repo_cargo,
+        require_built_by_recorded_invocation, run_command, sanitize_artifact_key, scenario_env,
+        scenario_spec, smoke_runtime_class, smoke_test_filter_for_selection, source_revision_key,
+        suite_spec, workspace_root,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -6274,6 +6322,130 @@ mod tests {
         let error = bazel_build_event_provenance(&foreign_bep, &workspace, &bazel_bin)
             .expect_err("a receipt outside the current output base must refuse");
         assert!(error.contains("outside the current output base"), "{error}");
+    }
+
+    /// The e2e-system lane prebuilds (scripts/run-build-backend-lane,
+    /// `prebuild_e2e_system_bins`) exactly the binaries the suites in
+    /// tests/e2e_system_lane.rs build as cargo-build pre-commands inside their
+    /// behaviour timeouts: a suite's build missing from the prebuild runs cold
+    /// inside its timeout again, and a prebuild no suite needs is stale.
+    #[test]
+    fn system_lane_prebuild_builds_exactly_the_system_suites_pre_command_binaries() {
+        let root = workspace_root();
+        let script_path = root.join("scripts/run-build-backend-lane");
+        let lane_path = root.join("tests/integration/tests/e2e_system_lane.rs");
+        let (Ok(script), Ok(lane)) = (
+            std::fs::read_to_string(&script_path),
+            std::fs::read_to_string(&lane_path),
+        ) else {
+            // The Bazel unit target's runfiles do not carry scripts/; the
+            // Cargo unit lane runs this drift gate on every CI push.
+            eprintln!(
+                "skipping system prebuild coverage: {} or {} not present in this sandbox",
+                script_path.display(),
+                lane_path.display()
+            );
+            return;
+        };
+
+        // Each `system_suite!(test_name, "suite")` wires one suite.
+        let suites: Vec<&str> = lane
+            .split("system_suite!(")
+            .skip(1)
+            .map(|invocation| {
+                invocation
+                    .split('"')
+                    .nth(1)
+                    .expect("every system_suite! names its suite")
+            })
+            .collect();
+        assert!(
+            !suites.is_empty(),
+            "no system suites found in {}",
+            lane_path.display()
+        );
+        let mut needed = BTreeSet::new();
+        for suite in &suites {
+            let spec =
+                suite_spec(suite).unwrap_or_else(|| panic!("system suite '{suite}' has no spec"));
+            assert!(
+                matches!(spec.lane, Lane::System),
+                "'{suite}' is not a system suite"
+            );
+            needed.extend(
+                spec.pre_commands
+                    .iter()
+                    .filter_map(|command| parse_cargo_build_requirement(command)),
+            );
+        }
+
+        let body = script
+            .split("prebuild_e2e_system_bins() {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("prebuild_e2e_system_bins is defined");
+        let prebuilt: BTreeSet<_> = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("\"${cargo_bin}\" "))
+            .map(|arguments| {
+                let command: Vec<&str> = std::iter::once("cargo")
+                    .chain(arguments.split_whitespace())
+                    .collect();
+                parse_cargo_build_requirement(&command)
+                    .unwrap_or_else(|| panic!("not a cargo build of one binary: {arguments}"))
+            })
+            .collect();
+
+        let missing: Vec<_> = needed.difference(&prebuilt).collect();
+        let stale: Vec<_> = prebuilt.difference(&needed).collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "prebuild_e2e_system_bins is out of step with the system suites' pre-commands; \
+             missing: {missing:?}; stale: {stale:?}"
+        );
+    }
+
+    /// A command that outlives its timeout is killed with everything it
+    /// started: repo-cargo's cargo and rustc are its descendants, which
+    /// killing the direct child alone would leave running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_command_leaves_nothing_it_started_running() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let pid_file = temp.path().join("descendant.pid");
+        let command = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("sleep 300 & echo $! > '{}'; wait", pid_file.display()),
+        ];
+        let error = run_command(&command, temp.path(), &[], 1)
+            .await
+            .err()
+            .expect("the command outlives its timeout");
+        assert!(error.contains("timed out"), "{error}");
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("the command recorded its descendant")
+            .trim()
+            .to_string();
+
+        // Gone, or a zombie awaiting its (re)parent's reap: not running.
+        let running = |pid: &str| {
+            let output = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", pid])
+                .output()
+                .expect("run ps");
+            let stat = String::from_utf8_lossy(&output.stdout);
+            let stat = stat.trim();
+            !stat.is_empty() && !stat.starts_with('Z')
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while running(&pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the timed-out command's descendant {pid} is still running"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// Every artifact the smoke-lane plan can require from bazel-bin must be

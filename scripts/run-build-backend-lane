@@ -126,9 +126,12 @@ prebuild_e2e_system_other_tests() {
 }
 
 prebuild_e2e_system_bins() {
-  # The system suites build these binaries as pre-commands INSIDE their
-  # per-command behaviour timeouts (the Lane::System `pre_commands` in
-  # tests/integration/src/e2e_lanes.rs; keep this list in step with them).
+  # The suites in tests/integration/tests/e2e_system_lane.rs build these
+  # binaries as cargo-build pre-commands INSIDE their per-command behaviour
+  # timeouts. The unit test
+  # system_lane_prebuild_builds_exactly_the_system_suites_pre_command_binaries
+  # in tests/integration/src/e2e_lanes.rs fails when this list and those
+  # pre-commands differ.
   # On a cold 4-vCPU hosted runner the first build of a variant outlasted
   # the timeout itself: nightly 36275543570 lost cli-mob-run-custody to
   # `rkat --features integration-real-tests,mob` at 900 s and

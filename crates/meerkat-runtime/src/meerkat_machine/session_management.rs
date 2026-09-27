@@ -1256,66 +1256,75 @@ async fn retire_ops_lifecycle_owner_for_unregister(
 }
 
 impl MeerkatMachine {
-    /// Whether `session_id` holds a run input that its run has taken up but
-    /// whose boundary has not consumed it yet: an input `Staged`, `Applied`
-    /// or `AppliedPendingConsumption`.
+    /// Whether an assistant-producing run input of `session_id` still awaits
+    /// its boundary commit on the session's current driver, under healthy
+    /// durability.
     ///
-    /// That is exactly the stretch from staging an input onto a run until the
-    /// run's boundary commit consumes it, the same commit that makes the
-    /// turn's transcript durable. So it is `true` for the WHOLE active turn,
-    /// and in particular for a turn that is already terminal in the live
-    /// agent while its boundary commit is still landing. It is a machine
-    /// phase, not a comparison of transcripts: a turn that compacted reads
-    /// the same.
+    /// Such an input is `Staged`, `Applied` or `AppliedPendingConsumption`: a
+    /// run has taken it up and the run's boundary commit, the commit that
+    /// makes the turn's transcript durable, has not consumed it yet. `true`
+    /// covers the whole active turn, including one already terminal in the
+    /// live agent whose commit is still landing. It is a machine phase, not a
+    /// transcript comparison, so a turn that compacted reads the same.
     ///
-    /// `false` means no run input awaits a boundary: every staged turn has
-    /// committed (or its input reached another terminal phase). It says
-    /// nothing about work that is queued but not yet staged, i.e. whether a
-    /// new turn is about to start. A runtime that no longer holds the session
-    /// (not found, destroyed, not ready) holds nothing pending and reads
-    /// `false`.
+    /// `Ok(false)` means exactly: durability is ready, every input of the
+    /// current driver was read, and none is `Staged`, `Applied` or
+    /// `AppliedPendingConsumption`. `Queued` input (and the compatibility
+    /// `Accepted`) does not count, so queued work that has not started does
+    /// not hold a reader back. It is not a promise that no later run will
+    /// start, or that background operations are done.
     ///
-    /// Reads queue behind a boundary commit in progress (the commit holds the
-    /// session driver), so the call can wait for as long as that commit
-    /// takes. Callers bound it; one that times out is behind an in-progress
-    /// commit, which is itself "pending".
+    /// Everything else is an error, never `Ok(false)`:
+    /// - no runtime holds the session: [`RuntimeDriverError::NotReady`];
+    /// - the session's driver was replaced or removed while this waited for
+    ///   it: [`RuntimeDriverError::StaleAuthority`];
+    /// - durability is degraded, for example after a failed boundary commit,
+    ///   which consumes the inputs in memory before persistence fails:
+    ///   [`RuntimeDriverError::RecoveryRepairBlocked`];
+    /// - an input without its generated phase: [`RuntimeDriverError::Internal`].
+    ///
+    /// The read waits for the session driver, which a boundary commit holds
+    /// until it lands, so the call can take as long as that commit. Callers
+    /// bound it; a read that times out is inconclusive.
     pub async fn session_has_uncommitted_run_input(
         &self,
         session_id: &SessionId,
     ) -> Result<bool, RuntimeDriverError> {
-        use crate::input_state::InputLifecycleState;
-        use crate::service_ext::SessionServiceRuntimeExt as _;
-        let gone = |error: &RuntimeDriverError| {
-            matches!(
-                error,
-                RuntimeDriverError::NotFound { .. }
-                    | RuntimeDriverError::Destroyed
-                    | RuntimeDriverError::NotReady { .. }
-            )
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            Arc::clone(&entry.driver)
         };
-        let inputs = match self.list_active_inputs(session_id).await {
-            Ok(inputs) => inputs,
-            Err(error) if gone(&error) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        for input in inputs {
-            let state = match self.input_state(session_id, &input).await {
-                Ok(state) => state,
-                Err(error) if gone(&error) => return Ok(false),
-                Err(error) => return Err(error),
-            };
-            if state.is_some_and(|state| {
-                matches!(
-                    state.seed.phase,
-                    InputLifecycleState::Staged
-                        | InputLifecycleState::Applied
-                        | InputLifecycleState::AppliedPendingConsumption
-                )
-            }) {
-                return Ok(true);
+        let driver_guard = driver.lock().await;
+        // Only the session's current driver answers: while this waited for
+        // the lock, the session may have been unregistered or given a new
+        // driver, and the one held here would describe nothing current.
+        {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            if !Arc::ptr_eq(&entry.driver, &driver) {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "session {session_id} changed its runtime driver while its run inputs were read"
+                    ),
+                });
             }
+            entry.require_durability_ready().map_err(|required| {
+                RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: None,
+                    reason: required.to_string(),
+                }
+            })?;
         }
-        Ok(false)
+        driver_guard.run_input_awaits_boundary()
     }
 
     fn binding_unregister_observer(

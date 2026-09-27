@@ -211,23 +211,32 @@ impl ManagedMobs {
 
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
 
-/// How long a child may stay settled in its member status while its last
-/// turn's input is still staged, unconsumed, on the run (its boundary commit
-/// has not landed) before the re-link stops waiting for that commit.
+/// How long the re-link keeps waiting on a child whose member status reads
+/// settled while its last turn's boundary commit is not confirmed, before it
+/// stops waiting for that commit.
 ///
-/// A boundary commit is one store transaction behind the run; under a loaded
-/// 4-core runner the whole window measured 23-76 ms. Five minutes is orders
-/// of magnitude past any commit that is going to land. It bounds the one
-/// that is not: a commit that failed while its discard failed too, which
-/// leaves the input staged forever. The re-link then delivers
-/// `restart_interrupted` with the typed reason `commit_never_landed` instead
-/// of waiting for good (a job without `max_run` would otherwise never be
-/// delivered). [`relink_child_within`] takes the ceiling explicitly.
+/// The commit is unconfirmed while the runtime shows machine evidence that it
+/// has not landed (a run input still `Staged`, `Applied` or
+/// `AppliedPendingConsumption`, or degraded durability after a boundary
+/// commit failed) or while its read is inconclusive (it timed out or failed).
+/// A healthy boundary commit is one store transaction behind the run (23-76
+/// ms measured on a loaded 4-core runner), so five minutes is far past any
+/// commit that is going to land. The ceiling bounds the ones that do not,
+/// for example a commit whose failure left durability degraded, which a job
+/// without `max_run` would otherwise wait on for good.
+///
+/// At the ceiling the re-link delivers `restart_interrupted`. The typed
+/// reason `commit_never_landed` is set only when the reading at the ceiling
+/// is machine evidence; an inconclusive reading carries no reason. Only a
+/// reading that shows the child running again restarts the wait; a status
+/// read that did not observe the child does not. [`relink_child_within`]
+/// takes the ceiling explicitly.
 pub const COMMIT_PENDING_CEILING: Duration = Duration::from_secs(300);
 
-/// Upper bound on one read of a child's run inputs. The runtime serializes
-/// those reads behind a boundary commit in progress; a read that has not
-/// answered in this long is behind such a commit, so the commit is pending.
+/// Upper bound on one read of a child's run inputs. The read waits for the
+/// child's session driver, which a boundary commit in progress holds; a read
+/// that has not answered in this long is inconclusive (the driver was busy,
+/// with a commit or with other work), not evidence of a pending commit.
 const RUN_INPUT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Pause before reading a child's status again after a read that did not
@@ -655,9 +664,7 @@ async fn relink_owned_child(
     let deadline_ms = job
         .max_run_ms
         .map(|limit| job.started_at_ms.saturating_add(limit));
-    // When the child was first read settled with its boundary commit still
-    // pending; cleared by any other reading.
-    let mut commit_pending_since: Option<tokio::time::Instant> = None;
+    let mut commit_watch = CommitWatch::new(commit_pending_ceiling);
     loop {
         // A limit already passed decides at once: the child's run is over
         // unless its reply is durable. Racing a status read against a
@@ -684,45 +691,21 @@ async fn relink_owned_child(
             // iteration decides it.
             continue;
         };
-        if observed != ChildObservation::CommitPending {
-            commit_pending_since = None;
-        }
-        match observed {
-            ChildObservation::Running => tokio::time::sleep(WATCH_INTERVAL).await,
-            ChildObservation::CommitPending => {
-                let since = *commit_pending_since.get_or_insert_with(tokio::time::Instant::now);
-                if since.elapsed() >= commit_pending_ceiling {
-                    // A reply that did land wins over the bound.
-                    if let Some(completion) =
-                        durable_reply(&service, mob_id, handle, child, job).await
-                    {
-                        return deliver(delivery, &owner, mob_id, job, completion).await;
-                    }
-                    tracing::warn!(
-                        mob_id = %mob_id,
-                        child = %child,
-                        waited_ms = since.elapsed().as_millis() as u64,
-                        "fork_off re-link: the child's finished turn never committed; \
-                         delivering restart_interrupted"
-                    );
-                    let mut completion = ForkOffCompletion::empty(
-                        child.to_string(),
-                        member_ref(mob_id, child),
-                        ForkOffCompletionStatus::RestartInterrupted,
-                    );
-                    completion.restart_reason = Some(RestartInterruptedReason::CommitNeverLanded);
-                    return deliver(delivery, &owner, mob_id, job, completion).await;
-                }
+        let (evidence, detail) = match observed {
+            ChildObservation::Running => {
+                commit_watch.progressed();
                 tokio::time::sleep(WATCH_INTERVAL).await;
+                continue;
             }
             ChildObservation::Settled => {
                 let completion = settled_outcome(&service, mob_id, handle, child, job).await;
                 return deliver(delivery, &owner, mob_id, job, completion).await;
             }
             ChildObservation::Unobserved(detail) => {
-                // The read says nothing about the child's state. A child
-                // that finished meanwhile shows in its durable transcript;
-                // otherwise read again.
+                // The read says nothing about the child's state, so it
+                // neither starts nor restarts the commit wait. A child that
+                // finished meanwhile has a durable reply; otherwise read
+                // again.
                 if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await
                 {
                     return deliver(delivery, &owner, mob_id, job, completion).await;
@@ -734,7 +717,97 @@ async fn relink_owned_child(
                     "fork_off re-link could not observe the child; reading again"
                 );
                 tokio::time::sleep(UNOBSERVED_RETRY_INTERVAL).await;
+                continue;
             }
+            ChildObservation::CommitPending(evidence) => (Some(evidence), None),
+            ChildObservation::CommitUnconfirmed(detail) => (None, Some(detail)),
+        };
+        let CommitWatchStep::Ceiling { reason } =
+            commit_watch.unconfirmed(meerkat_core::time_compat::Instant::now(), evidence)
+        else {
+            tokio::time::sleep(WATCH_INTERVAL).await;
+            continue;
+        };
+        // A reply that did land wins over the bound.
+        if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await {
+            return deliver(delivery, &owner, mob_id, job, completion).await;
+        }
+        tracing::warn!(
+            mob_id = %mob_id,
+            child = %child,
+            evidence = ?evidence,
+            detail = ?detail,
+            "fork_off re-link: the child's last turn never confirmed its commit; \
+             delivering restart_interrupted"
+        );
+        let mut completion = ForkOffCompletion::empty(
+            child.to_string(),
+            member_ref(mob_id, child),
+            ForkOffCompletionStatus::RestartInterrupted,
+        );
+        completion.restart_reason = reason;
+        return deliver(delivery, &owner, mob_id, job, completion).await;
+    }
+}
+
+/// Machine evidence that a settled child's last boundary commit has not
+/// landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitEvidence {
+    /// A run input is still `Staged`, `Applied` or
+    /// `AppliedPendingConsumption`: the run's boundary has not consumed it.
+    InputAwaitsBoundary,
+    /// The child's runtime reports degraded durability: a boundary commit
+    /// failed after the run consumed its inputs in memory, so the durable
+    /// history lacks the turn.
+    DurabilityDegraded,
+}
+
+/// The re-link's wait on a settled child whose commit is unconfirmed,
+/// bounded by the commit ceiling.
+struct CommitWatch {
+    ceiling: Duration,
+    since: Option<meerkat_core::time_compat::Instant>,
+}
+
+/// What the commit wait decides after an unconfirmed reading.
+#[derive(Debug, PartialEq, Eq)]
+enum CommitWatchStep {
+    KeepWatching,
+    /// The ceiling passed. `reason` is `commit_never_landed` only when the
+    /// reading at the ceiling was machine evidence.
+    Ceiling {
+        reason: Option<RestartInterruptedReason>,
+    },
+}
+
+impl CommitWatch {
+    fn new(ceiling: Duration) -> Self {
+        Self {
+            ceiling,
+            since: None,
+        }
+    }
+
+    /// The child was read running again: the wait restarts.
+    fn progressed(&mut self) {
+        self.since = None;
+    }
+
+    /// The child reads settled with its commit unconfirmed: by machine
+    /// `evidence`, or inconclusively (`None`). The wait starts at the first
+    /// such reading.
+    fn unconfirmed(
+        &mut self,
+        now: meerkat_core::time_compat::Instant,
+        evidence: Option<CommitEvidence>,
+    ) -> CommitWatchStep {
+        let since = *self.since.get_or_insert(now);
+        if now.saturating_duration_since(since) < self.ceiling {
+            return CommitWatchStep::KeepWatching;
+        }
+        CommitWatchStep::Ceiling {
+            reason: evidence.map(|_| RestartInterruptedReason::CommitNeverLanded),
         }
     }
 }
@@ -744,14 +817,17 @@ async fn relink_owned_child(
 enum ChildObservation {
     /// The child has a run open or work in flight.
     Running,
-    /// The child's member status reads settled, but its last turn's input is
-    /// still staged on the run, unconsumed: the turn is terminal in the live
-    /// agent while its boundary commit (which makes its reply durable and
-    /// consumes the input) has not landed. Its outcome is not readable yet.
-    CommitPending,
-    /// The child is not running: idle, no longer seated, its runtime no
-    /// longer holds it, or its mob's actor is gone (nothing runs it any
-    /// more).
+    /// The child's member status reads settled, but the runtime shows that
+    /// its last turn's boundary commit (which makes its reply durable) has
+    /// not landed. Its outcome is not readable yet.
+    CommitPending(CommitEvidence),
+    /// The child's member status reads settled, but the read of its run
+    /// inputs was inconclusive: it timed out or failed. Not evidence either
+    /// way.
+    CommitUnconfirmed(String),
+    /// The child is not running: idle with its commit landed, no longer
+    /// seated, its runtime no longer holds it, or its mob's actor is gone
+    /// (nothing runs it any more).
     Settled,
     /// The read did not observe the child, so it says nothing about the
     /// child's state: another reader held the mob's one status observation
@@ -787,15 +863,20 @@ impl ProgressVerdict {
 /// Read a fork child's status (see [`observe_child_run`]), where "settled"
 /// also requires its last turn to be committed.
 ///
-/// Member status reads the live agent, which is terminal before the service
-/// commits the turn, while the outcome is read from the durable transcript.
-/// The runtime owns the fact in between
+/// Member status reads the live agent, which is terminal before the turn's
+/// boundary commit lands, while the outcome is read from the durable
+/// transcript. The runtime owns the fact in between
 /// ([`meerkat_runtime::MeerkatMachine::session_has_uncommitted_run_input`]):
-/// the turn's input stays staged (or applied) on the run until the boundary
-/// commit consumes it, which is also what makes the reply durable. That is a machine phase, not a comparison
-/// of transcripts, so a turn that compacted inside the window reads the same.
-/// A read of it queues behind a commit in progress, so the commit landing,
-/// not a delay, is what settles the child. A failed read says nothing.
+/// a machine phase, not a comparison of transcripts, so a turn that compacted
+/// inside the window reads the same. Its answer maps as follows:
+/// - a run input awaiting its boundary, or degraded durability, is machine
+///   evidence that the commit has not landed ([`ChildObservation::CommitPending`]);
+/// - no such input, under healthy durability, settles the child;
+/// - a runtime that no longer holds the child's session (not found,
+///   destroyed, not ready) settles it too: for this workflow nothing is left
+///   to wait for, and nothing more can be delivered from that runtime;
+/// - a read that timed out or failed otherwise is inconclusive
+///   ([`ChildObservation::CommitUnconfirmed`]).
 async fn observe_child(
     runtime: Option<&meerkat_runtime::MeerkatMachine>,
     handle: &MobHandle,
@@ -812,19 +893,39 @@ async fn observe_child(
     let Some(session_id) = handle.resolve_bridge_session_id(child).await else {
         return ChildObservation::Settled;
     };
-    match tokio::time::timeout(
-        RUN_INPUT_READ_TIMEOUT,
-        runtime.session_has_uncommitted_run_input(&session_id),
+    commit_observation(
+        tokio::time::timeout(
+            RUN_INPUT_READ_TIMEOUT,
+            runtime.session_has_uncommitted_run_input(&session_id),
+        )
+        .await
+        .map_err(|_elapsed| ()),
     )
-    .await
-    {
-        // Still queued behind a boundary commit in progress.
-        Err(_elapsed) => ChildObservation::CommitPending,
-        Ok(Ok(true)) => ChildObservation::CommitPending,
+}
+
+/// How the re-link reads the runtime's answer about a settled child's last
+/// commit (see [`observe_child`]). `Err(())` is a read that timed out.
+fn commit_observation(
+    read: Result<Result<bool, meerkat_runtime::RuntimeDriverError>, ()>,
+) -> ChildObservation {
+    use meerkat_runtime::RuntimeDriverError;
+    match read {
+        Ok(Ok(true)) => ChildObservation::CommitPending(CommitEvidence::InputAwaitsBoundary),
         Ok(Ok(false)) => ChildObservation::Settled,
-        Ok(Err(detail)) => {
-            ChildObservation::Unobserved(format!("could not read the child's run inputs: {detail}"))
+        Ok(Err(RuntimeDriverError::RecoveryRepairBlocked { .. })) => {
+            ChildObservation::CommitPending(CommitEvidence::DurabilityDegraded)
         }
+        Ok(Err(
+            RuntimeDriverError::NotFound { .. }
+            | RuntimeDriverError::Destroyed
+            | RuntimeDriverError::NotReady { .. },
+        )) => ChildObservation::Settled,
+        Ok(Err(error)) => ChildObservation::CommitUnconfirmed(format!(
+            "could not read the child's run inputs: {error}"
+        )),
+        Err(()) => ChildObservation::CommitUnconfirmed(format!(
+            "the read of the child's run inputs did not answer within {RUN_INPUT_READ_TIMEOUT:?}"
+        )),
     }
 }
 
@@ -1099,13 +1200,16 @@ async fn deliver(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChildObservation, ForkRelinkAction, ForkRelinkReport, MAX_OWNER_REVIVAL_WAITS,
-        ProgressVerdict, from_runtime, redeliver_each,
+        ChildObservation, CommitEvidence, CommitWatch, CommitWatchStep, ForkRelinkAction,
+        ForkRelinkReport, MAX_OWNER_REVIVAL_WAITS, ProgressVerdict, commit_observation,
+        from_runtime, redeliver_each,
     };
+    use crate::agent_tools::RestartInterruptedReason;
     use crate::detached_delivery::OwnerRevivalDeferral;
     use meerkat_mob::{AgentIdentity, MemberRunState, MobId, MobState};
     use meerkat_runtime::{RuntimeDriverError, RuntimeState};
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
 
     /// Each deferred job waits on its own owner's mob with its own budget,
     /// and a wake retries that job alone. Job X's owner mob B stays stopped
@@ -1276,5 +1380,103 @@ mod tests {
             ),
             ChildObservation::Unobserved(_)
         ));
+    }
+
+    /// The runtime's answer about a settled child's commit: a run input
+    /// awaiting its boundary and degraded durability are machine evidence;
+    /// a gone runtime settles the child for this workflow; a timeout or any
+    /// other error is inconclusive, never settled.
+    #[test]
+    fn commit_observation_maps_the_owner_read() {
+        assert_eq!(
+            commit_observation(Ok(Ok(true))),
+            ChildObservation::CommitPending(CommitEvidence::InputAwaitsBoundary)
+        );
+        assert_eq!(commit_observation(Ok(Ok(false))), ChildObservation::Settled);
+        assert_eq!(
+            commit_observation(Ok(Err(RuntimeDriverError::RecoveryRepairBlocked {
+                evidence_digest: None,
+                reason: "reload required".to_string(),
+            }))),
+            ChildObservation::CommitPending(CommitEvidence::DurabilityDegraded)
+        );
+        for gone in [
+            RuntimeDriverError::Destroyed,
+            RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            },
+        ] {
+            assert_eq!(commit_observation(Ok(Err(gone))), ChildObservation::Settled);
+        }
+        for inconclusive in [
+            Err(()),
+            Ok(Err(RuntimeDriverError::StaleAuthority {
+                reason: "driver replaced".to_string(),
+            })),
+            Ok(Err(RuntimeDriverError::Internal(
+                "generated input lifecycle phase missing".to_string(),
+            ))),
+        ] {
+            assert!(matches!(
+                commit_observation(inconclusive),
+                ChildObservation::CommitUnconfirmed(_)
+            ));
+        }
+    }
+
+    /// The wait starts at the first unconfirmed reading and only a running
+    /// reading restarts it. At the ceiling, `commit_never_landed` is set only
+    /// when that reading is machine evidence.
+    #[test]
+    fn commit_watch_names_commit_never_landed_only_on_machine_evidence() {
+        let ceiling = Duration::from_secs(300);
+        let start = meerkat_core::time_compat::Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+
+        let mut watch = CommitWatch::new(ceiling);
+        assert_eq!(
+            watch.unconfirmed(at(0), Some(CommitEvidence::InputAwaitsBoundary)),
+            CommitWatchStep::KeepWatching
+        );
+        // Inconclusive readings (a timeout) in between do not restart it.
+        assert_eq!(
+            watch.unconfirmed(at(200), None),
+            CommitWatchStep::KeepWatching
+        );
+        assert_eq!(
+            watch.unconfirmed(at(300), Some(CommitEvidence::DurabilityDegraded)),
+            CommitWatchStep::Ceiling {
+                reason: Some(RestartInterruptedReason::CommitNeverLanded)
+            }
+        );
+
+        // Timeouts alone reach the ceiling without the typed reason.
+        let mut watch = CommitWatch::new(ceiling);
+        assert_eq!(
+            watch.unconfirmed(at(0), None),
+            CommitWatchStep::KeepWatching
+        );
+        assert_eq!(
+            watch.unconfirmed(at(301), None),
+            CommitWatchStep::Ceiling { reason: None }
+        );
+
+        // A running reading restarts the wait.
+        let mut watch = CommitWatch::new(ceiling);
+        assert_eq!(
+            watch.unconfirmed(at(0), Some(CommitEvidence::InputAwaitsBoundary)),
+            CommitWatchStep::KeepWatching
+        );
+        watch.progressed();
+        assert_eq!(
+            watch.unconfirmed(at(301), Some(CommitEvidence::InputAwaitsBoundary)),
+            CommitWatchStep::KeepWatching
+        );
+        assert_eq!(
+            watch.unconfirmed(at(601), Some(CommitEvidence::InputAwaitsBoundary)),
+            CommitWatchStep::Ceiling {
+                reason: Some(RestartInterruptedReason::CommitNeverLanded)
+            }
+        );
     }
 }

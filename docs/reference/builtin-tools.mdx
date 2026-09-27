@@ -356,7 +356,7 @@ When the child's turn ends, its outcome names the child (`agent_identity`,
 | `failed` | The turn failed. Carries `error`. The child was retired. |
 | `max_run_elapsed` | The opt-in `max_run_secs` elapsed. The run was cancelled and the child retired; `retirement_error` reports a failed retirement (a live outcome only: after a restart the child is retired once the outcome is delivered, so a re-linked outcome carries none). The notice status is `terminated`. |
 | `supervisor_stopped` | The runtime supervising the child stopped (mob shutdown) before the turn ended. |
-| `restart_interrupted` | The host restarted while the child ran and the child's turn did not survive the restart. The child stays seated for its forker. |
+| `restart_interrupted` | The host restarted while the child ran and the child's turn did not survive the restart. The child stays seated for its forker. May carry `restart_reason`: `commit_never_landed` when the re-link's commit ceiling passed while the child's runtime still showed that the turn's boundary commit had not landed (see "Across a restart"). |
 
 The outcome is recorded once, durably, in the forker's own transcript as a
 `BackgroundJob` system notice. Its body is the header "Background fork_off job
@@ -419,8 +419,24 @@ child whose job began in a previous process:
 - a child whose reply to the job is already in its durable transcript has that
   reply delivered, however late the restart landed, and stays seated;
 - a child still running is observed until its turn ends, with `max_run_secs`
-  measured from the original start;
+  measured from the original start. A turn that is terminal in the child's
+  live agent counts as running until its boundary commit lands: the re-link
+  asks the child's runtime whether a run input still awaits its boundary
+  (`MeerkatMachine::session_has_uncommitted_run_input`), so a finished reply
+  is read only once it is durable;
 - otherwise `restart_interrupted` is delivered and the child stays seated.
+
+Waiting on a commit is bounded. The re-link keeps watching a child whose
+member status reads settled while its commit is unconfirmed for at most
+`COMMIT_PENDING_CEILING` (5 minutes), measured from the first such reading
+and restarted only when the child is seen running again. The commit is
+unconfirmed while the runtime shows machine evidence that it has not landed
+(a run input still staged or applied, or degraded durability after a failed
+boundary commit), or while the runtime's read is inconclusive (it timed out
+behind a busy session driver, or failed). At the ceiling, unless a durable
+reply has appeared, `restart_interrupted` is delivered. It carries
+`restart_reason: commit_never_landed` only when the reading at the ceiling
+was machine evidence; an inconclusive reading names no cause.
 
 A limit that has already elapsed is decided at once, so an idle child past its
 limit always gets `max_run_elapsed`. When the limit wins, the child's run is

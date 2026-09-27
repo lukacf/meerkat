@@ -3166,9 +3166,11 @@ pub(crate) struct ForkOffCompletion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RestartInterruptedReason {
-    /// The child's turn finished, but its boundary commit never landed
-    /// within the re-link's ceiling (a commit that failed together with its
-    /// discard leaves the turn's input staged).
+    /// At the re-link's commit ceiling the runtime still showed machine
+    /// evidence that the child's last boundary commit had not landed: a run
+    /// input still staged or applied, unconsumed, or degraded durability
+    /// after a failed boundary commit. An inconclusive read (one that timed
+    /// out or failed) at the ceiling carries no reason.
     CommitNeverLanded,
 }
 

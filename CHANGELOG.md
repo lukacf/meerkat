@@ -117,20 +117,27 @@ them.
 
 - After a host restart, re-linking a `fork_off` child that was still running
   no longer reports `restart_interrupted` for a child that answered. Member
-  status reads the live agent, which is terminal before the session service
-  commits the turn, while the re-link reads the outcome from the durable
-  transcript, and in that window it found no reply. The re-link now also
-  asks the runtime, through the new public
-  `MeerkatMachine::session_has_uncommitted_run_input`, whether the child's
-  last turn input is still staged or applied on its run, unconsumed. That machine phase clears exactly when the
-  boundary commit lands, and a read of it queues behind a commit in
-  progress. Until then the child counts as running, whatever its transcript
-  looks like (a turn that compacted inside the window included). A commit
-  that never lands (it failed together with its discard) no longer keeps
-  the job waiting for good: after `COMMIT_PENDING_CEILING` (5 minutes) the
-  re-link delivers `restart_interrupted` with the typed reason
-  `commit_never_landed`. `fork_relink::relink_child_within` takes the
-  ceiling explicitly.
+  status reads the live agent, which is terminal before the turn's boundary
+  commit lands, while the re-link reads the outcome from the durable
+  transcript, and in that window it found no reply. The re-link now asks the
+  child's runtime, through the new public
+  `MeerkatMachine::session_has_uncommitted_run_input`, whether a run input
+  still awaits its boundary commit: a machine phase (`Staged`, `Applied` or
+  `AppliedPendingConsumption`), so a turn that compacted reads the same.
+  `Ok(false)` means durability is ready, every input of the session's
+  current driver was read, and none awaits a boundary. Everything else is an
+  error: no runtime holding the session, a driver replaced during the read,
+  degraded durability after a failed boundary commit (which consumes the
+  inputs in memory before persistence fails), or an input without its
+  generated phase. `Queued` input does not count. The re-link takes a
+  pending input or degraded durability as machine evidence, a timed-out or
+  failed read as inconclusive, and a session the runtime no longer holds as
+  settled. It waits on an unconfirmed commit for at most
+  `COMMIT_PENDING_CEILING` (5 minutes), restarted only when the child is seen
+  running again, then delivers `restart_interrupted`, with the typed
+  `restart_reason` `commit_never_landed` only when the reading at the ceiling
+  was machine evidence. `fork_relink::relink_child_within` takes the ceiling
+  explicitly.
 
 - The semver-breaks gate measures notes pending under `## [Unreleased]` after
   a release against that release's tag. With the workspace version still at

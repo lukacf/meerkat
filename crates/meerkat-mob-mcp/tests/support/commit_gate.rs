@@ -9,6 +9,11 @@
 //! continues when released. That opens, deterministically, the window in which a turn is
 //! terminal in its live agent but its rows have not reached the durable
 //! store: the window a restart re-link must never read an outcome from.
+//!
+//! Armed to fail instead ([`CommitGateRuntimeStore::arm_failure`]), the next
+//! such commit for that runtime fails once with a store write error, after
+//! the run has already consumed its inputs in memory: the failed durable
+//! boundary that leaves the runtime's durability degraded.
 
 use std::sync::{Arc, Mutex};
 
@@ -26,6 +31,8 @@ pub enum CommitHold {
 pub struct CommitGateRuntimeStore {
     inner: meerkat_runtime::InMemoryRuntimeStore,
     armed: Mutex<Option<LogicalRuntimeId>>,
+    fail_next: Mutex<Option<LogicalRuntimeId>>,
+    failed: watch::Sender<bool>,
     hold: watch::Sender<CommitHold>,
 }
 
@@ -40,8 +47,40 @@ impl CommitGateRuntimeStore {
         Self {
             inner: meerkat_runtime::InMemoryRuntimeStore::new(),
             armed: Mutex::new(None),
+            fail_next: Mutex::new(None),
+            failed: watch::channel(false).0,
             hold: watch::channel(CommitHold::Idle).0,
         }
+    }
+
+    /// Fail the next boundary commit of `runtime_id`, once.
+    pub fn arm_failure(&self, runtime_id: LogicalRuntimeId) {
+        self.failed.send_replace(false);
+        *self.fail_next.lock().expect("commit gate lock") = Some(runtime_id);
+    }
+
+    /// Resolves once the armed failure has been returned.
+    pub async fn failed(&self) {
+        let mut failed = self.failed.subscribe();
+        failed
+            .wait_for(|failed| *failed)
+            .await
+            .expect("commit gate sender outlives the store");
+    }
+
+    fn fail_if_armed(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        let mut fail_next = self.fail_next.lock().expect("commit gate lock");
+        if fail_next.as_ref() != Some(runtime_id) {
+            return Ok(());
+        }
+        *fail_next = None;
+        self.failed.send_replace(true);
+        Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+            "commit gate: injected boundary commit failure".to_string(),
+        ))
     }
 
     /// Hold the next boundary commit of `runtime_id` until [`Self::release`].
@@ -109,6 +148,7 @@ impl meerkat_runtime::RuntimeStore for CommitGateRuntimeStore {
         meerkat_runtime::RuntimeStoreError,
     > {
         self.pause_if_gated(runtime_id).await;
+        self.fail_if_armed(runtime_id)?;
         self.inner
             .commit_prepared_session_boundary(runtime_id, request)
             .await
@@ -709,6 +749,7 @@ impl meerkat_runtime::RuntimeStore for CommitGateRuntimeStore {
         meerkat_runtime::RuntimeStoreError,
     > {
         self.pause_if_gated(runtime_id).await;
+        self.fail_if_armed(runtime_id)?;
         self.inner
             .commit_prepared_session_boundary_with_fence(runtime_id, request, write_fence)
             .await

@@ -157,6 +157,19 @@ them.
 
 ### Fixed
 
+- Live host: assistant realtime events (display-text deltas, spoken-transcript
+  deltas and spoken-transcript finals) now reach the session with the channel
+  they streamed on, through both the RPC `SessionServiceProjectionSink` and the
+  facade `ServiceLiveProjection`, as user transcripts already did. Core stamps
+  that channel on the staged assistant item, but `LiveAdapterHost` never
+  passed it for assistant events, so outside a context observation an ordinary
+  spoken turn committed with no `realtime_origin`: no console pairing key, and
+  the live context mirror classified the row as `ParentSessionServiceTurn`
+  instead of the `LiveRealtimeTranscript` disposition the 0.8.41 entries
+  describe. Behaviour-only, no signature change: assistant projections on a
+  channel whose close has released its turn-boundary waiters now return
+  `SessionBusy` instead of waiting behind the boundary, the same as user
+  projections.
 - The Python and TypeScript SDK `retrying` parsers accept the canonical wire
   shape, which carries one typed `retry` schedule; `attempt`, `max_attempts` /
   `maxAttempts`, `error` and `delay_ms` / `delayMs` are derived from it and the

@@ -321,7 +321,12 @@ Rust consumers can read any of these through `AgentEvent::assistant_message_id()
   id. One row can cover several items (a barge-in that re-keys speech into a
   second item). The id-less `text_complete` and `turn_completed` carry no
   provider item id either, so pair realtime rows with the live transport's
-  observations, not with session events.
+  observations, not with session events. The origin is set when the live host
+  hands the session an assistant event together with the channel it streamed
+  on, which the built-in RPC and facade projection sinks do. A realtime row
+  committed by an earlier release, or from events a custom `LiveProjectionSink`
+  applied without `LiveTranscriptIdentity::channel_id`, has no
+  `realtime_origin`; render it from history only.
   Core does not mint an `assistant_message_id` for these rows: their live
   output reaches the client straight from the live transport, never through
   the agent loop, so no core-minted id could be stamped on it before the row

@@ -320,7 +320,13 @@ class TextDelta(Event):
 
 @dataclass(frozen=True, slots=True)
 class TextComplete(Event):
-    """Full assistant text for the current turn."""
+    """Full assistant text for the current turn.
+
+    ``assistant_message_id`` names the assistant message the text belongs to;
+    ``None`` on output that is not a transcript assistant message and on
+    realtime materializer commits, whose row carries no id and pairs through
+    ``SessionMessage.realtime_origin["provider_item_ids"]``.
+    """
 
     content: str = ""
     assistant_message_id: str | None = None
@@ -354,7 +360,8 @@ class TurnCompleted(Event):
     ``assistant_message_id`` is ``None`` when the turn pushed no row, and on
     realtime materializer turns, which DO commit a row: that row carries no
     ``assistant_message_id`` and pairs with the live transport's realtime
-    observations through ``SessionMessage.realtime_origin.provider_item_ids``.
+    observations through ``SessionMessage.realtime_origin["provider_item_ids"]``.
+    ``None`` therefore does not mean no row was committed.
 
     ``usage`` is ``None`` when the provider stream carried no normalized token
     accounting for the turn. That is an honest absence, not a zero: the turn

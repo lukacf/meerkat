@@ -333,8 +333,9 @@ export interface TextCompleteEvent {
    * Session-scoped occurrence id of the assistant message this event belongs
    * to. It equals `assistantMessageId` on the committed `block_assistant`
    * history row, so live rows join history by id, never by text or rank.
-   * Absent on events written before 0.8.45 and on output that is not a
-   * transcript assistant message.
+   * Absent on events written before 0.8.45, on output that is not a
+   * transcript assistant message, and on realtime materializer commits, whose
+   * row carries no id and pairs through `SessionMessage.realtimeOrigin`.
    */
   readonly assistantMessageId?: string;
 }
@@ -360,7 +361,8 @@ export interface ToolResultReceivedEvent {
  * (see `TurnStartedEvent`). `assistantMessageId` is absent when the turn
  * pushed no row, and on realtime materializer turns, which DO commit a row:
  * that row carries no `assistantMessageId` and pairs with the live transport's
- * realtime observations through `SessionMessage.realtimeOrigin.providerItemIds`.
+ * realtime observations through `SessionMessage.realtimeOrigin.provider_item_ids`
+ * (the origin keeps its generated wire shape).
  *
  * `usage` is ABSENT when the provider stream carried no normalized token
  * accounting for the turn. That is an honest absence rather than a zero: the
@@ -377,8 +379,10 @@ export interface TurnCompletedEvent {
    * Session-scoped occurrence id of the assistant message this event belongs
    * to. It equals `assistantMessageId` on the committed `block_assistant`
    * history row, so live rows join history by id, never by text or rank.
-   * Absent on events written before 0.8.45 and on output that is not a
-   * transcript assistant message.
+   * Absent on events written before 0.8.45, when the turn pushed no row, and
+   * on realtime materializer turns, which DO commit a row without an id (it
+   * pairs through `SessionMessage.realtimeOrigin`). Absence does not mean no
+   * row was committed.
    */
   readonly assistantMessageId?: string;
 }

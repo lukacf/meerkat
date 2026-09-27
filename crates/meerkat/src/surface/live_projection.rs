@@ -77,6 +77,43 @@ impl<B: SessionAgentBuilder + 'static> ServiceLiveProjection<B> {
         }
     }
 
+    /// Apply one assistant realtime event, naming the live channel it streamed
+    /// on when the host supplied one. Core stamps the channel on the staged
+    /// assistant item, so the row the materializer later commits carries a
+    /// `realtime_origin` naming its provider items - the pairing key consoles
+    /// use to retire the live rendering.
+    async fn append_assistant_realtime_event(
+        &self,
+        session_id: &SessionId,
+        event: RealtimeTranscriptEvent,
+        channel_id: Option<&LiveChannelId>,
+    ) -> Result<(), LiveProjectionError> {
+        let applied = match channel_id {
+            Some(channel_id) => {
+                self.service
+                    .append_realtime_transcript_event_from_channel_with_machine(
+                        self.machine.as_ref(),
+                        session_id,
+                        event,
+                        channel_id.clone(),
+                    )
+                    .await
+            }
+            None => {
+                self.service
+                    .append_realtime_transcript_event_with_machine(
+                        self.machine.as_ref(),
+                        session_id,
+                        event,
+                    )
+                    .await
+            }
+        };
+        applied
+            .map(|_outcome| ())
+            .map_err(|err| session_error_to_projection(err, session_id))
+    }
+
     fn buffer_assistant_content(
         &self,
         session_id: &SessionId,
@@ -413,11 +450,8 @@ impl<B: SessionAgentBuilder + 'static> LiveProjectionSink for ServiceLiveProject
         let event = build_assistant_text_delta_event(delta, identity)
             .map_err(identity_error_to_projection)?
             .with_context_observation(identity.context_observation_id.cloned());
-        self.service
-            .append_realtime_transcript_event_with_machine(self.machine.as_ref(), session_id, event)
+        self.append_assistant_realtime_event(session_id, event, identity.channel_id)
             .await
-            .map(|_outcome| ())
-            .map_err(|err| session_error_to_projection(err, session_id))
     }
 
     async fn append_assistant_transcript_delta(
@@ -429,11 +463,8 @@ impl<B: SessionAgentBuilder + 'static> LiveProjectionSink for ServiceLiveProject
         let event = build_assistant_transcript_delta_event(delta, identity)
             .map_err(identity_error_to_projection)?
             .with_context_observation(identity.context_observation_id.cloned());
-        self.service
-            .append_realtime_transcript_event_with_machine(self.machine.as_ref(), session_id, event)
+        self.append_assistant_realtime_event(session_id, event, identity.channel_id)
             .await
-            .map(|_outcome| ())
-            .map_err(|err| session_error_to_projection(err, session_id))
     }
 
     async fn append_assistant_text_final(
@@ -487,11 +518,8 @@ impl<B: SessionAgentBuilder + 'static> LiveProjectionSink for ServiceLiveProject
             text: text.to_string(),
         }
         .with_context_observation(identity.context_observation_id.cloned());
-        self.service
-            .append_realtime_transcript_event_with_machine(self.machine.as_ref(), session_id, event)
+        self.append_assistant_realtime_event(session_id, event, identity.channel_id)
             .await
-            .map(|_outcome| ())
-            .map_err(|err| session_error_to_projection(err, session_id))
     }
 
     async fn resolve_assistant_playback_after_final(

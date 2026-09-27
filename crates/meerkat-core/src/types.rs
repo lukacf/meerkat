@@ -3328,11 +3328,13 @@ pub enum SecurityMode {
 ///   [`TurnUsage::presented_tokens`]) instead, which is exactly what
 ///   [`CumulativeUsage::add_turn`] does.
 /// - Do not expect the per-call rows to reconcile with the cumulative account
-///   unconditionally. Every committed agent-loop call publishes a
-///   `turn_completed` row and every extraction request a `request_usage` row
-///   on the extraction outcome event, but the compaction summary call and a
-///   call whose turn fails after the provider answered are charged to the
-///   cumulative account without a row.
+///   unconditionally. An agent-loop call publishes a `turn_completed` row
+///   when its turn completes and every extraction request a `request_usage`
+///   row on the extraction outcome event, but the compaction summary call and
+///   a call whose turn fails after the provider answered are charged to the
+///   cumulative account without a row. That includes a call whose assistant
+///   row was already committed when a later hook failed the run, so a
+///   committed row does not imply a `turn_completed`.
 ///
 /// The worked example lives in `docs/reference/usage-accounting.mdx`. Its
 /// numbers are pinned against the agent loop by

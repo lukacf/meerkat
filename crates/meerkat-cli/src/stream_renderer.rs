@@ -66,10 +66,11 @@ struct ScopeRenderState {
 
 /// Per-call token rows of the run in progress on one scope.
 ///
-/// Every committed agent-loop call publishes `turn_completed` and every
-/// extraction request a `request_usage` row on the extraction outcome, so the
-/// rows are one line per provider request, and folding them the way the
-/// session does gives the run's own total.
+/// An agent-loop call publishes `turn_completed` when its turn completes and
+/// every extraction request a `request_usage` row on the extraction outcome,
+/// so the rows are one line per provider request that reached them, and
+/// folding them the way the session does gives the run's own total for those
+/// calls.
 #[derive(Debug, Default)]
 struct RunTokenLedger {
     run_usage: CumulativeUsage,

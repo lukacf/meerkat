@@ -13110,6 +13110,119 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         }
     }
 
+    /// Ordinary realtime speech applied through the live host and the RPC
+    /// projection sink commits a `block_assistant` row whose
+    /// `realtime_origin` names the channel, the canonical row and the
+    /// provider item the live deltas carried. That is the key a console uses
+    /// to retire its live rendering; before the host passed the channel with
+    /// assistant events this row committed with no origin at all.
+    #[tokio::test]
+    async fn live_host_assistant_speech_commits_row_with_realtime_origin() {
+        let (router, _notif_rx) = test_router().await;
+        let create = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({"prompt": "live fixture session"}),
+            ))
+            .await
+            .expect("session/create response");
+        assert!(create.error.is_none(), "session/create failed: {create:?}");
+        let session_id = SessionId::parse(
+            result_value(&create)["session_id"]
+                .as_str()
+                .expect("session_id"),
+        )
+        .expect("canonical session id");
+
+        let host = meerkat_live::LiveAdapterHost::new(Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        ));
+        let channel_id = meerkat_live::LiveChannelId::random_uuid();
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let authority = router
+            .runtime_adapter
+            .resolve_live_open_admission(&session_id, &channel_id, &identity)
+            .await
+            .expect("machine admits fixture channel");
+        host.open_channel_with_authority(
+            authority
+                .channel_open_authority()
+                .expect("generated host open handoff"),
+        )
+        .await
+        .expect("open live channel");
+
+        for (delta_id, delta) in [("d1", "Hello"), ("d2", " there.")] {
+            host.apply_observation(
+                &channel_id,
+                &meerkat_core::live_adapter::LiveAdapterObservation::AssistantTranscriptDelta {
+                    provider_item_id: Some("item_spoken".to_string()),
+                    previous_item_id: None,
+                    content_index: Some(0),
+                    response_id: Some("resp_spoken".to_string()),
+                    delta_id: Some(delta_id.to_string()),
+                    delta: delta.to_string(),
+                },
+            )
+            .await
+            .expect("assistant transcript delta applies");
+        }
+        host.apply_observation(
+            &channel_id,
+            &meerkat_core::live_adapter::LiveAdapterObservation::TurnCompleted {
+                response_id: Some("resp_spoken".to_string()),
+                stop_reason: meerkat_core::types::StopReason::EndTurn,
+                usage: meerkat_core::TurnUsage::host_declared(
+                    meerkat_core::Provider::Other,
+                    "live-origin-test",
+                    meerkat_core::types::Usage::default(),
+                ),
+            },
+        )
+        .await
+        .expect("turn completion applies");
+
+        let history = router
+            .runtime
+            .read_session_history_rich(
+                &session_id,
+                meerkat_core::service::SessionHistoryQuery {
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .expect("history reads")
+            .expect("session exists");
+        let (sequence, origin) = history
+            .messages
+            .iter()
+            .enumerate()
+            .find_map(|(index, message)| match message {
+                meerkat_contracts::WireSessionMessage::BlockAssistant {
+                    realtime_origin: Some(origin),
+                    ..
+                } => Some((index as u64 + 1, origin.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("realtime assistant row must carry realtime_origin: {history:?}")
+            });
+        assert!(
+            origin.matches(&session_id, &channel_id, sequence),
+            "origin must name this session, channel and canonical row: {origin:?}"
+        );
+        assert_eq!(origin.provider_item_ids(), ["item_spoken".to_string()]);
+    }
+
     /// Create a real, materialized session through `session/create` (its
     /// initial turn runs against the mock LLM). This is the state every live
     /// channel's session is in by the time `live/open` admits a channel:

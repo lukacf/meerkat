@@ -11,7 +11,7 @@
 //!   (its committed record is `max_run_elapsed`), whose child is retired if a
 //!   crash or failure left it seated;
 //! - already finished (its reply to the job is durable: the runtime's
-//!   completion receipt for the job turn's input, or, for a record without a
+//!   terminal receipt for the job turn's input, or, for a record without a
 //!   turn delivery identity, the child's transcript after the fork prefix):
 //!   delivers that result, however late the restart landed, and leaves the
 //!   child seated; the opt-in `max_run` limit only bounds a run still going;
@@ -766,8 +766,8 @@ fn from_runtime(
 /// `completed` outcome. The child stays seated.
 ///
 /// A job whose turn was admitted under a stable delivery identity is read
-/// from the runtime's durable completion receipt for that input, which
-/// compacting the child's transcript cannot move. A record without one (a
+/// from the runtime's terminal receipt for that input, which compacting the
+/// child's transcript cannot move. A record without one (a
 /// host without a runtime, or a record written before the field existed)
 /// falls back to the child's transcript after the fork prefix.
 async fn durable_reply(
@@ -801,10 +801,13 @@ async fn durable_reply(
     Some(completion)
 }
 
-/// The job turn's completed result from the runtime's durable completion
-/// receipt. `None` while the input has no receipt (still in flight, or never
-/// admitted), when the turn ended without a result, and when the receipt
-/// cannot be read on this host.
+/// The job turn's completed result from the runtime's terminal receipt for
+/// its input, read once: the deadline has already passed, so the read is
+/// bounded by the waiter's evidence-read floor and waits for nothing.
+/// `None` while the input has no terminal (still in flight, or never
+/// admitted), when the turn ended without a result (a failed turn, or an
+/// input no run answered, such as one cancelled when the restarted host
+/// revived the child), and when the receipt cannot be read on this host.
 async fn receipt_reply(
     handle: &MobHandle,
     child: &AgentIdentity,
@@ -821,30 +824,29 @@ async fn receipt_reply(
             return None;
         }
     };
-    let recovery = match handle
-        .recover_bounded_work_for_identity_with_delivery_identity(child, delivery, &spec)
+    let report = match handle
+        .wait_bounded_work_for_identity_with_delivery_identity(
+            child,
+            delivery,
+            &spec,
+            meerkat_core::time_compat::Instant::now(),
+        )
         .await
     {
-        Ok(recovery) => recovery,
+        Ok(report) => report,
         Err(error) => {
             tracing::debug!(child = %child, error = %error, "fork_off re-link could not read the job turn's receipt");
             return None;
         }
     };
-    let (_member, work) = recovery.into_parts();
-    match work {
-        meerkat_mob::DurableBoundedWorkState::Terminal {
+    let (_member, work) = report.into_parts();
+    let meerkat_mob::DeliveryTerminalWait::Terminal(record) = work else {
+        return None;
+    };
+    match record.into_resolution() {
+        meerkat_mob::DeliveryTerminalResolution::Receipt {
             result: Ok(turn), ..
         } => Some(turn),
-        meerkat_mob::DurableBoundedWorkState::Broken { input_id, reason } => {
-            tracing::debug!(
-                child = %child,
-                input_id = ?input_id,
-                reason = %reason,
-                "fork_off re-link: the job turn's receipt is unreadable"
-            );
-            None
-        }
         _ => None,
     }
 }

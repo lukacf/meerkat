@@ -3212,7 +3212,7 @@ impl ForkOffCompletion {
 
     /// Record the child's completed turn. One mapping for the live custodian
     /// and the restart re-link, which reads the same result from the
-    /// runtime's durable completion receipt.
+    /// runtime's terminal receipt.
     pub(crate) fn record_completed_turn(&mut self, turn: &meerkat_mob::BoundedTurnResult) {
         self.status = ForkOffCompletionStatus::Completed;
         self.bounded_result = Some(turn.result().to_wire());

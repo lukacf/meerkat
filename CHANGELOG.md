@@ -128,8 +128,8 @@ them.
   transcript that index points into. On a runtime-backed host the job turn is
   now admitted under a stable delivery identity recorded in the job record
   (`ForkJobRecord::turn_delivery`), and the re-link reads the turn's result
-  from the runtime's durable completion receipt for that input through
-  `MobHandle::recover_bounded_work_for_identity_with_delivery_identity`. The
+  from the runtime's terminal receipt for that input through
+  `MobHandle::wait_bounded_work_for_identity_with_delivery_identity`. The
   delivered outcome also carries the turn's `usage`, `turns` and
   `tool_calls`, as the live custodian reports them. Records without the field
   (earlier releases, or hosts without a runtime) keep the transcript read.

@@ -4404,8 +4404,8 @@ pub struct ForkJobRecord {
     pub max_text_bytes: usize,
     /// The stable delivery identity the child's job turn is admitted under,
     /// minted with the record on a runtime-backed host. The job's result is
-    /// read from the runtime's durable completion receipt for that input
-    /// ([`MobHandle::recover_bounded_work_for_identity_with_delivery_identity`]),
+    /// read from the runtime's terminal receipt for that input
+    /// ([`MobHandle::wait_bounded_work_for_identity_with_delivery_identity`]),
     /// which compacting the child's transcript cannot move. `None` on a host
     /// without a runtime and in records written before this field existed;
     /// those read the result from the transcript
@@ -13566,9 +13566,9 @@ impl MobHandle {
     }
 
     /// The stable delivery identity a fork job's turn is admitted under, on
-    /// a host whose runtime can realize one: the runtime keeps the durable
-    /// completion receipt of that input, which is where a restarted host
-    /// reads the job's result (see [`ForkJobRecord::turn_delivery`]). A host
+    /// a host whose runtime can realize one: the runtime keeps the terminal
+    /// receipt of that input, which is where a restarted host reads the
+    /// job's result (see [`ForkJobRecord::turn_delivery`]). A host
     /// without a runtime admits no stable input identity, so its record
     /// carries none.
     fn fork_job_turn_delivery(

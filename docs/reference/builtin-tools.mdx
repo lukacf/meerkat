@@ -419,7 +419,7 @@ settles every child whose job began in a previous process:
 
 - a child whose reply to the job is already durable has that reply delivered,
   however late the restart landed, and stays seated. The reply is read from
-  the runtime's durable completion receipt for the job turn's input, so a
+  the runtime's terminal receipt for the job turn's input, so a
   child whose transcript was compacted during the job is still delivered its
   real reply, with the turn's `usage`, `turns` and `tool_calls`. A record
   without a delivery identity (written by an earlier release, or on a host

@@ -17,6 +17,7 @@ async fn first_delta_reaches_pipe_before_next_event_or_close() {
     let processor = tokio::spawn(process_events(rx, BufWriter::new(writer)));
     tx.send(AgentEvent::TextDelta {
         delta: "first".into(),
+        assistant_message_id: None,
     })
     .await
     .unwrap();
@@ -53,6 +54,7 @@ async fn output_failure_is_returned_and_closes_receiver() {
     let (tx, rx) = mpsc::channel(4);
     tx.send(AgentEvent::TextDelta {
         delta: "hello".into(),
+        assistant_message_id: None,
     })
     .await
     .unwrap();

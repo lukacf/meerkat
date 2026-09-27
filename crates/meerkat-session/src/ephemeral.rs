@@ -6435,6 +6435,7 @@ mod runtime_interaction_terminal_journal_tests {
                 next.clone(),
                 AgentEvent::TextDelta {
                     delta: "invalid".to_owned(),
+                    assistant_message_id: None,
                 },
             ],
             vec![next.clone(), prior.clone()],

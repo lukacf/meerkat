@@ -57,6 +57,22 @@ them.
   its source's).
   Host-owned council participants, and attached spawns that carry no
   inheritance, are customized as before.
+- Behavior-only: a host's `SpawnMemberCustomizer` no longer runs on the
+  process-restart restore or explicit resume of a fork-derived member (one
+  that carries `fork_source`: a `fork_off` child, a child of the
+  `MobHandle::fork_member*` forks, or a local temporary-council participant).
+  Such a rebuild repeats the member's first build, at which no customizer ran
+  either: its request is the member's own durable records (roster labels,
+  profile and model overrides, the application context and auth binding its
+  session persisted). The customizer used to be asked a `SpawnSource::Resume`
+  request for the member and everything it returned but the overlay was
+  applied (labels, context, instructions, auth binding, tool policy, system
+  prompt, profile and model overrides), so every restart changed the build
+  (MobKit's memory customizer appended memory and recorder instructions for
+  the member's own identity: another prompt and a lost cached prefix). Where
+  the member's per-spawn overlay has to come from its own identity (see
+  Fixed), the customizer is still asked and only its `external_tools` is
+  used. Ordinary members are customized on resume as before.
 
 ### Added
 
@@ -119,8 +135,9 @@ them.
 
   Every rebuild of such a child (warm revival, explicit resume,
   process-restart restore) keeps its `fork_source`, labels and application
-  context. Its per-spawn overlay, which is process-local and not persisted,
-  is chosen as follows. A warm revival uses the overlay the child was built
+  context, and the host's spawn customizer cannot change them (see Breaking).
+  Its per-spawn overlay, which is process-local and not persisted, is chosen
+  as follows. A warm revival uses the overlay the child was built
   with. An explicit resume or restart restore gives a child seated with its
   source's overlay the overlay its source is restored with (sources are
   restored before their forks), and a child seated with the fork caller's
@@ -129,10 +146,14 @@ them.
   another session, or replaced by another member under the same identity no
   longer follows it: every rebuild, in process or after a restart, uses the
   customizer's overlay for the child's own identity (none without a
-  customizer), and a warning names the missing source. A fork of a child
-  inherits the overlay the child was built with, so grandchildren (a
-  `fork_off` from a fork, or a council forking one) get the same tools, also
-  after a restart. A temporary-council participant's source is in another mob:
+  customizer), and a warning names the missing source. The rule is
+  transitive: a grandchild follows its source only while every in-mob
+  ancestor its overlay came through is still the build its fork was taken
+  from, so a grandchild of a retired source no longer keeps that source's
+  dispatcher across in-process revivals, and its warning also names the
+  ancestor whose source is missing. A fork of a child inherits the overlay the
+  child was built with, so grandchildren (a `fork_off` from a fork, or a
+  council forking one) get the same tools, also after a restart. A temporary-council participant's source is in another mob:
   a revived participant keeps the overlay it was seated with, and a restored
   one gets the customizer's overlay for its own identity.
 - A mob member rebuilt without an explicit application context (warm revival,

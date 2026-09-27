@@ -17703,19 +17703,14 @@ impl ExplicitResumePreparationContext {
             // exact-session admission or successor search. This makes a
             // one-shot resume_from_role declaration part of the actual
             // recovery request instead of an after-the-fact build tweak.
-            let mut restore_spec = super::fork_build::member_resume_spec(&entry, &session_id);
-            if let Some(customizer) = self.spawn_member_customizer.as_ref() {
-                customizer.customize_spawn(
-                    &super::handle::SpawnCustomizationContext {
-                        mob_id: self.definition.id.clone(),
-                        spawn_source: super::handle::SpawnSource::Resume,
-                        spawner_identity: None,
-                        spawner_runtime_id: None,
-                        requested_profile: restore_spec.role_name.clone(),
-                    },
-                    &mut restore_spec,
-                )?;
-            }
+            // A fork-derived member's request is its own durable records, not
+            // customized, like its first build (see `fork_build`).
+            let mut restore_spec = super::fork_build::rebuild_resume_spec(
+                &self.definition.id,
+                self.spawn_member_customizer.as_ref(),
+                &entry,
+                &session_id,
+            )?;
             if restore_spec.identity != entry.agent_identity {
                 return Err(MobError::Internal(format!(
                     "spawn customizer cannot change explicit-resume identity from '{}' to '{}'",
@@ -18014,9 +18009,10 @@ impl MobActor {
             }
 
             // The public SpawnMemberCustomizer already ran before exact
-            // session/successor selection in prepare_explicit_resume. Keep the
-            // resulting process-local overlay and one-shot migration
-            // declaration on this exact rebuild request.
+            // session/successor selection in prepare_explicit_resume (for an
+            // ordinary member; a fork-derived member's request is its own
+            // durable records). Keep the resulting process-local overlay and
+            // one-shot migration declaration on this exact rebuild request.
             let crate::launch::MemberLaunchMode::Resume {
                 bridge_session_id: customized_session_id,
                 ..
@@ -18047,9 +18043,16 @@ impl MobActor {
             // a fork seated with its source's overlay the one its source is
             // rebuilt with) rides the rebuild request and is retained: a later
             // warm revival recomposes it and a fork of the member inherits it.
-            restore_spec.external_tools = self
-                .recustomized_rebuild_overlay(&entry, restore_spec.external_tools.take())
-                .await;
+            match self
+                .recustomized_rebuild_overlay(&entry, &bridge_session_id, &restore_spec)
+                .await
+            {
+                Ok(overlay) => restore_spec.external_tools = overlay,
+                Err(error) => {
+                    first_infrastructure_error.get_or_insert(error);
+                    continue;
+                }
+            }
             self.retain_rebuild_overlay(
                 &entry.agent_identity,
                 restore_spec.external_tools.as_ref(),

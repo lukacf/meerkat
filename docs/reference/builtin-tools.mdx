@@ -336,13 +336,16 @@ spawn customizer does not run on the child's seating.
 
 A child that is rebuilt later (revived after its session was dropped, resumed,
 or restored after a restart) keeps its `fork_source`, labels and application
-context. It is revived with the tool overlay it was built with. After a
-restart or explicit resume it gets the overlay its source is restored with,
-as long as the source is still seated on the session the child was forked
+context. The host's spawn customizer does not run on those rebuilds either, so
+it cannot change them. It is revived with the tool overlay it was built with.
+After a restart or explicit resume it gets the overlay its source is restored
+with, as long as the source is still seated on the session the child was forked
 from. Once the source has been retired or respawned, the child is rebuilt with
 the overlay the host's spawn customizer gives its own identity, and a warning
 names the missing source. A fork of the child inherits the overlay the child
-was built with, so grandchildren get the same tools.
+was built with, so grandchildren get the same tools. A grandchild follows its
+source only while every ancestor its tools came through is still seated on the
+session its fork was taken from, so it drops a retired ancestor's tools too.
 
 **Detached.** A call runs detached when three things hold: the host declares
 it can deliver later, it has a runtime to admit the completion, and the caller

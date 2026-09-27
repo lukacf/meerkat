@@ -8427,17 +8427,15 @@ impl MobBuilder {
                 );
             };
 
-            let mut restore_spec = super::fork_build::member_resume_spec(entry, &bridge_session_id);
-            if let Some(customizer) = spawn_member_customizer.as_ref() {
-                let ctx = super::SpawnCustomizationContext {
-                    mob_id: definition.id.clone(),
-                    spawn_source: super::SpawnSource::Resume,
-                    spawner_identity: None,
-                    spawner_runtime_id: None,
-                    requested_profile: restore_spec.role_name.clone(),
-                };
-                customizer.customize_spawn(&ctx, &mut restore_spec)?;
-            }
+            // The host's spawn customizer makes an ordinary member's restore
+            // request; a fork-derived member's is its own durable records,
+            // like its first build (see `fork_build`).
+            let restore_spec = super::fork_build::rebuild_resume_spec(
+                &definition.id,
+                spawn_member_customizer.as_ref(),
+                entry,
+                &bridge_session_id,
+            )?;
             if restore_spec.identity != entry.agent_identity {
                 return Err(MobError::Internal(format!(
                     "spawn customizer cannot change resume restore identity from '{}' to '{}'",
@@ -8469,48 +8467,61 @@ impl MobBuilder {
             let restore_resume_from_role = restore_resume_from_role.clone();
             // The overlay this member is restored with: the customizer's
             // overlay for its own identity, except for a fork-derived member
-            // seated with its source's overlay whose source is still the
-            // build it was forked from, which gets the overlay its source was
-            // restored with in this pass (see `fork_build`).
+            // seated with its source's overlay whose source (and every in-mob
+            // ancestor that overlay came through) is still the build it was
+            // forked from, which gets the overlay its source was restored
+            // with in this pass (see `fork_build`).
             let fork_rule = super::fork_build::fork_overlay_rule(
                 entry,
                 &definition.id,
-                |identity| roster.get(identity).is_some(),
+                |identity| roster.get(identity),
                 dsl_authority.state(),
             );
+            let own_overlay = || {
+                super::fork_build::rebuild_own_overlay(
+                    &definition.id,
+                    spawn_member_customizer.as_ref(),
+                    entry,
+                    &bridge_session_id,
+                    &restore_spec,
+                )
+            };
             let restore_overlay = match fork_rule {
-                super::fork_build::ForkOverlayRule::Own => restore_spec.external_tools.clone(),
+                super::fork_build::ForkOverlayRule::Own => own_overlay()?,
                 super::fork_build::ForkOverlayRule::Caller => {
-                    if restore_spec.external_tools.is_none() {
+                    let own = own_overlay()?;
+                    if own.is_none() {
                         super::fork_build::warn_caller_overlay_not_resupplied(
                             &definition.id,
                             entry,
                         );
                     }
-                    restore_spec.external_tools.clone()
+                    own
                 }
                 super::fork_build::ForkOverlayRule::FollowSource(source) => {
                     match restored_overlays.get(&source).cloned() {
                         Some(source_overlay) => source_overlay,
                         None => {
+                            let own = own_overlay()?;
                             super::fork_build::warn_fork_source_unavailable(
                                 &definition.id,
                                 entry,
                                 &super::fork_build::ForkSourceUnavailable::NotRebuilt,
-                                restore_spec.external_tools.is_some(),
+                                own.is_some(),
                             );
-                            restore_spec.external_tools.clone()
+                            own
                         }
                     }
                 }
                 super::fork_build::ForkOverlayRule::SourceUnavailable(reason) => {
+                    let own = own_overlay()?;
                     super::fork_build::warn_fork_source_unavailable(
                         &definition.id,
                         entry,
                         &reason,
-                        restore_spec.external_tools.is_some(),
+                        own.is_some(),
                     );
-                    restore_spec.external_tools.clone()
+                    own
                 }
             };
             // Seed the actor's retention map with the overlay the member is

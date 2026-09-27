@@ -5061,6 +5061,15 @@ pub struct SpawnCustomizationContext {
 }
 
 /// Narrow pre-build mutator for per-spawn construction inputs.
+///
+/// Not asked for a durable fork's seating (`SpawnSource::PersistedForkResume`,
+/// or a local temporary-council participant seated with its source's
+/// [`super::ForkBuildInheritance`]), nor for any later rebuild of such a
+/// fork-derived member: those repeat the member's first build from its own
+/// durable records. Where the rebuild of a fork-derived member takes its
+/// per-spawn overlay from its own identity, the customizer is asked a
+/// `SpawnSource::Resume` request for the member and only its `external_tools`
+/// is used.
 pub trait SpawnMemberCustomizer: Send + Sync {
     fn customize_spawn(
         &self,

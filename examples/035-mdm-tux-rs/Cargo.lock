@@ -2329,6 +2329,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "uuid",
+ "wasm-bindgen",
  "web-time",
 ]
 

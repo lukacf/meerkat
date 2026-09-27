@@ -35,6 +35,22 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Behaviour-only: `SessionServiceRuntimeExt::input_terminal_completion` now
+  shares one classification of receipt-less rows with `input_terminal_receipt`. A
+  terminal the machine reaches without staging a receipt - superseded or
+  coalesced by a later admission, consumed on accept, `Abandoned { Cancelled }`
+  by member-host boot revival, or `Abandoned { MaxAttemptsExhausted }` after a
+  failed batch start - now fails `RuntimeDriverError::InputTerminalWithoutReceipt`
+  instead of `RecoveryCorruption`. A migrated 0.8.10 row stays repair-blocked
+  (superseded and coalesced rows never carried a receipt and classify the
+  same on either version), and any other terminal row without a receipt is
+  still `RecoveryCorruption`. `MobHandle::recover_bounded_work_for_identity_with_delivery_identity`,
+  built on it, reports those rows as `DurableBoundedWorkState::TerminalWithoutRun`
+  instead of `Broken`; callers matching `DurableBoundedWorkState` already
+  need a wildcard arm and see the new variant there.
+
 ### Added
 
 - `meerkat_mob::MobHandle::wait_bounded_work_for_identity_with_delivery_identity(&self, &AgentIdentity, &MobDeliveryIdentity, &BoundedResultSpec, meerkat_core::time_compat::Instant) -> Result<DeliveryTerminalWaitReport, DeliveryTerminalWaitError>`
@@ -76,10 +92,14 @@ them.
   or the input's pending lifecycle facts. One run can commit several
   batches, so the recipient set is the batch, not every input the run
   touched. `MeerkatMachine::wait_input_terminal_receipt(&self, &SessionId, &InputId) -> Result<Option<InputTerminalReceiptWait>, RuntimeDriverError>`
-  waits for that receipt without polling. Every transition that can
-  terminalize a pending input wakes it, including coalescing or superseding
-  by a later admission, which resolves no completion waiter. A requeued
-  failed attempt does not resolve it, and it returns `Detached` when the
+  waits for that receipt without polling, woken by the runtime's own
+  terminal signals, including coalescing or superseding by a later
+  admission, which resolves no completion waiter. A directed (peer-request)
+  batch wakes it only once the batch's interaction terminals are published:
+  its receipt is finalized first, so while a transient publication failure
+  is retried the read already returns the receipt and the wait stays parked.
+  Callers that need such terminals promptly bound each wait and re-read. A
+  requeued failed attempt does not resolve it, and it returns `Detached` when the
   input is still pending durably and the session has no live registration.
   It resolves an unknown input exactly as `input_terminal_receipt` does,
   registered or not: `Ok(None)` for a known session without that input,
@@ -92,22 +112,6 @@ them.
   and `meerkat_mob::DurableBoundedWorkState::TerminalWithoutRun { input_id, terminal, last_run_id }`
   (both enums are `#[non_exhaustive]`) type a terminal the machine reached
   through a transition that stages no terminal-completion receipt.
-
-### Changed
-
-- `SessionServiceRuntimeExt::input_terminal_completion` now shares one
-  classification of receipt-less rows with `input_terminal_receipt`. A
-  terminal the machine reaches without staging a receipt - superseded or
-  coalesced by a later admission, consumed on accept, `Abandoned { Cancelled }`
-  by member-host boot revival, or `Abandoned { MaxAttemptsExhausted }` after a
-  failed batch start - now fails `RuntimeDriverError::InputTerminalWithoutReceipt`
-  instead of `RecoveryCorruption`. A migrated 0.8.10 row stays repair-blocked
-  (superseded and coalesced rows never carried a receipt and classify the
-  same on either version), and any other terminal row without a receipt is
-  still `RecoveryCorruption`. `MobHandle::recover_bounded_work_for_identity_with_delivery_identity`,
-  built on it, reports those rows as `DurableBoundedWorkState::TerminalWithoutRun`
-  instead of `Broken`; callers matching `DurableBoundedWorkState` already
-  need a wildcard arm and see the new variant there.
 
 ### Fixed
 

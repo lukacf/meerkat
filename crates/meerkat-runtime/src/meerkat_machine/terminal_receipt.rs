@@ -119,13 +119,24 @@ impl MeerkatMachine {
     /// (session never registered, or unregistered while waiting) the wait
     /// returns `Detached` with the current durable read instead of polling.
     ///
-    /// The wait is event-driven and unbounded; callers bound it. Every
-    /// transition that can terminalize a pending input wakes it: batch
-    /// finalization and runtime termination resolve its completion waiter,
-    /// boot revival and a failed batch start fail that waiter mechanically,
-    /// and the admission that coalesces or supersedes the input wakes its
-    /// receipt-less terminal observer. A wake carries nothing; the receipt is
-    /// re-read. Dropping the future unregisters both registrations.
+    /// The wait is event-driven and unbounded; callers bound it. It wakes on
+    /// the signals that already mark a pending input's terminal: a resolved
+    /// completion waiter (batch finalization or runtime termination), a
+    /// mechanically failed waiter (boot revival, a failed batch start), and
+    /// the receipt-less terminal observer woken by the admission that
+    /// coalesces or supersedes the input. A wake carries nothing; the receipt
+    /// is re-read. Dropping the future unregisters both registrations.
+    ///
+    /// Directed (peer-request) batches wake late. Their receipt is finalized
+    /// before the batch's interaction terminals are published, and their
+    /// completion waiters are resolved only once publication succeeds. While
+    /// a transient publication failure is being retried,
+    /// [`Self::input_terminal_receipt`] already reads the finalized receipt
+    /// but this wait stays parked until publication succeeds or the session
+    /// is torn down. A caller that must observe such a terminal promptly
+    /// bounds each wait and re-reads, as the mob delivery wait does.
+    /// Undirected inputs (prompts, external events) publish no interaction
+    /// terminals and are not affected.
     pub async fn wait_input_terminal_receipt(
         &self,
         session_id: &SessionId,

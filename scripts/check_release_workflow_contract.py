@@ -23,8 +23,11 @@ run wherever `python3` does.
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -429,6 +432,24 @@ def render(template: str, context: EventContext) -> str:
     return EXPRESSION.sub(substitute, template)
 
 
+def render_strict(template: str, context: EventContext) -> str:
+    """Substitute every `${{ }}`; raise if any cannot be evaluated.
+
+    For checks that must fail closed: an expression the checker does not
+    model is a contract error, never a literal left in place.
+    """
+
+    def substitute(match: re.Match[str]) -> str:
+        value = evaluate(match.group(1), context)
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    return EXPRESSION.sub(substitute, template)
+
+
 # --------------------------------------------------------------------------
 # Event contexts
 # --------------------------------------------------------------------------
@@ -453,11 +474,12 @@ HISTORICAL_EVIDENCE = EventContext(
 
 BRANCH_DISPATCHES = [
     EventContext(
-        label=f"a {mode} dispatch from main without release_tag",
+        label=f"{'an' if mode[0] in 'aeiou' else 'a'} {mode} dispatch from {ref} without release_tag",
         event_name="workflow_dispatch",
-        ref="refs/heads/main",
+        ref=ref,
         inputs=inputs,
     )
+    for ref in ("refs/heads/main", "refs/heads/release/v0.0.0", "refs/heads/hotfix/0.0.0")
     for mode, inputs in (
         ("package", {"publish_release_packages": "true"}),
         ("alpha crate", {"publish_release_packages": "true", "alpha_crates_only": "true"}),
@@ -523,14 +545,66 @@ def check_semver_evidence(text: str) -> list[str]:
     return violations
 
 
-def check_dispatch_binding(text: str) -> list[str]:
-    """Every publishing run is bound to its version's tag.
+# The version the binding scenarios run against, and a tag that is not it.
+BINDING_VERSION = "0.0.0"
 
-    `require_ci_green` gates everything that publishes. Its version check must
-    run on a tag push, on a dispatch that names release_tag, and on any
-    publishing dispatch that names none: there the release ref is the branch,
-    which never matches `v<version>`, so the run refuses instead of publishing
-    the branch tip as whatever version its Cargo.toml carries.
+
+def _run_binding_step(step: Step, context: EventContext, tags: tuple[str, ...]) -> int:
+    """Run the step's script as the runner would, in a scratch checkout.
+
+    The checkout's Cargo.toml carries BINDING_VERSION, HEAD is its only
+    commit, and `tags` point at HEAD. Every `${{ }}` in the step's env and
+    run must evaluate under `context`; one that does not raises
+    UnsupportedExpression, so the check fails closed.
+    """
+    env = {key: render_strict(value, context) for key, value in step.env.items()}
+    script = render_strict(step.run, context)
+    with tempfile.TemporaryDirectory(prefix="release-binding-") as checkout:
+        Path(checkout, "Cargo.toml").write_text(
+            f'[workspace.package]\nversion = "{BINDING_VERSION}"\n', encoding="utf-8"
+        )
+        git_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": checkout,
+            "GIT_AUTHOR_NAME": "binding",
+            "GIT_AUTHOR_EMAIL": "binding@example.invalid",
+            "GIT_COMMITTER_NAME": "binding",
+            "GIT_COMMITTER_EMAIL": "binding@example.invalid",
+        }
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "-c", "commit.gpgsign=false", "add", "Cargo.toml"],
+            ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "release"],
+            *(["git", "-c", "tag.gpgsign=false", "tag", tag] for tag in tags),
+        ):
+            subprocess.run(command, cwd=checkout, env=git_env, check=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", "-c", script],
+            cwd=checkout,
+            env={
+                **git_env,
+                **env,
+                "GITHUB_REF": context.ref,
+                "GITHUB_REF_NAME": context.ref.rsplit("/", 1)[-1],
+                "GITHUB_EVENT_NAME": context.event_name,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode
+
+
+def check_dispatch_binding(text: str) -> list[str]:
+    """Every publishing run is bound to its version's TAG.
+
+    `require_ci_green` gates everything that publishes. Its version step must
+    run on a tag push, on a dispatch that names release_tag, and on every
+    publishing dispatch that names none, and it must refuse unless the run is
+    bound to the tag `v<version>`: a tag push of exactly that ref, or a
+    release_tag that resolves to that tag. The step's script is executed
+    against scratch checkouts, so what is checked is what it does, not how
+    it is spelled; a branch named after the version must not pass.
     """
     block = job_block(text, CI_GREEN_JOB)
     steps = [
@@ -542,24 +616,43 @@ def check_dispatch_binding(text: str) -> list[str]:
             "exactly one must bind the release ref to the workspace version"
         ]
     step = steps[0]
+    tag = f"v{BINDING_VERSION}"
+    tag_push = EventContext(label=f"a {tag} tag push", event_name="push", ref=f"refs/tags/{tag}")
+    other_tag_push = EventContext(
+        label="a tag push of another version", event_name="push", ref="refs/tags/v9.9.9"
+    )
+    named_tag = EventContext(
+        label=f"a package dispatch naming release_tag {tag}",
+        event_name="workflow_dispatch",
+        ref="refs/heads/main",
+        inputs={"release_tag": tag, "publish_release_packages": "true"},
+    )
+    must_accept = [(tag_push, (tag,)), (named_tag, (tag,))]
+    must_refuse = [
+        (other_tag_push, ("v9.9.9",)),
+        # release_tag names the version but no such tag exists (a branch).
+        (named_tag, ()),
+        *((context, ()) for context in BRANCH_DISPATCHES),
+    ]
     violations: list[str] = []
-    for context in (TAG_PUSH, PACKAGE_RECOVERY, *BRANCH_DISPATCHES):
+    for context, _tags in must_accept + must_refuse:
         if not step_runs(step, context):
             violations.append(
                 f"step `{step.name}` does not run on {context.label}, so nothing binds "
                 "that publication to its version's tag"
             )
-    ref_name = step.env.get("RELEASE_REF_NAME")
-    if ref_name is None:
-        violations.append(f"step `{step.name}` sets no RELEASE_REF_NAME to compare")
-    else:
-        for context in BRANCH_DISPATCHES:
-            compared = render(ref_name, context)
-            if compared.startswith("v"):
-                violations.append(
-                    f"step `{step.name}` compares `{compared}` on {context.label}, "
-                    "not the branch it runs on"
-                )
+    if violations:
+        return violations
+    for context, tags in must_accept:
+        if _run_binding_step(step, context, tags) != 0:
+            violations.append(f"step `{step.name}` refuses {context.label}")
+    for context, tags in must_refuse:
+        if _run_binding_step(step, context, tags) == 0:
+            detail = " (no such tag exists)" if context is named_tag else ""
+            violations.append(
+                f"step `{step.name}` accepts {context.label}{detail}; only the "
+                f"{tag} tag may publish {BINDING_VERSION}"
+            )
     return violations
 
 

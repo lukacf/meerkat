@@ -50,11 +50,14 @@ them.
   stamped notes keep the published baseline. Release semver readiness no
   longer uploads an attestation for such a post-release tree, because it is
   not evidence for the released version, and the release workflow's own
-  measurement refuses one outright. Every publishing dispatch of the release
-  workflow must also name `release_tag` or run on the matching `v<version>`
-  tag. Before, a dispatch from `main` with `publish_release_packages=true`
-  and no `release_tag` skipped the ref check and could publish main's tip as
-  whatever version `Cargo.toml` carried.
+  measurement refuses one outright. Every publishing run of the release
+  workflow is also bound to the tag `v<version>`: either a tag push of exactly
+  that ref, or a `release_tag` that resolves to that tag and is the
+  checked-out commit. A branch is refused whatever its name. Before, a
+  dispatch from `main` with `publish_release_packages=true` and no
+  `release_tag` skipped the ref check and could publish main's tip as
+  whatever version `Cargo.toml` carried, and the check compared only a ref's
+  last path segment.
 
 - Full-fresh BuildBuddy validation no longer runs out of its 50-minute SLO
   on integration-fast. The Native submitter waited for the `//...` prebuild

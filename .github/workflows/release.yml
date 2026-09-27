@@ -102,11 +102,12 @@ jobs:
           echo "sha=${release_sha}" >> "${GITHUB_OUTPUT}"
           echo "tree=${release_tree}" >> "${GITHUB_OUTPUT}"
 
-      # Every publishing dispatch is bound to a version: it names release_tag,
-      # or runs on the matching v<version> tag. A dispatch from a branch with
-      # no release_tag reaches this step with the branch as its ref and is
-      # refused, so a branch tip can never publish as whatever version its
-      # Cargo.toml happens to carry.
+      # Every publishing run is bound to a TAG. A tag push must be exactly
+      # refs/tags/v<version>; a dispatch must name a release_tag that
+      # resolves to a tag (not a branch) and is the checked-out commit. A
+      # dispatch from a branch with no release_tag, whatever the branch is
+      # called (release/v0.8.45 included), is refused, so a branch tip can
+      # never publish as the version its Cargo.toml carries.
       - name: Verify selected release ref matches version
         id: release_version
         if: >-
@@ -118,7 +119,7 @@ jobs:
             github.event.inputs.publish_release_assets_only == 'true'))
         shell: bash
         env:
-          RELEASE_REF_NAME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+          RELEASE_TAG_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || '' }}
         run: |
           set -euo pipefail
           version="$(awk '
@@ -130,14 +131,28 @@ jobs:
               exit
             }
           ' Cargo.toml)"
-          tag="${RELEASE_REF_NAME##*/}"
-          tag="${tag#v}"
-          if [[ "${version}" != "${tag}" ]]; then
-            echo "Version mismatch: Cargo.toml has ${version} but release ref is ${RELEASE_REF_NAME}" >&2
-            echo "A publishing dispatch must set release_tag or run on the v${version} tag." >&2
+          expected="v${version}"
+          if [[ -n "${RELEASE_TAG_INPUT}" ]]; then
+            if ! tag_commit="$(git rev-parse -q --verify "refs/tags/${RELEASE_TAG_INPUT}^{commit}")"; then
+              echo "release_tag ${RELEASE_TAG_INPUT} is not a tag; a publishing run is bound to a tag, not a branch." >&2
+              exit 1
+            fi
+            if [[ "$(git rev-parse HEAD)" != "${tag_commit}" ]]; then
+              echo "The checked-out commit is not the ${RELEASE_TAG_INPUT} tag." >&2
+              exit 1
+            fi
+            release_tag="${RELEASE_TAG_INPUT}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            release_tag="${GITHUB_REF#refs/tags/}"
+          else
+            echo "${GITHUB_REF} is not a tag. A publishing run must be the ${expected} tag push or name release_tag." >&2
             exit 1
           fi
-          echo "Version ${version} matches release ref ${RELEASE_REF_NAME}"
+          if [[ "${release_tag}" != "${expected}" ]]; then
+            echo "Version mismatch: Cargo.toml has ${version} but the release tag is ${release_tag} (expected ${expected})." >&2
+            exit 1
+          fi
+          echo "Version ${version} matches release tag ${release_tag}"
 
       - name: Require successful exact-main CI
         id: ci_run

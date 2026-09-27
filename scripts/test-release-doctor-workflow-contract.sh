@@ -168,6 +168,24 @@ elif name == "dispatch-unbound":
         "          (github.event_name == 'workflow_dispatch' &&\n"
         "           github.event.inputs.release_tag != '')\n",
     )
+elif name == "dispatch-branch-name":
+    # The pre-round-2 comparison: the last path segment of the ref name,
+    # so a branch named release/v<version> passed and could publish.
+    binding = re.compile(
+        r'          expected="v\$\{version\}"\n(?:.*\n)*?'
+        r'          echo "Version \$\{version\} matches release tag \$\{release_tag\}"\n'
+    )
+    text, count = binding.subn(
+        '          ref_name="${RELEASE_TAG_INPUT:-${GITHUB_REF_NAME}}"\n'
+        '          tag="${ref_name##*/}"\n'
+        '          tag="${tag#v}"\n'
+        '          if [[ "${version}" != "${tag}" ]]; then\n'
+        '            exit 1\n'
+        '          fi\n',
+        text,
+    )
+    if count != 1:
+        raise SystemExit(f"fixture `{name}` expects one release-version script, found {count}")
 elif name == "dispatch-reflowed":
     # Equivalent: the same publishing modes, reordered onto one line.
     replace_once(
@@ -264,7 +282,10 @@ expect_fail_named slo-flag-removed "${TEST_ROOT}/slo-flag-removed.yml" \
 
 mutate dispatch-unbound "${TEST_ROOT}/dispatch-unbound.yml"
 expect_fail_named dispatch-unbound "${TEST_ROOT}/dispatch-unbound.yml" \
-  "does not run on a package dispatch from main without release_tag" dispatch-binding
+  "does not run on a package dispatch from refs/heads/main without release_tag" dispatch-binding
+mutate dispatch-branch-name "${TEST_ROOT}/dispatch-branch-name.yml"
+expect_fail_named dispatch-branch-name "${TEST_ROOT}/dispatch-branch-name.yml" \
+  "accepts a package dispatch from refs/heads/release/v0.0.0 without release_tag" dispatch-binding
 
 mutate readback-step-removed "${TEST_ROOT}/readback-step-removed.yml"
 expect_fail_named readback-step-removed "${TEST_ROOT}/readback-step-removed.yml" \

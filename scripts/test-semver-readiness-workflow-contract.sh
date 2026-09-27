@@ -139,6 +139,15 @@ mutate "$RELEASE" "$fixture" 1 \
 expect_violation "evidence gated on an unmodelled step output" \
   "context \`steps.mode.outputs.skip_evidence\` is not modelled" "$(check "$fixture" semver-evidence)"
 
+# The binding step's env must evaluate; an unmodelled expression there fails
+# the check closed instead of being left as a literal that "is not a tag".
+fixture="$TEST_ROOT/release-binding-unmodelled.yml"
+mutate "$RELEASE" "$fixture" 1 \
+  "RELEASE_TAG_INPUT: \${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || '' }}" \
+  "RELEASE_TAG_INPUT: \${{ steps.pick.outputs.tag }}"
+expect_violation "binding step fed an unmodelled expression" \
+  "context \`steps.pick.outputs.tag\` is not modelled" "$(check "$fixture" dispatch-binding)"
+
 fixture="$TEST_ROOT/release-requirement-off.yml"
 mutate "$RELEASE" "$fixture" 1 "$REQUIRE" 'MEERKAT_SEMVER_REQUIRE_RELEASE_TREE: "0"'
 expect_violation "release measurement with the requirement switched off" \

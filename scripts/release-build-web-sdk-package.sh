@@ -49,18 +49,8 @@ fi
 tarball="${out_dir}/${packfile}"
 mv "${packfile}" "${tarball}"
 
-tar_listing="$(tar -tzf "${tarball}")"
-grep -Fxq "package/wasm/meerkat_web_runtime_bg.wasm" <<<"${tar_listing}"
-grep -Fxq "package/dist/index.js" <<<"${tar_listing}"
-grep -Fxq "package/proxy/cli.mjs" <<<"${tar_listing}"
-
-smoke_dir="$(mktemp -d)"
-trap 'rm -rf "${smoke_dir}"' EXIT
-(
-  cd "${smoke_dir}"
-  npm init -y >/dev/null 2>&1
-  npm install "${tarball}" >/dev/null 2>&1
-  node --input-type=module -e "const web = await import('@rkat/web'); if (!web.MeerkatRuntime || !web.Session) throw new Error('missing @rkat/web exports');"
-)
+# The packed tarball is what npm publishes: check its contents, refuse a wasm
+# stack below 8 MiB (typed parse), and run one turn from it in Node.
+node scripts/smoke-packed-package.mjs "${tarball}"
 
 echo "Built ${package_spec} package at ${tarball}"

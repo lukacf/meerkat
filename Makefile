@@ -130,13 +130,15 @@ test-sdk-typescript:
 		npm run build && \
 		npm test)
 
-# Web SDK test suite
+# Web SDK test suite. test:packed smokes the package as npm ships it: the
+# packed wasm's stack and one turn through the packed JS and wasm.
 test-sdk-web:
 	@echo "$(GREEN)Running Web SDK tests...$(NC)"
 	@(cd sdks/web && \
 		npm install --ignore-scripts && \
 		npm run build && \
-		npm test)
+		npm test && \
+		npm run test:packed)
 
 # WASM runtime compile and lint gate
 wasm-check:

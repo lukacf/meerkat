@@ -48,9 +48,14 @@ them.
   - the build is the shortest of the four, since wasm-opt's time follows its
     input's size.
   The packed-package smoke's turn stack budget drops from 2 MiB to 512 KiB
-  (about four times the measured high-water) so it still catches growth.
-  Opt-level 0 dated from when the generated machine catalog made rustc's
-  optimizer run out of memory, since fixed by chunking the catalog.
+  (about four times the measured high-water) so it still catches growth. It
+  is enforced for the release build (profile release, opt-level `"s"`, as
+  the package's `wasm/.meerkat-wasm-build.json` now records it, or a package
+  without recorded settings); for other builds, such as the manual sdk-web
+  lane's dev-profile build, the high-water is logged and not budgeted. The
+  commit that chose opt-level 0 gives no reason; the likely one is that the
+  generated machine catalog then made rustc's optimizer run out of memory,
+  since fixed by chunking the catalog.
 
 ## [0.8.45] - 2026-09-27
 

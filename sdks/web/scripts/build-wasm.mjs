@@ -64,9 +64,10 @@ const WASM_RUSTFLAGS = WASM_BUILD.flags;
 // 133 KB (1.46 MB at 0, where LLVM colours no stack slots and every awaited
 // future keeps its own slot in its parent's poll frame), a 32.3 MB wasm
 // (10.1 MB gzip; 43.1 / 12.7 MB at 0, 60.5 / 16.2 MB at 2) and the shortest
-// build, since wasm-opt's time follows the size of its input. Opt-level 0
-// dates from when the generated machine catalog made rustc's optimizer run
-// out of memory; that was fixed at its root by chunking the catalog.
+// build, since wasm-opt's time follows the size of its input. The commit that
+// chose opt-level 0 states no reason; the likely one is that the generated
+// machine catalog then made rustc's optimizer run out of memory, since fixed
+// at its root by chunking the catalog.
 const RELEASE_CARGO_PROFILE_ENV =
   BUILD_PROFILE === "release"
     ? {
@@ -76,6 +77,16 @@ const RELEASE_CARGO_PROFILE_ENV =
           process.env.CARGO_PROFILE_RELEASE_OPT_LEVEL ?? "s",
       }
     : {};
+// How the module was built, recorded in the cache manifest the package ships
+// (wasm/.meerkat-wasm-build.json). The packed-package smoke reads it to decide
+// whether the release build's stack budget applies. The opt-level is the one
+// this script sets (release) or `null` for Cargo's own profile default.
+const BUILD_SETTINGS = {
+  profile: BUILD_PROFILE,
+  opt_level: RELEASE_CARGO_PROFILE_ENV.CARGO_PROFILE_RELEASE_OPT_LEVEL ?? null,
+  codegen_units: RELEASE_CARGO_PROFILE_ENV.CARGO_PROFILE_RELEASE_CODEGEN_UNITS ?? null,
+  wasm_opt: WASM_OPT,
+};
 // Lock timeout must exceed (wasm_build_seconds * max_parallel_tests). A cold
 // wasm-pack build takes ~60s on M-series; the e2e-smoke lane can run ~5 browser
 // tests that all compete for this lock. 15 minutes gives comfortable headroom
@@ -354,7 +365,12 @@ async function cacheIsValid(sourceHash) {
   }
   try {
     const manifest = JSON.parse(await readFile(CACHE_MANIFEST, "utf8"));
-    return manifest.source_hash === sourceHash;
+    // A module whose manifest records other (or no) build settings is
+    // rebuilt, so the settings the package ships are the module's own.
+    return (
+      manifest.source_hash === sourceHash &&
+      JSON.stringify(manifest.build ?? null) === JSON.stringify(BUILD_SETTINGS)
+    );
   } catch {
     return false;
   }
@@ -437,6 +453,7 @@ async function run() {
           source_hash: source.hash,
           input_count: source.inputCount,
           built_at: new Date().toISOString(),
+          build: BUILD_SETTINGS,
         },
         null,
         2,

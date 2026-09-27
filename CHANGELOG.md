@@ -107,6 +107,20 @@ them.
   events to the interaction event tap, not only to the run's event channel,
   so interaction-scoped streams see provider server-tool content.
 
+- Behaviour-only: `SessionServiceRuntimeExt::input_terminal_completion` now
+  shares one classification of receipt-less rows with `input_terminal_receipt`. A
+  terminal the machine reaches without staging a receipt - superseded or
+  coalesced by a later admission, consumed on accept, `Abandoned { Cancelled }`
+  by member-host boot revival, or `Abandoned { MaxAttemptsExhausted }` after a
+  failed batch start - now fails `RuntimeDriverError::InputTerminalWithoutReceipt`
+  instead of `RecoveryCorruption`. A migrated 0.8.10 row stays repair-blocked
+  (superseded and coalesced rows never carried a receipt and classify the
+  same on either version), and any other terminal row without a receipt is
+  still `RecoveryCorruption`. `MobHandle::recover_bounded_work_for_identity_with_delivery_identity`,
+  built on it, reports those rows as `DurableBoundedWorkState::TerminalWithoutRun`
+  instead of `Broken`; callers matching `DurableBoundedWorkState` already
+  need a wildcard arm and see the new variant there.
+
 ### Added
 
 - Assistant message identity: every assistant message the agent loop commits
@@ -155,6 +169,66 @@ them.
   for their commit carry none either. The Python and TypeScript SDKs expose it
   as `SessionMessage.realtime_origin` / `realtimeOrigin`.
 
+- `meerkat_mob::MobHandle::wait_bounded_work_for_identity_with_delivery_identity(&self, &AgentIdentity, &MobDeliveryIdentity, &BoundedResultSpec, meerkat_core::time_compat::Instant) -> Result<DeliveryTerminalWaitReport, DeliveryTerminalWaitError>`
+  (feature `runtime-adapter`) waits for the terminal of one delivery that was
+  sent with a delivery identity, as the member's runtime recorded it. It works
+  for `AutonomousHost` members, which still refuse completion-bearing
+  admission: the delivery keeps going through the ordinary inbox and still
+  commits as an `ExternalEvent` notice. The report carries that delivery's own
+  runtime input id, the input's typed terminal outcome, and its terminal
+  receipt: the run whose terminal transaction committed the input's batch,
+  every input finalized in that same batch (so a batched answer reports its
+  batch), and the batch's result through the same bounded projection as
+  `WorkTurnHandle::wait_bounded`. The receipt proves which inputs share that
+  result, not that a run's answer covers every input the run touched: a
+  delivery steered into a running run at a live boundary is finalized alone
+  in its own batch of that run with `CompletedWithoutResult`. A terminal the
+  runtime reaches without a receipt (superseded, coalesced, consumed on
+  accept, cancelled by member-host boot revival, abandoned at the
+  stage-attempt cap after a failed batch start) is `WithoutRun`. A durably
+  finalized terminal is read from the store after a restart, before the
+  member's session is registered again. The call returns by its deadline
+  (or within a 100 ms evidence-read floor for a deadline closer than that):
+  the member lifecycle read is bounded too, the wait runs until the deadline
+  less that floor, and one final read uses the floor. An unknown delivery
+  returns a typed `Unknown`, a deadline that elapses first returns
+  `NotTerminal` with the input's last lifecycle facts, and a deadline that
+  elapses before anything could be read returns
+  `Unknown { cause: NotObservedByDeadline }` with no member lifecycle. The
+  method only reads: it sends no mob actor command and cancels nothing. New
+  types: `DeliveryTerminalWaitReport`, `DeliveryTerminalWait`,
+  `DeliveryTerminalRecord`, `DeliveryTerminalResolution`,
+  `DeliveryNotTerminalCause`, `DeliveryUnknownCause` and
+  `DeliveryTerminalWaitError`.
+- `meerkat_runtime::MeerkatMachine::input_terminal_receipt(&self, &SessionId, InteractionSelector) -> Result<Option<Sourced<InputTerminalReceiptRead>>, RuntimeDriverError>`
+  reads one input's terminal receipt from the runtime's own durable
+  terminal-completion batch: the batch scope (the run whose terminal
+  transaction committed it, or runtime termination), the inputs finalized in
+  that batch, the owner input and the batch's finalized `CompletionOutcome`,
+  or the input's pending lifecycle facts. One run can commit several
+  batches, so the recipient set is the batch, not every input the run
+  touched. `MeerkatMachine::wait_input_terminal_receipt(&self, &SessionId, &InputId) -> Result<Option<InputTerminalReceiptWait>, RuntimeDriverError>`
+  waits for that receipt without polling, woken by the runtime's own
+  terminal signals, including coalescing or superseding by a later
+  admission, which resolves no completion waiter. A directed (peer-request)
+  batch wakes it only once the batch's interaction terminals are published:
+  its receipt is finalized first, so while a transient publication failure
+  is retried the read already returns the receipt and the wait stays parked.
+  Callers that need such terminals promptly bound each wait and re-read. A
+  requeued failed attempt does not resolve it, and it returns `Detached` when the
+  input is still pending durably and the session has no live registration.
+  It resolves an unknown input exactly as `input_terminal_receipt` does,
+  registered or not: `Ok(None)` for a known session without that input,
+  `NotReady` for an unregistered session on a store-less machine, `NotFound`
+  for a never-admitted session. New types in
+  `meerkat_runtime::terminal_status`: `InputTerminalReceipt`,
+  `InputTerminalReceiptScope`, `InputTerminalReceiptRead` and
+  `InputTerminalReceiptWait`.
+- `meerkat_runtime::RuntimeDriverError::InputTerminalWithoutReceipt { input_id, terminal }`
+  and `meerkat_mob::DurableBoundedWorkState::TerminalWithoutRun { input_id, terminal, last_run_id }`
+  (both enums are `#[non_exhaustive]`) type a terminal the machine reached
+  through a transition that stages no terminal-completion receipt.
+
 ### Fixed
 
 - Live host: assistant realtime events (display-text deltas, spoken-transcript
@@ -188,6 +262,31 @@ them.
   `maxAttempts`, `error` and `delay_ms` / `delayMs` are derived from it and the
   schedule is kept in `retry`. Current `retrying` events previously parsed as
   `malformed_event`.
+
+- The semver-breaks gate measures notes pending under `## [Unreleased]` after
+  a release against that release's tag. With the workspace version still at
+  the just-tagged 0.8.44 and crates.io not yet caught up, it measured 0.8.44
+  against 0.8.43 and demanded the 66 breaks the stamped 0.8.44 section already
+  declared again under `## [Unreleased]`. That failed Release semver readiness
+  for every tree with post-release notes (#1208's first run), and `make
+  release-preflight` could never pass once crates.io had published the
+  workspace version. Now, when the pending notes follow the stamped workspace
+  version and HEAD has moved past its tag, that tag is the baseline. The
+  release tree itself, the tagged commit, and trees whose bump landed without
+  stamped notes keep the published baseline. Release semver readiness no
+  longer uploads an attestation for such a post-release tree, because it is
+  not evidence for the released version, and the release workflow's own
+  measurement refuses one outright. Every publishing run of the release
+  workflow is also bound to an allowed tag of its version: `v<version>`, plus
+  `alpha/v<version>` for the crates-only alpha canary. It must be either a
+  tag push of exactly that ref, or a `release_tag` that resolves to that tag
+  and is the checked-out commit, or a dispatch on that tag ref. A branch is
+  refused whatever its name. Before, a
+  dispatch from `main` with `publish_release_packages=true` and no
+  `release_tag` skipped the ref check and could publish main's tip as
+  whatever version `Cargo.toml` carried, and the check compared only a ref's
+  last path segment.
+
 - `@rkat/web` ships its runtime with the 8 MiB wasm stack it was built to
   have. Every published package from 0.8.30 through 0.8.44 linked the 1 MiB
   default and failed its first turn with `RuntimeError: memory access out of

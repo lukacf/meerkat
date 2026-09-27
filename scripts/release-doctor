@@ -270,6 +270,12 @@ else
   bad "Tag releases must reuse exact-tree pre-tag semver evidence instead of rerunning the long semver measurement (${semver_contract//$'\n'/; })"
 fi
 
+if dispatch_contract="$(workflow_contract dispatch-binding)"; then
+  pass "Publishing dispatches are bound to their version's tag"
+else
+  bad "A publishing dispatch without release_tag could publish a branch tip as the tagged version (${dispatch_contract//$'\n'/; })"
+fi
+
 registry_job="$(workflow_job publish_registries)"
 registry_needs="$(grep -m1 '^[[:space:]]*needs:' <<<"${registry_job}" || true)"
 if grep -Fq 'require_ci_green' <<<"${registry_needs}" &&

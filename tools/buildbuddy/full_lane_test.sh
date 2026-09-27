@@ -345,16 +345,44 @@ cd "${work_root}"
 # from this variable instead of the crate directory Cargo runs them from.
 export MEERKAT_WORKSPACE_ROOT="${work_root}"
 
+# The browser contract links the 8 MiB wasm stack sdks/web/scripts/build-wasm.mjs
+# asks for. At the 1 MiB default the unoptimized test build overflows the
+# stack in its first turn ("RuntimeError: memory access out of bounds").
+# No published @rkat/web has ever shipped this stack. Releases before 0.7.0
+# never asked for it, and every release since the flag was introduced (0.7.0)
+# through 0.8.44 lost it to an ambient RUSTFLAGS and shipped 1 MiB (#1211
+# fixes the release build).
+WASM_STACK_LINK_ARG="link-arg=-zstack-size=8388608"
+
+append_wasm_stack_size() {
+  if [[ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+    local unit_separator
+    unit_separator=$'\x1f'
+    case "${CARGO_ENCODED_RUSTFLAGS}" in
+      *"${WASM_STACK_LINK_ARG}"*) ;;
+      *)
+        export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${unit_separator}-C${unit_separator}${WASM_STACK_LINK_ARG}"
+        ;;
+    esac
+  else
+    case " ${RUSTFLAGS:-} " in
+      *" -C ${WASM_STACK_LINK_ARG} "*) ;;
+      *) export RUSTFLAGS="${RUSTFLAGS:-} -C ${WASM_STACK_LINK_ARG}" ;;
+    esac
+  fi
+}
+
 run_wasm_contract_test() {
   local test_name="$1"
   local runner="$2"
+  append_wasm_stack_size
   "${CARGO}" test -p meerkat-web-runtime --target wasm32-unknown-unknown --test "${test_name}" --no-run
   case "${runner}" in
     chrome)
-      "${WASM_PACK}" test --headless --chrome meerkat-web-runtime --test "${test_name}"
+      "${WASM_PACK}" test --headless --chrome crates/meerkat-web-runtime --test "${test_name}"
       ;;
     node)
-      "${WASM_PACK}" test --node meerkat-web-runtime --test "${test_name}"
+      "${WASM_PACK}" test --node crates/meerkat-web-runtime --test "${test_name}"
       ;;
     *)
       echo "unknown wasm contract runner: ${runner}" >&2

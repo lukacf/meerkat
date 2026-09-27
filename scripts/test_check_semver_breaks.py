@@ -546,6 +546,95 @@ class StampingTests(unittest.TestCase):
         self.assertEqual(gate.check_stamped(gate.parse_changelog(REPO_CHANGELOG), version), [])
 
 
+class NotesBaselineTests(unittest.TestCase):
+    """Which release the pending notes are measured against.
+
+    After v0.8.44 was tagged, every tree with notes under `## [Unreleased]`
+    was measured against 0.8.43 (crates.io had not caught up) and failed for
+    breaks the stamped 0.8.44 section already declared. Notes that follow the
+    stamped workspace version are measured against that version instead.
+    """
+
+    def baseline(self, *sections: str, version: str = "0.8.23") -> str:
+        return gate.notes_baseline(gate.parse_changelog(changelog(*sections)), version)
+
+    def test_release_tree_is_measured_against_the_published_release(self) -> None:
+        # The normal release path: the release commit stamps the notes and
+        # leaves an empty stub. Unchanged.
+        self.assertEqual(
+            self.baseline(UNRELEASED_EMPTY, STAMPED_23, STAMPED_22), gate.NOTES_BASELINE_PUBLISHED
+        )
+
+    def test_stamped_pending_section_without_a_stub_is_the_release(self) -> None:
+        self.assertEqual(self.baseline(STAMPED_23, STAMPED_22), gate.NOTES_BASELINE_PUBLISHED)
+
+    def test_notes_after_the_stamped_workspace_version_follow_it(self) -> None:
+        self.assertEqual(
+            self.baseline(UNRELEASED_POPULATED, STAMPED_23, STAMPED_22),
+            gate.NOTES_BASELINE_WORKSPACE,
+        )
+
+    def test_notes_left_unstamped_after_the_bump_stay_on_the_published_release(self) -> None:
+        # The bump landed and the notes did not: still this release's notes,
+        # which check_stamped rejects.
+        sections = (UNRELEASED_POPULATED, STAMPED_22)
+        self.assertEqual(self.baseline(*sections), gate.NOTES_BASELINE_PUBLISHED)
+        self.assertNotEqual(
+            gate.check_stamped(gate.parse_changelog(changelog(*sections)), "0.8.23"), []
+        )
+
+    def test_an_undated_heading_is_not_a_release_to_follow(self) -> None:
+        self.assertEqual(
+            self.baseline(UNRELEASED_POPULATED, "## [0.8.23]\n\n- x\n\n", STAMPED_22),
+            gate.NOTES_BASELINE_PUBLISHED,
+        )
+
+    def test_changelog_with_only_an_unreleased_section_is_published(self) -> None:
+        self.assertEqual(self.baseline(UNRELEASED_POPULATED), gate.NOTES_BASELINE_PUBLISHED)
+
+    def run_cli(self, text: str, *extra: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "CHANGELOG.md"
+            path.write_text(text, encoding="utf-8")
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--changelog",
+                    str(path),
+                    "--version",
+                    "0.8.23",
+                    *extra,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_cli_prints_the_notes_baseline(self) -> None:
+        post = self.run_cli(
+            changelog(UNRELEASED_POPULATED, STAMPED_23, STAMPED_22), "--notes-baseline"
+        )
+        self.assertEqual(post.returncode, 0, post.stderr)
+        self.assertEqual(post.stdout.strip(), gate.NOTES_BASELINE_WORKSPACE)
+        release = self.run_cli(
+            changelog(UNRELEASED_EMPTY, STAMPED_23, STAMPED_22), "--notes-baseline"
+        )
+        self.assertEqual(release.returncode, 0, release.stderr)
+        self.assertEqual(release.stdout.strip(), gate.NOTES_BASELINE_PUBLISHED)
+
+    def test_cli_analysis_still_requires_a_report_and_exit_code(self) -> None:
+        result = self.run_cli(changelog(UNRELEASED_EMPTY, STAMPED_23, STAMPED_22))
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("--report and --tool-exit-code are required", result.stderr)
+
+    # End to end (selection, then the analyser on the report a measurement
+    # against the SELECTED baseline yields) lives in
+    # scripts/test-semver-baseline.sh, where the selection runs in scratch
+    # repositories; an analyser-only case here would pass on the pre-fix
+    # selection too.
+
+
 class MeasuredTests(unittest.TestCase):
     """A report the gate could not produce is not evidence of no breaks."""
 

@@ -23,21 +23,33 @@ run wherever `python3` does.
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_WORKFLOW = Path(".github/workflows/release.yml")
+READINESS_WORKFLOW = Path(".github/workflows/release-semver-readiness.yml")
 TAG_SLO_SECONDS = 1800
 
 SEMVER_GATE_JOB = "release_semver_gate"
+CI_GREEN_JOB = "require_ci_green"
+RELEASE_VERSION_STEP_ID = "release_version"
 REGISTRY_JOB = "publish_registries"
 # The evidence step is the one that resolves the exact-tree readiness artifact.
 EVIDENCE_ARTIFACT_PREFIX = "meerkat-semver-attestation-main-"
 # The long measurement the tag path must never rerun.
 MEASUREMENT_COMMAND = "make semver-breaks"
+# The release's own measurement must refuse a post-release tree: measured
+# against its own tag it would pass and publish main's tip as that version.
+RELEASE_TREE_ENV = "MEERKAT_SEMVER_REQUIRE_RELEASE_TREE"
+READINESS_JOB = "semver"
+NOTES_STEP_ID = "notes"
+NOTES_OUTPUT = "baseline"
 PUBLIC_VERIFIER = "scripts/verify-rust-release-public.py"
 
 
@@ -125,6 +137,7 @@ def parse_mapping(lines: list[str], indent: int) -> dict[str, str]:
 @dataclass
 class Step:
     fields: dict[str, str]
+    lines: list[str] = field(default_factory=list)
 
     @property
     def name(self) -> str:
@@ -137,6 +150,38 @@ class Step:
     @property
     def run(self) -> str:
         return self.fields.get("run", "")
+
+    @property
+    def env(self) -> dict[str, str]:
+        """The step's `env:` mapping, values unquoted."""
+        return self.nested("env")
+
+    def nested(self, name: str) -> dict[str, str]:
+        """The step's `<name>:` mapping (`env`, `with`), values unquoted."""
+        for index, line in enumerate(self.lines):
+            match = KEY_LINE.match(line)
+            if match and len(match.group(1)) == 8 and match.group(2) == name:
+                nested: list[str] = []
+                for candidate in self.lines[index + 1 :]:
+                    if candidate.strip() and _indent(candidate) <= 8:
+                        break
+                    nested.append(candidate)
+                return {
+                    key: value.strip().strip("'\"")
+                    for key, value in parse_mapping(nested, 10).items()
+                }
+        return {}
+
+    def written_outputs(self) -> set[str]:
+        """Output names the step's `run:` writes into `$GITHUB_OUTPUT`."""
+        names: set[str] = set()
+        for line in self.run.splitlines():
+            if "GITHUB_OUTPUT" not in line:
+                continue
+            match = re.search(r"""echo\s+["']?([A-Za-z_][A-Za-z0-9_-]*)=""", line)
+            if match:
+                names.add(match.group(1))
+        return names
 
 
 def job_steps(block: list[str]) -> list[Step]:
@@ -153,13 +198,13 @@ def job_steps(block: list[str]) -> list[Step]:
             break
         if STEP_START.match(line):
             if current is not None:
-                steps.append(Step(parse_mapping(current, 8)))
+                steps.append(Step(parse_mapping(current, 8), current))
             current = ["        " + line[8:]]
             continue
         if current is not None:
             current.append(line)
     if current is not None:
-        steps.append(Step(parse_mapping(current, 8)))
+        steps.append(Step(parse_mapping(current, 8), current))
     if not steps:
         raise ContractError("job defines no steps")
     return steps
@@ -188,6 +233,9 @@ class EventContext:
     ref: str = "refs/tags/v0.0.0"
     inputs: dict[str, str] = field(default_factory=dict)
     needs_result: str = "success"
+    # `<step id>.<output>` -> value, for the outputs this context models. Any
+    # other `steps.*.outputs.*` reference raises UnsupportedExpression.
+    step_outputs: dict[str, str] = field(default_factory=dict)
 
     def resolve(self, path: str) -> str:
         if path == "github.event_name":
@@ -206,6 +254,12 @@ class EventContext:
         # same assumption `needs_result` makes for upstream jobs.
         if re.fullmatch(r"steps\.[A-Za-z0-9_-]+\.(?:outcome|conclusion)", path):
             return self.needs_result
+        # Only the step outputs a context models resolve; anything else stays
+        # unsupported, so a gate added on an unmodelled output fails the check
+        # closed instead of reading as an empty string.
+        output = re.fullmatch(r"steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)", path)
+        if output and f"{output.group(1)}.{output.group(2)}" in self.step_outputs:
+            return self.step_outputs[f"{output.group(1)}.{output.group(2)}"]
         raise UnsupportedExpression(
             f"context `{path}` is not modelled by the release doctor"
         )
@@ -382,6 +436,24 @@ def render(template: str, context: EventContext) -> str:
     return EXPRESSION.sub(substitute, template)
 
 
+def render_strict(template: str, context: EventContext) -> str:
+    """Substitute every `${{ }}`; raise if any cannot be evaluated.
+
+    For checks that must fail closed: an expression the checker does not
+    model is a contract error, never a literal left in place.
+    """
+
+    def substitute(match: re.Match[str]) -> str:
+        value = evaluate(match.group(1), context)
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    return EXPRESSION.sub(substitute, template)
+
+
 # --------------------------------------------------------------------------
 # Event contexts
 # --------------------------------------------------------------------------
@@ -402,6 +474,23 @@ HISTORICAL_EVIDENCE = EventContext(
         "semver_evidence_job_id": "2",
     },
 )
+
+
+BRANCH_DISPATCHES = [
+    EventContext(
+        label=f"{'an' if mode[0] in 'aeiou' else 'a'} {mode} dispatch from {ref} without release_tag",
+        event_name="workflow_dispatch",
+        ref=ref,
+        inputs=inputs,
+    )
+    for ref in ("refs/heads/main", "refs/heads/release/v0.0.0", "refs/heads/hotfix/0.0.0")
+    for mode, inputs in (
+        ("package", {"publish_release_packages": "true"}),
+        ("alpha crate", {"publish_release_packages": "true", "alpha_crates_only": "true"}),
+        ("Web-SDK-only", {"publish_web_sdk_only": "true"}),
+        ("asset-only", {"publish_release_assets_only": "true"}),
+    )
+]
 
 
 # --------------------------------------------------------------------------
@@ -445,12 +534,211 @@ def check_semver_evidence(text: str) -> list[str]:
     for step in steps:
         if MEASUREMENT_COMMAND not in step.run:
             continue
+        if step.env.get(RELEASE_TREE_ENV) != "1":
+            violations.append(
+                f"step `{step.name}` runs `{MEASUREMENT_COMMAND}` without "
+                f"`{RELEASE_TREE_ENV}: \"1\"`, so a post-release tree (notes above the "
+                "stamped version) would pass and publish as the tagged version"
+            )
         for context in (TAG_PUSH, PACKAGE_RECOVERY):
             if step_runs(step, context):
                 violations.append(
                     f"step `{step.name}` reruns `{MEASUREMENT_COMMAND}` on "
                     f"{context.label}; the long measurement belongs before the tag"
                 )
+    return violations
+
+
+# The version the binding scenarios run against.
+BINDING_VERSION = "0.0.0"
+CHECKOUT_ACTION = "actions/checkout"
+
+
+def _run_binding_step(
+    step: Step,
+    context: EventContext,
+    tags: tuple[str, ...],
+    checkout_ref: str | None,
+) -> int:
+    """Run the step's script as the runner would, in a scratch checkout.
+
+    The repository has two commits: the release commit, which every tag in
+    `tags` points at, and a later commit, which every branch points at. HEAD
+    is what the job's checkout step selects for `context` (`checkout_ref`,
+    rendered from its `with.ref`); `None` puts HEAD on the later commit, a
+    checkout that did not land on the tag. A ref that does not resolve fails
+    the checkout, which refuses the run as the runner would. Every `${{ }}`
+    in the step's env and run must evaluate under `context`; one that does
+    not raises UnsupportedExpression, so the check fails closed.
+    """
+    env = {key: render_strict(value, context) for key, value in step.env.items()}
+    script = render_strict(step.run, context)
+    with tempfile.TemporaryDirectory(prefix="release-binding-") as checkout:
+        git_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": checkout,
+            "GIT_AUTHOR_NAME": "binding",
+            "GIT_AUTHOR_EMAIL": "binding@example.invalid",
+            "GIT_COMMITTER_NAME": "binding",
+            "GIT_COMMITTER_EMAIL": "binding@example.invalid",
+        }
+
+        def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *args],
+                cwd=checkout,
+                env=git_env,
+                check=check,
+                capture_output=True,
+                text=True,
+            )
+
+        cargo = Path(checkout, "Cargo.toml")
+        cargo.write_text(f'[workspace.package]\nversion = "{BINDING_VERSION}"\n', encoding="utf-8")
+        git("init", "-q", "-b", "binding-base")
+        git("add", "Cargo.toml")
+        git("commit", "-q", "-m", "release")
+        for tag in tags:
+            git("tag", tag)
+        cargo.write_text(
+            f'[workspace.package]\nversion = "{BINDING_VERSION}"\n# later\n', encoding="utf-8"
+        )
+        git("commit", "-q", "-am", "later")
+        for context_ref in (context.ref,):
+            if context_ref.startswith("refs/heads/"):
+                git("branch", "-f", context_ref[len("refs/heads/") :], "HEAD")
+        if checkout_ref is not None:
+            if git("checkout", "-q", "--detach", checkout_ref, check=False).returncode != 0:
+                return 1
+        result = subprocess.run(
+            ["bash", "-c", script],
+            cwd=checkout,
+            env={
+                **git_env,
+                **env,
+                "GITHUB_REF": context.ref,
+                "GITHUB_REF_NAME": context.ref.rsplit("/", 1)[-1],
+                "GITHUB_EVENT_NAME": context.event_name,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode
+
+
+def check_dispatch_binding(text: str) -> list[str]:
+    """Every publishing run is bound to an allowed TAG of its version.
+
+    `require_ci_green` gates everything that publishes. Its version step must
+    run on a tag push, on a dispatch that names release_tag, and on every
+    publishing dispatch that names none, and it must refuse unless the run is
+    bound to an allowed tag: `v<version>` in every mode, `alpha/v<version>`
+    only for the crates-only alpha canary. The step's script runs against
+    scratch checkouts in which HEAD is whatever the job's checkout step
+    selects, so what is checked is what the job does, not how it is spelled:
+    a branch named after the version, an alpha tag outside the alpha lane,
+    and a named tag that is not the checked-out commit must not pass.
+    """
+    block = job_block(text, CI_GREEN_JOB)
+    steps = job_steps(block)
+    binding = [step for step in steps if step.fields.get("id") == RELEASE_VERSION_STEP_ID]
+    if len(binding) != 1:
+        return [
+            f"job `{CI_GREEN_JOB}` has {len(binding)} steps with `id: {RELEASE_VERSION_STEP_ID}`; "
+            "exactly one must bind the release ref to the workspace version"
+        ]
+    step = binding[0]
+    checkouts = [
+        candidate
+        for candidate in steps[: steps.index(step)]
+        if CHECKOUT_ACTION in candidate.fields.get("uses", "")
+    ]
+    if len(checkouts) != 1 or "ref" not in checkouts[0].nested("with"):
+        return [
+            f"job `{CI_GREEN_JOB}` must check out the release ref with exactly one "
+            f"`{CHECKOUT_ACTION}` step carrying `with.ref` before `{step.name}`"
+        ]
+    checkout_expression = checkouts[0].nested("with")["ref"]
+
+    def checkout_for(context: EventContext) -> str:
+        return render_strict(checkout_expression, context)
+
+    tag = f"v{BINDING_VERSION}"
+    alpha_tag = f"alpha/{tag}"
+
+    def dispatch(label: str, ref: str, **inputs: str) -> EventContext:
+        return EventContext(label=label, event_name="workflow_dispatch", ref=ref, inputs=inputs)
+
+    tag_push = EventContext(label=f"a {tag} tag push", event_name="push", ref=f"refs/tags/{tag}")
+    named_tag = dispatch(
+        f"a package dispatch naming release_tag {tag}",
+        "refs/heads/main",
+        release_tag=tag,
+        publish_release_packages="true",
+    )
+    alpha_on_tag = dispatch(
+        f"an alpha crate dispatch on the {alpha_tag} tag",
+        f"refs/tags/{alpha_tag}",
+        publish_release_packages="true",
+        alpha_crates_only="true",
+    )
+    alpha_named = dispatch(
+        f"an alpha crate dispatch naming release_tag {alpha_tag}",
+        "refs/heads/main",
+        release_tag=alpha_tag,
+        publish_release_packages="true",
+        alpha_crates_only="true",
+    )
+    alpha_without_lane = dispatch(
+        f"a package dispatch on the {alpha_tag} tag without alpha_crates_only",
+        f"refs/tags/{alpha_tag}",
+        publish_release_packages="true",
+    )
+    alpha_named_without_lane = dispatch(
+        f"a package dispatch naming release_tag {alpha_tag} without alpha_crates_only",
+        "refs/heads/main",
+        release_tag=alpha_tag,
+        publish_release_packages="true",
+    )
+    other_tag_push = EventContext(
+        label="a tag push of another version", event_name="push", ref="refs/tags/v9.9.9"
+    )
+    # (context, tags, head) where head None means "HEAD off the tag".
+    must_accept = [
+        (tag_push, (tag,), checkout_for(tag_push)),
+        (named_tag, (tag,), checkout_for(named_tag)),
+        (alpha_on_tag, (alpha_tag,), checkout_for(alpha_on_tag)),
+        (alpha_named, (alpha_tag,), checkout_for(alpha_named)),
+    ]
+    must_refuse = [
+        (other_tag_push, ("v9.9.9",), checkout_for(other_tag_push), ""),
+        (alpha_without_lane, (alpha_tag,), checkout_for(alpha_without_lane), ""),
+        (alpha_named_without_lane, (alpha_tag,), checkout_for(alpha_named_without_lane), ""),
+        # release_tag names the version but no such tag exists (a branch).
+        (named_tag, (), None, " (no such tag exists)"),
+        # The tag exists but the checked-out commit is a later one.
+        (named_tag, (tag,), None, " (the tag is not the checked-out commit)"),
+        *((context, (), checkout_for(context), "") for context in BRANCH_DISPATCHES),
+    ]
+    violations: list[str] = []
+    for context, *_ in must_accept + must_refuse:
+        if not step_runs(step, context):
+            violations.append(
+                f"step `{step.name}` does not run on {context.label}, so nothing binds "
+                "that publication to its version's tag"
+            )
+    if violations:
+        return violations
+    for context, tags, head in must_accept:
+        if _run_binding_step(step, context, tags, head) != 0:
+            violations.append(f"step `{step.name}` refuses {context.label}")
+    for context, tags, head, detail in must_refuse:
+        if _run_binding_step(step, context, tags, head) == 0:
+            violations.append(
+                f"step `{step.name}` accepts {context.label}{detail}; only an allowed tag "
+                f"({tag}, or {alpha_tag} in the alpha lane) may publish {BINDING_VERSION}"
+            )
     return violations
 
 
@@ -528,9 +816,80 @@ def check_registry_slo(text: str) -> list[str]:
     return violations
 
 
+def _readiness_push(needed: str, baseline: str) -> EventContext:
+    return EventContext(
+        label=f"a main push with needed={needed!r} and notes baseline {baseline!r}",
+        event_name="push",
+        ref="refs/heads/main",
+        step_outputs={"unpublished.needed": needed, f"{NOTES_STEP_ID}.{NOTES_OUTPUT}": baseline},
+    )
+
+
+def check_readiness_attestation(text: str) -> list[str]:
+    """Only a release tree becomes release evidence (release-semver-readiness.yml).
+
+    A post-release tree is measured against its own tag, so its green result
+    says nothing about the breaks since the release before. `release_semver_gate`
+    trusts the main-push attestation by tree and version alone, so the
+    attestation and its upload must run for a release tree and never for a
+    post-release one, keyed on the output the classifying step really writes.
+    """
+    block = job_block(text, READINESS_JOB)
+    steps = job_steps(block)
+    violations: list[str] = []
+
+    notes = [step for step in steps if step.fields.get("id") == NOTES_STEP_ID]
+    if len(notes) != 1:
+        violations.append(
+            f"job `{READINESS_JOB}` has {len(notes)} steps with `id: {NOTES_STEP_ID}`; "
+            "exactly one must classify the measured notes"
+        )
+    else:
+        written = notes[0].written_outputs()
+        if NOTES_OUTPUT not in written:
+            violations.append(
+                f"step `{notes[0].name}` writes {sorted(written) or 'no outputs'} to "
+                f"$GITHUB_OUTPUT, not `{NOTES_OUTPUT}`, which the attestation is gated on"
+            )
+        if not step_runs(notes[0], _readiness_push("true", "published")):
+            violations.append(f"step `{notes[0].name}` does not run when a measurement is needed")
+
+    attestation = [step for step in steps if "attestation.json" in step.run]
+    upload = [
+        step
+        for step in steps
+        if "upload-artifact" in step.fields.get("uses", "")
+        and EVIDENCE_ARTIFACT_PREFIX in step.fields.get("with", "")
+    ]
+    if not attestation:
+        violations.append(f"job `{READINESS_JOB}` has no step that writes attestation.json")
+    if not upload:
+        violations.append(
+            f"job `{READINESS_JOB}` has no step that uploads the "
+            f"`{EVIDENCE_ARTIFACT_PREFIX}<tree>` artifact"
+        )
+    release_tree = _readiness_push("true", "published")
+    post_release = _readiness_push("true", "workspace-version")
+    not_needed = _readiness_push("false", "published")
+    for step in attestation + upload:
+        if not step_runs(step, release_tree):
+            violations.append(f"step `{step.name}` does not run on {release_tree.label}")
+        for context in (post_release, not_needed):
+            if step_runs(step, context):
+                violations.append(f"step `{step.name}` also runs on {context.label}")
+    return violations
+
+
 CHECKS: dict[str, Callable[[str], list[str]]] = {
     "semver-evidence": check_semver_evidence,
     "registry-slo": check_registry_slo,
+    "dispatch-binding": check_dispatch_binding,
+}
+
+# Checks of release-semver-readiness.yml; run them by name with
+# `--workflow .github/workflows/release-semver-readiness.yml`.
+READINESS_CHECKS: dict[str, Callable[[str], list[str]]] = {
+    "readiness-attestation": check_readiness_attestation,
 }
 
 
@@ -538,7 +897,7 @@ def run_checks(text: str, names: Iterable[str]) -> list[str]:
     violations: list[str] = []
     for name in names:
         try:
-            violations.extend(CHECKS[name](text))
+            violations.extend({**CHECKS, **READINESS_CHECKS}[name](text))
         except ContractError as error:
             violations.append(f"{name}: {error}")
     return violations
@@ -555,9 +914,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "checks",
         nargs="*",
-        choices=[*CHECKS, "all"],
+        choices=[*CHECKS, *READINESS_CHECKS, "all"],
         default=["all"],
-        help="which contract checks to run (default: all)",
+        help="which contract checks to run (default: all release.yml checks)",
     )
     args = parser.parse_args(argv)
     names = list(CHECKS) if "all" in args.checks else args.checks

@@ -106,8 +106,28 @@ jobs:
           MEERKAT_SEMVER_REPORT_OUT: ${{ runner.temp }}/semver-evidence/report.txt
         run: make semver-breaks
 
-      - name: Build exact-tree semver attestation
+      # Only a release tree is evidence for its version. A post-release tree
+      # (notes under a non-empty `## [Unreleased]` above the stamped workspace
+      # version) is measured against that version's own tag, so its green
+      # result says nothing about the breaks since the release before, which
+      # is what `release_semver_gate` trusts this artifact for.
+      - name: Classify the measured notes
+        id: notes
         if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        shell: bash
+        env:
+          VERSION: ${{ steps.candidate.outputs.version }}
+        run: |
+          set -euo pipefail
+          baseline="$(python3 scripts/check_semver_breaks.py --notes-baseline \
+            --changelog CHANGELOG.md --version "${VERSION}")"
+          echo "baseline=${baseline}" >> "${GITHUB_OUTPUT}"
+          if [[ "${baseline}" != published ]]; then
+            echo "::notice::The pending notes follow the stamped ${VERSION} release; this tree is not ${VERSION} release evidence and no attestation is uploaded."
+          fi
+
+      - name: Build exact-tree semver attestation
+        if: ${{ steps.unpublished.outputs.needed == 'true' && steps.notes.outputs.baseline == 'published' }}
         shell: bash
         env:
           TREE_SHA: ${{ steps.candidate.outputs.tree_sha }}
@@ -143,7 +163,7 @@ jobs:
             }' > "${evidence}/attestation.json"
 
       - name: Upload exact-tree semver evidence
-        if: ${{ steps.unpublished.outputs.needed == 'true' }}
+        if: ${{ steps.unpublished.outputs.needed == 'true' && steps.notes.outputs.baseline == 'published' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event_name == 'push' && format('meerkat-semver-attestation-main-{0}', steps.candidate.outputs.tree_sha) || format('meerkat-semver-attestation-preview-{0}', steps.candidate.outputs.tree_sha) }}

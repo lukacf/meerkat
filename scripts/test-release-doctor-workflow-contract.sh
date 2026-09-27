@@ -27,6 +27,8 @@ SEMVER_PASS="PASS Tag releases reuse exact-tree pre-tag semver evidence"
 SEMVER_FAIL="FAIL Tag releases must reuse exact-tree pre-tag semver evidence"
 SLO_PASS="PASS Rust registry publication reads crates back before the SDKs and enforces the 30 minute publication SLO"
 SLO_FAIL="FAIL Rust registry publication does not read crates back before the SDKs or enforce the 30 minute publication SLO"
+DISPATCH_PASS="PASS Publishing dispatches are bound to their version's tag"
+DISPATCH_FAIL="FAIL A publishing dispatch without release_tag could publish a branch tip as the tagged version"
 
 fail() {
   echo "release doctor workflow contract violated: $1" >&2
@@ -79,7 +81,6 @@ MEASUREMENT_STEP_IF = (
     "            github.event.inputs.semver_evidence_job_id == '' &&\n"
     "            github.event.inputs.release_tag == ''\n"
     "          }}\n"
-    "        run: make semver-breaks\n"
 )
 SLO_LINE = (
     "            --slo-seconds ${{ github.event_name == 'workflow_dispatch'"
@@ -121,8 +122,7 @@ elif name == "evidence-if-single-line":
 elif name == "measurement-on-tags":
     replace_once(
         MEASUREMENT_STEP_IF,
-        "      - name: Verify every reported break is named and the notes are stamped\n"
-        "        run: make semver-breaks\n",
+        "      - name: Verify every reported break is named and the notes are stamped\n",
     )
 elif name == "slo-relaxed":
     replace_once(SLO_LINE, SLO_LINE.replace("'1800'", "'3600'"))
@@ -156,6 +156,72 @@ elif name == "slo-before-sdk":
     text = text[: slo.start()] + text[slo.end() :]
     sdk = PYTHON_SDK_STEP.search(text)
     text = text[: sdk.start()] + slo_text + text[sdk.start() :]
+elif name == "dispatch-unbound":
+    # The pre-fix condition: a publishing dispatch with no release_tag
+    # skipped the version check and published the branch tip.
+    replace_once(
+        "          (github.event_name == 'workflow_dispatch' &&\n"
+        "           (github.event.inputs.release_tag != '' ||\n"
+        "            github.event.inputs.publish_release_packages == 'true' ||\n"
+        "            github.event.inputs.publish_web_sdk_only == 'true' ||\n"
+        "            github.event.inputs.publish_release_assets_only == 'true'))\n",
+        "          (github.event_name == 'workflow_dispatch' &&\n"
+        "           github.event.inputs.release_tag != '')\n",
+    )
+elif name == "dispatch-branch-name":
+    # The pre-round-2 comparison: the last path segment of the ref name,
+    # so a branch named release/v<version> passed and could publish.
+    binding = re.compile(
+        r'          expected="v\$\{version\}"\n(?:.*\n)*?'
+        r'          echo "Version \$\{version\} matches release tag \$\{release_tag\}"\n'
+    )
+    text, count = binding.subn(
+        '          ref_name="${RELEASE_TAG_INPUT:-${GITHUB_REF_NAME}}"\n'
+        '          tag="${ref_name##*/}"\n'
+        '          tag="${tag#v}"\n'
+        '          if [[ "${version}" != "${tag}" ]]; then\n'
+        '            exit 1\n'
+        '          fi\n',
+        text,
+    )
+    if count != 1:
+        raise SystemExit(f"fixture `{name}` expects one release-version script, found {count}")
+elif name == "dispatch-head-unchecked":
+    # Drop the guard that the named release_tag is the checked-out commit.
+    replace_once(
+        '            if [[ "$(git rev-parse HEAD)" != "${tag_commit}" ]]; then\n'
+        '              echo "The checked-out commit is not the ${RELEASE_TAG_INPUT} tag." >&2\n'
+        "              exit 1\n"
+        "            fi\n",
+        "",
+    )
+elif name == "dispatch-alpha-unscoped":
+    # Allow the alpha tag namespace outside the alpha crates-only lane.
+    replace_once(
+        '          if [[ "${ALPHA_CRATES_ONLY}" == "true" ]]; then\n'
+        '            allowed+=("alpha/${expected}")\n'
+        "          fi\n",
+        '          allowed+=("alpha/${expected}")\n',
+    )
+elif name == "dispatch-checkout-github-ref":
+    # require_ci_green checks out github.ref instead of the named release_tag.
+    job = text.index("  require_ci_green:\n")
+    needle = (
+        "          ref: ${{ github.event_name == 'workflow_dispatch' && "
+        "github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}\n"
+    )
+    at = text.index(needle, job)
+    text = text[:at] + "          ref: ${{ github.ref }}\n" + text[at + len(needle):]
+elif name == "dispatch-reflowed":
+    # Equivalent: the same publishing modes, reordered onto one line.
+    replace_once(
+        "          (github.event_name == 'workflow_dispatch' &&\n"
+        "           (github.event.inputs.release_tag != '' ||\n"
+        "            github.event.inputs.publish_release_packages == 'true' ||\n"
+        "            github.event.inputs.publish_web_sdk_only == 'true' ||\n"
+        "            github.event.inputs.publish_release_assets_only == 'true'))\n",
+        "          (github.event_name == 'workflow_dispatch' && (github.event.inputs.publish_release_assets_only == 'true' || github.event.inputs.publish_web_sdk_only == 'true' || github.event.inputs.publish_release_packages == 'true' || github.event.inputs.release_tag != ''))\n",
+    )
 elif name == "both-defects":
     replace_once(
         MEASUREMENT_STEP_IF,
@@ -220,6 +286,8 @@ mutate slo-literal "${TEST_ROOT}/slo-literal.yml"
 expect_pass slo-literal "${TEST_ROOT}/slo-literal.yml" registry-slo
 mutate slo-reflowed "${TEST_ROOT}/slo-reflowed.yml"
 expect_pass slo-reflowed "${TEST_ROOT}/slo-reflowed.yml" registry-slo
+mutate dispatch-reflowed "${TEST_ROOT}/dispatch-reflowed.yml"
+expect_pass dispatch-reflowed "${TEST_ROOT}/dispatch-reflowed.yml" dispatch-binding
 
 # 3. Dropping the behaviour fails and names the defect.
 mutate evidence-step-removed "${TEST_ROOT}/evidence-step-removed.yml"
@@ -237,6 +305,22 @@ expect_fail_named slo-relaxed "${TEST_ROOT}/slo-relaxed.yml" \
 mutate slo-flag-removed "${TEST_ROOT}/slo-flag-removed.yml"
 expect_fail_named slo-flag-removed "${TEST_ROOT}/slo-flag-removed.yml" \
   "without \`--slo-seconds\`" registry-slo
+
+mutate dispatch-unbound "${TEST_ROOT}/dispatch-unbound.yml"
+expect_fail_named dispatch-unbound "${TEST_ROOT}/dispatch-unbound.yml" \
+  "does not run on a package dispatch from refs/heads/main without release_tag" dispatch-binding
+mutate dispatch-head-unchecked "${TEST_ROOT}/dispatch-head-unchecked.yml"
+expect_fail_named dispatch-head-unchecked "${TEST_ROOT}/dispatch-head-unchecked.yml" \
+  "(the tag is not the checked-out commit)" dispatch-binding
+mutate dispatch-alpha-unscoped "${TEST_ROOT}/dispatch-alpha-unscoped.yml"
+expect_fail_named dispatch-alpha-unscoped "${TEST_ROOT}/dispatch-alpha-unscoped.yml" \
+  "accepts a package dispatch on the alpha/v0.0.0 tag without alpha_crates_only" dispatch-binding
+mutate dispatch-checkout-github-ref "${TEST_ROOT}/dispatch-checkout-github-ref.yml"
+expect_fail_named dispatch-checkout-github-ref "${TEST_ROOT}/dispatch-checkout-github-ref.yml" \
+  "refuses a package dispatch naming release_tag v0.0.0" dispatch-binding
+mutate dispatch-branch-name "${TEST_ROOT}/dispatch-branch-name.yml"
+expect_fail_named dispatch-branch-name "${TEST_ROOT}/dispatch-branch-name.yml" \
+  "accepts a package dispatch from refs/heads/release/v0.0.0 without release_tag" dispatch-binding
 
 mutate readback-step-removed "${TEST_ROOT}/readback-step-removed.yml"
 expect_fail_named readback-step-removed "${TEST_ROOT}/readback-step-removed.yml" \
@@ -257,7 +341,7 @@ run_doctor() {
 }
 
 run_doctor "$WORKFLOW" "${TEST_ROOT}/doctor-committed.log"
-for line in "$SEMVER_PASS" "$SLO_PASS"; do
+for line in "$SEMVER_PASS" "$SLO_PASS" "$DISPATCH_PASS"; do
   if ! grep -Fxq "$line" "${TEST_ROOT}/doctor-committed.log"; then
     fail "doctor does not report \`${line}\` for the committed workflow" \
       "$(cat "${TEST_ROOT}/doctor-committed.log")"
@@ -272,5 +356,12 @@ for line in "$SEMVER_FAIL" "$SLO_FAIL"; do
       "$(cat "${TEST_ROOT}/doctor-defects.log")"
   fi
 done
+
+mutate dispatch-unbound "${TEST_ROOT}/doctor-dispatch-unbound.yml"
+run_doctor "${TEST_ROOT}/doctor-dispatch-unbound.yml" "${TEST_ROOT}/doctor-dispatch.log"
+if ! grep -Fq "$DISPATCH_FAIL" "${TEST_ROOT}/doctor-dispatch.log"; then
+  fail "doctor does not report \`${DISPATCH_FAIL}\` for a workflow whose branch dispatch is unbound" \
+    "$(cat "${TEST_ROOT}/doctor-dispatch.log")"
+fi
 
 echo "release doctor workflow contract holds"

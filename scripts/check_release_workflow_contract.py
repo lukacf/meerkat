@@ -224,6 +224,20 @@ TOKEN = re.compile(
 )
 
 
+def github_ref_name(ref: str) -> str:
+    """`github.ref_name` / `GITHUB_REF_NAME` as GitHub sets it: the ref with
+    its `refs/heads/` or `refs/tags/` prefix removed (for other refs, its
+    `refs/<kind>/` prefix), so `refs/tags/alpha/v1.2.3` is `alpha/v1.2.3`,
+    not its last path segment."""
+    for prefix in ("refs/heads/", "refs/tags/"):
+        if ref.startswith(prefix):
+            return ref[len(prefix) :]
+    parts = ref.split("/", 2)
+    if len(parts) == 3 and parts[0] == "refs":
+        return parts[2]
+    return ref
+
+
 @dataclass(frozen=True)
 class EventContext:
     """The `github` and `needs` contexts of one hypothetical workflow run."""
@@ -243,7 +257,7 @@ class EventContext:
         if path == "github.ref":
             return self.ref
         if path == "github.ref_name":
-            return self.ref.rsplit("/", 1)[-1]
+            return github_ref_name(self.ref)
         if path.startswith("github.event.inputs."):
             # Unset dispatch inputs and push events both read as empty.
             return self.inputs.get(path[len("github.event.inputs.") :], "")
@@ -559,11 +573,13 @@ def _run_binding_step(
     context: EventContext,
     tags: tuple[str, ...],
     checkout_ref: str | None,
+    later_refs: tuple[str, ...] = (),
 ) -> int:
     """Run the step's script as the runner would, in a scratch checkout.
 
     The repository has two commits: the release commit, which every tag in
-    `tags` points at, and a later commit, which every branch points at. HEAD
+    `tags` points at, and a later commit, which every branch points at, as do
+    the `refs/tags/` and `refs/heads/` refs in `later_refs`. HEAD
     is what the job's checkout step selects for `context` (`checkout_ref`,
     rendered from its `with.ref`); `None` puts HEAD on the later commit, a
     checkout that did not land on the tag. A ref that does not resolve fails
@@ -604,9 +620,11 @@ def _run_binding_step(
             f'[workspace.package]\nversion = "{BINDING_VERSION}"\n# later\n', encoding="utf-8"
         )
         git("commit", "-q", "-am", "later")
-        for context_ref in (context.ref,):
-            if context_ref.startswith("refs/heads/"):
-                git("branch", "-f", context_ref[len("refs/heads/") :], "HEAD")
+        for later_ref in (context.ref, *later_refs):
+            if later_ref.startswith("refs/heads/"):
+                git("branch", "-f", later_ref[len("refs/heads/") :], "HEAD")
+            elif later_ref.startswith("refs/tags/") and later_ref != context.ref:
+                git("tag", "-f", later_ref[len("refs/tags/") :], "HEAD")
         if checkout_ref is not None:
             if git("checkout", "-q", "--detach", checkout_ref, check=False).returncode != 0:
                 return 1
@@ -617,7 +635,7 @@ def _run_binding_step(
                 **git_env,
                 **env,
                 "GITHUB_REF": context.ref,
-                "GITHUB_REF_NAME": context.ref.rsplit("/", 1)[-1],
+                "GITHUB_REF_NAME": github_ref_name(context.ref),
                 "GITHUB_EVENT_NAME": context.event_name,
             },
             capture_output=True,
@@ -704,6 +722,36 @@ def check_dispatch_binding(text: str) -> list[str]:
     other_tag_push = EventContext(
         label="a tag push of another version", event_name="push", ref="refs/tags/v9.9.9"
     )
+    # A run on the version's tag that names another release_tag: the named
+    # tag is what is checked out and published, so it must bind. A binding
+    # that preferred github.ref would pass these and publish the named ref.
+    tag_ref_naming_branch = dispatch(
+        f"a package dispatch on the {tag} tag naming release_tag main (a branch)",
+        f"refs/tags/{tag}",
+        release_tag="main",
+        publish_release_packages="true",
+    )
+    tag_ref_naming_other_tag = dispatch(
+        f"a package dispatch on the {tag} tag naming release_tag v9.9.9 "
+        "(a tag on another commit)",
+        f"refs/tags/{tag}",
+        release_tag="v9.9.9",
+        publish_release_packages="true",
+    )
+    # The alpha lane binds only its own version's alpha tag.
+    other_alpha_on_tag = dispatch(
+        "an alpha crate dispatch on the alpha/v9.9.9 tag (another version)",
+        "refs/tags/alpha/v9.9.9",
+        publish_release_packages="true",
+        alpha_crates_only="true",
+    )
+    other_alpha_named = dispatch(
+        "an alpha crate dispatch naming release_tag alpha/v9.9.9 (another version)",
+        "refs/heads/main",
+        release_tag="alpha/v9.9.9",
+        publish_release_packages="true",
+        alpha_crates_only="true",
+    )
     # (context, tags, head) where head None means "HEAD off the tag".
     must_accept = [
         (tag_push, (tag,), checkout_for(tag_push)),
@@ -713,6 +761,8 @@ def check_dispatch_binding(text: str) -> list[str]:
     ]
     must_refuse = [
         (other_tag_push, ("v9.9.9",), checkout_for(other_tag_push), ""),
+        (other_alpha_on_tag, ("alpha/v9.9.9",), checkout_for(other_alpha_on_tag), ""),
+        (other_alpha_named, ("alpha/v9.9.9",), checkout_for(other_alpha_named), ""),
         (alpha_without_lane, (alpha_tag,), checkout_for(alpha_without_lane), ""),
         (alpha_named_without_lane, (alpha_tag,), checkout_for(alpha_named_without_lane), ""),
         # release_tag names the version but no such tag exists (a branch).
@@ -722,7 +772,11 @@ def check_dispatch_binding(text: str) -> list[str]:
         *((context, (), checkout_for(context), "") for context in BRANCH_DISPATCHES),
     ]
     violations: list[str] = []
-    for context, *_ in must_accept + must_refuse:
+    for context in [
+        *(entry[0] for entry in must_accept + must_refuse),
+        tag_ref_naming_branch,
+        tag_ref_naming_other_tag,
+    ]:
         if not step_runs(step, context):
             violations.append(
                 f"step `{step.name}` does not run on {context.label}, so nothing binds "
@@ -738,6 +792,17 @@ def check_dispatch_binding(text: str) -> list[str]:
             violations.append(
                 f"step `{step.name}` accepts {context.label}{detail}; only an allowed tag "
                 f"({tag}, or {alpha_tag} in the alpha lane) may publish {BINDING_VERSION}"
+            )
+    # The named ref sits on the later commit, where the checkout lands.
+    for context, later_ref in (
+        (tag_ref_naming_branch, "refs/heads/main"),
+        (tag_ref_naming_other_tag, "refs/tags/v9.9.9"),
+    ):
+        if _run_binding_step(step, context, (tag,), checkout_for(context), (later_ref,)) == 0:
+            violations.append(
+                f"step `{step.name}` accepts {context.label}; the named release_tag is "
+                f"what is checked out, and only an allowed tag ({tag}, or {alpha_tag} in "
+                f"the alpha lane) may publish {BINDING_VERSION}"
             )
     return violations
 

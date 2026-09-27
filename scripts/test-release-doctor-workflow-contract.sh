@@ -212,6 +212,28 @@ elif name == "dispatch-checkout-github-ref":
     )
     at = text.index(needle, job)
     text = text[:at] + "          ref: ${{ github.ref }}\n" + text[at + len(needle):]
+elif name == "dispatch-prefers-github-ref":
+    # Prefer a tag github.ref over the named release_tag: a dispatch on the
+    # version's tag that names a branch checks out and publishes the branch.
+    replace_once(
+        '          if [[ -n "${RELEASE_TAG_INPUT}" ]]; then\n',
+        '          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then\n'
+        '            release_tag="${GITHUB_REF#refs/tags/}"\n'
+        '          elif [[ -n "${RELEASE_TAG_INPUT}" ]]; then\n',
+    )
+elif name == "dispatch-alpha-any-version":
+    # Accept any alpha/* tag in the alpha lane, not only this version's.
+    replace_once(
+        '            if [[ "${release_tag}" == "${tag}" ]]; then\n',
+        '            if [[ "${release_tag}" == "${tag}" || ( "${ALPHA_CRATES_ONLY}" == "true" && "${release_tag}" == alpha/* ) ]]; then\n',
+    )
+elif name == "dispatch-ref-name":
+    # Equivalent: read a tag push's tag from GITHUB_REF_NAME, which GitHub
+    # sets to the ref without refs/tags/ (alpha/v<version> stays whole).
+    replace_once(
+        '            release_tag="${GITHUB_REF#refs/tags/}"\n',
+        '            release_tag="${GITHUB_REF_NAME}"\n',
+    )
 elif name == "dispatch-reflowed":
     # Equivalent: the same publishing modes, reordered onto one line.
     replace_once(
@@ -288,6 +310,8 @@ mutate slo-reflowed "${TEST_ROOT}/slo-reflowed.yml"
 expect_pass slo-reflowed "${TEST_ROOT}/slo-reflowed.yml" registry-slo
 mutate dispatch-reflowed "${TEST_ROOT}/dispatch-reflowed.yml"
 expect_pass dispatch-reflowed "${TEST_ROOT}/dispatch-reflowed.yml" dispatch-binding
+mutate dispatch-ref-name "${TEST_ROOT}/dispatch-ref-name.yml"
+expect_pass dispatch-ref-name "${TEST_ROOT}/dispatch-ref-name.yml" dispatch-binding
 
 # 3. Dropping the behaviour fails and names the defect.
 mutate evidence-step-removed "${TEST_ROOT}/evidence-step-removed.yml"
@@ -315,6 +339,12 @@ expect_fail_named dispatch-head-unchecked "${TEST_ROOT}/dispatch-head-unchecked.
 mutate dispatch-alpha-unscoped "${TEST_ROOT}/dispatch-alpha-unscoped.yml"
 expect_fail_named dispatch-alpha-unscoped "${TEST_ROOT}/dispatch-alpha-unscoped.yml" \
   "accepts a package dispatch on the alpha/v0.0.0 tag without alpha_crates_only" dispatch-binding
+mutate dispatch-prefers-github-ref "${TEST_ROOT}/dispatch-prefers-github-ref.yml"
+expect_fail_named dispatch-prefers-github-ref "${TEST_ROOT}/dispatch-prefers-github-ref.yml" \
+  "accepts a package dispatch on the v0.0.0 tag naming release_tag main (a branch)" dispatch-binding
+mutate dispatch-alpha-any-version "${TEST_ROOT}/dispatch-alpha-any-version.yml"
+expect_fail_named dispatch-alpha-any-version "${TEST_ROOT}/dispatch-alpha-any-version.yml" \
+  "accepts an alpha crate dispatch on the alpha/v9.9.9 tag (another version)" dispatch-binding
 mutate dispatch-checkout-github-ref "${TEST_ROOT}/dispatch-checkout-github-ref.yml"
 expect_fail_named dispatch-checkout-github-ref "${TEST_ROOT}/dispatch-checkout-github-ref.yml" \
   "refuses a package dispatch naming release_tag v0.0.0" dispatch-binding

@@ -170,6 +170,19 @@ them.
   channel whose close has released its turn-boundary waiters now return
   `SessionBusy` instead of waiting behind the boundary, the same as user
   projections.
+- Live close: an explicit close of an ordinary (non-experimental) channel no
+  longer releases the channel's live projections from the member's turn
+  boundary when the embedder installs an experimental live open authority
+  (MobKit does, so every `live/close` runs the experimental close first). The
+  release is keyed on the generated close custody only experimental channels
+  hold, so ordinary channels close the same way with or without that
+  authority: their projections wait for the boundary and the ordinary close
+  defers its playback settlement to it. Before, a projection parked behind a
+  running member turn returned `SessionBusy`, the ordinary WebSocket/WebRTC
+  pump treated that as fatal, and its disconnect cleanup raced the RPC close;
+  when the cleanup committed first, `live/close` answered with an
+  unbound-channel error for a channel that did close. Behaviour-only, no
+  signature change.
 - The Python and TypeScript SDK `retrying` parsers accept the canonical wire
   shape, which carries one typed `retry` schedule; `attempt`, `max_attempts` /
   `maxAttempts`, `error` and `delay_ms` / `delayMs` are derived from it and the

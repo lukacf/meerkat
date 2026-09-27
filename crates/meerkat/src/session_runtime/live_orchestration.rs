@@ -3596,12 +3596,19 @@ mod orchestrator {
             } else {
                 None
             };
-            if matches!(purpose, ExperimentalLiveClosePurpose::Explicit) {
+            if close_custody.is_some() {
                 // The owner has revoked the channel's custody: its live
                 // projections no longer wait behind the member's turn
                 // boundary. A projection parked there returns Busy and the
-                // transport defers it to the boundary, so the physical close
-                // below converges on provider confirmation alone.
+                // experimental transport defers it to the boundary, so the
+                // physical close below converges on provider confirmation
+                // alone. The release precedes the physical close, so it keys
+                // on the generated close custody rather than on the physical
+                // close's answer. An ordinary channel holds no close custody
+                // and is never released: its projections wait for the
+                // boundary exactly as they do when no experimental authority
+                // is installed, and the ordinary close the caller falls back
+                // to defers its settlement to the boundary instead.
                 self.service
                     .release_live_projection_turn_boundary_waiters(&session, channel);
                 tracing::info!(

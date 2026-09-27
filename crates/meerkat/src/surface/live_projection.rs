@@ -961,3 +961,162 @@ impl<B: SessionAgentBuilder + 'static> LiveProjectionSink for ServiceLiveProject
             .map_err(|err| session_error_to_projection(err, session_id))
     }
 }
+
+#[cfg(all(test, feature = "memory-store"))]
+mod tests {
+    use super::*;
+    use meerkat_core::live_adapter::LiveAdapterObservation;
+    use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
+
+    /// `rkat mob host` and MobKit's voice product apply live observations
+    /// through [`ServiceLiveProjection`], not the RPC sink. Ordinary realtime
+    /// speech applied through it must commit a `block_assistant` row whose
+    /// `realtime_origin` names this session, the channel the speech streamed
+    /// on, the canonical row and the provider item, and the row must carry
+    /// that origin on its `WireSessionMessage` projection: it is the key a
+    /// console retires its live rendering by.
+    #[tokio::test]
+    async fn live_assistant_speech_commits_block_assistant_row_with_realtime_origin() {
+        let persistence = crate::PersistenceBundle::new(
+            Arc::new(crate::MemoryStore::new()),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let factory = crate::AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut builder = crate::FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(meerkat_client::TestClient::default()));
+        let (service, runtime) =
+            crate::surface::build_runtime_backed_service(builder, 4, persistence);
+        let service = Arc::new(service);
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let executor_service = Arc::clone(&service);
+        let executor_runtime = Arc::clone(&runtime);
+        Box::pin(crate::surface::materialize_session(
+            &service,
+            &runtime,
+            session,
+            crate::CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-realtime-2".to_string(),
+                prompt: ContentInput::Text(String::new()),
+                system_prompt: crate::SystemPromptOverride::Disable,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            },
+            move |materialized_session_id| {
+                crate::surface::default_persistent_executor(
+                    executor_service,
+                    executor_runtime,
+                    materialized_session_id,
+                )
+            },
+        ))
+        .await
+        .expect("materialize live projection fixture session");
+
+        let projection: Arc<dyn LiveProjectionSink> = Arc::new(ServiceLiveProjection::new(
+            Arc::clone(&service),
+            Arc::clone(&runtime),
+        ));
+        let host = meerkat_live::LiveAdapterHost::new(projection);
+        let channel_id = LiveChannelId::random_uuid();
+        let admission = runtime
+            .resolve_live_open_admission(
+                &session_id,
+                &channel_id,
+                &meerkat_core::SessionLlmIdentity {
+                    model: "gpt-realtime-2".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            )
+            .await
+            .expect("machine admits the fixture channel");
+        host.open_channel_with_authority(
+            admission
+                .channel_open_authority()
+                .expect("generated host open handoff"),
+        )
+        .await
+        .expect("open live channel");
+
+        for (delta_id, delta) in [("d1", "Hello"), ("d2", " there.")] {
+            host.apply_observation(
+                &channel_id,
+                &LiveAdapterObservation::AssistantTranscriptDelta {
+                    provider_item_id: Some("item_spoken".to_string()),
+                    previous_item_id: None,
+                    content_index: Some(0),
+                    response_id: Some("resp_spoken".to_string()),
+                    delta_id: Some(delta_id.to_string()),
+                    delta: delta.to_string(),
+                },
+            )
+            .await
+            .expect("assistant transcript delta applies through the facade sink");
+        }
+        host.apply_observation(
+            &channel_id,
+            &LiveAdapterObservation::TurnCompleted {
+                response_id: Some("resp_spoken".to_string()),
+                stop_reason: StopReason::EndTurn,
+                usage: meerkat_core::TurnUsage::host_declared(
+                    meerkat_core::Provider::Other,
+                    "facade-live-origin-test",
+                    Usage::default(),
+                ),
+            },
+        )
+        .await
+        .expect("turn completion materializes the staged speech");
+
+        let session = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("session loads")
+            .expect("session exists");
+        let (sequence, row) = session
+            .messages()
+            .iter()
+            .enumerate()
+            .find_map(|(index, message)| match message {
+                meerkat_core::types::Message::BlockAssistant(assistant)
+                    if assistant.identity.realtime_origin.is_some() =>
+                {
+                    Some((index as u64 + 1, message.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "the realtime assistant row must carry realtime_origin: {:?}",
+                    session.messages()
+                )
+            });
+        let meerkat_contracts::WireSessionMessage::BlockAssistant {
+            realtime_origin: Some(origin),
+            blocks,
+            ..
+        } = meerkat_contracts::WireSessionMessage::from(row)
+        else {
+            panic!("the row projects as a block_assistant carrying its realtime_origin");
+        };
+        assert!(
+            origin.matches(&session_id, &channel_id, sequence),
+            "origin must name this session, channel and canonical row: {origin:?}"
+        );
+        assert_eq!(origin.provider_item_ids(), ["item_spoken".to_string()]);
+        assert!(
+            !blocks.is_empty(),
+            "the committed row carries the spoken text"
+        );
+    }
+}

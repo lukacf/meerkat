@@ -28795,4 +28795,204 @@ mod tests {
             "no-swap propagation must NOT enqueue a synthetic terminal Error, got: {synthetic:?}"
         );
     }
+
+    /// Experimental close authority that owns no binding: every channel it is
+    /// asked about is an ordinary channel.
+    #[cfg(feature = "openai-live")]
+    struct NoBindingExperimentalAuthority;
+
+    #[cfg(feature = "openai-live")]
+    #[async_trait]
+    impl meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider
+        for NoBindingExperimentalAuthority
+    {
+        async fn prepare_open(
+            &self,
+            _canonical_session_id: &SessionId,
+            _execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+        ) -> Result<
+            Box<dyn meerkat::experimental_gpt_live::ExperimentalLivePendingOpen>,
+            meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityError,
+        > {
+            Err(meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::Unavailable)
+        }
+
+        async fn unbind_channel(
+            &self,
+            _channel_id: &meerkat_live::LiveChannelId,
+            _canonical_session_id: &SessionId,
+        ) {
+        }
+
+        async fn close_physical_if_bound(
+            &self,
+            _channel_id: &meerkat_live::LiveChannelId,
+            _canonical_session_id: &SessionId,
+        ) -> Result<
+            meerkat::experimental_gpt_live::ExperimentalLivePhysicalClose,
+            meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityError,
+        > {
+            Ok(meerkat::experimental_gpt_live::ExperimentalLivePhysicalClose::NotBound)
+        }
+    }
+
+    /// An embedder that installs the experimental open authority (MobKit
+    /// does) routes every `live/close` through the experimental close first.
+    /// For an ordinary channel that close holds no generated close custody,
+    /// so it must not release the channel's projections from the member's
+    /// turn boundary: an ordinary transport pump treats a refused projection
+    /// as fatal, and its disconnect cleanup would then race the RPC close
+    /// (a close that loses answers with an unbound-channel error for a
+    /// channel that did close). The projection parked behind the running
+    /// turn keeps waiting, and the ordinary close the handler falls back to
+    /// converges with the turn still running, exactly as it does when no
+    /// experimental authority is installed.
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn explicit_close_of_ordinary_channel_under_experimental_authority_keeps_projections_waiting()
+     {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let session_id = runtime
+            .create_session(
+                realtime_build_config("gpt-realtime-2"),
+                None,
+                None,
+                Vec::new(),
+            )
+            .await
+            .expect("create_session for live channel");
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize for the ordinary explicit close test".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session via first turn");
+
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        let identity = SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let candidate_channel_id = meerkat_live::LiveChannelId::random_uuid();
+        let open_authority = runtime
+            .runtime_adapter()
+            .resolve_live_open_admission(&session_id, &candidate_channel_id, &identity)
+            .await
+            .expect("live open admission");
+        let channel_id = host
+            .open_channel_with_authority(
+                open_authority
+                    .channel_open_authority()
+                    .expect("generated live open handoff"),
+            )
+            .await
+            .expect("open_channel");
+        let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
+            Arc::new(R11RecordingAdapter {
+                log: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            });
+        host.attach_adapter(&channel_id, adapter)
+            .await
+            .expect("attach_adapter");
+
+        // The member's own turn holds the session's turn boundary. The
+        // channel's next assistant transcript projection parks behind it.
+        let boundary = runtime
+            .service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        let parked_runtime = Arc::clone(&runtime);
+        let parked_session = session_id.clone();
+        let parked_channel = channel_id.clone();
+        let parked = tokio::spawn(async move {
+            parked_runtime
+                .append_realtime_transcript_event_from_channel(
+                    &parked_session,
+                    meerkat_core::RealtimeTranscriptEvent::AssistantTranscriptDelta {
+                        response_id: "resp_parked".to_string(),
+                        delta_id: "delta_parked".to_string(),
+                        item_id: "item_parked".to_string(),
+                        previous_item_id: None,
+                        content_index: 0,
+                        delta: "parked behind the member turn".to_string(),
+                    },
+                    parked_channel,
+                )
+                .await
+                .map(|_| ())
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !parked.is_finished(),
+            "the channel's projection waits behind the member's running turn"
+        );
+
+        let authority = NoBindingExperimentalAuthority;
+        let experimental = runtime
+            .close_experimental_live_channel(&host, &authority, &channel_id)
+            .await
+            .expect("experimental close of an ordinary channel");
+        assert!(
+            experimental.is_none(),
+            "an ordinary channel is left to the ordinary close: {experimental:?}"
+        );
+        assert!(
+            !runtime
+                .service
+                .live_projection_turn_boundary_released(&session_id, &channel_id),
+            "an ordinary channel holds no close custody; its projections are never released"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !parked.is_finished(),
+            "the parked projection keeps waiting for the boundary instead of failing Busy"
+        );
+
+        // The handler falls back to the ordinary close, which converges while
+        // the turn still runs: its playback settlement is deferred to the
+        // boundary.
+        let closed = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            runtime.close_live_channel(&host, &channel_id),
+        )
+        .await
+        .expect("the ordinary close does not wait for the member turn")
+        .expect("ordinary close");
+        assert_eq!(closed.status, meerkat_contracts::LiveCloseStatus::Closed);
+        assert!(
+            runtime
+                .runtime_adapter()
+                .live_session_for_active_channel(&channel_id)
+                .await
+                .is_none(),
+            "the channel is closed"
+        );
+
+        // The turn ends: the parked projection leaves the boundary. Its
+        // channel closed meanwhile, so whether it lands or is refused is the
+        // session's call; it must not be a released-channel Busy.
+        drop(boundary);
+        let parked = tokio::time::timeout(std::time::Duration::from_secs(10), parked)
+            .await
+            .expect("the parked projection resolves once the boundary frees")
+            .expect("projection task");
+        assert!(
+            !matches!(parked, Err(SessionError::Busy { .. })),
+            "the parked projection was never refused as released: {parked:?}"
+        );
+    }
 }

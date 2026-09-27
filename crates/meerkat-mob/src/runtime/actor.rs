@@ -53426,12 +53426,9 @@ impl MobActor {
             .get_run(&run_id)
             .await?
             .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
-        if crate::run::mob_machine_run_status_is_terminal(&run.run_id, &run.status)?
-            && !matches!(
-                (&target, &run.status),
-                (TerminalizationTarget::Canceled { .. }, MobRunStatus::Failed)
-            )
-        {
+        if crate::run::mob_machine_run_status_is_terminal(&run.run_id, &run.status)? {
+            // A late cancellation request cannot replace the machine-owned
+            // terminal winner. Repair only its matching durable carrier.
             let repaired = self
                 .flow_engine
                 .repair_persisted_terminalization(run_id, flow_id, target)

@@ -105,6 +105,10 @@ them.
 
 ### Fixed
 
+- Flow cancellation preserves an already committed terminal outcome. A late
+  cancellation after natural failure repairs the existing terminal event and
+  drains its task trackers without attempting to rewrite Failed as Canceled
+  or closing the mob actor.
 - The release doctor's dispatch-binding check covers more of the ways a
   future edit could let a publishing run bind the wrong ref. It now refuses:
   - a run on the version's tag that names another `release_tag` (a branch,

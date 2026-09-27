@@ -5247,6 +5247,12 @@ impl MobSessionService for MockSessionService {
     }
 }
 
+#[derive(Default)]
+struct TerminalAppendGate {
+    appended: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
 struct FaultInjectedMobEventStore {
     events: RwLock<Vec<MobEvent>>,
     event_tx: tokio::sync::broadcast::Sender<MobEvent>,
@@ -5259,6 +5265,9 @@ struct FaultInjectedMobEventStore {
     fail_clear: AtomicBool,
     poll_calls: AtomicU64,
     replay_calls: AtomicU64,
+    terminal_append_gate: RwLock<Option<Arc<TerminalAppendGate>>>,
+    terminal_repair_attempts: RwLock<Vec<MobEventKind>>,
+    terminal_repair_attempted: tokio::sync::Notify,
     stall_replay: AtomicBool,
     replay_released: tokio::sync::Notify,
 }
@@ -5359,6 +5368,9 @@ impl FaultInjectedMobEventStore {
             fail_clear: AtomicBool::new(false),
             poll_calls: AtomicU64::new(0),
             replay_calls: AtomicU64::new(0),
+            terminal_append_gate: RwLock::new(None),
+            terminal_repair_attempts: RwLock::new(Vec::new()),
+            terminal_repair_attempted: tokio::sync::Notify::new(),
             stall_replay: AtomicBool::new(false),
             replay_released: tokio::sync::Notify::new(),
         }
@@ -5622,6 +5634,13 @@ impl MobEventStore for FaultInjectedMobEventStore {
         events.push(stored.clone());
         drop(events);
         let _ = self.event_tx.send(stored.clone());
+        if terminal_event_identity(&stored.kind).is_some() {
+            let gate = self.terminal_append_gate.read().await.clone();
+            if let Some(gate) = gate {
+                gate.appended.notify_one();
+                gate.release.notified().await;
+            }
+        }
         if self
             .fail_after_append_on_kind
             .read()
@@ -5639,6 +5658,11 @@ impl MobEventStore for FaultInjectedMobEventStore {
         &self,
         event: NewMobEvent,
     ) -> Result<Option<MobEvent>, MobStoreError> {
+        self.terminal_repair_attempts
+            .write()
+            .await
+            .push(event.kind.clone());
+        self.terminal_repair_attempted.notify_one();
         let Some((run_id, flow_id)) = terminal_event_identity(&event.kind) else {
             return Err(MobStoreError::Internal(
                 "append_terminal_event_if_absent requires a terminal flow event".to_string(),
@@ -48316,6 +48340,236 @@ fn test_supervisor_private_trust_realizes_generated_publish_obligation() {
 }
 
 #[tokio::test]
+async fn test_cancel_cleanup_preserves_natural_failure_with_live_trackers() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let gate = Arc::new(TerminalAppendGate::default());
+    *events.terminal_append_gate.write().await = Some(gate.clone());
+    let (handle, service) = create_test_mob_with_events(
+        sample_definition_with_single_step_flow(60_000, 8),
+        events.clone(),
+    )
+    .await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_fail(true);
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+
+    tokio::time::timeout(Duration::from_secs(3), gate.appended.notified())
+        .await
+        .expect("natural failure reaches its committed terminal carrier");
+    let original_events = events.replay_all().await.expect("read committed events");
+    let original_terminal = original_events
+        .iter()
+        .find(|event| terminal_event_identity(&event.kind).is_some_and(|(id, _)| id == &run_id))
+        .expect("natural failure committed its carrier");
+    assert!(matches!(
+        &original_terminal.kind,
+        MobEventKind::FlowFailed { .. }
+    ));
+    let original_terminal_json = serde_json::to_value(original_terminal).expect("encode carrier");
+
+    // The actor is still inside the terminal store acknowledgement, so the
+    // original flow task cannot yet enqueue FlowFinished. Queue cancellation
+    // and an observation behind that commit before allowing it to return.
+    // FIFO then proves the cancellation coordinator owns the live trackers.
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    handle
+        .command_tx
+        .send(super::scope_gate::RoutedMobCommand {
+            authority: handle.command_authority.clone(),
+            cmd: super::state::MobCommand::CancelFlow {
+                run_id: run_id.clone(),
+                reply_tx: cancel_tx,
+            },
+        })
+        .await
+        .expect("queue cancel after terminal commit");
+    let (trackers_tx, trackers_rx) = tokio::sync::oneshot::channel();
+    handle
+        .command_tx
+        .send(super::scope_gate::RoutedMobCommand::internal(
+            super::state::MobCommand::FlowTrackerCounts {
+                reply_tx: trackers_tx,
+            },
+        ))
+        .await
+        .expect("queue cancellation tracker observation");
+    gate.release.notify_one();
+    cancel_rx
+        .await
+        .expect("cancel reply")
+        .expect("cancel admitted");
+    assert_eq!(trackers_rx.await.expect("tracker observation"), (1, 1));
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            () = events.terminal_repair_attempted.notified() => {}
+            () = handle.command_tx.closed() => {
+                panic!("cancellation cleanup fail-stopped an already Failed run with a committed carrier");
+            }
+        }
+    })
+    .await
+    .expect("cancellation cleanup must repair the existing terminal outcome");
+    let repairs = events.terminal_repair_attempts.read().await.clone();
+    assert!(repairs.iter().any(|kind| matches!(
+        kind,
+        MobEventKind::FlowFailed { run_id: id, .. } if id == &run_id
+    )));
+    assert!(
+        !repairs
+            .iter()
+            .any(|kind| matches!(kind, MobEventKind::FlowCanceled { .. }))
+    );
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if handle
+                .debug_flow_tracker_counts()
+                .await
+                .expect("actor remains responsive")
+                == (0, 0)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("flow trackers drain");
+    let terminal = handle
+        .flow_status(run_id.clone())
+        .await
+        .expect("actor still answers status")
+        .expect("run exists");
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    assert_eq!(handle.roster().await.len(), 1);
+    let final_events = events.replay_all().await.expect("read final events");
+    let terminal_events: Vec<_> = final_events
+        .iter()
+        .filter(|event| terminal_event_identity(&event.kind).is_some_and(|(id, _)| id == &run_id))
+        .map(|event| serde_json::to_value(event).expect("encode terminal carrier"))
+        .collect();
+    assert_eq!(terminal_events, vec![original_terminal_json]);
+    handle.shutdown().await.expect("shutdown mob");
+}
+
+#[tokio::test]
+async fn test_repeated_terminalization_preserves_failed_run_and_exact_carrier() {
+    assert_repeated_terminalization_preserves_failed_run(false).await;
+}
+
+#[tokio::test]
+async fn test_repeated_engine_terminalization_preserves_failed_run_and_exact_carrier() {
+    assert_repeated_terminalization_preserves_failed_run(true).await;
+}
+
+async fn assert_repeated_terminalization_preserves_failed_run(direct_engine: bool) {
+    use super::terminalization::{FlowFailureCause, TerminalizationOutcome, TerminalizationTarget};
+    use crate::run::{MobMachineFlowRunCommand, flow_run};
+
+    let definition = sample_definition();
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let run = authority_backed_empty_test_run("test-mob", "test-flow");
+    let run_id = run.run_id.clone();
+    let flow_id = FlowId::from("test-flow");
+    store.create_run(run).await.expect("create run");
+    let (handle, _) = create_test_mob_with_run_store(definition.clone(), store.clone()).await;
+    seed_test_run_in_mob_machine(&handle, &run_id).await;
+    handle
+        .commit_flow_run_command(
+            &run_id,
+            MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {}),
+            "test_failed_terminal_start",
+        )
+        .await
+        .expect("start run");
+    let cause = FlowFailureCause::from_step_error(&MobError::FlowTurnTimedOut);
+    assert_eq!(
+        handle
+            .commit_flow_terminalization(
+                run_id.clone(),
+                flow_id.clone(),
+                TerminalizationTarget::Failed {
+                    cause: cause.clone()
+                },
+                MobMachineFlowRunCommand::TerminalizeFailed(flow_run::inputs::TerminalizeFailed {}),
+                "test_failed_terminal_commit",
+            )
+            .await
+            .expect("commit failed"),
+        TerminalizationOutcome::Transitioned
+    );
+    let failed = store
+        .get_run(&run_id)
+        .await
+        .expect("load failed")
+        .expect("run exists");
+    let original_inputs = serialized_flow_authority_inputs(&failed);
+    let original_events = serde_json::to_value(handle.events().replay_all().await.expect("events"))
+        .expect("encode original events");
+    let engine = FlowEngine::new(
+        Arc::new(UnusedFlowTurnExecutor),
+        handle.clone(),
+        store.clone(),
+        handle.events.clone(),
+        Arc::new(super::topology::MobTopologyService::new(
+            definition.topology,
+        )),
+    );
+    // Exercise both actor mailbox and direct engine projection paths. Neither
+    // may treat a later cancel request as authority to rewrite Failed.
+    for _ in 0..2 {
+        let canceled = if direct_engine {
+            engine
+                .terminalize_canceled_with_machine_state(
+                    run_id.clone(),
+                    flow_id.clone(),
+                    handle.query_machine_state().await.expect("canonical state"),
+                )
+                .await
+        } else {
+            engine
+                .terminalize_canceled(run_id.clone(), flow_id.clone())
+                .await
+        };
+        assert_eq!(
+            canceled.expect("canceling a failed run is a no-op"),
+            TerminalizationOutcome::Noop
+        );
+        assert_eq!(
+            engine
+                .terminalize_failed(run_id.clone(), flow_id.clone(), cause.clone())
+                .await
+                .expect("repeat failure is a no-op"),
+            TerminalizationOutcome::Noop
+        );
+    }
+    let retained = handle
+        .flow_status(run_id)
+        .await
+        .expect("status remains available")
+        .expect("run exists");
+    assert_eq!(retained.status, MobRunStatus::Failed);
+    assert_eq!(serialized_flow_authority_inputs(&retained), original_inputs);
+    assert_eq!(
+        serde_json::to_value(handle.events().replay_all().await.expect("final events"))
+            .expect("encode events"),
+        original_events
+    );
+    handle.shutdown().await.expect("shutdown mob");
+}
+
+#[tokio::test]
 async fn test_cancel_flow_cooperative_path_finishes_before_fallback_window() {
     let (handle, service) = create_test_mob(sample_definition_with_two_step_flow(5_000)).await;
     handle
@@ -48345,6 +48599,74 @@ async fn test_cancel_flow_cooperative_path_finishes_before_fallback_window() {
         start.elapsed() < Duration::from_secs(2),
         "cooperative cancel path should finalize before fallback timeout window"
     );
+
+    let original_events = handle
+        .events()
+        .replay_all()
+        .await
+        .expect("events after cancel");
+    let original_terminal: Vec<_> = original_events
+        .iter()
+        .filter(|event| terminal_event_identity(&event.kind).is_some_and(|(id, _)| id == &run_id))
+        .collect();
+    assert_eq!(original_terminal.len(), 1);
+    assert!(matches!(
+        &original_terminal[0].kind,
+        MobEventKind::FlowCanceled {
+            cause: Some(crate::event::FlowCancelClass::CancelRequested),
+            ..
+        }
+    ));
+    let original_carrier =
+        serde_json::to_value(original_terminal[0]).expect("encode canceled carrier");
+    assert_eq!(
+        handle
+            .commit_flow_terminalization(
+                run_id.clone(),
+                FlowId::from("two_step"),
+                super::terminalization::TerminalizationTarget::Failed {
+                    cause: super::terminalization::FlowFailureCause::from_step_error(
+                        &MobError::FlowTurnTimedOut
+                    ),
+                },
+                crate::run::MobMachineFlowRunCommand::TerminalizeFailed(
+                    crate::run::flow_run::inputs::TerminalizeFailed {}
+                ),
+                "test_failure_after_cancel",
+            )
+            .await
+            .expect("failure cannot replace an already canceled run"),
+        super::terminalization::TerminalizationOutcome::Noop
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if handle
+                .debug_flow_tracker_counts()
+                .await
+                .expect("actor remains responsive")
+                == (0, 0)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancel trackers drain");
+    let retained = handle
+        .flow_status(run_id.clone())
+        .await
+        .expect("retained status")
+        .expect("run exists");
+    assert_eq!(retained.status, MobRunStatus::Canceled);
+    let final_events = handle.events().replay_all().await.expect("final events");
+    let terminal_carriers: Vec<_> = final_events
+        .iter()
+        .filter(|event| terminal_event_identity(&event.kind).is_some_and(|(id, _)| id == &run_id))
+        .map(|event| serde_json::to_value(event).expect("encode terminal carrier"))
+        .collect();
+    assert_eq!(terminal_carriers, vec![original_carrier]);
+    handle.shutdown().await.expect("shutdown mob");
 }
 
 #[tokio::test]

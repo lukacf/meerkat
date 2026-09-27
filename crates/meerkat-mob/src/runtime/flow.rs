@@ -2075,12 +2075,7 @@ impl FlowEngine {
         let authority_input = input.authority_input(&run_id);
         for attempt in 0..5u32 {
             let run = self.run_snapshot(&run_id).await?;
-            if mob_machine_run_status_is_terminal(&run_id, &run.status)?
-                && !matches!(
-                    (&target, &run.status),
-                    (TerminalizationTarget::Canceled { .. }, MobRunStatus::Failed)
-                )
-            {
+            if mob_machine_run_status_is_terminal(&run_id, &run.status)? {
                 return self
                     .repair_persisted_terminalization(run_id, flow_id, target)
                     .await;

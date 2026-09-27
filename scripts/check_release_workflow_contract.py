@@ -154,9 +154,13 @@ class Step:
     @property
     def env(self) -> dict[str, str]:
         """The step's `env:` mapping, values unquoted."""
+        return self.nested("env")
+
+    def nested(self, name: str) -> dict[str, str]:
+        """The step's `<name>:` mapping (`env`, `with`), values unquoted."""
         for index, line in enumerate(self.lines):
             match = KEY_LINE.match(line)
-            if match and len(match.group(1)) == 8 and match.group(2) == "env":
+            if match and len(match.group(1)) == 8 and match.group(2) == name:
                 nested: list[str] = []
                 for candidate in self.lines[index + 1 :]:
                     if candidate.strip() and _indent(candidate) <= 8:
@@ -545,24 +549,31 @@ def check_semver_evidence(text: str) -> list[str]:
     return violations
 
 
-# The version the binding scenarios run against, and a tag that is not it.
+# The version the binding scenarios run against.
 BINDING_VERSION = "0.0.0"
+CHECKOUT_ACTION = "actions/checkout"
 
 
-def _run_binding_step(step: Step, context: EventContext, tags: tuple[str, ...]) -> int:
+def _run_binding_step(
+    step: Step,
+    context: EventContext,
+    tags: tuple[str, ...],
+    checkout_ref: str | None,
+) -> int:
     """Run the step's script as the runner would, in a scratch checkout.
 
-    The checkout's Cargo.toml carries BINDING_VERSION, HEAD is its only
-    commit, and `tags` point at HEAD. Every `${{ }}` in the step's env and
-    run must evaluate under `context`; one that does not raises
-    UnsupportedExpression, so the check fails closed.
+    The repository has two commits: the release commit, which every tag in
+    `tags` points at, and a later commit, which every branch points at. HEAD
+    is what the job's checkout step selects for `context` (`checkout_ref`,
+    rendered from its `with.ref`); `None` puts HEAD on the later commit, a
+    checkout that did not land on the tag. A ref that does not resolve fails
+    the checkout, which refuses the run as the runner would. Every `${{ }}`
+    in the step's env and run must evaluate under `context`; one that does
+    not raises UnsupportedExpression, so the check fails closed.
     """
     env = {key: render_strict(value, context) for key, value in step.env.items()}
     script = render_strict(step.run, context)
     with tempfile.TemporaryDirectory(prefix="release-binding-") as checkout:
-        Path(checkout, "Cargo.toml").write_text(
-            f'[workspace.package]\nversion = "{BINDING_VERSION}"\n', encoding="utf-8"
-        )
         git_env = {
             "PATH": os.environ.get("PATH", ""),
             "HOME": checkout,
@@ -571,13 +582,34 @@ def _run_binding_step(step: Step, context: EventContext, tags: tuple[str, ...]) 
             "GIT_COMMITTER_NAME": "binding",
             "GIT_COMMITTER_EMAIL": "binding@example.invalid",
         }
-        for command in (
-            ["git", "init", "-q"],
-            ["git", "-c", "commit.gpgsign=false", "add", "Cargo.toml"],
-            ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "release"],
-            *(["git", "-c", "tag.gpgsign=false", "tag", tag] for tag in tags),
-        ):
-            subprocess.run(command, cwd=checkout, env=git_env, check=True, capture_output=True)
+
+        def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *args],
+                cwd=checkout,
+                env=git_env,
+                check=check,
+                capture_output=True,
+                text=True,
+            )
+
+        cargo = Path(checkout, "Cargo.toml")
+        cargo.write_text(f'[workspace.package]\nversion = "{BINDING_VERSION}"\n', encoding="utf-8")
+        git("init", "-q", "-b", "binding-base")
+        git("add", "Cargo.toml")
+        git("commit", "-q", "-m", "release")
+        for tag in tags:
+            git("tag", tag)
+        cargo.write_text(
+            f'[workspace.package]\nversion = "{BINDING_VERSION}"\n# later\n', encoding="utf-8"
+        )
+        git("commit", "-q", "-am", "later")
+        for context_ref in (context.ref,):
+            if context_ref.startswith("refs/heads/"):
+                git("branch", "-f", context_ref[len("refs/heads/") :], "HEAD")
+        if checkout_ref is not None:
+            if git("checkout", "-q", "--detach", checkout_ref, check=False).returncode != 0:
+                return 1
         result = subprocess.run(
             ["bash", "-c", script],
             cwd=checkout,
@@ -596,46 +628,101 @@ def _run_binding_step(step: Step, context: EventContext, tags: tuple[str, ...]) 
 
 
 def check_dispatch_binding(text: str) -> list[str]:
-    """Every publishing run is bound to its version's TAG.
+    """Every publishing run is bound to an allowed TAG of its version.
 
     `require_ci_green` gates everything that publishes. Its version step must
     run on a tag push, on a dispatch that names release_tag, and on every
     publishing dispatch that names none, and it must refuse unless the run is
-    bound to the tag `v<version>`: a tag push of exactly that ref, or a
-    release_tag that resolves to that tag. The step's script is executed
-    against scratch checkouts, so what is checked is what it does, not how
-    it is spelled; a branch named after the version must not pass.
+    bound to an allowed tag: `v<version>` in every mode, `alpha/v<version>`
+    only for the crates-only alpha canary. The step's script runs against
+    scratch checkouts in which HEAD is whatever the job's checkout step
+    selects, so what is checked is what the job does, not how it is spelled:
+    a branch named after the version, an alpha tag outside the alpha lane,
+    and a named tag that is not the checked-out commit must not pass.
     """
     block = job_block(text, CI_GREEN_JOB)
-    steps = [
-        step for step in job_steps(block) if step.fields.get("id") == RELEASE_VERSION_STEP_ID
-    ]
-    if len(steps) != 1:
+    steps = job_steps(block)
+    binding = [step for step in steps if step.fields.get("id") == RELEASE_VERSION_STEP_ID]
+    if len(binding) != 1:
         return [
-            f"job `{CI_GREEN_JOB}` has {len(steps)} steps with `id: {RELEASE_VERSION_STEP_ID}`; "
+            f"job `{CI_GREEN_JOB}` has {len(binding)} steps with `id: {RELEASE_VERSION_STEP_ID}`; "
             "exactly one must bind the release ref to the workspace version"
         ]
-    step = steps[0]
+    step = binding[0]
+    checkouts = [
+        candidate
+        for candidate in steps[: steps.index(step)]
+        if CHECKOUT_ACTION in candidate.fields.get("uses", "")
+    ]
+    if len(checkouts) != 1 or "ref" not in checkouts[0].nested("with"):
+        return [
+            f"job `{CI_GREEN_JOB}` must check out the release ref with exactly one "
+            f"`{CHECKOUT_ACTION}` step carrying `with.ref` before `{step.name}`"
+        ]
+    checkout_expression = checkouts[0].nested("with")["ref"]
+
+    def checkout_for(context: EventContext) -> str:
+        return render_strict(checkout_expression, context)
+
     tag = f"v{BINDING_VERSION}"
+    alpha_tag = f"alpha/{tag}"
+
+    def dispatch(label: str, ref: str, **inputs: str) -> EventContext:
+        return EventContext(label=label, event_name="workflow_dispatch", ref=ref, inputs=inputs)
+
     tag_push = EventContext(label=f"a {tag} tag push", event_name="push", ref=f"refs/tags/{tag}")
+    named_tag = dispatch(
+        f"a package dispatch naming release_tag {tag}",
+        "refs/heads/main",
+        release_tag=tag,
+        publish_release_packages="true",
+    )
+    alpha_on_tag = dispatch(
+        f"an alpha crate dispatch on the {alpha_tag} tag",
+        f"refs/tags/{alpha_tag}",
+        publish_release_packages="true",
+        alpha_crates_only="true",
+    )
+    alpha_named = dispatch(
+        f"an alpha crate dispatch naming release_tag {alpha_tag}",
+        "refs/heads/main",
+        release_tag=alpha_tag,
+        publish_release_packages="true",
+        alpha_crates_only="true",
+    )
+    alpha_without_lane = dispatch(
+        f"a package dispatch on the {alpha_tag} tag without alpha_crates_only",
+        f"refs/tags/{alpha_tag}",
+        publish_release_packages="true",
+    )
+    alpha_named_without_lane = dispatch(
+        f"a package dispatch naming release_tag {alpha_tag} without alpha_crates_only",
+        "refs/heads/main",
+        release_tag=alpha_tag,
+        publish_release_packages="true",
+    )
     other_tag_push = EventContext(
         label="a tag push of another version", event_name="push", ref="refs/tags/v9.9.9"
     )
-    named_tag = EventContext(
-        label=f"a package dispatch naming release_tag {tag}",
-        event_name="workflow_dispatch",
-        ref="refs/heads/main",
-        inputs={"release_tag": tag, "publish_release_packages": "true"},
-    )
-    must_accept = [(tag_push, (tag,)), (named_tag, (tag,))]
+    # (context, tags, head) where head None means "HEAD off the tag".
+    must_accept = [
+        (tag_push, (tag,), checkout_for(tag_push)),
+        (named_tag, (tag,), checkout_for(named_tag)),
+        (alpha_on_tag, (alpha_tag,), checkout_for(alpha_on_tag)),
+        (alpha_named, (alpha_tag,), checkout_for(alpha_named)),
+    ]
     must_refuse = [
-        (other_tag_push, ("v9.9.9",)),
+        (other_tag_push, ("v9.9.9",), checkout_for(other_tag_push), ""),
+        (alpha_without_lane, (alpha_tag,), checkout_for(alpha_without_lane), ""),
+        (alpha_named_without_lane, (alpha_tag,), checkout_for(alpha_named_without_lane), ""),
         # release_tag names the version but no such tag exists (a branch).
-        (named_tag, ()),
-        *((context, ()) for context in BRANCH_DISPATCHES),
+        (named_tag, (), None, " (no such tag exists)"),
+        # The tag exists but the checked-out commit is a later one.
+        (named_tag, (tag,), None, " (the tag is not the checked-out commit)"),
+        *((context, (), checkout_for(context), "") for context in BRANCH_DISPATCHES),
     ]
     violations: list[str] = []
-    for context, _tags in must_accept + must_refuse:
+    for context, *_ in must_accept + must_refuse:
         if not step_runs(step, context):
             violations.append(
                 f"step `{step.name}` does not run on {context.label}, so nothing binds "
@@ -643,15 +730,14 @@ def check_dispatch_binding(text: str) -> list[str]:
             )
     if violations:
         return violations
-    for context, tags in must_accept:
-        if _run_binding_step(step, context, tags) != 0:
+    for context, tags, head in must_accept:
+        if _run_binding_step(step, context, tags, head) != 0:
             violations.append(f"step `{step.name}` refuses {context.label}")
-    for context, tags in must_refuse:
-        if _run_binding_step(step, context, tags) == 0:
-            detail = " (no such tag exists)" if context is named_tag else ""
+    for context, tags, head, detail in must_refuse:
+        if _run_binding_step(step, context, tags, head) == 0:
             violations.append(
-                f"step `{step.name}` accepts {context.label}{detail}; only the "
-                f"{tag} tag may publish {BINDING_VERSION}"
+                f"step `{step.name}` accepts {context.label}{detail}; only an allowed tag "
+                f"({tag}, or {alpha_tag} in the alpha lane) may publish {BINDING_VERSION}"
             )
     return violations
 

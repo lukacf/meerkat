@@ -51,9 +51,11 @@ them.
   longer uploads an attestation for such a post-release tree, because it is
   not evidence for the released version, and the release workflow's own
   measurement refuses one outright. Every publishing run of the release
-  workflow is also bound to the tag `v<version>`: either a tag push of exactly
-  that ref, or a `release_tag` that resolves to that tag and is the
-  checked-out commit. A branch is refused whatever its name. Before, a
+  workflow is also bound to an allowed tag of its version: `v<version>`, plus
+  `alpha/v<version>` for the crates-only alpha canary. It must be either a
+  tag push of exactly that ref, or a `release_tag` that resolves to that tag
+  and is the checked-out commit, or a dispatch on that tag ref. A branch is
+  refused whatever its name. Before, a
   dispatch from `main` with `publish_release_packages=true` and no
   `release_tag` skipped the ref check and could publish main's tip as
   whatever version `Cargo.toml` carried, and the check compared only a ref's

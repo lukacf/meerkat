@@ -95,12 +95,14 @@ the gate measures against the workspace version's own tag instead
 checks. Such a tree is not evidence for the released version: Release semver
 readiness measures it without uploading an attestation, and the release
 workflow's own measurement (`MEERKAT_SEMVER_REQUIRE_RELEASE_TREE=1`) refuses
-it outright. Separately, every publishing run is bound to the tag
-`v<version>`. That means a tag push of exactly `refs/tags/v<version>`, or a
-dispatch whose `release_tag` resolves to that tag and is the checked-out
-commit. `require_ci_green` refuses anything else, including a branch named
-after the version (such as `release/v<version>`), so a branch tip cannot
-publish under whatever version its `Cargo.toml` carries.
+it outright. Separately, every publishing run is bound to an allowed tag of
+its version: `v<version>` in every mode, and `alpha/v<version>` only for the
+crates-only alpha canary (`alpha_crates_only`). That means a tag push of
+exactly that ref, or a dispatch whose `release_tag` resolves to that tag and
+is the checked-out commit, or a dispatch on that tag ref. `require_ci_green`
+refuses anything else, including a branch named after the version (such as
+`release/v<version>`), so a branch tip cannot publish under whatever version
+its `Cargo.toml` carries.
 
 1. **Measured.** Every crate the release publishes was either rebuilt and
    compared, or proven identical to the baseline release. Only crates whose

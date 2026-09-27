@@ -186,6 +186,32 @@ elif name == "dispatch-branch-name":
     )
     if count != 1:
         raise SystemExit(f"fixture `{name}` expects one release-version script, found {count}")
+elif name == "dispatch-head-unchecked":
+    # Drop the guard that the named release_tag is the checked-out commit.
+    replace_once(
+        '            if [[ "$(git rev-parse HEAD)" != "${tag_commit}" ]]; then\n'
+        '              echo "The checked-out commit is not the ${RELEASE_TAG_INPUT} tag." >&2\n'
+        "              exit 1\n"
+        "            fi\n",
+        "",
+    )
+elif name == "dispatch-alpha-unscoped":
+    # Allow the alpha tag namespace outside the alpha crates-only lane.
+    replace_once(
+        '          if [[ "${ALPHA_CRATES_ONLY}" == "true" ]]; then\n'
+        '            allowed+=("alpha/${expected}")\n'
+        "          fi\n",
+        '          allowed+=("alpha/${expected}")\n',
+    )
+elif name == "dispatch-checkout-github-ref":
+    # require_ci_green checks out github.ref instead of the named release_tag.
+    job = text.index("  require_ci_green:\n")
+    needle = (
+        "          ref: ${{ github.event_name == 'workflow_dispatch' && "
+        "github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}\n"
+    )
+    at = text.index(needle, job)
+    text = text[:at] + "          ref: ${{ github.ref }}\n" + text[at + len(needle):]
 elif name == "dispatch-reflowed":
     # Equivalent: the same publishing modes, reordered onto one line.
     replace_once(
@@ -283,6 +309,15 @@ expect_fail_named slo-flag-removed "${TEST_ROOT}/slo-flag-removed.yml" \
 mutate dispatch-unbound "${TEST_ROOT}/dispatch-unbound.yml"
 expect_fail_named dispatch-unbound "${TEST_ROOT}/dispatch-unbound.yml" \
   "does not run on a package dispatch from refs/heads/main without release_tag" dispatch-binding
+mutate dispatch-head-unchecked "${TEST_ROOT}/dispatch-head-unchecked.yml"
+expect_fail_named dispatch-head-unchecked "${TEST_ROOT}/dispatch-head-unchecked.yml" \
+  "(the tag is not the checked-out commit)" dispatch-binding
+mutate dispatch-alpha-unscoped "${TEST_ROOT}/dispatch-alpha-unscoped.yml"
+expect_fail_named dispatch-alpha-unscoped "${TEST_ROOT}/dispatch-alpha-unscoped.yml" \
+  "accepts a package dispatch on the alpha/v0.0.0 tag without alpha_crates_only" dispatch-binding
+mutate dispatch-checkout-github-ref "${TEST_ROOT}/dispatch-checkout-github-ref.yml"
+expect_fail_named dispatch-checkout-github-ref "${TEST_ROOT}/dispatch-checkout-github-ref.yml" \
+  "refuses a package dispatch naming release_tag v0.0.0" dispatch-binding
 mutate dispatch-branch-name "${TEST_ROOT}/dispatch-branch-name.yml"
 expect_fail_named dispatch-branch-name "${TEST_ROOT}/dispatch-branch-name.yml" \
   "accepts a package dispatch from refs/heads/release/v0.0.0 without release_tag" dispatch-binding

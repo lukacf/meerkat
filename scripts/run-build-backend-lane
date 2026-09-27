@@ -125,6 +125,23 @@ prebuild_e2e_system_other_tests() {
     --no-run
 }
 
+prebuild_e2e_system_bins() {
+  # The system suites build these binaries as pre-commands INSIDE their
+  # per-command behaviour timeouts (the Lane::System `pre_commands` in
+  # tests/integration/src/e2e_lanes.rs; keep this list in step with them).
+  # On a cold 4-vCPU hosted runner the first build of a variant outlasted
+  # the timeout itself: nightly 36275543570 lost cli-mob-run-custody to
+  # `rkat --features integration-real-tests,mob` at 900 s and
+  # sqlite-shared-realm-cli-rest-cli to `rkat-rest` at 600 s. Built here with
+  # the scenarios' own command lines (and the CARGO_INCREMENTAL=0 the lane
+  # exports), each in-suite build only uplifts cached artifacts, and the
+  # timeouts measure the behaviour they were written for.
+  "${cargo_bin}" build -p rkat --bin rkat --features integration-real-tests,mob
+  "${cargo_bin}" build -p rkat --bin rkat
+  "${cargo_bin}" build -p meerkat-rpc --bin rkat-rpc
+  "${cargo_bin}" build -p meerkat-rest --bin rkat-rest
+}
+
 prebuild_e2e_system_harness() {
   # Build the harness before the nested rkat graphs. Compiling the harness
   # unifies test-support features across its dependency graph; doing that after
@@ -210,6 +227,7 @@ case "${lane}" in
     prebuild_e2e_system_harness
     prebuild_e2e_system_other_tests
     prebuild_e2e_system_rkat_tests
+    prebuild_e2e_system_bins
     exec "${cargo_bin}" e2e-system
     ;;
   e2e-live)

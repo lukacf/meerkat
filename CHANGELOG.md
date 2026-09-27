@@ -37,6 +37,30 @@ them.
 
 ### Fixed
 
+- The semver-breaks gate measures notes pending under `## [Unreleased]` after
+  a release against that release's tag. With the workspace version still at
+  the just-tagged 0.8.44 and crates.io not yet caught up, it measured 0.8.44
+  against 0.8.43 and demanded the 66 breaks the stamped 0.8.44 section already
+  declared again under `## [Unreleased]`. That failed Release semver readiness
+  for every tree with post-release notes (#1208's first run), and `make
+  release-preflight` could never pass once crates.io had published the
+  workspace version. Now, when the pending notes follow the stamped workspace
+  version and HEAD has moved past its tag, that tag is the baseline. The
+  release tree itself, the tagged commit, and trees whose bump landed without
+  stamped notes keep the published baseline. Release semver readiness no
+  longer uploads an attestation for such a post-release tree, because it is
+  not evidence for the released version, and the release workflow's own
+  measurement refuses one outright. Every publishing run of the release
+  workflow is also bound to an allowed tag of its version: `v<version>`, plus
+  `alpha/v<version>` for the crates-only alpha canary. It must be either a
+  tag push of exactly that ref, or a `release_tag` that resolves to that tag
+  and is the checked-out commit, or a dispatch on that tag ref. A branch is
+  refused whatever its name. Before, a
+  dispatch from `main` with `publish_release_packages=true` and no
+  `release_tag` skipped the ref check and could publish main's tip as
+  whatever version `Cargo.toml` carried, and the check compared only a ref's
+  last path segment.
+
 - `@rkat/web` ships its runtime with the 8 MiB wasm stack it was built to
   have. Every published package from 0.8.30 through 0.8.44 linked the 1 MiB
   default and failed its first turn with `RuntimeError: memory access out of

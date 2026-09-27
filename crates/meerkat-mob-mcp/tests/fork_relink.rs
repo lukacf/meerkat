@@ -212,6 +212,270 @@ async fn relink_delivers_a_finished_childs_result_exactly_once() {
     fixture.teardown().await;
 }
 
+/// The compactor's summary of a compacted child.
+const COMPACTION_SUMMARY: &str = "COMPACTED-HANDOFF-SUMMARY-7Q";
+/// Prompts of the forker's own turns before the fork.
+const WARMUP_PROMPT: &str = "forker warm-up turn";
+
+/// The child's job turn compacted its transcript (a tool round trip, then
+/// compaction before the next provider call), so the transcript no longer
+/// holds the fork prefix the job record indexes from. The re-link still
+/// delivers the child's real reply, read from the runtime's durable
+/// completion receipt for the job turn, with the turn's usage and counts.
+#[tokio::test]
+async fn relink_delivers_the_reply_of_a_child_whose_turn_compacted() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let compactions = Arc::new(AtomicUsize::new(0));
+    let tool_called = Arc::new(AtomicBool::new(false));
+    let (seen_compactions, seen_tool_call) = (Arc::clone(&compactions), Arc::clone(&tool_called));
+    // The forker's warm-up turns reply plainly. The child's first provider
+    // call requests a tool and its next one replies; the compactor's summary
+    // request (whose prompt is the request's last user text) is answered
+    // with a summary.
+    let fixture = CouncilFixture::new(move |request| {
+        let last_user = support::last_user_text(request);
+        if last_user.contains("CONTEXT COMPACTION") {
+            seen_compactions.fetch_add(1, Ordering::SeqCst);
+            ScriptedTurn::Text(COMPACTION_SUMMARY.to_string())
+        } else if last_user.contains(WARMUP_PROMPT) {
+            ScriptedTurn::Text("warm-up reply".to_string())
+        } else if !seen_tool_call.swap(true, Ordering::SeqCst) {
+            ScriptedTurn::ToolCall {
+                id: "toolu_relink_compaction".to_string(),
+                name: "peers".to_string(),
+                args: serde_json::json!({}),
+            }
+        } else {
+            ScriptedTurn::Text(CHILD_REPLY.to_string())
+        }
+    });
+    let mob_id = fixture.source_mob_id();
+    let mut definition = support::council_definition(mob_id.as_str());
+    let mut compacting = support::participant_profile("compacting fork child");
+    compacting.auto_compact_threshold = std::num::NonZeroU64::new(1);
+    definition.profiles.insert(
+        ProfileName::from("compacting"),
+        meerkat_mob::ProfileBinding::Inline(Box::new(compacting)),
+    );
+    fixture.seed_source_mob_from(definition, &["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture.state.handle_for(&mob_id).await.unwrap();
+    // The forker's own history is the child's fork prefix.
+    for turn in 0..4 {
+        drive_turn(&handle, "forker", &format!("{WARMUP_PROMPT} {turn}")).await;
+    }
+    let job_id = "job-compacted-before-restart".to_string();
+    let mut spec = child_spec("compacted-child");
+    spec.role_name = ProfileName::from("compacting");
+
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            spec,
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    // No custodian: the process died right after the child finished.
+    let Some(ForkChildRunOutcome::Completed(turn)) = run.outcome().await else {
+        panic!("the child's job turn completed");
+    };
+    assert_eq!(turn.result().result().text(), CHILD_REPLY);
+    assert_eq!(turn.result().tool_calls(), 1, "one tool round trip");
+    assert!(tool_called.load(Ordering::SeqCst));
+    assert!(
+        compactions.load(Ordering::SeqCst) >= 1,
+        "the child's job turn compacted its transcript"
+    );
+
+    // The scenario the fix is for: the compacted transcript no longer holds
+    // the reply where the record's fork prefix says the job's exchange
+    // starts.
+    let child = AgentIdentity::from("compacted-child");
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    assert!(
+        job.turn_delivery.is_some(),
+        "a runtime-backed host records the turn's delivery identity"
+    );
+    let child_session = handle
+        .resolve_bridge_session_id(&child)
+        .await
+        .expect("child session");
+    let transcript = <meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session(
+        fixture.service.as_ref(),
+        &child_session,
+    )
+    .await
+    .unwrap()
+    .expect("child session exists");
+    let from_prefix = job
+        .durable_terminal_result(&transcript)
+        .expect("bounded")
+        .map(|result| result.text().to_string());
+    assert_ne!(
+        from_prefix.as_deref(),
+        Some(CHILD_REPLY),
+        "compaction left the fork prefix intact (prefix {} of {} messages), so this \
+         scenario does not exercise the receipt read",
+        job.prefix_message_count,
+        transcript.messages().len()
+    );
+
+    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new(
+        fixture.service.clone(),
+        meerkat_mob::MobControlPrincipal::Owner,
+    ));
+    restarted
+        .mob_insert_handle(mob_id.clone(), handle.clone())
+        .await;
+    await_completion_record(&fixture, &owner, &job_id).await;
+    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
+    let outcome = completion_record_outcome(&fixture, &owner, &job_id).await;
+    assert_eq!(outcome["status"], "completed", "{outcome}");
+    assert_eq!(outcome["bounded_result"]["text"], CHILD_REPLY, "{outcome}");
+    // The receipt carries the same turn result the live custodian reports.
+    assert_eq!(outcome["turns"], turn.result().turns(), "{outcome}");
+    assert_eq!(
+        outcome["tool_calls"],
+        turn.result().tool_calls(),
+        "{outcome}"
+    );
+    assert_eq!(
+        outcome["usage"],
+        serde_json::to_value(turn.result().usage()).unwrap(),
+        "{outcome}"
+    );
+    fixture.teardown().await;
+}
+
+/// The outcome JSON job `job_id`'s completion record in `session` carries.
+async fn completion_record_outcome(
+    fixture: &CouncilFixture,
+    session: &meerkat_core::SessionId,
+    job_id: &str,
+) -> serde_json::Value {
+    let persisted = <meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session(
+        fixture.service.as_ref(),
+        session,
+    )
+    .await
+    .expect("load forker session")
+    .expect("forker session exists");
+    let detail = persisted
+        .messages()
+        .iter()
+        .filter(|message| is_completion_record(message, job_id))
+        .find_map(|message| match message {
+            meerkat_core::Message::SystemNotice(notice) => {
+                notice.blocks.iter().find_map(|block| match block {
+                    meerkat_core::types::SystemNoticeBlock::BackgroundJob { detail, .. } => {
+                        detail.clone()
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("the completion record carries its outcome");
+    serde_json::from_str(&detail).expect("the outcome is JSON")
+}
+
+/// A record written before the job turn's delivery identity was recorded
+/// (`turn_delivery` absent) still has its finished child's reply delivered,
+/// read from the child's transcript after the fork prefix.
+#[tokio::test]
+async fn relink_of_a_record_without_a_turn_delivery_reads_the_transcript() {
+    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-recorded-before-turn-delivery".to_string();
+    let child = AgentIdentity::from("legacy-record-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec(child.as_str()),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    assert!(matches!(
+        run.outcome().await,
+        Some(ForkChildRunOutcome::Completed(_))
+    ));
+    let mut job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    assert!(job.turn_delivery.is_some());
+    // The record as an older host wrote it.
+    job.turn_delivery = None;
+
+    let action = meerkat_mob_mcp::fork_relink::relink_child(
+        fixture.state.session_service(),
+        &relink_delivery(&fixture),
+        &fixture.source_mob_id(),
+        &handle,
+        &child,
+        &job,
+    )
+    .await;
+    assert_eq!(action, ForkRelinkAction::Delivered);
+    await_completion_record(&fixture, &owner, &job_id).await;
+    let outcome = completion_record_outcome(&fixture, &owner, &job_id).await;
+    assert_eq!(outcome["status"], "completed", "{outcome}");
+    assert_eq!(outcome["bounded_result"]["text"], CHILD_REPLY, "{outcome}");
+    fixture.teardown().await;
+}
+
+/// Run one exact turn of `member` with `prompt`.
+async fn drive_turn(handle: &meerkat_mob::MobHandle, member: &str, prompt: &str) {
+    let spec = meerkat_mob::BoundedResultSpec::new("warm-up", 4096).expect("bounded result spec");
+    let work = handle
+        .start_work_for_identity_bounded(
+            AgentIdentity::from(member),
+            meerkat_mob::WorkSpec::new(
+                meerkat_core::types::ContentInput::Text(prompt.to_string()),
+                meerkat_mob::WorkOrigin::Internal,
+            ),
+            meerkat_core::types::HandlingMode::Queue,
+            spec.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("start a turn for {member}: {error}"));
+    tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+        .await
+        .expect("the turn finished in time")
+        .unwrap_or_else(|error| panic!("turn for {member} failed: {error:?}"));
+}
+
 /// A child still running when the re-link reaches it keeps its opt-in
 /// max_run, measured from the ORIGINAL start: the re-link waits for the run,
 /// and the limit winning cancels and retires the child and delivers

@@ -10,7 +10,9 @@
 //!   later work that is not this job's; except a job that ended by its limit
 //!   (its committed record is `max_run_elapsed`), whose child is retired if a
 //!   crash or failure left it seated;
-//! - already finished (its reply to the job is in its durable transcript):
+//! - already finished (its reply to the job is durable: the runtime's
+//!   completion receipt for the job turn's input, or, for a record without a
+//!   turn delivery identity, the child's transcript after the fork prefix):
 //!   delivers that result, however late the restart landed, and leaves the
 //!   child seated; the opt-in `max_run` limit only bounds a run still going;
 //! - still running: waits for the run to end, racing the opt-in `max_run`
@@ -18,7 +20,7 @@
 //!   the limit wins, the run is cancelled and `max_run_elapsed` delivered,
 //!   and the child (with its descendants) is retired only once that outcome
 //!   is settled, so a delivery that must wait keeps the job on record;
-//! - idle with its own reply after the fork prefix: delivers that result;
+//! - idle with its durable reply: delivers that result;
 //! - idle without one (the turn did not survive the restart): delivers a
 //!   `restart_interrupted` outcome and leaves the child seated for its forker.
 //!
@@ -624,7 +626,7 @@ async fn relink_owned_child(
             }
             ChildObservation::Unobserved(detail) => {
                 // The read says nothing about the child's state. A child
-                // that finished meanwhile shows in its durable transcript;
+                // that finished meanwhile has a durable reply;
                 // otherwise read again.
                 if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await
                 {
@@ -760,8 +762,14 @@ fn from_runtime(
     }
 }
 
-/// The child's reply to the job, when its durable transcript already holds
-/// it, as a `completed` outcome. The child stays seated.
+/// The child's completed reply to the job, once it is durable, as a
+/// `completed` outcome. The child stays seated.
+///
+/// A job whose turn was admitted under a stable delivery identity is read
+/// from the runtime's durable completion receipt for that input, which
+/// compacting the child's transcript cannot move. A record without one (a
+/// host without a runtime, or a record written before the field existed)
+/// falls back to the child's transcript after the fork prefix.
 async fn durable_reply(
     service: &Arc<dyn meerkat_mob::MobSessionService>,
     mob_id: &MobId,
@@ -769,20 +777,76 @@ async fn durable_reply(
     child: &AgentIdentity,
     job: &ForkJobRecord,
 ) -> Option<ForkOffCompletion> {
-    let session_id = handle.resolve_bridge_session_id(child).await?;
-    let session = service
-        .load_persisted_session(&session_id)
-        .await
-        .ok()
-        .flatten()?;
-    let result = job.durable_terminal_result(&session).ok().flatten()?;
     let mut completion = ForkOffCompletion::empty(
         child.to_string(),
         member_ref(mob_id, child),
         ForkOffCompletionStatus::Completed,
     );
-    completion.bounded_result = Some(result.to_wire());
+    match &job.turn_delivery {
+        Some(delivery) => {
+            let turn = receipt_reply(handle, child, job, delivery).await?;
+            completion.record_completed_turn(&turn);
+        }
+        None => {
+            let session_id = handle.resolve_bridge_session_id(child).await?;
+            let session = service
+                .load_persisted_session(&session_id)
+                .await
+                .ok()
+                .flatten()?;
+            let result = job.durable_terminal_result(&session).ok().flatten()?;
+            completion.bounded_result = Some(result.to_wire());
+        }
+    }
     Some(completion)
+}
+
+/// The job turn's completed result from the runtime's durable completion
+/// receipt. `None` while the input has no receipt (still in flight, or never
+/// admitted), when the turn ended without a result, and when the receipt
+/// cannot be read on this host.
+async fn receipt_reply(
+    handle: &MobHandle,
+    child: &AgentIdentity,
+    job: &ForkJobRecord,
+    delivery: &meerkat_mob::store::MobDeliveryIdentity,
+) -> Option<meerkat_mob::BoundedTurnResult> {
+    let spec = match meerkat_mob::BoundedResultSpec::new(
+        job.result_label.clone(),
+        job.max_text_bytes,
+    ) {
+        Ok(spec) => spec,
+        Err(error) => {
+            tracing::debug!(child = %child, error = %error, "fork_off re-link: the job's result bounds are invalid");
+            return None;
+        }
+    };
+    let recovery = match handle
+        .recover_bounded_work_for_identity_with_delivery_identity(child, delivery, &spec)
+        .await
+    {
+        Ok(recovery) => recovery,
+        Err(error) => {
+            tracing::debug!(child = %child, error = %error, "fork_off re-link could not read the job turn's receipt");
+            return None;
+        }
+    };
+    let (_member, work) = recovery.into_parts();
+    match work {
+        meerkat_mob::DurableBoundedWorkState::Terminal {
+            result: Ok(turn), ..
+        } => Some(turn),
+        meerkat_mob::DurableBoundedWorkState::Broken { input_id, reason } => {
+            tracing::debug!(
+                child = %child,
+                input_id = ?input_id,
+                reason = %reason,
+                "fork_off re-link: the job turn's receipt is unreadable"
+            );
+            None
+        }
+        _ => None,
+    }
 }
 
 /// The opt-in limit won: cancel the child's run and deliver
@@ -823,7 +887,7 @@ async fn limit_elapsed(
     action
 }
 
-/// The outcome of an idle child: its own reply after the fork prefix, or
+/// The outcome of an idle child: its durable reply, or
 /// `restart_interrupted` when the turn left none.
 async fn settled_outcome(
     service: &Arc<dyn meerkat_mob::MobSessionService>,

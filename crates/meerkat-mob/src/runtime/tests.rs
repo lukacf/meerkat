@@ -22150,6 +22150,39 @@ async fn a_detached_fork_dropped_mid_spawn_leaves_no_child_seated() {
     );
 }
 
+/// A fork job record written before `turn_delivery` existed reads back
+/// without one (its result falls back to the transcript), a record without
+/// one writes no field, and a recorded identity round-trips exactly.
+#[test]
+fn a_fork_job_record_without_a_turn_delivery_is_read_as_absent() {
+    let owner = SessionId::new();
+    let legacy = serde_json::json!({
+        "job_id": "job-legacy",
+        "owner_session_id": owner,
+        "started_at_ms": 7,
+        "prefix_message_count": 3,
+        "result_label": "fork_off_result",
+        "max_text_bytes": 4096,
+    });
+    let record: ForkJobRecord =
+        serde_json::from_value(legacy.clone()).expect("a pre-turn_delivery record reads back");
+    assert_eq!(record.turn_delivery, None);
+    assert_eq!(serde_json::to_value(&record).unwrap(), legacy);
+
+    let delivery = crate::store::MobDeliveryIdentity::new(
+        "fork_off_job_turn:5f0c2b1e-8f5a-4a57-9a55-2f1c7a0e9b3d",
+        "5f0c2b1e-8f5a-4a57-9a55-2f1c7a0e9b3d",
+    )
+    .expect("canonical delivery identity");
+    let recorded = ForkJobRecord {
+        turn_delivery: Some(delivery),
+        ..record
+    };
+    let round_trip: ForkJobRecord =
+        serde_json::from_value(serde_json::to_value(&recorded).unwrap()).unwrap();
+    assert_eq!(round_trip, recorded);
+}
+
 /// The job record's terminal reply read from a fork child's durable
 /// transcript, around the durable completion record of the child's own
 /// detached job (a nested fork): a record admitted after the child replied
@@ -22206,6 +22239,7 @@ fn a_fork_jobs_durable_reply_skips_nested_job_completion_records() {
         prefix_message_count: prefix.len(),
         result_label: "fork_off_result".to_string(),
         max_text_bytes: 4096,
+        turn_delivery: None,
     };
     let reply_of = |own_exchange: Vec<Message>| {
         let mut session = meerkat_core::Session::new();

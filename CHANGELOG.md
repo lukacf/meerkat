@@ -35,7 +35,28 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_mob::ForkJobRecord` gains the public field
+  `turn_delivery: Option<meerkat_mob::store::MobDeliveryIdentity>`. Struct
+  literals must supply it (`None` keeps the transcript read). It is
+  serde-defaulted and omitted when absent, so job records written by earlier
+  releases read back unchanged.
+
 ### Fixed
+
+- A fork_off child whose transcript was compacted during its job is
+  delivered its real reply when a restarted host re-links it, not
+  `restart_interrupted`. The re-link located the child's reply at the fork
+  prefix length recorded in its `ForkJobRecord`, and compaction rewrites the
+  transcript that index points into. On a runtime-backed host the job turn is
+  now admitted under a stable delivery identity recorded in the job record
+  (`ForkJobRecord::turn_delivery`), and the re-link reads the turn's result
+  from the runtime's durable completion receipt for that input through
+  `MobHandle::recover_bounded_work_for_identity_with_delivery_identity`. The
+  delivered outcome also carries the turn's `usage`, `turns` and
+  `tool_calls`, as the live custodian reports them. Records without the field
+  (earlier releases, or hosts without a runtime) keep the transcript read.
 
 - `@rkat/web` ships its runtime with the 8 MiB wasm stack it was built to
   have. Every published package from 0.8.30 through 0.8.44 linked the 1 MiB

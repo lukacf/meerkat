@@ -411,13 +411,20 @@ rejects arguments it does not define, so a misspelled or invented field is an
 argument error instead of a silently ignored intent.
 
 **Across a restart.** A detached child carries a durable job record (job id,
-forker session, start time, opt-in limit, fork prefix length, and result bound)
-on its spawn event and roster entry. When a host restores its mobs, or inserts
-a restored mob handle as MobKit does, a one-time re-link pass settles every
-child whose job began in a previous process:
+forker session, start time, opt-in limit, fork prefix length, result bound,
+and, on a runtime-backed host, the stable delivery identity its job turn is
+admitted under) on its spawn event and roster entry. When a host restores its
+mobs, or inserts a restored mob handle as MobKit does, a one-time re-link pass
+settles every child whose job began in a previous process:
 
-- a child whose reply to the job is already in its durable transcript has that
-  reply delivered, however late the restart landed, and stays seated;
+- a child whose reply to the job is already durable has that reply delivered,
+  however late the restart landed, and stays seated. The reply is read from
+  the runtime's durable completion receipt for the job turn's input, so a
+  child whose transcript was compacted during the job is still delivered its
+  real reply, with the turn's `usage`, `turns` and `tool_calls`. A record
+  without a delivery identity (written by an earlier release, or on a host
+  without a runtime) reads the reply from the child's transcript after the
+  fork prefix instead;
 - a child still running is observed until its turn ends, with `max_run_secs`
   measured from the original start;
 - otherwise `restart_interrupted` is delivered and the child stays seated.

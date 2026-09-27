@@ -4388,6 +4388,16 @@ pub struct ForkJobRecord {
     pub prefix_message_count: usize,
     pub result_label: String,
     pub max_text_bytes: usize,
+    /// The stable delivery identity the child's job turn is admitted under,
+    /// minted with the record on a runtime-backed host. The job's result is
+    /// read from the runtime's durable completion receipt for that input
+    /// ([`MobHandle::recover_bounded_work_for_identity_with_delivery_identity`]),
+    /// which compacting the child's transcript cannot move. `None` on a host
+    /// without a runtime and in records written before this field existed;
+    /// those read the result from the transcript
+    /// ([`Self::durable_terminal_result`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_delivery: Option<crate::store::MobDeliveryIdentity>,
 }
 
 impl ForkJobRecord {
@@ -4404,6 +4414,12 @@ impl ForkJobRecord {
     /// runtime is doing now, which is what a restarted host needs before it
     /// decides a limit elapsed. `None` when the transcript holds no such
     /// reply (the turn is still running or did not survive).
+    ///
+    /// This is the fallback for a record without a
+    /// [`turn_delivery`](Self::turn_delivery). It locates the child's exchange
+    /// by `prefix_message_count`, which only holds while the transcript keeps
+    /// its fork prefix: after the child's transcript is compacted, the reply
+    /// can be missed or a different message read as it.
     pub fn durable_terminal_result(
         &self,
         session: &meerkat_core::Session,
@@ -13356,6 +13372,7 @@ impl MobHandle {
                 prefix_message_count: 0,
                 result_label: result_label.clone(),
                 max_text_bytes,
+                turn_delivery: self.fork_job_turn_delivery()?,
             });
         }
         let result_spec = BoundedResultSpec::new(result_label, max_text_bytes)?;
@@ -13435,16 +13452,35 @@ impl MobHandle {
         result_spec: BoundedResultSpec,
         max_run: Option<Duration>,
     ) -> Result<(ForkMemberResult, ForkChildRun), BoundedMemberRunError> {
+        let turn_delivery = member
+            .fork_job
+            .as_ref()
+            .and_then(|job| job.turn_delivery.clone());
         let fork = self.seat_forked_member(member, session_fork).await?;
-        let turn = match self
-            .start_work_for_identity_bounded(
-                fork.agent_identity.clone(),
-                Self::fork_child_work(task, objective_id),
-                HandlingMode::Queue,
-                result_spec.clone(),
-            )
-            .await
-        {
+        let work = Self::fork_child_work(task, objective_id);
+        let admitted = match turn_delivery {
+            // The job's durable result is read back through this identity.
+            Some(delivery) => {
+                self.start_work_for_identity_with_delivery_identity_bounded(
+                    fork.agent_identity.clone(),
+                    work,
+                    HandlingMode::Queue,
+                    delivery,
+                    result_spec.clone(),
+                )
+                .await
+            }
+            None => {
+                self.start_work_for_identity_bounded(
+                    fork.agent_identity.clone(),
+                    work,
+                    HandlingMode::Queue,
+                    result_spec.clone(),
+                )
+                .await
+            }
+        };
+        let turn = match admitted {
             Ok(turn) => turn,
             Err(error) => {
                 return Err(self
@@ -13500,6 +13536,26 @@ impl MobHandle {
         }
         .retire_child_if_abandoned();
         Ok((fork, run))
+    }
+
+    /// The stable delivery identity a fork job's turn is admitted under, on
+    /// a host whose runtime can realize one: the runtime keeps the durable
+    /// completion receipt of that input, which is where a restarted host
+    /// reads the job's result (see [`ForkJobRecord::turn_delivery`]). A host
+    /// without a runtime admits no stable input identity, so its record
+    /// carries none.
+    fn fork_job_turn_delivery(
+        &self,
+    ) -> Result<Option<crate::store::MobDeliveryIdentity>, MobError> {
+        #[cfg(feature = "runtime-adapter")]
+        if self.runtime_adapter.is_some() {
+            let correlation = uuid::Uuid::new_v4().to_string();
+            return Ok(Some(crate::store::MobDeliveryIdentity::new(
+                format!("fork_off_job_turn:{correlation}"),
+                correlation,
+            )?));
+        }
+        Ok(None)
     }
 
     fn fork_child_work(

@@ -34,6 +34,13 @@ use meerkat_mob_mcp::MobMcpState;
 
 /// What the scripted client should do for one turn.
 pub enum ScriptedTurn {
+    /// Request one call of tool `name` with `args`: the turn continues with
+    /// the tool's result and a further provider call.
+    ToolCall {
+        id: String,
+        name: String,
+        args: serde_json::Value,
+    },
     /// Emit this exact assistant text.
     Text(String),
     /// Fail the provider call, so the member turn fails terminally.
@@ -149,6 +156,26 @@ impl LlmClient for ScriptedCouncilClient {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let events = match (self.script)(request) {
+            ScriptedTurn::ToolCall { id, name, args } => vec![
+                LlmEvent::ToolCallComplete {
+                    id,
+                    name,
+                    args,
+                    meta: None,
+                },
+                LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                },
+                LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::ToolUse,
+                    },
+                },
+            ],
             ScriptedTurn::Text(text) => vec![
                 LlmEvent::TextDelta {
                     delta: text,
@@ -495,11 +522,18 @@ impl CouncilFixture {
     /// every fork taken from it.
     pub async fn seed_source_mob_with_description(&self, members: &[&str], description: &str) {
         let mob_id = self.source_mob_id();
+        self.seed_source_mob_from(
+            council_definition_with_description(mob_id.as_str(), description),
+            members,
+        )
+        .await;
+    }
+
+    /// [`Self::seed_source_mob`] from an explicit definition.
+    pub async fn seed_source_mob_from(&self, definition: MobDefinition, members: &[&str]) {
+        let mob_id = self.source_mob_id();
         self.state
-            .mob_create_definition(council_definition_with_description(
-                mob_id.as_str(),
-                description,
-            ))
+            .mob_create_definition(definition)
             .await
             .expect("create source mob");
         for member in members {

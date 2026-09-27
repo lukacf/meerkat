@@ -3210,6 +3210,17 @@ impl ForkOffCompletion {
         }
     }
 
+    /// Record the child's completed turn. One mapping for the live custodian
+    /// and the restart re-link, which reads the same result from the
+    /// runtime's durable completion receipt.
+    pub(crate) fn record_completed_turn(&mut self, turn: &meerkat_mob::BoundedTurnResult) {
+        self.status = ForkOffCompletionStatus::Completed;
+        self.bounded_result = Some(turn.result().to_wire());
+        self.usage = Some(turn.usage().clone());
+        self.turns = Some(turn.turns());
+        self.tool_calls = Some(turn.tool_calls());
+    }
+
     /// Returns the completion and whether it reports a failure.
     fn from_outcome(
         agent_identity: String,
@@ -3230,11 +3241,7 @@ impl ForkOffCompletion {
         };
         match outcome {
             Some(meerkat_mob::ForkChildRunOutcome::Completed(turn)) => {
-                completion.status = ForkOffCompletionStatus::Completed;
-                completion.bounded_result = Some(turn.result().result().to_wire());
-                completion.usage = Some(turn.result().usage().clone());
-                completion.turns = Some(turn.result().turns());
-                completion.tool_calls = Some(turn.result().tool_calls());
+                completion.record_completed_turn(turn.result());
             }
             Some(meerkat_mob::ForkChildRunOutcome::Failed(error)) => {
                 completion.status = ForkOffCompletionStatus::Failed;

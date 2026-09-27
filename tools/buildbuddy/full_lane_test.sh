@@ -345,10 +345,11 @@ cd "${work_root}"
 # from this variable instead of the crate directory Cargo runs them from.
 export MEERKAT_WORKSPACE_ROOT="${work_root}"
 
-# The browser contract exercises the runtime as @rkat/web ships it, linked
-# with an 8 MiB wasm stack (sdks/web/scripts/build-wasm.mjs). At the 1 MiB
-# default the unoptimized test build overflows the stack in its first turn
-# ("RuntimeError: memory access out of bounds").
+# The browser contract links the 8 MiB wasm stack sdks/web/scripts/build-wasm.mjs
+# asks for. At the 1 MiB default the unoptimized test build overflows the
+# stack in its first turn ("RuntimeError: memory access out of bounds").
+# Published @rkat/web up to 0.8.44 shipped 1 MiB (an ambient RUSTFLAGS dropped
+# the flag; #1211), so this does not yet match every release.
 WASM_STACK_LINK_ARG="link-arg=-zstack-size=8388608"
 
 append_wasm_stack_size() {

@@ -6714,6 +6714,17 @@ mod tests {
         {
             Ok(self.session.append_realtime_transcript_event(event))
         }
+
+        fn append_realtime_transcript_event_for_channel(
+            &mut self,
+            event: meerkat_core::RealtimeTranscriptEvent,
+            channel_id: meerkat_core::LiveChannelId,
+        ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, meerkat_core::AgentError>
+        {
+            Ok(self
+                .session
+                .append_realtime_transcript_event_for_channel(event, channel_id))
+        }
     }
 
     #[cfg(feature = "experimental-gpt-live-gate0-harness")]

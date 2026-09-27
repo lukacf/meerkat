@@ -37,6 +37,66 @@ them.
 
 ### Breaking
 
+- `meerkat_contracts::MobMemberStatusResult` gains the public field
+  `preview_unavailable: Option<WireMemberPreviewUnavailable>`; struct
+  literals must supply it. It is serde-defaulted and omitted when absent, so
+  released SDKs keep reading the payload unchanged.
+- `meerkat_mob::MobSessionService` gains the required trait method
+  `observe_member_status_view(&self, session_id: &SessionId) ->
+  Result<MemberStatusSessionView, SessionError>`, with no default body, so
+  every implementor must add it. Migration: a wrapper over a persistent
+  service (for example one delegating to `PersistentSessionService`) forwards
+  it to the inner service's `observe_member_status_view`; a service whose
+  sessions live in process memory, whose `SessionService::read` is its
+  published live state, calls
+  `meerkat_mob::observe_member_status_view_via_read(self, session_id)`.
+  There is deliberately no default: serving it from `SessionService::read` on
+  a wrapper over a persistent service waits on the member's running turn, so
+  every status read of a busy member would end at the observation deadline
+  with `preview_unavailable: observation_deadline` and hold a unit of the
+  mob's status capacity meanwhile, refusing every status read in the mob with
+  `observation_lane_saturated` once 16 members run turns.
+- Behavior-only: the model-facing `fork_off` results (`meerkat-mob-mcp`
+  `AgentMobToolSurface`, both the detached `status: "running"` result and the
+  blocking result) no longer carry `cache_inheritance`. Mob forks always
+  reported it `unavailable` (the child's cache identity is resolved after the
+  fork) and request building never reads it, but models and operators read it
+  as the child's prefix being re-billed. It stays on
+  `meerkat_mob::ForkMemberResult` and the SDK fork results for hosts; the
+  child's real cache cost is the `usage` in its `fork_off` completion.
+- Behavior-only: member status reads (`MobHandle::member_status` and every
+  surface over it, including `mob_check_member`) no longer refuse a read
+  because another read of the same mob is in flight. A second read of the
+  same member joins the read in flight and receives the same snapshot; reads
+  of different members run concurrently. A read is refused
+  (`LifecycleOperationAdmissionPending`, stage `observation_lane_saturated`)
+  only after waiting 2 s for the mob-wide capacity of 16 concurrent reads, so
+  its `deadline_reached: true` is now accurate.
+- Behavior-only: a member status read whose callers all go away no longer
+  cancels its session read. Dropping a read's future does not stop a durable
+  read running on a blocking thread, so the observation keeps the read, and
+  its unit of the mob-wide capacity, until it finishes, for at most a 30 s
+  drain ceiling; the same holds for a read still running at the 1 s
+  observation deadline, whose callers are answered with
+  `preview_unavailable: observation_deadline` meanwhile. A later read of the
+  same session waits (bounded by its own deadline) on the read still running
+  instead of starting a second one. A read still running at the ceiling is
+  orphaned: its capacity unit and per-session slot are released, it is logged
+  as a warning with its member and session, its future is dropped (a durable
+  read already on a blocking thread finishes there, unobserved), and the next
+  read of that member starts a fresh read. Until the ceiling, reads stalled
+  on 16 members (a hung durable store, such as an unresponsive network
+  filesystem) hold the whole capacity, so every other status read in the mob,
+  live members included, is refused with `observation_lane_saturated` after
+  its 2 s admission wait. Actor shutdown still aborts a draining read.
+- Behavior-only: `mob_check_member`'s `note` is chosen by the
+  `preview_unavailable` variant: `observation_deadline` and `read_failed` say
+  to check again later and that only `status` and `progress.run_state` are
+  current; `session_absent` says the member has no readable session and that
+  checking again will not bring the preview back; `not_observed_while_retiring`
+  says the retiring member's session was not read. While `progress.run_state`
+  is `run_open` the note keeps saying the turn is still running.
+
 - `meerkat_core::types::BlockAssistantMessage` (re-exported as
   `meerkat_core::BlockAssistantMessage` and `meerkat::BlockAssistantMessage`)
   gains the public field
@@ -162,6 +222,52 @@ them.
   need a wildcard arm and see the new variant there.
 
 ### Added
+
+- The `@rkat/web` packed-package smoke (`npm run test:packed`, which the
+  release package job and `make test-sdk-web` run) now measures the one
+  stubbed turn's wasm shadow-stack high-water and fails when it exceeds 2 MiB
+  (`sdks/web/scripts/wasm-stack-highwater.mjs`). It paints the idle stack
+  below the resting stack pointer before the turn and finds the deepest
+  overwritten byte after it, and logs the measurement on every run
+  (1,450,664 bytes on the current tree, against the 8 MiB stack the runtime
+  links). This is the web counterpart of the native worker-stack canaries: a
+  turn grew from 880 KB (0.8.36) to 1.3 MB (0.8.37) with nothing to catch
+  it.
+
+- `MobSessionService::observe_member_status_view` (required, see Breaking)
+  returns a `MemberStatusSessionView { last_assistant_text, total_tokens,
+  source }` with `MemberStatusViewSource::{LiveWatch, DurableHead, Absent}`:
+  the read-only preview and token count a status read reports. The
+  persistent service serves a live session from the actor's published
+  watches and any other session from the committed durable head; it never
+  waits on the member's session task, never writes, and never replays the
+  rewrite audit. The ephemeral service serves it from its in-memory `read`.
+  The RPC and CLI wrappers over the persistent service forward it.
+- `meerkat_mob::observe_member_status_view_via_read` serves
+  `observe_member_status_view` from `SessionService::read` (`LiveWatch`, or
+  `Absent` when the session is not found), for implementors whose sessions
+  live in process memory. It must not be used by a wrapper over a persistent
+  service.
+- `PersistentSessionService::observe_live_session_view` reads a live
+  session's view from its summary and state watches without a command to the
+  session task.
+- `MobMemberSnapshot::preview_unavailable` and the wire twin
+  `MobMemberStatusResult::preview_unavailable` carry a typed
+  `MemberPreviewUnavailable` / `WireMemberPreviewUnavailable`
+  (`observation_deadline`, `read_failed`, `session_absent`,
+  `not_observed_while_retiring`) whenever a status read did not observe the
+  member's session view, so a missing `output_preview` and a zero
+  `tokens_used` are never a silent zero. A retiring member's status, answered
+  from machine state without reading its session, carries
+  `not_observed_while_retiring` when the member is session-backed and local.
+  `mob_check_member` adds a plain-language note when it is set.
+- The Python, TypeScript and Web SDKs parse the marker on member status
+  (`mob_member_status` / `mobMemberStatus` / `Mob.memberStatus`) and on the
+  `wait_kickoff` / `wait_ready` members of the Python and TypeScript clients,
+  as `preview_unavailable` (Python, Web) / `previewUnavailable` (TypeScript),
+  typed as the generated `WireMemberPreviewUnavailable` (now exported from
+  each package root) and absent when unset. A value outside the closed
+  vocabulary fails closed with `INVALID_RESPONSE`.
 
 - Assistant message identity: every assistant message the agent loop commits
   carries a session-scoped `meerkat_core::types::AssistantMessageId`
@@ -303,6 +409,21 @@ them.
   (both enums are `#[non_exhaustive]`) type a terminal the machine reached
   through a transition that stages no terminal-completion receipt.
 
+### Changed
+
+- `MobHandle::wait_all` polls its members one after another from a single
+  loop instead of running one polling loop per member, and returns the first
+  failed poll instead of waiting for every other member first.
+- `MobHandle::bounded_terminal_member_result` retries a bracketing member
+  status read that did not observe the member's session view
+  (`preview_unavailable` set), up to 3 attempts, and leaves a read still
+  degraded after them out of its version comparison, instead of taking the
+  missing preview and zero tokens for a version change and reporting
+  `BoundedHelperResultUnavailable`.
+- The fork_off re-link pass backs off between status reads that did not
+  observe a child (250 ms doubling to 5 s, reset by an observed read) instead
+  of retrying every 100 ms.
+
 ### Fixed
 
 - The release doctor's dispatch-binding check covers three gaps a future
@@ -316,6 +437,41 @@ them.
   `refs/tags/`, so `refs/tags/alpha/v<version>` is `alpha/v<version>`, not
   its last path segment. Each gap has a doctor fixture that fails without
   the new scenario.
+
+- `mob_check_member` on an idle fork child no longer fails with
+  `observation_lane_saturated` while anything else reads a member's status.
+  Every mob had a single status permit taken with a fail-fast `try_acquire`
+  and held for the whole read, and a busy member's read held it through an
+  unbounded full durable load (rewrite-audit read and possible finalize
+  write included). A console progress sweep or an operator polling a busy
+  member kept it taken, so the forker's check of its own child was refused
+  whatever the child's state.
+- A member status read is bounded. It never queues behind the member's
+  running turn: the idle path used `SessionService::read`, which asks the
+  session task and waits for the whole turn when one starts between the busy
+  probe and the read. A failed execution snapshot is treated as unknown (the
+  run state comes from the runtime machine) instead of idle. The session
+  reads of one observation stop at a 1 s deadline and return the runtime run
+  state with the typed `observation_deadline` marker.
+- A live session resumed or forked into a new session actor reports its
+  committed transcript from the actor's birth: `SessionService::read`,
+  `list` and `PersistentSessionService::observe_live_session_view` gave
+  `message_count` 0, `total_tokens` 0 and no `last_assistant_text` until the
+  actor first published its summary (turn end, durable sync). A member status
+  read during the first turn after a resume (a deferred first turn) or of a
+  `fork_off` child's first turn therefore reported no preview and zero
+  tokens as observations. The summary watch is now seeded from the session
+  the actor is built from; its `updated_at` is still the actor's creation
+  time. The seed applies to every new live session actor, not only resumes
+  and forks: every new live session's summary counts its initial transcript
+  from the actor's birth, so `read` and `list` of a brand-new session report
+  its initial messages (at least the system prompt, so `message_count` is 1
+  or more) from creation instead of 0 until its first publish.
+- The member-status in-flight map no longer keeps an entry for an identity
+  whose observation every caller abandoned: the observation tells the actor
+  to forget it, and registering an observation prunes any closed entry, so
+  unique `fork_off` child identities read once do not accumulate in a
+  long-lived mob.
 
 - After a host restart, re-linking a `fork_off` child that was still running
   no longer reports `restart_interrupted` for a child that answered. Member
@@ -484,6 +640,13 @@ them.
   that starts with the executors, both lanes concurrently. The Native
   submitter keeps the Bazel-native all-features clippy lane, which reads the
   prebuild cache. The SLO stays 3000 seconds.
+
+- The Bazel `//crates/xtask:machines_contracts_test` target is sized
+  `large` (900s). Fresh remote runs took 264-274s of the 300s `medium`
+  budget and it timed out in the 2026-09-27 nightly's governance lane. A
+  release tag always runs it fresh, because the version bump changes every
+  crate's rustc_env, so the release run's full BuildBuddy validation could
+  fail on it.
 
 ## [0.8.44] - 2026-09-26
 

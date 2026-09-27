@@ -22,9 +22,11 @@
 //! - idle without one (the turn did not survive the restart): delivers a
 //!   `restart_interrupted` outcome and leaves the child seated for its forker.
 //!
-//! A status read that does not observe the child (the mob has one status
-//! observation lane, so another reader can hold it) says nothing about the
-//! child's state: the pass reads again, and never takes it for an idle child.
+//! A status read that does not observe the child (the mob's status
+//! observation capacity stayed full past its admission wait, the actor did
+//! not answer, or a read failed) says nothing about the child's state: the
+//! pass reads again after a growing pause, and never takes it for an idle
+//! child.
 //! A read whose run state is unknown (the member was busy and the status
 //! projection's bounded runtime read did not answer) is settled by reading
 //! the child's runtime state directly.
@@ -239,9 +241,37 @@ pub const COMMIT_PENDING_CEILING: Duration = Duration::from_secs(300);
 /// with a commit or with other work), not evidence of a pending commit.
 const RUN_INPUT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Pause before reading a child's status again after a read that did not
-/// observe it (another reader held the mob's status lane).
-const UNOBSERVED_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+/// First pause before reading a child's status again after a read that did
+/// not observe it. Each further unobserved read in a row doubles the pause, up
+/// to [`UNOBSERVED_RETRY_MAX_INTERVAL`]; an observed read resets it.
+const UNOBSERVED_RETRY_INITIAL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Longest pause between unobserved reads. An unobserved read already waited
+/// out the status lane's own admission bound, so retrying faster only adds
+/// load to a mob whose status capacity is saturated.
+const UNOBSERVED_RETRY_MAX_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Pause schedule between status reads that did not observe a child.
+#[derive(Debug, Default)]
+struct UnobservedBackoff {
+    consecutive: u32,
+}
+
+impl UnobservedBackoff {
+    /// The pause before the next read after one more unobserved read.
+    fn next_pause(&mut self) -> Duration {
+        let pause = UNOBSERVED_RETRY_INITIAL_INTERVAL
+            .saturating_mul(2_u32.saturating_pow(self.consecutive))
+            .min(UNOBSERVED_RETRY_MAX_INTERVAL);
+        self.consecutive = self.consecutive.saturating_add(1);
+        pause
+    }
+
+    /// An observed read restarts the schedule.
+    fn reset(&mut self) {
+        self.consecutive = 0;
+    }
+}
 
 /// Times the automatic pass waits for a deferred forker revival to clear and
 /// delivers again.
@@ -664,6 +694,7 @@ async fn relink_owned_child(
     let deadline_ms = job
         .max_run_ms
         .map(|limit| job.started_at_ms.saturating_add(limit));
+    let mut unobserved_backoff = UnobservedBackoff::default();
     let mut commit_watch = CommitWatch::new(commit_pending_ceiling);
     loop {
         // A limit already passed decides at once: the child's run is over
@@ -691,6 +722,9 @@ async fn relink_owned_child(
             // iteration decides it.
             continue;
         };
+        if !matches!(observed, ChildObservation::Unobserved(_)) {
+            unobserved_backoff.reset();
+        }
         let (evidence, detail) = match observed {
             ChildObservation::Running => {
                 commit_watch.progressed();
@@ -716,7 +750,7 @@ async fn relink_owned_child(
                     detail = %detail,
                     "fork_off re-link could not observe the child; reading again"
                 );
-                tokio::time::sleep(UNOBSERVED_RETRY_INTERVAL).await;
+                tokio::time::sleep(unobserved_backoff.next_pause()).await;
                 continue;
             }
             ChildObservation::CommitPending(evidence) => (Some(evidence), None),
@@ -830,8 +864,8 @@ enum ChildObservation {
     /// (nothing runs it any more).
     Settled,
     /// The read did not observe the child, so it says nothing about the
-    /// child's state: another reader held the mob's one status observation
-    /// lane, the actor did not answer in time, or a read failed.
+    /// child's state: the mob's status observation capacity stayed full past
+    /// its admission wait, the actor did not answer in time, or a read failed.
     Unobserved(String),
 }
 
@@ -1201,8 +1235,9 @@ async fn deliver(
 mod tests {
     use super::{
         ChildObservation, CommitEvidence, CommitWatch, CommitWatchStep, ForkRelinkAction,
-        ForkRelinkReport, MAX_OWNER_REVIVAL_WAITS, ProgressVerdict, commit_observation,
-        from_runtime, redeliver_each,
+        ForkRelinkReport, MAX_OWNER_REVIVAL_WAITS, ProgressVerdict,
+        UNOBSERVED_RETRY_INITIAL_INTERVAL, UNOBSERVED_RETRY_MAX_INTERVAL, UnobservedBackoff,
+        commit_observation, from_runtime, redeliver_each,
     };
     use crate::agent_tools::RestartInterruptedReason;
     use crate::detached_delivery::OwnerRevivalDeferral;
@@ -1301,6 +1336,34 @@ mod tests {
         assert_eq!(action("job-y"), Some(y_waits()), "Y spent its own budget");
         assert_eq!(x_retries.load(Ordering::SeqCst), 1, "X delivered once");
         assert_eq!(y_retries.load(Ordering::SeqCst), MAX_OWNER_REVIVAL_WAITS);
+    }
+
+    /// Unobserved reads back off: the pause doubles from the initial interval
+    /// up to the cap, and an observed read restarts it. A read that did not
+    /// observe the child already waited out the status lane's admission
+    /// bound, so a fixed short retry only loads a saturated mob.
+    #[test]
+    fn unobserved_reads_back_off_and_an_observed_read_resets_the_pause() {
+        let mut backoff = UnobservedBackoff::default();
+        let pauses: Vec<Duration> = (0..8).map(|_| backoff.next_pause()).collect();
+        assert_eq!(pauses[0], UNOBSERVED_RETRY_INITIAL_INTERVAL);
+        assert_eq!(pauses[1], UNOBSERVED_RETRY_INITIAL_INTERVAL * 2);
+        assert_eq!(pauses[2], UNOBSERVED_RETRY_INITIAL_INTERVAL * 4);
+        assert!(
+            pauses.windows(2).all(|pair| pair[0] <= pair[1]),
+            "the pause never shrinks while reads stay unobserved: {pauses:?}"
+        );
+        assert_eq!(pauses[7], UNOBSERVED_RETRY_MAX_INTERVAL);
+        assert!(
+            pauses
+                .iter()
+                .all(|pause| *pause <= UNOBSERVED_RETRY_MAX_INTERVAL)
+        );
+        for _ in 0..64 {
+            assert_eq!(backoff.next_pause(), UNOBSERVED_RETRY_MAX_INTERVAL);
+        }
+        backoff.reset();
+        assert_eq!(backoff.next_pause(), UNOBSERVED_RETRY_INITIAL_INTERVAL);
     }
 
     /// An unknown run state (the member was busy and the projection's

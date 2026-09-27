@@ -1673,6 +1673,51 @@ impl Drop for AtomicInFlightGuard<'_> {
     }
 }
 
+/// Session reads of one session: calls, reads in flight, and the most in
+/// flight at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SessionReadCounts {
+    calls: u64,
+    in_flight: u64,
+    max_in_flight: u64,
+}
+
+type SessionReadCountsBySession = std::sync::Mutex<HashMap<SessionId, SessionReadCounts>>;
+
+/// Counts one read of `session_id` in flight until dropped.
+struct SessionReadInFlightGuard<'a> {
+    reads: &'a SessionReadCountsBySession,
+    session_id: SessionId,
+}
+
+impl<'a> SessionReadInFlightGuard<'a> {
+    fn enter(reads: &'a SessionReadCountsBySession, session_id: &SessionId) -> Self {
+        let mut counts = reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = counts.entry(session_id.clone()).or_default();
+        entry.calls += 1;
+        entry.in_flight += 1;
+        entry.max_in_flight = entry.max_in_flight.max(entry.in_flight);
+        Self {
+            reads,
+            session_id: session_id.clone(),
+        }
+    }
+}
+
+impl Drop for SessionReadInFlightGuard<'_> {
+    fn drop(&mut self) {
+        let mut counts = self
+            .reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = counts.get_mut(&self.session_id) {
+            entry.in_flight = entry.in_flight.saturating_sub(1);
+        }
+    }
+}
+
 /// A mock session service that creates sessions with mock comms runtimes.
 /// Parks trusted-peer installs on one mock runtime behind a barrier.
 ///
@@ -1781,6 +1826,8 @@ struct MockSessionService {
     /// Records (session_id, prompt) for each create_session call.
     prompts: RwLock<Vec<(SessionId, String)>>,
     session_read_calls: AtomicU64,
+    session_read_in_flight: AtomicU64,
+    session_read_max_in_flight: AtomicU64,
     session_read_not_found_remaining: AtomicU64,
     resume_authority_absent_remaining: AtomicU64,
     create_requests: RwLock<Vec<CreateSessionRecord>>,
@@ -1906,6 +1953,17 @@ struct MockSessionService {
     flow_turn_max_in_flight: Arc<AtomicU64>,
     execution_snapshot_delay_ms: AtomicU64,
     execution_snapshot_started: tokio::sync::Notify,
+    /// Per-session status-path delays and faults, for tests that need one
+    /// member slow or failing while its siblings answer normally.
+    execution_snapshot_delays_for: std::sync::Mutex<HashMap<SessionId, Duration>>,
+    execution_snapshot_failures_for: std::sync::Mutex<HashSet<SessionId>>,
+    session_read_delays_for: std::sync::Mutex<HashMap<SessionId, Duration>>,
+    /// Per-session count of upcoming reads that fail with a store error.
+    session_read_failures_for: std::sync::Mutex<HashMap<SessionId, u64>>,
+    /// Per-session read counts, so a test can pin the reads of one member's
+    /// session while other sessions are read in the background.
+    session_reads_for: SessionReadCountsBySession,
+    load_persisted_session_delays_for: std::sync::Mutex<HashMap<SessionId, Duration>>,
     execution_snapshot_calls: AtomicU64,
     execution_snapshots: std::sync::Mutex<VecDeque<meerkat_core::agent::AgentExecutionSnapshot>>,
     session_read_barriers: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
@@ -1992,6 +2050,8 @@ impl MockSessionService {
             session_counter: AtomicU64::new(0),
             prompts: RwLock::new(Vec::new()),
             session_read_calls: AtomicU64::new(0),
+            session_read_in_flight: AtomicU64::new(0),
+            session_read_max_in_flight: AtomicU64::new(0),
             session_read_not_found_remaining: AtomicU64::new(0),
             resume_authority_absent_remaining: AtomicU64::new(0),
             create_requests: RwLock::new(Vec::new()),
@@ -2059,6 +2119,12 @@ impl MockSessionService {
             flow_turn_max_in_flight: Arc::new(AtomicU64::new(0)),
             execution_snapshot_delay_ms: AtomicU64::new(0),
             execution_snapshot_started: tokio::sync::Notify::new(),
+            execution_snapshot_delays_for: std::sync::Mutex::new(HashMap::new()),
+            execution_snapshot_failures_for: std::sync::Mutex::new(HashSet::new()),
+            session_read_delays_for: std::sync::Mutex::new(HashMap::new()),
+            session_read_failures_for: std::sync::Mutex::new(HashMap::new()),
+            session_reads_for: std::sync::Mutex::new(HashMap::new()),
+            load_persisted_session_delays_for: std::sync::Mutex::new(HashMap::new()),
             execution_snapshot_calls: AtomicU64::new(0),
             execution_snapshots: std::sync::Mutex::new(VecDeque::new()),
             session_read_barriers: RwLock::new(HashMap::new()),
@@ -2683,6 +2749,70 @@ impl MockSessionService {
             .store(delay_ms, Ordering::Relaxed);
     }
 
+    fn set_execution_snapshot_delay_for(&self, session_id: &SessionId, delay: Duration) {
+        self.execution_snapshot_delays_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), delay);
+    }
+
+    /// Make every execution snapshot of `session_id` fail, as a live actor
+    /// that cannot report its execution state would.
+    fn fail_execution_snapshots_for(&self, session_id: &SessionId) {
+        self.execution_snapshot_failures_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone());
+    }
+
+    fn set_session_read_delay_for(&self, session_id: &SessionId, delay: Duration) {
+        self.session_read_delays_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), delay);
+    }
+
+    /// Make the next `count` reads of `session_id` fail with a transient
+    /// store error (not `NotFound`).
+    fn fail_next_session_reads_for(&self, session_id: &SessionId, count: u64) {
+        self.session_read_failures_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), count);
+    }
+
+    fn take_session_read_failure(&self, session_id: &SessionId) -> bool {
+        let mut failures = self
+            .session_read_failures_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match failures.get_mut(session_id) {
+            Some(remaining) if *remaining > 0 => {
+                *remaining -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn set_load_persisted_session_delay_for(&self, session_id: &SessionId, delay: Duration) {
+        self.load_persisted_session_delays_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), delay);
+    }
+
+    fn per_session_delay(
+        delays: &std::sync::Mutex<HashMap<SessionId, Duration>>,
+        session_id: &SessionId,
+    ) -> Option<Duration> {
+        delays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .copied()
+    }
+
     fn set_execution_snapshots(
         &self,
         snapshots: impl IntoIterator<Item = meerkat_core::agent::AgentExecutionSnapshot>,
@@ -2699,6 +2829,28 @@ impl MockSessionService {
 
     fn session_read_calls(&self) -> u64 {
         self.session_read_calls.load(Ordering::Relaxed)
+    }
+
+    /// Reads of `session_id` so far.
+    fn session_reads_of(&self, session_id: &SessionId) -> SessionReadCounts {
+        self.session_reads_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Most session reads in flight at once since the last reset.
+    fn max_concurrent_session_reads(&self) -> u64 {
+        self.session_read_max_in_flight.load(Ordering::Relaxed)
+    }
+
+    fn reset_max_concurrent_session_reads(&self) {
+        self.session_read_max_in_flight.store(
+            self.session_read_in_flight.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
     }
 
     /// Make the next `count` durable resume-authority observations report
@@ -3708,6 +3860,14 @@ impl SessionService for MockSessionService {
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         self.session_read_calls.fetch_add(1, Ordering::Relaxed);
+        let in_flight = self.session_read_in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+        self.session_read_max_in_flight
+            .fetch_max(in_flight, Ordering::Relaxed);
+        let _in_flight_guard = AtomicInFlightGuard(&self.session_read_in_flight);
+        let _session_in_flight_guard = SessionReadInFlightGuard::enter(&self.session_reads_for, id);
+        if let Some(delay) = Self::per_session_delay(&self.session_read_delays_for, id) {
+            tokio::time::sleep(delay).await;
+        }
         let return_not_found = self
             .session_read_not_found_remaining
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
@@ -3721,6 +3881,11 @@ impl SessionService for MockSessionService {
         }
         if return_not_found {
             return Err(SessionError::NotFound { id: id.clone() });
+        }
+        if self.take_session_read_failure(id) {
+            return Err(SessionError::Store(Box::new(std::io::Error::other(
+                "mock transient session read failure",
+            ))));
         }
         let session = self
             .live_session_clone(id)
@@ -4174,6 +4339,14 @@ impl SessionServiceControlExt for MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberStatusSessionView, SessionError> {
+        // In-memory test double: `read` is the published live state.
+        crate::observe_member_status_view_via_read(self, session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &meerkat_core::SessionId,
@@ -4659,7 +4832,7 @@ impl MobSessionService for MockSessionService {
 
     async fn execution_snapshot(
         &self,
-        _session_id: &SessionId,
+        session_id: &SessionId,
     ) -> Result<Option<meerkat_core::agent::AgentExecutionSnapshot>, SessionError> {
         self.execution_snapshot_calls
             .fetch_add(1, Ordering::Relaxed);
@@ -4667,6 +4840,23 @@ impl MobSessionService for MockSessionService {
         let delay_ms = self.execution_snapshot_delay_ms.load(Ordering::Relaxed);
         if delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        if let Some(delay) =
+            Self::per_session_delay(&self.execution_snapshot_delays_for, session_id)
+        {
+            tokio::time::sleep(delay).await;
+        }
+        if self
+            .execution_snapshot_failures_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(session_id)
+        {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "test execution snapshot of {session_id} failed"
+                )),
+            ));
         }
         Ok(self
             .execution_snapshots
@@ -4788,6 +4978,11 @@ impl MobSessionService for MockSessionService {
         let delay_ms = self.load_persisted_session_delay_ms.load(Ordering::Relaxed);
         if delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        if let Some(delay) =
+            Self::per_session_delay(&self.load_persisted_session_delays_for, session_id)
+        {
+            tokio::time::sleep(delay).await;
         }
         let _authority_guard = self.resume_authority_gate.lock().await;
         // Mirror PersistentSessionService: archived sessions have no loadable
@@ -11242,6 +11437,13 @@ impl SessionServiceControlExt for PersistedListingSessionService {
 
 #[async_trait]
 impl MobSessionService for PersistedListingSessionService {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberStatusSessionView, SessionError> {
+        self.inner.observe_member_status_view(session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &meerkat_core::SessionId,
@@ -11651,6 +11853,14 @@ impl SessionServiceControlExt for InactiveReadSessionService {
 
 #[async_trait]
 impl MobSessionService for InactiveReadSessionService {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberStatusSessionView, SessionError> {
+        // Serve the view from this wrapper's own inactive-session `read`.
+        crate::observe_member_status_view_via_read(self, session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &meerkat_core::SessionId,
@@ -23109,6 +23319,85 @@ async fn test_bounded_terminal_result_preserves_deferred_member_for_retry() {
         handle.get_member(&member_id).await.unwrap().is_some(),
         "unavailable bounded projection must preserve the member for retry"
     );
+}
+
+/// One degraded status read (preview_unavailable set, so no preview and zero
+/// tokens) inside the bounded terminal projection is not a version change:
+/// the projection retries it and compares only observed previews, so an
+/// idle member with an exact terminal answer still projects it.
+#[tokio::test]
+async fn test_bounded_terminal_result_retries_a_degraded_status_read() {
+    use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason};
+
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("bounded-degraded-read");
+    let session_id = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn idle worker")
+        .bridge_session_id()
+        .expect("worker is session-backed")
+        .clone();
+    let mut answered = service
+        .live_session_clone(&session_id)
+        .await
+        .expect("the worker's live session");
+    answered.push(Message::BlockAssistant(BlockAssistantMessage::new(
+        vec![AssistantBlock::Text {
+            text: "exact terminal answer".to_string(),
+            meta: None,
+        }],
+        StopReason::EndTurn,
+    )));
+    service.replace_live_session(answered).await;
+    let mut idle = test_member_execution_snapshot(1, 0);
+    idle.active_run_id = None;
+    idle.turn_terminal = true;
+    service.set_execution_snapshots(std::iter::repeat_n(idle, 16));
+
+    let exact = handle
+        .bounded_terminal_member_result(&member_id, "observed-result", 256)
+        .await
+        .expect("an idle member with an exact answer projects it");
+    assert_eq!(exact.text(), "exact terminal answer");
+
+    // The first status read of the next projection fails its session-view
+    // read: it reports no preview and zero tokens with a read_failed marker.
+    service.fail_next_session_reads_for(&session_id, 1);
+    let reads_before = service.session_reads_of(&session_id).calls;
+    let retried = handle
+        .bounded_terminal_member_result(&member_id, "degraded-result", 256)
+        .await
+        .expect("a degraded status read is retried, never taken for a version change");
+    assert_eq!(retried.text(), "exact terminal answer");
+    assert_eq!(
+        service.session_reads_of(&session_id).calls - reads_before,
+        6,
+        "three bracketing status reads, one retry of the degraded one, and two exact reads"
+    );
+
+    // A bracketing read still degraded after every attempt is left out of
+    // the comparison instead of being read as a change.
+    let attempts = super::handle::BOUNDED_PROJECTION_STATUS_READ_ATTEMPTS;
+    service.fail_next_session_reads_for(&session_id, attempts as u64);
+    let reads_before = service.session_reads_of(&session_id).calls;
+    let unobserved = handle
+        .bounded_terminal_member_result(&member_id, "unobserved-result", 256)
+        .await
+        .expect("an unobserved bracketing read is excluded, never taken for a change");
+    assert_eq!(unobserved.text(), "exact terminal answer");
+    assert_eq!(
+        service.session_reads_of(&session_id).calls - reads_before,
+        attempts as u64 + 4,
+        "the degraded read is attempted a bounded number of times"
+    );
+    handle.shutdown().await.expect("shutdown test mob");
 }
 
 #[tokio::test]
@@ -52999,6 +53288,14 @@ impl SessionServiceControlExt for RealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RealCommsSessionService {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberStatusSessionView, SessionError> {
+        // In-memory test double: `read` is the published live state.
+        crate::observe_member_status_view_via_read(self, session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         _source_session_id: &meerkat_core::SessionId,
@@ -54332,6 +54629,14 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberStatusSessionView, SessionError> {
+        // In-memory test double: `read` is the published live state.
+        crate::observe_member_status_view_via_read(self, session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         _source_session_id: &meerkat_core::SessionId,
@@ -60486,6 +60791,698 @@ async fn test_busy_member_execution_snapshot_cannot_block_mob_lifecycle_commands
     );
 }
 
+/// The production incident: a harness polled the busy `calendar` member once
+/// a second while its turn ran, each read held the mob's only status permit
+/// through an unbounded durable load (~9 s), and `calendar`'s own check on
+/// its idle fork child was refused on the spot. A busy member's slow read
+/// must neither block another member's read nor run unbounded.
+#[tokio::test]
+async fn test_busy_member_slow_status_read_does_not_block_another_member() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let calendar = AgentIdentity::from("calendar");
+    let calendar_session = handle
+        .spawn(ProfileName::from("worker"), calendar.clone(), None)
+        .await
+        .expect("spawn calendar")
+        .bridge_session_id()
+        .expect("calendar is session-backed")
+        .clone();
+    let child = AgentIdentity::from("calendar-child");
+    handle
+        .spawn(ProfileName::from("worker"), child.clone(), None)
+        .await
+        .expect("spawn calendar child");
+    // Calendar is mid-turn: its session task cannot answer the execution
+    // snapshot, and every read of its transcript takes ~9 s. The child is
+    // idle and answers at once.
+    service.set_execution_snapshot_delay_for(&calendar_session, Duration::from_secs(5));
+    service.set_load_persisted_session_delay_for(&calendar_session, Duration::from_secs(9));
+    service.set_session_read_delay_for(&calendar_session, Duration::from_secs(9));
+
+    tokio::time::pause();
+    let calendar_rx = handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::ProjectMemberStatus {
+            agent_identity: calendar.clone(),
+            reply_tx,
+        })
+        .await
+        .expect("enqueue the harness read of calendar");
+    // Past the 250 ms busy probe: calendar's observation is inside its slow
+    // transcript read.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let child_snapshot = tokio::time::timeout(Duration::from_secs(1), handle.member_status(&child))
+        .await
+        .expect("the child's read is not held behind calendar's slow read")
+        .expect("the child's read is not refused while calendar's read is in flight");
+    assert_eq!(child_snapshot.preview_unavailable, None);
+    assert!(
+        child_snapshot.progress.is_some(),
+        "the child's read carries its progress"
+    );
+
+    let calendar_snapshot = tokio::time::timeout(Duration::from_secs(2), calendar_rx)
+        .await
+        .expect("calendar's slow read is bounded by the observation deadline")
+        .expect("calendar reply channel")
+        .expect("a slow read degrades instead of failing");
+    assert_eq!(calendar_snapshot.output_preview, None);
+    assert_eq!(
+        calendar_snapshot.preview_unavailable,
+        Some(crate::runtime::handle::MemberPreviewUnavailable::ObservationDeadline),
+        "the unobserved preview is marked, never a silent zero"
+    );
+    assert_eq!(
+        calendar_snapshot
+            .progress
+            .as_ref()
+            .map(|progress| progress.run_state),
+        Some(crate::runtime::handle::MemberRunState::RunOpen),
+        "the busy member's run state still comes from the runtime machine"
+    );
+    let wire = calendar_snapshot
+        .to_member_status_result(meerkat_contracts::WireMemberRef::encode(
+            "status-mob",
+            calendar.as_str(),
+        ))
+        .expect("project the degraded snapshot to the wire");
+    assert_eq!(
+        wire.preview_unavailable,
+        Some(meerkat_contracts::WireMemberPreviewUnavailable::ObservationDeadline)
+    );
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// Concurrent reads of one member share one observation: one session read,
+/// one result.
+#[tokio::test]
+async fn test_same_member_status_reads_join_one_session_read() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("status-joined");
+    let session_id = handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn joined member")
+        .bridge_session_id()
+        .expect("joined member is session-backed")
+        .clone();
+    let barrier = service.install_session_read_barrier(session_id).await;
+    let reads_before = service.session_read_calls();
+    let first = {
+        let handle = handle.clone();
+        let identity = identity.clone();
+        tokio::spawn(async move { handle.member_status(&identity).await })
+    };
+    tokio::time::timeout(Duration::from_secs(1), service.wait_for_session_read())
+        .await
+        .expect("the first read enters its session read");
+    let second = {
+        let handle = handle.clone();
+        let identity = identity.clone();
+        tokio::spawn(async move { handle.member_status(&identity).await })
+    };
+    let joined = wait_for_member_status_lanes(&handle, Duration::from_secs(5), |probe| {
+        probe.observation_callers.get(&identity) == Some(&2)
+    })
+    .await;
+    assert_eq!(
+        joined.observation_callers.get(&identity),
+        Some(&2),
+        "the second read joins the observation in flight before it is released: {joined:?}"
+    );
+    barrier.release_all();
+    let first = first
+        .await
+        .expect("first read task")
+        .expect("first read succeeds");
+    let second = second
+        .await
+        .expect("second read task")
+        .expect("a concurrent read of the same member joins instead of being refused");
+    assert_eq!(
+        service.session_read_calls() - reads_before,
+        1,
+        "joined reads share one session read"
+    );
+    assert_eq!(first.status, second.status);
+    assert_eq!(first.tokens_used, second.tokens_used);
+    assert_eq!(first.output_preview, second.output_preview);
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// The execution snapshot said idle, then a turn started before the
+/// transcript read: every later request to the session task waits for that
+/// turn. The read is still bounded, and another member is not refused.
+#[tokio::test]
+async fn test_member_status_bounded_when_turn_starts_after_probe() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let raced = AgentIdentity::from("status-turn-raced");
+    let raced_session = handle
+        .spawn(ProfileName::from("worker"), raced.clone(), None)
+        .await
+        .expect("spawn raced member")
+        .bridge_session_id()
+        .expect("raced member is session-backed")
+        .clone();
+    let sibling = AgentIdentity::from("status-turn-sibling");
+    handle
+        .spawn(ProfileName::from("worker"), sibling.clone(), None)
+        .await
+        .expect("spawn sibling");
+    service.set_execution_snapshots([test_member_execution_snapshot(1, 0)]);
+    let turn = service.install_session_read_barrier(raced_session).await;
+
+    let started_at = Instant::now();
+    let raced_status = {
+        let handle = handle.clone();
+        let raced = raced.clone();
+        tokio::spawn(async move { handle.member_status(&raced).await })
+    };
+    tokio::time::timeout(Duration::from_secs(1), service.wait_for_session_read())
+        .await
+        .expect("the raced read reaches the busy session");
+    let sibling_snapshot =
+        tokio::time::timeout(Duration::from_secs(1), handle.member_status(&sibling))
+            .await
+            .expect("the sibling is not held behind the raced read")
+            .expect("the sibling is not refused while the raced read is stuck");
+    assert_eq!(sibling_snapshot.preview_unavailable, None);
+
+    let raced_snapshot = tokio::time::timeout(Duration::from_secs(3), raced_status)
+        .await
+        .expect("a read stuck behind a turn is bounded")
+        .expect("raced status task")
+        .expect("the stuck read degrades instead of failing");
+    assert!(
+        started_at.elapsed() < Duration::from_secs(3),
+        "the observation deadline bounds the read"
+    );
+    assert_eq!(
+        raced_snapshot.preview_unavailable,
+        Some(crate::runtime::handle::MemberPreviewUnavailable::ObservationDeadline)
+    );
+    turn.release_all();
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// A failed execution snapshot says nothing about whether the member is
+/// idle. It is not treated as an answered, idle snapshot: the run state is
+/// resolved through the runtime machine, as for a busy member, never left
+/// unknown or inferred from the failed read.
+#[tokio::test]
+async fn test_failed_execution_snapshot_takes_run_state_from_runtime_machine() {
+    async fn runtime_run_state(
+        runtime: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+    ) -> crate::runtime::handle::MemberRunState {
+        match <meerkat_runtime::MeerkatMachine as meerkat_runtime::SessionServiceRuntimeExt>::runtime_state(
+            runtime,
+            session_id,
+        )
+        .await
+        .expect("runtime state of the member")
+        {
+            meerkat_runtime::RuntimeState::Running => {
+                crate::runtime::handle::MemberRunState::RunOpen
+            }
+            meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached => {
+                crate::runtime::handle::MemberRunState::Idle
+            }
+            other => panic!("unexpected runtime state for a live member: {other:?}"),
+        }
+    }
+
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("status-snapshot-failed");
+    let session_id = handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn member")
+        .bridge_session_id()
+        .expect("member is session-backed")
+        .clone();
+    service.fail_execution_snapshots_for(&session_id);
+    let runtime = service
+        .runtime_adapter()
+        .expect("test mob runs on a runtime adapter");
+    // The worker's kickoff turn may start while the status is read, so the
+    // snapshot must match the runtime machine's state from before or after.
+    let before = runtime_run_state(runtime.as_ref(), &session_id).await;
+    let snapshot = handle
+        .member_status(&identity)
+        .await
+        .expect("member status with a failed execution snapshot");
+    let after = runtime_run_state(runtime.as_ref(), &session_id).await;
+    let run_state = snapshot
+        .progress
+        .map(|progress| progress.run_state)
+        .expect("a local member's status carries progress");
+    assert!(
+        run_state == before || run_state == after,
+        "a failed snapshot is resolved through the runtime machine: got {run_state:?}, runtime \
+         {before:?} then {after:?}"
+    );
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// `wait_all` over several members never refuses itself and never competes
+/// with itself for the mob's status capacity: one poller reads one member at
+/// a time, even while a member's read is slow.
+#[tokio::test]
+async fn test_wait_all_polls_members_without_refusing_itself() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let mut ids = Vec::new();
+    for name in ["wait-all-a", "wait-all-b", "wait-all-c"] {
+        let identity = AgentIdentity::from(name);
+        let session_id = handle
+            .spawn(ProfileName::from("worker"), identity.clone(), None)
+            .await
+            .expect("spawn wait_all member")
+            .bridge_session_id()
+            .expect("wait_all member is session-backed")
+            .clone();
+        service.set_session_read_delay_for(&session_id, Duration::from_millis(150));
+        ids.push(identity);
+    }
+    service.reset_max_concurrent_session_reads();
+    let wait = {
+        let handle = handle.clone();
+        let ids = ids.clone();
+        tokio::spawn(async move { handle.wait_all(&ids).await })
+    };
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        !wait.is_finished(),
+        "wait_all keeps polling members that are not terminal instead of failing"
+    );
+    assert_eq!(
+        service.max_concurrent_session_reads(),
+        1,
+        "wait_all reads its members one at a time"
+    );
+    for identity in &ids {
+        handle
+            .retire(identity.clone())
+            .await
+            .expect("retire wait_all member");
+    }
+    let finals = tokio::time::timeout(Duration::from_secs(10), wait)
+        .await
+        .expect("wait_all resolves once every member is terminal")
+        .expect("wait_all task")
+        .expect("wait_all never refuses its own polls");
+    assert_eq!(finals.len(), ids.len());
+    assert!(finals.iter().all(|snapshot| snapshot.is_final));
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+async fn member_status_lane_probe(
+    handle: &MobHandle,
+) -> super::actor::member_status_lane::MemberStatusLaneProbe {
+    handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::MemberStatusLaneProbe { reply_tx })
+        .await
+        .expect("enqueue member-status lane probe")
+        .await
+        .expect("member-status lane probe reply")
+}
+
+/// Poll the member-status lanes until `settled` holds, for at most `budget`.
+async fn wait_for_member_status_lanes(
+    handle: &MobHandle,
+    budget: Duration,
+    settled: impl Fn(&super::actor::member_status_lane::MemberStatusLaneProbe) -> bool,
+) -> super::actor::member_status_lane::MemberStatusLaneProbe {
+    let deadline = Instant::now() + budget;
+    loop {
+        let probe = member_status_lane_probe(handle).await;
+        if settled(&probe) || Instant::now() >= deadline {
+            return probe;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A read whose every caller gives up while it waits for the mob-wide
+/// capacity leaves no entry behind in the actor's in-flight map: its task
+/// tells the actor to forget it. Unique `fork_off` child identities read once
+/// and abandoned must not accumulate in a long-lived mob.
+#[tokio::test]
+async fn test_abandoned_member_status_observation_leaves_no_lane_entry() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let mut blocked = Vec::new();
+    for index in 0..super::actor::member_status_lane::MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS {
+        let identity = AgentIdentity::from(format!("status-capacity-{index}"));
+        let session_id = handle
+            .spawn(ProfileName::from("worker"), identity.clone(), None)
+            .await
+            .expect("spawn capacity member")
+            .bridge_session_id()
+            .expect("capacity member is session-backed")
+            .clone();
+        let barrier = service.install_session_read_barrier(session_id).await;
+        let reply_rx = handle
+            .enqueue_actor_command_for_test(|reply_tx| MobCommand::ProjectMemberStatus {
+                agent_identity: identity,
+                reply_tx,
+            })
+            .await
+            .expect("enqueue capacity read");
+        tokio::time::timeout(Duration::from_secs(1), service.wait_for_session_read())
+            .await
+            .expect("the capacity read enters its session read");
+        blocked.push((barrier, reply_rx));
+    }
+
+    let abandoned = AgentIdentity::from("status-abandoned-child");
+    handle
+        .spawn(ProfileName::from("worker"), abandoned.clone(), None)
+        .await
+        .expect("spawn abandoned member");
+    let abandoned_rx = handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::ProjectMemberStatus {
+            agent_identity: abandoned.clone(),
+            reply_tx,
+        })
+        .await
+        .expect("enqueue the read that will be abandoned");
+    let registered = wait_for_member_status_lanes(&handle, Duration::from_secs(1), |probe| {
+        probe.observed_identities.contains(&abandoned)
+    })
+    .await;
+    assert!(
+        registered.observed_identities.contains(&abandoned),
+        "the waiting read is registered: {registered:?}"
+    );
+    drop(abandoned_rx);
+
+    let after = wait_for_member_status_lanes(&handle, Duration::from_secs(1), |probe| {
+        !probe.observed_identities.contains(&abandoned)
+    })
+    .await;
+    assert!(
+        !after.observed_identities.contains(&abandoned),
+        "an abandoned observation's entry is forgotten, not retained until the identity is \
+         read again: {after:?}"
+    );
+
+    for (barrier, reply_rx) in blocked {
+        barrier.release_all();
+        let _ = tokio::time::timeout(Duration::from_secs(3), reply_rx).await;
+    }
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// A session-view read still running at the observation deadline answers its
+/// callers with the typed marker but keeps its capacity unit and its
+/// per-session single flight until it finishes: a durable read on a blocking
+/// thread keeps running when its future is dropped, so a 1 Hz poller must not
+/// stack concurrent underlying reads. A later read of the same member waits
+/// on the draining read (bounded by its own deadline) and receives its result
+/// when it lands in time.
+///
+/// Runs on a paused clock, and releases the draining read only once the lane
+/// census shows the third read joined it, so the join is proven, never
+/// assumed from elapsed time: each read's execution snapshot takes 240 ms,
+/// longer than any fixed pause a sleep-based wait would pick.
+#[tokio::test]
+async fn test_member_status_read_past_deadline_holds_capacity_and_is_not_duplicated() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("status-draining");
+    let session_id = handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn draining member")
+        .bridge_session_id()
+        .expect("draining member is session-backed")
+        .clone();
+    let capacity = super::actor::member_status_lane::MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS;
+    let reads_before = service.session_reads_of(&session_id).calls;
+    let barrier = service
+        .install_session_read_barrier(session_id.clone())
+        .await;
+    service.set_execution_snapshot_delay_for(&session_id, Duration::from_millis(240));
+    tokio::time::pause();
+
+    let first = tokio::time::timeout(Duration::from_secs(3), handle.member_status(&identity))
+        .await
+        .expect("a hung session read is bounded by the observation deadline")
+        .expect("a hung session read degrades instead of failing");
+    assert_eq!(
+        first.preview_unavailable,
+        Some(crate::runtime::handle::MemberPreviewUnavailable::ObservationDeadline)
+    );
+    let draining = member_status_lane_probe(&handle).await;
+    assert_eq!(
+        draining.view_reads_in_flight, 1,
+        "the underlying read outlives the answered observation"
+    );
+    assert_eq!(
+        draining.available_capacity,
+        capacity - 1,
+        "the draining read keeps its capacity unit until it finishes"
+    );
+    assert!(
+        draining.observed_identities.is_empty(),
+        "the answered observation's callers are settled: {draining:?}"
+    );
+
+    let second = tokio::time::timeout(Duration::from_secs(3), handle.member_status(&identity))
+        .await
+        .expect("a read joining a draining read is bounded")
+        .expect("a read joining a draining read degrades instead of failing");
+    assert_eq!(
+        second.preview_unavailable,
+        Some(crate::runtime::handle::MemberPreviewUnavailable::ObservationDeadline)
+    );
+    let reads = service.session_reads_of(&session_id);
+    assert_eq!(
+        reads.calls - reads_before,
+        1,
+        "no second underlying read starts while the first drains: {reads:?}"
+    );
+    assert_eq!(reads.max_in_flight, 1, "{reads:?}");
+
+    let idle = member_status_lane_probe(&handle).await;
+    assert_eq!(
+        idle.view_read_joiners, 0,
+        "the second read stopped waiting at its deadline: {idle:?}"
+    );
+    let third = {
+        let handle = handle.clone();
+        let identity = identity.clone();
+        tokio::spawn(async move { handle.member_status(&identity).await })
+    };
+    let joined = wait_for_member_status_lanes(&handle, Duration::from_secs(5), |probe| {
+        probe.view_read_joiners == 1
+    })
+    .await;
+    assert_eq!(
+        joined.view_read_joiners, 1,
+        "the third read waits on the draining read before it is released: {joined:?}"
+    );
+    assert_eq!(joined.view_reads_in_flight, 1, "{joined:?}");
+    barrier.release_all();
+    let third = tokio::time::timeout(Duration::from_secs(2), third)
+        .await
+        .expect("the joined read resolves when the draining read lands")
+        .expect("joined read task")
+        .expect("the joined read succeeds");
+    assert_eq!(
+        third.preview_unavailable, None,
+        "a read that joined the draining read receives its result"
+    );
+    assert_eq!(
+        service.session_reads_of(&session_id).calls - reads_before,
+        1,
+        "the joined read shares the drained read"
+    );
+    let drained = wait_for_member_status_lanes(&handle, Duration::from_secs(1), |probe| {
+        probe.view_reads_in_flight == 0 && probe.available_capacity == capacity
+    })
+    .await;
+    assert_eq!(drained.view_reads_in_flight, 0, "{drained:?}");
+    assert_eq!(
+        drained.available_capacity, capacity,
+        "a finished read returns its capacity unit: {drained:?}"
+    );
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// Session-view reads that never finish (a stalled durable store) hold their
+/// capacity units only up to the drain ceiling. Stalled reads of as many
+/// members as the mob-wide capacity refuse every other status read until the
+/// ceiling; at the ceiling they are orphaned and release their units, so a
+/// live member is observed again while the stalled reads are still hung at
+/// the store, and a new read of a stalled member starts a fresh read.
+#[tokio::test]
+async fn test_stalled_member_status_reads_release_capacity_at_the_drain_ceiling() {
+    use super::actor::member_status_lane::{
+        MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS, MEMBER_STATUS_VIEW_READ_DRAIN_CEILING,
+    };
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let live = AgentIdentity::from("status-live");
+    handle
+        .spawn(ProfileName::from("worker"), live.clone(), None)
+        .await
+        .expect("spawn live member");
+    let mut stalled = Vec::new();
+    for index in 0..MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS {
+        let identity = AgentIdentity::from(format!("status-stalled-{index}"));
+        let session_id = handle
+            .spawn(ProfileName::from("worker"), identity.clone(), None)
+            .await
+            .expect("spawn stalled member")
+            .bridge_session_id()
+            .expect("stalled member is session-backed")
+            .clone();
+        let store_stall = service
+            .install_session_read_barrier(session_id.clone())
+            .await;
+        stalled.push((identity, session_id, store_stall));
+    }
+    tokio::time::pause();
+
+    let mut first_drain_started = None;
+    for (identity, _, _) in &stalled {
+        let degraded = tokio::time::timeout(Duration::from_secs(3), handle.member_status(identity))
+            .await
+            .expect("a stalled read is bounded by the observation deadline")
+            .expect("a stalled read degrades instead of failing");
+        assert_eq!(
+            degraded.preview_unavailable,
+            Some(crate::runtime::handle::MemberPreviewUnavailable::ObservationDeadline)
+        );
+        first_drain_started.get_or_insert_with(tokio::time::Instant::now);
+    }
+    let last_drain_started = tokio::time::Instant::now();
+    let first_drain_started = first_drain_started.expect("at least one stalled member");
+    let saturated = member_status_lane_probe(&handle).await;
+    assert_eq!(saturated.available_capacity, 0, "{saturated:?}");
+    assert_eq!(
+        saturated.view_reads_in_flight, MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS,
+        "{saturated:?}"
+    );
+
+    // Until the ceiling the stalled reads keep every unit, so the live
+    // member's read is refused after the admission wait.
+    let refused = handle
+        .member_status(&live)
+        .await
+        .expect_err("a saturated capacity refuses the live member's read");
+    assert!(
+        matches!(
+            refused,
+            MobError::LifecycleOperationAdmissionPending {
+                stage: "observation_lane_saturated",
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+    tokio::time::sleep_until(
+        first_drain_started + MEMBER_STATUS_VIEW_READ_DRAIN_CEILING - Duration::from_millis(100),
+    )
+    .await;
+    let held = member_status_lane_probe(&handle).await;
+    assert_eq!(
+        held.available_capacity, 0,
+        "a stalled read keeps its unit until the ceiling: {held:?}"
+    );
+
+    tokio::time::sleep_until(
+        last_drain_started + MEMBER_STATUS_VIEW_READ_DRAIN_CEILING + Duration::from_millis(100),
+    )
+    .await;
+    let released = wait_for_member_status_lanes(&handle, Duration::from_secs(1), |probe| {
+        probe.available_capacity == MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS
+            && probe.view_reads_in_flight == 0
+    })
+    .await;
+    assert_eq!(
+        released.available_capacity, MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS,
+        "stalled reads release their units at the ceiling: {released:?}"
+    );
+    assert_eq!(released.view_reads_in_flight, 0, "{released:?}");
+
+    // The store is still stalled for those members; the live member is
+    // observable again.
+    let observed = tokio::time::timeout(Duration::from_secs(3), handle.member_status(&live))
+        .await
+        .expect("the live member's read is bounded")
+        .expect("the live member's read is admitted once the stalled reads are orphaned");
+    assert_eq!(observed.preview_unavailable, None);
+
+    let (identity, session_id, _) = &stalled[0];
+    let reads_before = service.session_reads_of(session_id).calls;
+    let fresh = tokio::time::timeout(Duration::from_secs(3), handle.member_status(identity))
+        .await
+        .expect("a fresh read of a formerly stalled member is bounded")
+        .expect("a fresh read of a formerly stalled member succeeds");
+    assert_eq!(
+        service.session_reads_of(session_id).calls,
+        reads_before + 1,
+        "a read after the ceiling starts a fresh underlying read"
+    );
+    assert_eq!(fresh.preview_unavailable, None);
+
+    for (_, _, store_stall) in stalled {
+        store_stall.release_all();
+    }
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// A retiring member's status is answered from the mob's machine state
+/// without reading its session, so its preview and token count carry a typed
+/// marker instead of reading as an empty member.
+#[tokio::test]
+async fn test_retiring_member_status_marks_preview_not_observed() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("status-retiring");
+    let mut spec = SpawnMemberSpec::new("worker", identity.as_str());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn retiring member");
+    let session_id = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("retiring member is session-backed");
+    service.set_archive_failure(&session_id).await;
+    handle
+        .retire(identity.clone())
+        .await
+        .expect_err("an archive failure retains the member as retiring");
+
+    let snapshot = handle
+        .member_status(&identity)
+        .await
+        .expect("retiring member status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Retiring
+    );
+    assert_eq!(snapshot.output_preview, None);
+    assert_eq!(snapshot.tokens_used, 0);
+    assert_eq!(
+        snapshot.preview_unavailable,
+        Some(crate::runtime::handle::MemberPreviewUnavailable::NotObservedWhileRetiring),
+        "the unread session is marked, never a silent zero"
+    );
+    let wire = snapshot
+        .to_member_status_result(meerkat_contracts::WireMemberRef::encode(
+            "status-mob",
+            identity.as_str(),
+        ))
+        .expect("project the retiring snapshot to the wire");
+    assert_eq!(
+        wire.preview_unavailable,
+        Some(meerkat_contracts::WireMemberPreviewUnavailable::NotObservedWhileRetiring)
+    );
+    service.clear_archive_failure(&session_id).await;
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestActorLoopProbeEvent {
     ActorLoopStalled { stall_id: u64 },
@@ -60635,6 +61632,7 @@ async fn test_member_status_lane_serializes_absence_before_success() {
         .clone();
     service.fail_next_session_read_as_absent();
     let first_read_barrier = service.install_session_read_barrier(session_id).await;
+    let reads_before = service.session_read_calls();
 
     let stale_absence_rx = handle
         .enqueue_actor_command_for_test(|reply_tx| MobCommand::ProjectMemberStatus {
@@ -60646,23 +61644,52 @@ async fn test_member_status_lane_serializes_absence_before_success() {
     tokio::time::timeout(Duration::from_secs(1), service.wait_for_session_read())
         .await
         .expect("stale absence should enter its session read");
-    let busy = handle
-        .member_status(&identity)
-        .await
-        .expect_err("a second observation must not overlap the first");
-    assert!(matches!(
-        busy,
-        MobError::LifecycleOperationAdmissionPending {
-            ref intent,
-            stage: "observation_lane_saturated"
-        } if intent == "member_status_observation"
-    ));
+    // A second read of the same member joins the observation in flight: it
+    // is neither refused nor run as an overlapping read that could land a
+    // stale absence after a later success.
+    let joined = {
+        let handle = handle.clone();
+        let identity = identity.clone();
+        tokio::spawn(async move { handle.member_status(&identity).await })
+    };
+    let lanes = wait_for_member_status_lanes(&handle, Duration::from_secs(5), |probe| {
+        probe.observation_callers.get(&identity) == Some(&2)
+    })
+    .await;
+    assert_eq!(
+        lanes.observation_callers.get(&identity),
+        Some(&2),
+        "the second read joins the observation in flight: {lanes:?}"
+    );
+    assert!(
+        !joined.is_finished(),
+        "the joined read waits for the observation in flight"
+    );
 
     first_read_barrier.release_all();
-    stale_absence_rx
+    let first = stale_absence_rx
         .await
         .expect("stale absence reply channel")
-        .expect("first absence should resolve under exclusive lane custody");
+        .expect("first absence resolves");
+    let second = tokio::time::timeout(Duration::from_secs(1), joined)
+        .await
+        .expect("the joined read resolves with the first")
+        .expect("joined read task")
+        .expect("a joined same-member read is never refused");
+    assert_eq!(
+        service.session_read_calls() - reads_before,
+        1,
+        "joined same-member reads share one session read"
+    );
+    assert_eq!(first.status, second.status);
+    assert_eq!(first.output_preview, second.output_preview);
+    assert_eq!(first.tokens_used, second.tokens_used);
+    assert_eq!(first.preview_unavailable, second.preview_unavailable);
+    assert_eq!(
+        first.preview_unavailable,
+        Some(crate::runtime::handle::MemberPreviewUnavailable::SessionAbsent),
+        "an absent session view is marked, never reported as an empty member"
+    );
     handle.shutdown().await.expect("shutdown test mob");
 }
 
@@ -60670,7 +61697,7 @@ async fn test_member_status_lane_serializes_absence_before_success() {
 async fn test_member_status_observation_lane_saturates_and_releases() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let mut blocked = Vec::new();
-    for index in 0..super::actor::MAX_PENDING_MEMBER_STATUS_OBSERVATIONS {
+    for index in 0..super::actor::member_status_lane::MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS {
         let identity = AgentIdentity::from(format!("status-saturated-{index}"));
         let session_id = handle
             .spawn(ProfileName::from("worker"), identity.clone(), None)
@@ -60689,7 +61716,7 @@ async fn test_member_status_observation_lane_saturates_and_releases() {
             .expect("enqueue saturated status");
         tokio::time::timeout(Duration::from_secs(1), service.wait_for_session_read())
             .await
-            .expect("status observation should occupy its lane permit");
+            .expect("status observation should occupy its capacity");
         blocked.push((barrier, reply_rx));
     }
 
@@ -60698,30 +61725,21 @@ async fn test_member_status_observation_lane_saturates_and_releases() {
         .spawn(ProfileName::from("worker"), overflow_identity.clone(), None)
         .await
         .expect("spawn overflow member");
-    let overflow = handle
-        .member_status(&overflow_identity)
-        .await
-        .expect_err("full observation lane must refuse immediately");
-    assert!(matches!(
-        overflow,
-        MobError::LifecycleOperationAdmissionPending {
-            ref intent,
-            stage: "observation_lane_saturated"
-        } if intent == "member_status_observation"
-    ));
-    assert_eq!(
-        overflow.failure_class(),
-        crate::MobFailureClass::RuntimeRejected
+    let reads_while_full = service.session_read_calls();
+    let overflow = {
+        let handle = handle.clone();
+        let identity = overflow_identity.clone();
+        tokio::spawn(async move { handle.member_status(&identity).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !overflow.is_finished(),
+        "a read over the mob-wide capacity waits for it instead of being refused"
     );
     assert_eq!(
-        overflow.wire_error_code(),
-        Some(meerkat_contracts::ErrorCode::SessionBusy)
-    );
-    assert_eq!(
-        overflow
-            .structured_data()
-            .expect("busy observation carries typed data")["authority_retained"],
-        false
+        service.session_read_calls(),
+        reads_while_full,
+        "the waiting read does not touch session state before it is admitted"
     );
 
     let (released_barrier, released_rx) = blocked.remove(0);
@@ -60730,17 +61748,27 @@ async fn test_member_status_observation_lane_saturates_and_releases() {
         .await
         .expect("released observation reply channel")
         .expect("released observation completes");
-    handle
-        .member_status(&overflow_identity)
+    let admitted = tokio::time::timeout(Duration::from_secs(1), overflow)
         .await
-        .expect("released permit admits a subsequent observation");
+        .expect("released capacity admits the waiting read")
+        .expect("overflow task")
+        .expect("the waiting read succeeds once admitted");
+    assert_eq!(admitted.preview_unavailable, None);
 
+    // A read that never finishes is bounded by the observation deadline and
+    // reports the typed marker instead of an empty member.
     for (barrier, reply_rx) in blocked {
-        barrier.release_all();
-        reply_rx
+        let degraded = tokio::time::timeout(Duration::from_secs(3), reply_rx)
             .await
+            .expect("a stuck session read is bounded by the observation deadline")
             .expect("blocked observation reply channel")
-            .expect("blocked observation completes");
+            .expect("blocked observation degrades instead of failing");
+        assert_eq!(
+            degraded.preview_unavailable,
+            Some(crate::runtime::handle::MemberPreviewUnavailable::ObservationDeadline)
+        );
+        assert_eq!(degraded.output_preview, None);
+        barrier.release_all();
     }
     handle.shutdown().await.expect("shutdown test mob");
 }
@@ -60811,30 +61839,31 @@ async fn test_member_status_completion_cancels_while_mailbox_is_full() {
         .await
         .expect("fill test mailbox");
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let observation_permits = Arc::new(tokio::sync::Semaphore::new(1));
-    let observation_permit = Arc::clone(&observation_permits)
-        .try_acquire_owned()
-        .expect("test observation permit");
-    let completion = tokio::spawn(super::actor::enqueue_member_status_observation(
-        command_tx,
-        AgentIdentity::from("status-full-mailbox"),
-        super::state::MemberStatusProjectionTarget {
-            bridge_session_id: None,
-            include_local_session_details: false,
-            agent_runtime_id: None,
-            fence_token: None,
-        },
-        super::state::MemberStatusSessionObservation {
-            output_preview: None,
-            tokens_used: 0,
-            genuinely_absent: false,
-            execution_snapshot: None,
-            runtime_run_state: None,
-            observed_at_ms: 1,
-        },
-        observation_permit,
-        reply_tx,
-    ));
+    let waiters = super::actor::member_status_lane::MemberStatusObservationWaiters::new(reply_tx);
+    let completion = tokio::spawn(
+        super::actor::member_status_lane::enqueue_member_status_observation(
+            command_tx,
+            AgentIdentity::from("status-full-mailbox"),
+            super::state::MemberStatusProjectionTarget {
+                bridge_session_id: None,
+                include_local_session_details: false,
+                agent_runtime_id: None,
+                fence_token: None,
+            },
+            super::actor::member_status_lane::MemberStatusObservationOutcome::Observed(Box::new(
+                super::state::MemberStatusSessionObservation {
+                    output_preview: None,
+                    tokens_used: 0,
+                    genuinely_absent: false,
+                    execution_snapshot: None,
+                    runtime_run_state: None,
+                    preview_unavailable: None,
+                    observed_at_ms: 1,
+                },
+            )),
+            Arc::clone(&waiters),
+        ),
+    );
     tokio::task::yield_now().await;
     drop(reply_rx);
     assert!(
@@ -60843,10 +61872,10 @@ async fn test_member_status_completion_cancels_while_mailbox_is_full() {
             .expect("closed receiver should release mailbox reservation wait")
             .expect("completion task should not panic")
     );
-    assert_eq!(
-        observation_permits.available_permits(),
-        1,
-        "cancellation must release the transferred observation permit"
+    let (late_tx, _late_rx) = tokio::sync::oneshot::channel();
+    assert!(
+        waiters.join(late_tx).is_err(),
+        "an abandoned completion closes its lane so no caller joins it"
     );
     assert!(
         command_rx.try_recv().is_ok(),
@@ -60925,17 +61954,12 @@ async fn test_member_status_session_read_does_not_close_actor_tool_dependency_cy
         })
         .await
         .expect("enqueue unrelated member status");
-    let unrelated_error = unrelated_status_rx
+    let unrelated = tokio::time::timeout(Duration::from_secs(1), unrelated_status_rx)
         .await
+        .expect("an unrelated member's status is not held behind the blocked read")
         .expect("unrelated status reply channel")
-        .expect_err("the single observation lane must reject overlap");
-    assert!(matches!(
-        unrelated_error,
-        MobError::LifecycleOperationAdmissionPending {
-            intent,
-            stage: "observation_lane_saturated"
-        } if intent == "member_status_observation"
-    ));
+        .expect("observations of different members do not refuse each other");
+    assert_eq!(unrelated.preview_unavailable, None);
 
     let heartbeat = match tokio::time::timeout(Duration::from_secs(1), &mut probe_task).await {
         Ok(result) => result
@@ -61076,8 +62100,14 @@ async fn test_actor_loop_probe_does_not_stall_when_member_status_read_is_availab
     handle.shutdown().await.expect("shutdown test mob");
 }
 
+/// A caller dropping its receiver does not orphan the underlying session
+/// read: dropping a read's future does not stop a durable read on a blocking
+/// thread, so the observation keeps the read, and its capacity unit, until
+/// it finishes, then releases both and forgets the abandoned entry. The actor
+/// stays responsive meanwhile; shutdown still aborts the read
+/// (`test_shutdown_aborts_owned_member_status_read`).
 #[tokio::test]
-async fn test_dropped_member_status_receiver_cancels_owned_session_read() {
+async fn test_dropped_member_status_receiver_keeps_underlying_read_until_it_finishes() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let identity = AgentIdentity::from("status-closed-receiver");
     let session_id = handle
@@ -61101,16 +62131,44 @@ async fn test_dropped_member_status_receiver_cancels_owned_session_read() {
     assert_eq!(Arc::strong_count(&read_barrier), 2);
 
     drop(status_rx);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        Arc::strong_count(&read_barrier),
+        2,
+        "the underlying read is not orphaned when its caller leaves"
+    );
+    assert_eq!(
+        handle.status().await.expect("actor remains responsive"),
+        MobState::Running
+    );
+    let capacity = super::actor::member_status_lane::MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS;
+    let draining = member_status_lane_probe(&handle).await;
+    assert_eq!(draining.view_reads_in_flight, 1, "{draining:?}");
+    assert_eq!(
+        draining.available_capacity,
+        capacity - 1,
+        "the abandoned read keeps its capacity unit while it runs: {draining:?}"
+    );
+
+    read_barrier.release_all();
     tokio::time::timeout(Duration::from_secs(1), async {
         while Arc::strong_count(&read_barrier) != 1 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("closed receiver should cancel the owned read future");
-    assert_eq!(
-        handle.status().await.expect("actor remains responsive"),
-        MobState::Running
+    .expect("the released read finishes and drops its handle");
+    let drained = wait_for_member_status_lanes(&handle, Duration::from_secs(2), |probe| {
+        probe.view_reads_in_flight == 0
+            && probe.available_capacity == capacity
+            && probe.observed_identities.is_empty()
+    })
+    .await;
+    assert_eq!(drained.view_reads_in_flight, 0, "{drained:?}");
+    assert_eq!(drained.available_capacity, capacity, "{drained:?}");
+    assert!(
+        drained.observed_identities.is_empty(),
+        "the abandoned observation's entry is forgotten: {drained:?}"
     );
 
     handle.shutdown().await.expect("shutdown test mob");

@@ -140,6 +140,7 @@ import {
   type WireMemberToolDeclaration,
   type WireMemberLifecycleCapabilities,
   type WireNonPortableResourceKind,
+  type WireMemberPreviewUnavailable,
   type WireReachability,
   type ToolsRegisterParams,
   type ToolsRegisterResult,
@@ -2987,6 +2988,13 @@ export class MeerkatClient {
     snapshot.nonPortableDisabled = MeerkatClient.parseNonPortableDisabled(
       result.non_portable_disabled,
     );
+    const previewUnavailable = MeerkatClient.parseWireMemberPreviewUnavailable(
+      result.preview_unavailable,
+      "Invalid mob/member_status response",
+    );
+    if (previewUnavailable !== undefined) {
+      snapshot.previewUnavailable = previewUnavailable;
+    }
     return snapshot;
   }
 
@@ -3215,6 +3223,10 @@ export class MeerkatClient {
         "is_final",
         "Invalid mob/wait_kickoff response",
       );
+      const previewUnavailable = MeerkatClient.parseWireMemberPreviewUnavailable(
+        member.preview_unavailable,
+        "Invalid mob/wait_kickoff response",
+      );
       return {
         agentIdentity,
         status,
@@ -3227,6 +3239,7 @@ export class MeerkatClient {
           member.peer_connectivity,
           "Invalid mob/wait_kickoff response",
         ),
+        ...(previewUnavailable !== undefined ? { previewUnavailable } : {}),
       };
     });
   }
@@ -3270,6 +3283,10 @@ export class MeerkatClient {
         "is_final",
         "Invalid mob/wait_ready response",
       );
+      const previewUnavailable = MeerkatClient.parseWireMemberPreviewUnavailable(
+        member.preview_unavailable,
+        "Invalid mob/wait_ready response",
+      );
       return {
         agentIdentity,
         status,
@@ -3282,6 +3299,7 @@ export class MeerkatClient {
           member.peer_connectivity,
           "Invalid mob/wait_ready response",
         ),
+        ...(previewUnavailable !== undefined ? { previewUnavailable } : {}),
       };
     });
   }
@@ -5354,6 +5372,33 @@ export class MeerkatClient {
     throw new MeerkatError(
       "INVALID_RESPONSE",
       `Invalid mob/member_status response: ${field} must be a valid reachability`,
+    );
+  }
+
+  /**
+   * Parse the typed reason a member-status read carries no observed preview.
+   * Absent (or `null`) means `output_preview`/`tokens_used` are observations;
+   * a value outside the closed vocabulary fails closed.
+   */
+  private static parseWireMemberPreviewUnavailable(
+    raw: unknown,
+    context: string,
+  ): WireMemberPreviewUnavailable | undefined {
+    if (raw == null) {
+      return undefined;
+    }
+    const values: readonly WireMemberPreviewUnavailable[] = [
+      "observation_deadline",
+      "read_failed",
+      "session_absent",
+      "not_observed_while_retiring",
+    ];
+    if (typeof raw === "string" && values.includes(raw as WireMemberPreviewUnavailable)) {
+      return raw as WireMemberPreviewUnavailable;
+    }
+    throw new MeerkatError(
+      "INVALID_RESPONSE",
+      `${context}: preview_unavailable must be a valid preview-unavailable reason`,
     );
   }
 

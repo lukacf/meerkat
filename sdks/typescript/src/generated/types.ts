@@ -1862,6 +1862,7 @@ export interface MobMemberStatusResult {
   output_preview?: string | null;
   peer_connectivity?: WirePeerConnectivity | null;
   placement?: WireHostRef | null;
+  preview_unavailable?: WireMemberPreviewUnavailable | null;
   progress?: WireMemberProgressSnapshot | null;
   resolved_capabilities?: WireResolvedModelCapabilities | null;
   status: WireMobMemberStatus;
@@ -3404,6 +3405,8 @@ export type WireProjectionProvenance = "host_claimed" | "controlling_host_verifi
 export type WireReachability = "reachable" | "stale" | "unreachable" | "unknown";
 
 export type WireNonPortableResourceKind = "rust_bundles" | "per_spawn_external_tools" | "mob_default_external_tools" | "default_llm_client_override" | "host_surface_mcp_allowlist" | "workgraph_tools";
+
+export type WireMemberPreviewUnavailable = "observation_deadline" | "read_failed" | "session_absent" | "not_observed_while_retiring";
 
 export type WireMobRunStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 

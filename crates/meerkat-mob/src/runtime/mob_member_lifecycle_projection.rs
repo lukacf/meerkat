@@ -64,6 +64,7 @@ impl CanonicalMemberSnapshotMaterial {
             freshness_reason: None,
             lifecycle_capabilities: None,
             non_portable_disabled: None,
+            preview_unavailable: None,
         }
         .with_current_bridge_session_id(self.current_bridge_session_id.clone())
     }

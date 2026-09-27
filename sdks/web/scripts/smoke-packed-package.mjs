@@ -8,7 +8,10 @@
 //   1. the tarball carries the runtime, the TypeScript entry and the proxy;
 //   2. the packed wasm has the required stack (typed parse, scripts/wasm-stack.mjs);
 //   3. one turn runs end to end in Node through the packed JS and wasm, with
-//      `fetch` stubbed to an Anthropic SSE stream (as browser_contract.rs does).
+//      `fetch` stubbed to an Anthropic SSE stream (as browser_contract.rs does);
+//   4. that turn's shadow-stack high-water, measured by painting the idle stack
+//      (scripts/wasm-stack-highwater.mjs), stays within its 2 MiB budget. The
+//      measurement is logged on every run.
 //
 // Usage:
 //   node scripts/smoke-packed-package.mjs <rkat-web-X.Y.Z.tgz>
@@ -22,6 +25,12 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertWasmStack } from "./wasm-stack.mjs";
+import {
+  TURN_STACK_BUDGET_BYTES,
+  assertStackWithinBudget,
+  paintIdleStack,
+  stackHighWater,
+} from "./wasm-stack-highwater.mjs";
 
 const SDK_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REQUIRED_FILES = [
@@ -113,7 +122,14 @@ async function main(argv) {
     );
     const { web, rawWasm } = await import(pathToFileURL(entry).href);
     assert.ok(web.MeerkatRuntime && web.Session, "missing @rkat/web exports");
-    const wasm = { ...rawWasm, default: async () => rawWasm.default({ module_or_path: wasmBytes }) };
+    let instance = null;
+    const wasm = {
+      ...rawWasm,
+      default: async () => {
+        instance = await rawWasm.default({ module_or_path: wasmBytes });
+        return instance;
+      },
+    };
 
     const requests = installFetchStub();
     const runtime = await web.MeerkatRuntime.init(wasm, {
@@ -127,9 +143,16 @@ async function main(argv) {
         apiKey: "sk-test",
         anthropicBaseUrl: "https://example.test/anthropic",
       });
+      assert.ok(instance?.memory, "the packed runtime exposes its wasm memory");
+      paintIdleStack(instance.memory, stack);
       const result = await session.turn("Say the smoke phrase.");
+      const turnStack = stackHighWater(instance.memory, stack);
       assert.equal(result.text, REPLY, "the packed runtime's turn returned the stubbed reply");
       assert.ok(requests.length >= 1, "the turn reached the provider through fetch");
+      console.log(
+        `packed wasm turn stack high-water: ${turnStack} bytes (budget ${TURN_STACK_BUDGET_BYTES})`,
+      );
+      assertStackWithinBudget(turnStack, TURN_STACK_BUDGET_BYTES, `${path.basename(tarball)} turn`);
     } finally {
       runtime.destroy();
     }

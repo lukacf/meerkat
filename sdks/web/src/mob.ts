@@ -47,6 +47,7 @@ import type {
   MobSpawnManyFailureCause,
   WireMobMemberStatus,
   WireMemberLifecycleCapabilities,
+  WireMemberPreviewUnavailable,
   WireMemberProgressSnapshot,
   WireNonPortableResourceKind,
   WireReachability,
@@ -719,6 +720,35 @@ const WIRE_REACHABILITY_VALUES: readonly WireReachability[] = [
   'unknown',
 ];
 
+const WIRE_MEMBER_PREVIEW_UNAVAILABLE_VALUES: readonly WireMemberPreviewUnavailable[] = [
+  'observation_deadline',
+  'read_failed',
+  'session_absent',
+  'not_observed_while_retiring',
+];
+
+/**
+ * The typed reason a member-status read carries no observed preview. Absent
+ * (or `null`) means `output_preview`/`tokens_used` are observations; a value
+ * outside the closed vocabulary fails closed.
+ */
+function parseWireMemberPreviewUnavailable(
+  raw: unknown,
+): WireMemberPreviewUnavailable | undefined {
+  if (raw == null) {
+    return undefined;
+  }
+  if (
+    typeof raw === 'string' &&
+    WIRE_MEMBER_PREVIEW_UNAVAILABLE_VALUES.includes(raw as WireMemberPreviewUnavailable)
+  ) {
+    return raw as WireMemberPreviewUnavailable;
+  }
+  throw new Error(
+    'Invalid mob member_status response: preview_unavailable must be a valid preview-unavailable reason',
+  );
+}
+
 function parseWireReachability(raw: unknown, field: string): WireReachability | undefined {
   if (raw == null) {
     return undefined;
@@ -990,6 +1020,10 @@ function parseMobMemberSnapshot(raw: unknown): MobMemberSnapshot {
   const nonPortableDisabled = parseNonPortableDisabled(snapshot.non_portable_disabled);
   if (nonPortableDisabled !== undefined) {
     result.non_portable_disabled = nonPortableDisabled;
+  }
+  const previewUnavailable = parseWireMemberPreviewUnavailable(snapshot.preview_unavailable);
+  if (previewUnavailable !== undefined) {
+    result.preview_unavailable = previewUnavailable;
   }
   return result;
 }

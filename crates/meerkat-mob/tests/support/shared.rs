@@ -1119,6 +1119,13 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         self.inner.load_persisted_session(session_id).await
     }
 
+    async fn observe_member_status_view(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<meerkat_mob::MemberStatusSessionView, meerkat_core::service::SessionError> {
+        self.inner.observe_member_status_view(session_id).await
+    }
+
     async fn load_revivable_retired_session(
         &self,
         session_id: &meerkat_core::SessionId,

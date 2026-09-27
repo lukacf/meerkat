@@ -4,6 +4,7 @@ import type { AuthBindingRef } from './generated/runtime.js';
 import type {
   WireHostRef,
   WireMemberLifecycleCapabilities,
+  WireMemberPreviewUnavailable,
   WireMemberProgressSnapshot,
   WireMobMemberStatus,
   WireNonPortableResourceKind,
@@ -11,10 +12,13 @@ import type {
   WireWorkGraphFlowExecutionBinding,
 } from './generated/mob.js';
 
-// This type appears in the public `MobMemberSnapshot` shape, so consumers
-// must be able to name it through the package root rather than an unexported
-// generated-module path.
-export type { WireMemberProgressSnapshot } from './generated/mob.js';
+// These types appear in the public `MobMemberSnapshot` shape, so consumers
+// must be able to name them through the package root rather than an
+// unexported generated-module path.
+export type {
+  WireMemberPreviewUnavailable,
+  WireMemberProgressSnapshot,
+} from './generated/mob.js';
 
 // ─── Bootstrap / session config (generated wire parity) ─────────
 //
@@ -439,6 +443,12 @@ export interface MobMemberSnapshot {
   freshness_reason?: string;
   lifecycle_capabilities?: WireMemberLifecycleCapabilities;
   non_portable_disabled?: WireNonPortableResourceKind[];
+  /**
+   * Set when this read did not observe the member's session: `output_preview`
+   * and `tokens_used` are then missing, not an empty preview and a zero count.
+   * Absent when they are observations.
+   */
+  preview_unavailable?: WireMemberPreviewUnavailable;
 }
 
 /** Result envelope for helper-style mob flows. */

@@ -2752,6 +2752,30 @@ pub struct MobMemberStatusResult {
     /// list because non-portable resources are rejected, never disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_portable_disabled: Option<Vec<super::portable_spec::WireNonPortableResourceKind>>,
+    /// Present when the status read could not observe the member's session
+    /// view: `output_preview` and `tokens_used` are then unavailable, not an
+    /// empty preview and a zero count. Absent-omitted for byte-compat with
+    /// released SDKs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_unavailable: Option<WireMemberPreviewUnavailable>,
+}
+
+/// Why a member status read carries no observation of the member's session
+/// view.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMemberPreviewUnavailable {
+    /// The bounded session-view read did not finish before the status
+    /// observation deadline.
+    ObservationDeadline,
+    /// The session-view read failed.
+    ReadFailed,
+    /// The member's bound session has no readable view (absent or archived).
+    SessionAbsent,
+    /// The member is retiring; a status read of a retiring member is answered
+    /// without reading its session.
+    NotObservedWhileRetiring,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2845,6 +2869,7 @@ mod member_status_capability_tests {
             freshness_reason: None,
             lifecycle_capabilities: None,
             non_portable_disabled: None,
+            preview_unavailable: None,
         };
 
         let json = serde_json::to_string(&result)?;
@@ -4516,6 +4541,7 @@ mod tests {
             freshness_reason: None,
             lifecycle_capabilities: None,
             non_portable_disabled: None,
+            preview_unavailable: None,
         }
     }
 
@@ -4532,6 +4558,7 @@ mod tests {
             "freshness_reason",
             "lifecycle_capabilities",
             "non_portable_disabled",
+            "preview_unavailable",
         ] {
             assert!(
                 value.get(absent).is_none(),
@@ -4550,6 +4577,41 @@ mod tests {
             serde_json::from_value(legacy).expect("legacy member status decodes");
         assert!(decoded.placement.is_none());
         assert!(decoded.lifecycle_capabilities.is_none());
+        assert!(decoded.preview_unavailable.is_none());
+    }
+
+    /// The preview-unavailable marker is a closed snake_case vocabulary at
+    /// the top level of the status result, next to the fields it qualifies.
+    #[test]
+    fn member_status_preview_unavailable_round_trips() {
+        let mut status = minimal_member_status();
+        status.preview_unavailable = Some(WireMemberPreviewUnavailable::ObservationDeadline);
+        let value = serde_json::to_value(&status).expect("serialize member status");
+        assert_eq!(
+            value["preview_unavailable"],
+            serde_json::json!("observation_deadline")
+        );
+        let decoded: MobMemberStatusResult = serde_json::from_value(value).expect("marker decodes");
+        assert_eq!(
+            decoded.preview_unavailable,
+            Some(WireMemberPreviewUnavailable::ObservationDeadline)
+        );
+        for (marker, wire) in [
+            (WireMemberPreviewUnavailable::ReadFailed, "read_failed"),
+            (
+                WireMemberPreviewUnavailable::SessionAbsent,
+                "session_absent",
+            ),
+            (
+                WireMemberPreviewUnavailable::NotObservedWhileRetiring,
+                "not_observed_while_retiring",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(marker).expect("serialize marker"),
+                serde_json::json!(wire)
+            );
+        }
     }
 
     /// SD-5 pin: placement facts live ONLY at the typed keys — never

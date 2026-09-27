@@ -170,14 +170,21 @@ test("an unnamed module with no single stack-pointer candidate is refused, not g
 test("the release job's ambient RUSTFLAGS no longer replaces the stack flag", () => {
   // The exact environment of release.yml's "Build and pack Web SDK" step.
   const release = { RUSTFLAGS: '--cfg getrandom_backend="wasm_js"', PATH: "/usr/bin" };
-  const { env, flags } = wasmBuildEnv(release);
+  const { env, flags, cargoArgs } = wasmBuildEnv(release);
   assert.deepEqual(flags.slice(-REQUIRED_WASM_RUSTFLAGS.length), REQUIRED_WASM_RUSTFLAGS);
   assert.ok(flags.includes("link-arg=-zstack-size=8388608"));
-  // Only the source Cargo reads first is left, carrying everything.
-  assert.equal(env.RUSTFLAGS, undefined);
-  assert.equal(env.CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS, undefined);
-  assert.deepEqual(env.CARGO_ENCODED_RUSTFLAGS.split("\x1f"), flags);
+  // No rustflags variable is left to outrank the flags, or to leak the
+  // wasm-only stack flag into wasm-pack's host `cargo install` fallback.
+  for (const key of ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS"]) {
+    assert.equal(env[key], undefined, key);
+  }
   assert.equal(env.PATH, "/usr/bin");
+  // The flags reach Cargo as a --config array it joins with config-file
+  // target rustflags; the value is a TOML array of the folded flags.
+  assert.equal(cargoArgs[0], "--config");
+  const [key, value] = [cargoArgs[1].slice(0, cargoArgs[1].indexOf("=")), cargoArgs[1].slice(cargoArgs[1].indexOf("=") + 1)];
+  assert.equal(key, "target.wasm32-unknown-unknown.rustflags");
+  assert.deepEqual(JSON.parse(value), flags);
 });
 
 test("every ambient rustflags source is folded in ahead of the required flags", () => {

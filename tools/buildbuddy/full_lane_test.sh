@@ -449,7 +449,8 @@ case "${lane}" in
       cd sdks/web &&
       npm install --ignore-scripts &&
       npm run build &&
-      npm test
+      npm test &&
+      npm run test:packed
     '
     wait_parallel_jobs
     make verify-sdk-wrapper-freshness CARGO="${CARGO}" PYTHON="${PYTHON}"

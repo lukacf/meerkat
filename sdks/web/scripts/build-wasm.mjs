@@ -52,10 +52,12 @@ const WASM_OPT = (() => {
   }
   throw new Error(`invalid MEERKAT_WEB_WASM_OPT=${value}; expected 0 or 1`);
 })();
-// Ambient rustflags are folded in ahead of the runtime's own, and the result
-// is passed through the source Cargo reads first (scripts/wasm-rustflags.mjs),
-// so no environment can drop `-zstack-size` again.
-const WASM_RUSTFLAGS = wasmBuildEnv(process.env).flags;
+// Ambient rustflags are folded in ahead of the runtime's own and the result
+// reaches Cargo as a `--config target.wasm32-unknown-unknown.rustflags`
+// array, with no rustflags variable left to outrank it
+// (scripts/wasm-rustflags.mjs), so no environment can drop `-zstack-size`.
+const WASM_BUILD = wasmBuildEnv(process.env);
+const WASM_RUSTFLAGS = WASM_BUILD.flags;
 const RELEASE_CARGO_PROFILE_ENV =
   BUILD_PROFILE === "release"
     ? {
@@ -385,6 +387,8 @@ async function run() {
           OUT_DIR,
           ...profileArgs,
           ...(WASM_OPT ? [] : ["--no-opt"]),
+          "--",
+          ...WASM_BUILD.cargoArgs,
         ],
         {
           cwd: SDK_DIR,

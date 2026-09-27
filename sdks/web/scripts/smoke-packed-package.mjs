@@ -16,7 +16,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -102,11 +102,17 @@ async function main(argv) {
     const stack = assertWasmStack(new Uint8Array(wasmBytes), undefined, `${path.basename(tarball)} wasm`);
     console.log(`packed wasm stack: ${stack.stackBytes} bytes (${stack.layout})`);
 
-    const web = await import(pathToFileURL(path.join(packageDir, "dist", "index.js")).href);
-    assert.ok(web.MeerkatRuntime && web.Session, "missing @rkat/web exports");
-    const rawWasm = await import(
-      pathToFileURL(path.join(packageDir, "wasm", "meerkat_web_runtime.js")).href
+    // Resolve the package the way an installed consumer does: bare
+    // specifiers through its package.json `exports`, from a module that sits
+    // next to the unpacked node_modules (offline, no registry).
+    const entry = path.join(root, "smoke-entry.mjs");
+    await writeFile(
+      entry,
+      'export * as web from "@rkat/web";\n' +
+        'export * as rawWasm from "@rkat/web/wasm/meerkat_web_runtime.js";\n',
     );
+    const { web, rawWasm } = await import(pathToFileURL(entry).href);
+    assert.ok(web.MeerkatRuntime && web.Session, "missing @rkat/web exports");
     const wasm = { ...rawWasm, default: async () => rawWasm.default({ module_or_path: wasmBytes }) };
 
     const requests = installFetchStub();
@@ -133,7 +139,12 @@ async function main(argv) {
   }
 }
 
-main(process.argv).catch((error) => {
-  console.error(`packed @rkat/web smoke failed: ${error?.stack ?? error}`);
-  process.exit(1);
-});
+// Exit explicitly: the runtime's wasm leaves a ~120 s provider-timeout timer
+// scheduled after the turn, which would otherwise hold the process open.
+main(process.argv).then(
+  () => process.exit(0),
+  (error) => {
+    console.error(`packed @rkat/web smoke failed: ${error?.stack ?? error}`);
+    process.exit(1);
+  },
+);

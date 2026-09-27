@@ -395,6 +395,23 @@ for (const path of [
 // from, and the sources of examples 031, 032 and 033 select them; their
 // documentation, other examples and unrelated crates do not.
 {
+  // Dependency-only Rust changes must run both the browser examples and
+  // WASM timer tests, whose workflow jobs share the example_web flag.
+  for (const path of [
+    "crates/meerkat-core/src/time_compat/wasm.rs",
+    "crates/meerkat-core/src/lib.rs",
+    "crates/meerkat-runtime/src/lib.rs",
+    "crates/meerkat-session/src/lib.rs",
+    "crates/meerkat-mob/src/lib.rs",
+    "crates/meerkat-machine-kernels/src/lib.rs",
+  ]) {
+    const plan = planFor([path]);
+    assert.equal(plan.mode, "packages", `${path} selects its owning package`);
+    assert.equal(plan.packages.length, 1, `${path} does not escalate to the workspace`);
+    assert.ok(plan.closure.includes("meerkat-web-runtime"), `${path} reaches the web runtime through dependencies`);
+    assert.equal(plan.wasm, true, `${path} selects the WASM build`);
+    assert.equal(plan.example_web, true, `${path} selects the browser and WASM timer suites`);
+  }
   for (const path of [
     "sdks/web/scripts/build-wasm.mjs",
     "sdks/web/src/index.ts",
@@ -410,14 +427,28 @@ for (const path of [
     "examples/033-the-office-demo-sh/README.md",
     "examples/037-live-webrtc-web/app.js",
     "sdks/typescript/src/index.ts",
-    "crates/meerkat-core/src/lib.rs",
+    "crates/meerkat-core/README.md",
     "CHANGELOG.md",
   ]) {
     assert.equal(planFor([path]).example_web, false, `${path} does not select the example web suites`);
   }
-  const result = run(["--format", "github", "--", "sdks/web/src/index.ts"]);
-  const lines = Object.fromEntries(result.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
-  assert.equal(lines.example_web, "true");
+  for (const path of ["crates/meerkat-rpc/src/lib.rs", "crates/meerkat-cli/src/main.rs"]) {
+    const plan = planFor([path]);
+    assert.equal(plan.mode, "packages", `${path} still selects its Rust package`);
+    assert.ok(!plan.closure.includes("meerkat-web-runtime"), `${path} has no reverse dependency on the web runtime`);
+    assert.equal(plan.example_web, false, `${path} does not select the browser and WASM timer suites`);
+  }
+  for (const path of ["Cargo.lock", ".cargo/config.toml"]) {
+    const plan = planFor([path]);
+    assert.equal(plan.mode, "workspace", `${path} selects the workspace`);
+    assert.equal(plan.example_web, true, `${path} selects the browser and WASM timer suites`);
+  }
+  for (const path of ["sdks/web/src/index.ts", "crates/meerkat-core/src/time_compat/wasm.rs"]) {
+    const result = run(["--format", "github", "--", path]);
+    assert.equal(result.status, 0, result.stderr);
+    const lines = Object.fromEntries(result.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+    assert.equal(lines.example_web, "true", `${path} selects the suites in GitHub output`);
+  }
 }
 
 // A change to the lane definitions runs the lanes they define.

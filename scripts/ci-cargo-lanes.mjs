@@ -548,13 +548,20 @@ function plan(args) {
       }
     }
     result.closure = [...seen].map((id) => byId.get(id).name).sort();
-    if (result.closure.includes("meerkat-web-runtime")) result.wasm = true;
   } else {
     result.mode = "none";
     result.reason = "no Rust build-relevant paths changed";
     result.docs_only = changed !== null && changed.every(
       (path) => /^(docs\/|docs\/internal\/|CHANGELOG\.md|README\.md|AGENTS\.md|CLAUDE\.md|.*\.mdx?$)/.test(path),
     );
+  }
+
+  // The browser examples and WASM timer tests execute this runtime. Select
+  // them for any changed package that reaches it through the same reverse
+  // dependency closure, including a whole-workspace build change.
+  if (result.closure.includes("meerkat-web-runtime")) {
+    result.wasm = true;
+    result.example_web = true;
   }
 
   if (result.rust_changed) {

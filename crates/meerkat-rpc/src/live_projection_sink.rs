@@ -117,6 +117,38 @@ impl SessionServiceProjectionSink {
         }
     }
 
+    /// Apply one assistant realtime event, naming the live channel it streamed
+    /// on when the host supplied one. Core stamps the channel on the staged
+    /// assistant item, so the row the materializer later commits carries a
+    /// `realtime_origin` naming its provider items - the pairing key consoles
+    /// use to retire the live rendering.
+    async fn append_assistant_realtime_event(
+        &self,
+        session_id: &SessionId,
+        event: RealtimeTranscriptEvent,
+        channel_id: Option<&LiveChannelId>,
+    ) -> Result<(), LiveProjectionError> {
+        let applied = match channel_id {
+            Some(channel_id) => {
+                self.runtime
+                    .append_realtime_transcript_event_from_channel(
+                        session_id,
+                        event,
+                        channel_id.clone(),
+                    )
+                    .await
+            }
+            None => {
+                self.runtime
+                    .append_realtime_transcript_event(session_id, event)
+                    .await
+            }
+        };
+        applied
+            .map(|_outcome| ())
+            .map_err(|err| session_error_to_projection(err, session_id))
+    }
+
     /// Push an assistant final onto the per-(session, response_id) buffer
     /// (P1#1 + R6 + T6).
     fn buffer_assistant_content(
@@ -518,11 +550,8 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         let event = build_assistant_text_delta_event(delta, identity)
             .map_err(identity_error_to_projection)?
             .with_context_observation(identity.context_observation_id.cloned());
-        self.runtime
-            .append_realtime_transcript_event(session_id, event)
+        self.append_assistant_realtime_event(session_id, event, identity.channel_id)
             .await
-            .map(|_outcome| ())
-            .map_err(|err| session_error_to_projection(err, session_id))
     }
 
     async fn append_assistant_transcript_delta(
@@ -543,11 +572,8 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         let event = build_assistant_transcript_delta_event(delta, identity)
             .map_err(identity_error_to_projection)?
             .with_context_observation(identity.context_observation_id.cloned());
-        self.runtime
-            .append_realtime_transcript_event(session_id, event)
+        self.append_assistant_realtime_event(session_id, event, identity.channel_id)
             .await
-            .map(|_outcome| ())
-            .map_err(|err| session_error_to_projection(err, session_id))
     }
 
     async fn append_assistant_text_final(
@@ -629,11 +655,8 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
             text: text.to_string(),
         }
         .with_context_observation(identity.context_observation_id.cloned());
-        self.runtime
-            .append_realtime_transcript_event(session_id, event)
+        self.append_assistant_realtime_event(session_id, event, identity.channel_id)
             .await
-            .map(|_outcome| ())
-            .map_err(|err| session_error_to_projection(err, session_id))
     }
 
     async fn resolve_assistant_playback_after_final(
@@ -1198,6 +1221,7 @@ mod tests {
     /// trait callsite (the borrowed form does not survive the await).
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     struct OwnedIdentity {
+        channel_id: Option<LiveChannelId>,
         provider_item_id: Option<String>,
         previous_item_id: Option<String>,
         content_index: Option<u32>,
@@ -1208,6 +1232,7 @@ mod tests {
     impl OwnedIdentity {
         fn from_borrowed(identity: LiveTranscriptIdentity<'_>) -> Self {
             Self {
+                channel_id: identity.channel_id.cloned(),
                 provider_item_id: identity.provider_item_id.map(|s| s.to_string()),
                 previous_item_id: identity.previous_item_id.map(|s| s.to_string()),
                 content_index: identity.content_index,
@@ -1569,6 +1594,64 @@ mod tests {
         assert_eq!(identity.content_index, Some(0));
         assert_eq!(identity.response_id.as_deref(), Some("resp_7"));
         assert_eq!(identity.delta_id.as_deref(), Some("delta_3"));
+        assert_eq!(identity.channel_id.as_ref(), Some(&channel));
+    }
+
+    /// Every assistant transcript lane names the channel it streamed on, as
+    /// the user lane does. The session stamps that channel on the staged
+    /// item, so the row the materializer commits carries a `realtime_origin`
+    /// (the console pairing key). Without it, ordinary spoken turns committed
+    /// with no origin and consoles rendered them twice.
+    #[tokio::test]
+    async fn assistant_transcript_lanes_carry_the_source_channel() {
+        let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
+        let host = LiveAdapterHost::new(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>);
+        let session_id = test_session_id();
+        let channel = open_test_channel(&host, session_id.clone()).await;
+
+        for obs in [
+            LiveAdapterObservation::AssistantTextDelta {
+                provider_item_id: Some("item_text".to_string()),
+                previous_item_id: None,
+                content_index: Some(0),
+                response_id: Some("resp_lanes".to_string()),
+                delta_id: None,
+                delta: "shown".to_string(),
+            },
+            LiveAdapterObservation::AssistantTranscriptDelta {
+                provider_item_id: Some("item_spoken".to_string()),
+                previous_item_id: Some("item_text".to_string()),
+                content_index: Some(0),
+                response_id: Some("resp_lanes".to_string()),
+                delta_id: None,
+                delta: "spoken".to_string(),
+            },
+            LiveAdapterObservation::AssistantTranscriptFinal {
+                provider_item_id: "item_spoken".to_string(),
+                previous_item_id: Some("item_text".to_string()),
+                content_index: Some(0),
+                response_id: Some("resp_lanes".to_string()),
+                text: "spoken".to_string(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ] {
+            host.apply_observation(&channel, &obs).await.unwrap();
+        }
+
+        let text_deltas = sink.text_deltas.lock().unwrap();
+        let transcript_deltas = sink.transcript_deltas.lock().unwrap();
+        let transcript_finals = sink.transcript_finals.lock().unwrap();
+        assert_eq!(text_deltas.len(), 1);
+        assert_eq!(transcript_deltas.len(), 1);
+        assert_eq!(transcript_finals.len(), 1);
+        for identity in [
+            &text_deltas[0].2,
+            &transcript_deltas[0].2,
+            &transcript_finals[0].2,
+        ] {
+            assert_eq!(identity.channel_id.as_ref(), Some(&channel));
+        }
     }
 
     #[tokio::test]

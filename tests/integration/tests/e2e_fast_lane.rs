@@ -18,6 +18,9 @@ mod council_support;
 mod live_support;
 
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "e2e_fast/assistant_message_identity.rs"]
+mod assistant_message_identity;
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "e2e_fast/cross_host_live_member.rs"]
 mod cross_host_live_member;
 #[cfg(not(target_arch = "wasm32"))]

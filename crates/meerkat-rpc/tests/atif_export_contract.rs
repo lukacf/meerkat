@@ -117,9 +117,13 @@ async fn seed_committed_turn(event_store: &Arc<dyn EventStore>, session_id: &Ses
                         content: "hello".into(),
                     },
                 },
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
                 AgentEvent::TextComplete {
                     content: "answered".to_string(),
+                    assistant_message_id: None,
                 },
                 AgentEvent::TurnCompleted {
                     stop_reason: StopReason::EndTurn,
@@ -128,6 +132,7 @@ async fn seed_committed_turn(event_store: &Arc<dyn EventStore>, session_id: &Ses
                         "claude-sonnet-4-5",
                         meerkat_core::Usage::default(),
                     )),
+                    assistant_message_id: None,
                 },
             ],
         )

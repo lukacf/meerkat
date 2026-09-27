@@ -37,7 +37,7 @@ from urllib.error import URLError
 
 from .errors import CapabilityUnavailableError, MeerkatError
 from .event_envelope import parse_agent_event_envelope
-from .events import Usage, _parse_usage
+from .events import RealtimeMessageOrigin, Usage, _parse_usage
 from .generated.rpc_contracts import RpcRequest
 from .generated.types import (
     CONTRACT_VERSION,
@@ -6129,6 +6129,12 @@ class MeerkatClient:
                     f"{context}: unsupported transcript_role {transcript_role!r}",
                 )
         elif role == "block_assistant":
+            MeerkatClient._validate_nullable_response_string(
+                row, "assistant_message_id", context
+            )
+            MeerkatClient._parse_realtime_message_origin(
+                row.get("realtime_origin"), f"{context}: realtime_origin"
+            )
             blocks = MeerkatClient._require_present_list_field(
                 row,
                 "blocks",
@@ -6745,6 +6751,39 @@ class MeerkatClient:
             "INVALID_RESPONSE",
             f"{context}: unsupported coverage.kind {kind!r}",
         )
+
+    @staticmethod
+    def _parse_realtime_message_origin(
+        raw: Any, context: str
+    ) -> RealtimeMessageOrigin | None:
+        """Validate an optional ``realtime_origin`` in its generated wire shape."""
+        if raw is None:
+            return None
+        origin = MeerkatClient._require_dict(raw, "realtime_origin", context)
+        MeerkatClient._require_non_negative_integer_field(
+            origin, "canonical_row_sequence", context
+        )
+        MeerkatClient._require_string_field(origin, "channel_id", context)
+        MeerkatClient._require_string_field(origin, "session_id", context)
+        if "provider_item_ids" in origin:
+            items = origin["provider_item_ids"]
+            if not isinstance(items, list) or any(
+                not isinstance(item, str) for item in items
+            ):
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: provider_item_ids must be a list of strings",
+                )
+        observation = origin.get("context_observation_id")
+        if observation is not None:
+            observation = MeerkatClient._require_dict(
+                observation, "context_observation_id", context
+            )
+            for name in ("channel_id", "namespace", "nonce"):
+                MeerkatClient._require_string_field(
+                    observation, name, f"{context}: context_observation_id"
+                )
+        return cast(RealtimeMessageOrigin, origin)
 
     @staticmethod
     def _require_dict(raw: Any, field: str, context: str) -> dict[str, Any]:
@@ -8050,6 +8089,14 @@ class MeerkatClient:
             stop_reason=data.get("stop_reason"),
             interaction_id=data.get("interaction_id"),
             run_id=data.get("run_id"),
+            assistant_message_id=data.get("assistant_message_id")
+            if role == "block_assistant"
+            else None,
+            realtime_origin=MeerkatClient._parse_realtime_message_origin(
+                data.get("realtime_origin"), f"{context}: realtime_origin"
+            )
+            if role == "block_assistant"
+            else None,
             prompt_version=prompt_version,
             instruction_activation=instruction_activation,
             blocks=[

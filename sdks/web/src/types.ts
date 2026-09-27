@@ -128,6 +128,7 @@ export type TurnResult = import('./generated/session.js').WireRunResult & {
 
 export type {
   AgentEvent,
+  AssistantMessageId,
   BudgetType,
   HookId,
   HookPoint,

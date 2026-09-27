@@ -322,7 +322,7 @@ impl TrajectoryBuilder {
                     });
                 }
             }
-            AgentEvent::TurnStarted { turn_number } => {
+            AgentEvent::TurnStarted { turn_number, .. } => {
                 match pending.take() {
                     // The loop re-announces the turn it is already in when a
                     // compaction boundary sends it back to rebuild the request
@@ -341,20 +341,20 @@ impl TrajectoryBuilder {
                 }
                 *pending = Some(PendingTurn::started(*turn_number, envelope.timestamp_ms));
             }
-            AgentEvent::ReasoningDelta { delta } => pending
+            AgentEvent::ReasoningDelta { delta, .. } => pending
                 .get_or_insert_with(|| PendingTurn::new(envelope.timestamp_ms))
                 .reasoning
                 .push_str(delta),
-            AgentEvent::ReasoningComplete { content } => {
+            AgentEvent::ReasoningComplete { content, .. } => {
                 pending
                     .get_or_insert_with(|| PendingTurn::new(envelope.timestamp_ms))
                     .reasoning = content.clone();
             }
-            AgentEvent::TextDelta { delta } => pending
+            AgentEvent::TextDelta { delta, .. } => pending
                 .get_or_insert_with(|| PendingTurn::new(envelope.timestamp_ms))
                 .message
                 .push_str(delta),
-            AgentEvent::TextComplete { content } => {
+            AgentEvent::TextComplete { content, .. } => {
                 pending
                     .get_or_insert_with(|| PendingTurn::new(envelope.timestamp_ms))
                     .message = content.clone();
@@ -404,7 +404,9 @@ impl TrajectoryBuilder {
                     )])),
                     subagent_trajectory_ref: None,
                 }),
-            AgentEvent::ServerToolContent { id, content, kind } => pending
+            AgentEvent::ServerToolContent {
+                id, content, kind, ..
+            } => pending
                 .get_or_insert_with(|| PendingTurn::new(envelope.timestamp_ms))
                 .observations
                 .push(ObservationResult {
@@ -892,7 +894,10 @@ mod tests {
                 EventSourceIdentity::session(id.clone()),
                 2,
                 None,
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
             ),
             EventEnvelope::new_with_source(
                 EventSourceIdentity::session(id.clone()),
@@ -925,6 +930,7 @@ mod tests {
                 None,
                 AgentEvent::TextComplete {
                     content: "done".into(),
+                    assistant_message_id: None,
                 },
             ),
             EventEnvelope::new_with_source(
@@ -944,6 +950,7 @@ mod tests {
                         },
                         meerkat_core::ProviderTokenAccounting::openai("test", 4),
                     )),
+                    assistant_message_id: None,
                 },
             ),
         ];
@@ -1021,7 +1028,10 @@ mod tests {
                 EventSourceIdentity::session(id.clone()),
                 2,
                 None,
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
             ),
             EventEnvelope::new_with_source(
                 EventSourceIdentity::session(id.clone()),
@@ -1029,6 +1039,7 @@ mod tests {
                 None,
                 AgentEvent::TextDelta {
                     delta: "par".into(),
+                    assistant_message_id: None,
                 },
             ),
             EventEnvelope::new_with_source(
@@ -1037,6 +1048,7 @@ mod tests {
                 None,
                 AgentEvent::TextDelta {
                     delta: "tial".into(),
+                    assistant_message_id: None,
                 },
             ),
             EventEnvelope::new_with_source(
@@ -1056,6 +1068,7 @@ mod tests {
                         },
                         meerkat_core::ProviderTokenAccounting::openai("test", 3),
                     )),
+                    assistant_message_id: None,
                 },
             ),
             EventEnvelope::new_with_source(
@@ -1070,6 +1083,7 @@ mod tests {
                     extraction_required: false,
                     usage: Usage::default().into(),
                     terminal_cause_kind: None,
+                    assistant_message_id: None,
                 },
             ),
         ];
@@ -1115,7 +1129,10 @@ mod tests {
                 EventSourceIdentity::session(id.clone()),
                 1,
                 None,
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
             ),
             EventEnvelope::new_with_source(
                 EventSourceIdentity::session(id.clone()),
@@ -1123,6 +1140,7 @@ mod tests {
                 None,
                 AgentEvent::ReasoningComplete {
                     content: "d".repeat(1024),
+                    assistant_message_id: None,
                 },
             ),
             EventEnvelope::new_with_source(
@@ -1153,6 +1171,7 @@ mod tests {
                 None,
                 AgentEvent::TextComplete {
                     content: "f".repeat(256),
+                    assistant_message_id: None,
                 },
             ),
         ];
@@ -1171,6 +1190,7 @@ mod tests {
                         Usage::default(),
                         meerkat_core::ProviderTokenAccounting::openai("test", 0),
                     )),
+                    assistant_message_id: None,
                 },
             ))
             .unwrap();
@@ -1222,7 +1242,10 @@ mod tests {
                     content: ContentInput::Text("review this".into()),
                 },
             },
-            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::TurnStarted {
+                turn_number: 0,
+                assistant_message_id: None,
+            },
             AgentEvent::ToolCallRequested {
                 id: "call-1".into(),
                 name: "read_file".into(),
@@ -1243,16 +1266,22 @@ mod tests {
             events.push(AgentEvent::TurnCompleted {
                 stop_reason: meerkat_core::StopReason::ToolUse,
                 usage: Some(openai_usage(1000, 10, 0, 3)),
+                assistant_message_id: None,
             });
         }
         events.extend([
-            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
             AgentEvent::TextComplete {
                 content: "looks fine".into(),
+                assistant_message_id: None,
             },
             AgentEvent::TurnCompleted {
                 stop_reason: meerkat_core::StopReason::EndTurn,
                 usage: Some(openai_usage(1200, 20, 1000, 4)),
+                assistant_message_id: None,
             },
             AgentEvent::RunCompleted {
                 identity: Default::default(),
@@ -1262,10 +1291,12 @@ mod tests {
                 extraction_required: true,
                 usage: Usage::default().into(),
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             },
             // Extraction streams its JSON as deltas; they are not a turn.
             AgentEvent::TextDelta {
                 delta: r#"{"comments": []}"#.into(),
+                assistant_message_id: None,
             },
             AgentEvent::ExtractionSucceeded {
                 session_id: id.clone(),
@@ -1427,13 +1458,18 @@ mod tests {
                     content: ContentInput::Text("review this".into()),
                 },
             },
-            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::TurnStarted {
+                turn_number: 0,
+                assistant_message_id: None,
+            },
             AgentEvent::TextComplete {
                 content: reply.into(),
+                assistant_message_id: None,
             },
             AgentEvent::TurnCompleted {
                 stop_reason: meerkat_core::StopReason::EndTurn,
                 usage: Some(openai_usage(1200, 20, 1000, 4)),
+                assistant_message_id: None,
             },
             AgentEvent::RunCompleted {
                 identity: Default::default(),
@@ -1443,6 +1479,7 @@ mod tests {
                 extraction_required: true,
                 usage: Usage::default().into(),
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             },
             AgentEvent::ExtractionSucceeded {
                 session_id: id.clone(),
@@ -1486,13 +1523,21 @@ mod tests {
     fn failed_extraction_requests_are_steps_with_the_failure_on_the_last() {
         let id = SessionId::new();
         let events = vec![
-            envelope(&id, 1, AgentEvent::TurnStarted { turn_number: 0 }),
+            envelope(
+                &id,
+                1,
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
+            ),
             envelope(
                 &id,
                 2,
                 AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::EndTurn,
                     usage: Some(openai_usage(100, 5, 0, 0)),
+                    assistant_message_id: None,
                 },
             ),
             envelope(
@@ -1506,6 +1551,7 @@ mod tests {
                     extraction_required: true,
                     usage: Usage::default().into(),
                     terminal_cause_kind: None,
+                    assistant_message_id: None,
                 },
             ),
             envelope(
@@ -1579,6 +1625,7 @@ mod tests {
             extraction_required,
             usage: Usage::default().into(),
             terminal_cause_kind: None,
+            assistant_message_id: None,
         }
     }
 
@@ -1604,11 +1651,15 @@ mod tests {
         for first_attempt_streamed in [false, true] {
             let mut events = vec![
                 run_started(&id, "summarize"),
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
             ];
             if first_attempt_streamed {
                 events.push(AgentEvent::TextDelta {
                     delta: "partial".into(),
+                    assistant_message_id: None,
                 });
             }
             events.extend([
@@ -1622,13 +1673,18 @@ mod tests {
                     messages_before: 40,
                     messages_after: 3,
                 },
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
                 AgentEvent::TextDelta {
                     delta: "answer".into(),
+                    assistant_message_id: None,
                 },
                 AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::EndTurn,
                     usage: Some(openai_usage(3000, 40, 0, 0)),
+                    assistant_message_id: None,
                 },
                 run_completed(&id, "answer", false),
             ]);
@@ -1658,14 +1714,25 @@ mod tests {
         let id = SessionId::new();
         let events = vec![
             run_started(&id, "go"),
-            AgentEvent::TurnStarted { turn_number: 0 },
-            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::TurnStarted {
+                turn_number: 0,
+                assistant_message_id: None,
+            },
+            AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
             AgentEvent::ReasoningComplete {
                 content: "look first".into(),
+                assistant_message_id: None,
             },
-            AgentEvent::TurnStarted { turn_number: 2 },
+            AgentEvent::TurnStarted {
+                turn_number: 2,
+                assistant_message_id: None,
+            },
             AgentEvent::TextComplete {
                 content: "done".into(),
+                assistant_message_id: None,
             },
             run_completed(&id, "done", false),
         ];
@@ -1685,7 +1752,10 @@ mod tests {
         let id = SessionId::new();
         let events = vec![
             run_started(&id, "first"),
-            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::TurnStarted {
+                turn_number: 0,
+                assistant_message_id: None,
+            },
             AgentEvent::ToolCallRequested {
                 id: "call-1".into(),
                 name: "shell".into(),
@@ -1695,13 +1765,18 @@ mod tests {
                 .unwrap(),
             },
             run_started(&id, "second"),
-            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::TurnStarted {
+                turn_number: 0,
+                assistant_message_id: None,
+            },
             AgentEvent::TextComplete {
                 content: "second answer".into(),
+                assistant_message_id: None,
             },
             AgentEvent::TurnCompleted {
                 stop_reason: meerkat_core::StopReason::EndTurn,
                 usage: Some(openai_usage(500, 5, 0, 0)),
+                assistant_message_id: None,
             },
             run_completed(&id, "second answer", false),
         ];
@@ -1737,17 +1812,23 @@ mod tests {
         for fails_inside_extraction in [true, false] {
             let mut events = vec![
                 run_started(&id, "first"),
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
                 AgentEvent::TextComplete {
                     content: "first answer".into(),
+                    assistant_message_id: None,
                 },
                 AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::EndTurn,
                     usage: Some(openai_usage(100, 5, 0, 0)),
+                    assistant_message_id: None,
                 },
                 run_completed(&id, "first answer", true),
                 AgentEvent::TextDelta {
                     delta: r#"{"partial": "#.into(),
+                    assistant_message_id: None,
                 },
             ];
             if fails_inside_extraction {
@@ -1764,16 +1845,22 @@ mod tests {
             }
             events.extend([
                 run_started(&id, "second"),
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
                 AgentEvent::ReasoningComplete {
                     content: "thinking".into(),
+                    assistant_message_id: None,
                 },
                 AgentEvent::TextComplete {
                     content: "second answer".into(),
+                    assistant_message_id: None,
                 },
                 AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::EndTurn,
                     usage: Some(openai_usage(200, 6, 0, 0)),
+                    assistant_message_id: None,
                 },
             ]);
             let trajectory = trajectory_from_events(&envelopes(&id, events), test_agent()).unwrap();

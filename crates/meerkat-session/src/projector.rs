@@ -119,7 +119,7 @@ impl SessionProjector {
             last_seq = stored.seq;
 
             // Track last assistant text for summary
-            if let AgentEvent::TextComplete { content } = &stored.event
+            if let AgentEvent::TextComplete { content, .. } = &stored.event
                 && !content.is_empty()
             {
                 summary_updated = true;
@@ -870,6 +870,7 @@ mod tests {
                 },
                 AgentEvent::TextComplete {
                     content: "Hi there!".to_string(),
+                    assistant_message_id: None,
                 },
                 AgentEvent::RunCompleted {
                     identity: Default::default(),
@@ -879,6 +880,7 @@ mod tests {
                     extraction_required: false,
                     usage: Usage::default().into(),
                     terminal_cause_kind: None,
+                    assistant_message_id: None,
                 },
             ],
         );
@@ -926,6 +928,7 @@ mod tests {
             &sid,
             &[AgentEvent::TextDelta {
                 delta: "partial".to_string(),
+                assistant_message_id: None,
             }],
         );
         projector.project(&store, &sid, 1).await.unwrap();
@@ -956,6 +959,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let parent_revision = session.transcript_revision().unwrap();
         let commit = session
@@ -981,6 +985,7 @@ mod tests {
             &[
                 AgentEvent::TextComplete {
                     content: "old summary".to_string(),
+                    assistant_message_id: None,
                 },
                 AgentEvent::TranscriptRewriteAuditReceiptCommitted {
                     session_id: sid.clone(),
@@ -1007,9 +1012,13 @@ mod tests {
         store.add_events(
             &sid,
             &[
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
                 AgentEvent::TextComplete {
                     content: "Response 1".to_string(),
+                    assistant_message_id: None,
                 },
             ],
         );
@@ -1039,7 +1048,13 @@ mod tests {
         let sid = SessionId::new();
 
         // Add first batch
-        store.add_events(&sid, &[AgentEvent::TurnStarted { turn_number: 0 }]);
+        store.add_events(
+            &sid,
+            &[AgentEvent::TurnStarted {
+                turn_number: 0,
+                assistant_message_id: None,
+            }],
+        );
         projector.project(&store, &sid, 1).await.unwrap();
 
         // Verify checkpoint
@@ -1050,9 +1065,13 @@ mod tests {
         store.add_events(
             &sid,
             &[
-                AgentEvent::TurnStarted { turn_number: 1 },
+                AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                },
                 AgentEvent::TextComplete {
                     content: "Done".to_string(),
+                    assistant_message_id: None,
                 },
             ],
         );
@@ -1078,9 +1097,13 @@ mod tests {
         store.add_events(
             &sid,
             &[
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
                 AgentEvent::TextComplete {
                     content: "first".to_string(),
+                    assistant_message_id: None,
                 },
             ],
         );
@@ -1090,7 +1113,13 @@ mod tests {
         tokio::fs::write(session_dir.join("checkpoint"), b"not-a-seq")
             .await
             .unwrap();
-        store.add_events(&sid, &[AgentEvent::TurnStarted { turn_number: 1 }]);
+        store.add_events(
+            &sid,
+            &[AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            }],
+        );
 
         let seq = projector.resume(&store, &sid).await.unwrap();
         assert_eq!(seq, 3);
@@ -1113,9 +1142,13 @@ mod tests {
         store.add_events(
             &sid,
             &[
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
                 AgentEvent::TextComplete {
                     content: "authoritative tail".to_string(),
+                    assistant_message_id: None,
                 },
             ],
         );
@@ -1164,9 +1197,13 @@ mod tests {
         store.add_events(
             &sid,
             &[
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
                 AgentEvent::TextComplete {
                     content: "first".to_string(),
+                    assistant_message_id: None,
                 },
             ],
         );
@@ -1211,9 +1248,13 @@ mod tests {
         store.add_events(
             &sid,
             &[
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
                 AgentEvent::TextComplete {
                     content: "first".to_string(),
+                    assistant_message_id: None,
                 },
             ],
         );
@@ -1225,7 +1266,13 @@ mod tests {
         // Simulate the crashed incremental projection: event 3 lands durably
         // and its derived row is appended, but the crash happens before the
         // checkpoint write (checkpoint stays at the committed seq-2 cursor).
-        store.add_events(&sid, &[AgentEvent::TurnStarted { turn_number: 1 }]);
+        store.add_events(
+            &sid,
+            &[AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            }],
+        );
         let partial_row =
             serde_json::to_string(&store.read_from(&sid, 3).await.unwrap().first().unwrap())
                 .unwrap();
@@ -1281,9 +1328,13 @@ mod tests {
         store.add_events(
             &sid,
             &[
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
                 AgentEvent::TextComplete {
                     content: "first".to_string(),
+                    assistant_message_id: None,
                 },
             ],
         );
@@ -1292,7 +1343,13 @@ mod tests {
         tokio::fs::write(session_dir.join("events.jsonl"), b"x")
             .await
             .unwrap();
-        store.add_events(&sid, &[AgentEvent::TurnStarted { turn_number: 1 }]);
+        store.add_events(
+            &sid,
+            &[AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            }],
+        );
 
         let seq = projector.resume(&store, &sid).await.unwrap();
         assert_eq!(seq, 3);
@@ -1313,9 +1370,13 @@ mod tests {
         store.add_events(
             &sid,
             &[
-                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TurnStarted {
+                    turn_number: 0,
+                    assistant_message_id: None,
+                },
                 AgentEvent::TextComplete {
                     content: "first".to_string(),
+                    assistant_message_id: None,
                 },
             ],
         );
@@ -1325,7 +1386,13 @@ mod tests {
         let checkpoint_path = session_dir.join("checkpoint");
         tokio::fs::remove_file(&checkpoint_path).await.unwrap();
         tokio::fs::create_dir(&checkpoint_path).await.unwrap();
-        store.add_events(&sid, &[AgentEvent::TurnStarted { turn_number: 1 }]);
+        store.add_events(
+            &sid,
+            &[AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            }],
+        );
 
         let seq = projector.resume(&store, &sid).await.unwrap();
         assert_eq!(seq, 3);

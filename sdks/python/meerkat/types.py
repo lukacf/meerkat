@@ -302,6 +302,7 @@ PeerCorrelationId = NewType("PeerCorrelationId", str)
 from .events import (  # noqa: F401
     Event,
     ProviderTokenAccounting as ProviderTokenAccounting,
+    RealtimeMessageOrigin,
     Usage as Usage,
 )
 
@@ -847,6 +848,22 @@ class SessionMessage:
     stop_reason: str | None = None
     interaction_id: str | None = None
     run_id: str | None = None
+    # Session-scoped occurrence id of a ``block_assistant`` row, equal to the
+    # ``assistant_message_id`` its live events carried. Join live rows to
+    # history by this id; it implies nothing about position. The row is
+    # committed exactly because history carries the id; ``turn_completed`` is
+    # not the commit. Restoring a transcript revision keeps the restored rows'
+    # ids, and rows a live display-text drain committed have one. ``None`` on
+    # rows committed before 0.8.45, on rows the realtime transcript
+    # materializer committed (see ``realtime_origin``), and on rows a rewrite
+    # or fork edit replaced.
+    assistant_message_id: str | None = None
+    # Realtime provenance of a ``block_assistant`` row the realtime transcript
+    # materializer committed, in the generated wire shape. Its
+    # ``provider_item_ids`` are the provider item ids the live transport's
+    # realtime observations carry, so a realtime row pairs with its live
+    # rendering by provider item id. ``None`` on every other row.
+    realtime_origin: RealtimeMessageOrigin | None = None
     prompt_version: SystemPromptVersionIdentity | None = None
     instruction_activation: InstructionActivationIdentity | None = None
     blocks: list[SessionAssistantBlock] = field(default_factory=list)

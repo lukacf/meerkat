@@ -300,18 +300,68 @@ async fn durable_boundary_appends_join_the_running_turn_and_every_later_request(
     assert!(matches!(messages[at - 1], Message::ToolResults { .. }));
     assert!(matches!(messages[at + 1], Message::BlockAssistant(_)));
 
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
     let mut applied = Vec::new();
-    while let Ok(event) = rx.try_recv() {
+    for event in &events {
         if let AgentEvent::BoundaryAppendApplied {
             run_id: event_run,
             append_count,
             ..
         } = event
         {
-            applied.push((event_run, append_count));
+            applied.push((event_run.clone(), *append_count));
         }
     }
     assert_eq!(applied, vec![(run_id, 1)]);
+
+    // Interleaved steer never disturbs assistant message identity: every
+    // assistant row keeps the id its provider turn opened, the steer row
+    // between them carries none, and live turns pair with rows by id alone.
+    let row_ids = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::BlockAssistant(assistant) => Some(
+                assistant
+                    .assistant_message_id
+                    .expect("every committed assistant row has an id"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let opened = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TurnStarted {
+                assistant_message_id,
+                ..
+            } => *assistant_message_id,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let completed = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TurnCompleted {
+                assistant_message_id,
+                ..
+            } => *assistant_message_id,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(opened, row_ids);
+    assert_eq!(completed, row_ids);
+    let before = messages[..at]
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            Message::BlockAssistant(assistant) => assistant.assistant_message_id,
+            _ => None,
+        });
+    let after = match &messages[at + 1] {
+        Message::BlockAssistant(assistant) => assistant.assistant_message_id,
+        _ => None,
+    };
+    assert!(before.is_some() && after.is_some() && before != after);
 }
 
 #[tokio::test]

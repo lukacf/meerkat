@@ -125,6 +125,7 @@ impl SessionAgent for MockAgent {
                 extraction_required: false,
                 usage: usage.clone().into(),
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             })
             .await;
 

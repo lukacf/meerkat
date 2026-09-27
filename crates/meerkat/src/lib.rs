@@ -58,6 +58,7 @@ pub use meerkat_core::{
     AgentToolDispatcher,
     ArtifactRef,
     AssistantBlock,
+    AssistantMessageId,
     // Phase 3 provider-auth redesign — realm-scoped connection identity.
     AuthBindingRef,
     BindingId,
@@ -235,9 +236,10 @@ pub use meerkat_core::{
     CompactionCurator, CompactionCuratorError, CompactionWindow, CuratedCompactionSummary,
 };
 pub use meerkat_core::{
-    SessionTranscriptRestoreRevisionRequest, SessionTranscriptRevisionList,
-    SessionTranscriptRevisionListEntry, SessionTranscriptRevisionListQuery,
-    SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
+    RetainedTranscriptRevisionRows, SessionTranscriptRestoreRevisionRequest,
+    SessionTranscriptRevisionList, SessionTranscriptRevisionListEntry,
+    SessionTranscriptRevisionListQuery, SessionTranscriptRevisionPage,
+    SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, TranscriptEditRunningBehavior, TranscriptRewriteCommit,
     TranscriptRewriteReason, TranscriptRewriteRecord, TranscriptRewriteSelection,
     TranscriptRewriteSemantic,

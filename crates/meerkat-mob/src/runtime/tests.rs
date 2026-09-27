@@ -3651,6 +3651,7 @@ impl SessionService for MockSessionService {
                                 extraction_required: false,
                                 usage: Usage::default().into(),
                                 terminal_cause_kind: None,
+                                assistant_message_id: None,
                             },
                         ))
                         .await;
@@ -12216,6 +12217,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
                 extraction_required: false,
                 usage: result.usage.clone().into(),
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             })
             .await;
         Ok(result)
@@ -54678,6 +54680,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                         None,
                         AgentEvent::TextDelta {
                             delta: format!("runtime event {seq} before commit"),
+                            assistant_message_id: None,
                         },
                     ))
                     .await;
@@ -54699,6 +54702,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                     extraction_required: false,
                     usage: Usage::default().into(),
                     terminal_cause_kind: None,
+                    assistant_message_id: None,
                 }
             };
             let _ = event_tx
@@ -76958,8 +76962,8 @@ async fn test_batched_steer_turns_fan_out_complete_commit_gated_event_streams() 
         assert_eq!(event_a.source.session_id(), Some(&session_id));
         match (&event_a.payload, &event_b.payload) {
             (
-                AgentEvent::TextDelta { delta: delta_a },
-                AgentEvent::TextDelta { delta: delta_b },
+                AgentEvent::TextDelta { delta: delta_a, .. },
+                AgentEvent::TextDelta { delta: delta_b, .. },
             ) => {
                 assert_eq!(delta_a, delta_b);
             }

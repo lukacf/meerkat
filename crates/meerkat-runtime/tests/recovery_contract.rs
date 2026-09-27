@@ -1226,6 +1226,7 @@ async fn atomic_apply_recovery_boundary_commits_visible_effects_together() {
             stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let recovered_snapshot = serde_json::to_vec(&recovered).unwrap();
 
@@ -1346,6 +1347,7 @@ async fn whole_blob_provisional_recovery_promotes_store_owned_candidate() {
         stop_reason: Some(StopReason::EndTurn),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
     }));
     let candidate = BoundSessionCommit::sealed(Arc::new(candidate)).unwrap();
     let provisional = store
@@ -1429,6 +1431,7 @@ async fn whole_blob_interrupted_recovery_installs_one_sealed_repair_artifact() {
         stop_reason: Some(StopReason::ToolUse),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
     }));
     interrupted.push(Message::tool_results(vec![ToolResult::new(
         "durable-call".to_string(),
@@ -1520,6 +1523,7 @@ async fn whole_blob_recovery_uses_latest_same_run_candidate_sequence() {
         stop_reason: Some(StopReason::ToolUse),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
     }));
     let first = store
         .write_prepared_whole_blob_provisional_tail(
@@ -1550,6 +1554,7 @@ async fn whole_blob_recovery_uses_latest_same_run_candidate_sequence() {
         stop_reason: Some(StopReason::EndTurn),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
     }));
     let latest = store
         .write_prepared_whole_blob_provisional_tail(
@@ -1707,6 +1712,7 @@ async fn head_canonical_recovery_uses_only_store_owned_source_and_migrates_floor
         identity: meerkat_core::types::TranscriptMessageIdentity::default()
             .with_run_id(candidate_run.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
     }));
     let observed_head = session_store
         .load_head(&session_id)
@@ -1949,6 +1955,7 @@ async fn head_canonical_incomplete_intent_is_discarded_without_advancing_the_ses
         stop_reason: Some(StopReason::EndTurn),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
     }));
     let observed = session_store
         .load_head(&session_id)
@@ -2058,6 +2065,7 @@ async fn head_canonical_recovery_uses_latest_same_run_physical_candidate() {
         stop_reason: Some(StopReason::ToolUse),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
     }));
     let observed = session_store
         .load_head(&session_id)
@@ -2109,6 +2117,7 @@ async fn head_canonical_recovery_uses_latest_same_run_physical_candidate() {
         stop_reason: Some(StopReason::EndTurn),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
     }));
     let latest_mutation =
         PreparedHeadCanonicalMutation::prepare(&latest_candidate, Some(observed)).unwrap();

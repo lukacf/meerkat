@@ -5215,7 +5215,13 @@ mod tests {
         .await?;
 
         store
-            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
             .await?;
         let head = store
             .read_durable_event_log_head(&session_id)
@@ -5245,7 +5251,10 @@ mod tests {
         store
             .append(
                 &anchored_session,
-                &[AgentEvent::TurnStarted { turn_number: 1 }],
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
             )
             .await?;
         let mut anchored_corrupt = transcript_rewrite_record(1, "A", "B", None, "anchored-first");
@@ -5274,7 +5283,10 @@ mod tests {
         store
             .append(
                 &anchored_session,
-                &[AgentEvent::TurnStarted { turn_number: 2 }],
+                &[AgentEvent::TurnStarted {
+                    turn_number: 2,
+                    assistant_message_id: None,
+                }],
             )
             .await?;
         assert!(
@@ -5374,7 +5386,13 @@ mod tests {
             .await?;
 
         store
-            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
             .await?;
         let restarted = FileEventStore::new(store.root());
         restarted.reset_decoded_rows();
@@ -5419,7 +5437,10 @@ mod tests {
                     source: EventSourceIdentity::session(session_id.clone()),
                     mob_id: None,
                     stream_seq: 4,
-                    event: AgentEvent::TurnStarted { turn_number: 2 },
+                    event: AgentEvent::TurnStarted {
+                        turn_number: 2,
+                        assistant_message_id: None,
+                    },
                 },
                 StoredEvent {
                     seq: 5,
@@ -6402,6 +6423,7 @@ mod tests {
             None,
             AgentEvent::TextComplete {
                 content: "not terminal".to_string(),
+                assistant_message_id: None,
             },
         );
 
@@ -6476,7 +6498,10 @@ mod tests {
             EventSourceIdentity::session(session_id.clone()),
             1,
             None,
-            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
         );
 
         let error = store
@@ -6492,6 +6517,7 @@ mod tests {
             None,
             AgentEvent::TextComplete {
                 content: "not a terminal".to_string(),
+                assistant_message_id: None,
             },
         );
         let error = store
@@ -6572,6 +6598,7 @@ mod tests {
                     stream_seq: 1,
                     event: AgentEvent::TextComplete {
                         content: "corrupt occupant".to_string(),
+                        assistant_message_id: None,
                     },
                 },
                 StoredEvent {
@@ -6713,6 +6740,7 @@ mod tests {
                 &[AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::EndTurn,
                     usage: Some(usage.clone()),
+                    assistant_message_id: None,
                 }],
             )
             .await?;
@@ -6926,6 +6954,7 @@ mod tests {
                 stream_seq: 1,
                 event: AgentEvent::TextComplete {
                     content: "corrupt occupant".to_string(),
+                    assistant_message_id: None,
                 },
             }],
         )
@@ -6992,7 +7021,10 @@ mod tests {
         let session_id = SessionId::new();
         let writer = FileEventStore::new(&root);
         let history: Vec<_> = (0..2_048)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         writer.append(&session_id, &history).await?;
 
@@ -7037,9 +7069,13 @@ mod tests {
             .append(
                 &session_id,
                 &[
-                    AgentEvent::TurnStarted { turn_number: 1 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 1,
+                        assistant_message_id: None,
+                    },
                     AgentEvent::TextComplete {
                         content: "durable event".to_string(),
+                        assistant_message_id: None,
                     },
                 ],
             )
@@ -7070,11 +7106,18 @@ mod tests {
             .append(
                 &session_id,
                 &[
-                    AgentEvent::TurnStarted { turn_number: 1 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 1,
+                        assistant_message_id: None,
+                    },
                     AgentEvent::TextComplete {
                         content: "durable event".to_string(),
+                        assistant_message_id: None,
                     },
-                    AgentEvent::TurnStarted { turn_number: 2 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 2,
+                        assistant_message_id: None,
+                    },
                 ],
             )
             .await?;
@@ -7113,7 +7156,13 @@ mod tests {
         let session_id = SessionId::new();
         let store = FileEventStore::new(&root);
         store
-            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
             .await?;
 
         let path = root.join(format!("{session_id}.jsonl"));
@@ -7156,7 +7205,13 @@ mod tests {
         let store = FileEventStore::new(temp.path().join("events"));
         let session_id = SessionId::new();
         store
-            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
             .await?;
 
         let rows = store.read_from_bounded(&session_id, 1, usize::MAX).await?;
@@ -7173,7 +7228,10 @@ mod tests {
         let store = FileEventStore::new(temp.path().join("events"));
         let session_id = SessionId::new();
         let events: Vec<_> = (0..4_096)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         store.append(&session_id, &events).await?;
         assert_eq!(store.last_seq(&session_id).await?, 4_096);
@@ -7214,7 +7272,10 @@ mod tests {
         let session_id = SessionId::new();
         let store = FileEventStore::new(&root);
         let events: Vec<_> = (0..512)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         store.append(&session_id, &events).await?;
 
@@ -7258,14 +7319,20 @@ mod tests {
         let session_id = SessionId::new();
         let store = FileEventStore::new(&root);
         let initial: Vec<_> = (0..128)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         store.append(&session_id, &initial).await?;
         assert_eq!(store.last_seq(&session_id).await?, 128);
 
         let cloned = store.clone();
         let clone_growth: Vec<_> = (128..192)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         store.reset_decoded_rows();
         cloned.append(&session_id, &clone_growth).await?;
@@ -7287,7 +7354,10 @@ mod tests {
         // revalidate the grown file rather than trust its cached prefix.
         let independent = FileEventStore::new(&root);
         let independent_growth: Vec<_> = (192..200)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         independent.append(&session_id, &independent_growth).await?;
 
@@ -7314,7 +7384,10 @@ mod tests {
         let session_id = SessionId::new();
         let store = FileEventStore::new(&root);
         let events: Vec<_> = (0..256)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         store.append(&session_id, &events).await?;
         assert_eq!(store.last_seq(&session_id).await?, 256);
@@ -7355,7 +7428,10 @@ mod tests {
         store
             .append(
                 &retained_session,
-                &[AgentEvent::TurnStarted { turn_number: 1 }],
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
             )
             .await?;
         assert_eq!(store.last_seq(&retained_session).await?, 1);
@@ -7401,7 +7477,10 @@ mod tests {
         let store = FileEventStore::new(temp.path().join("events"));
         let session_id = SessionId::new();
         let initial: Vec<_> = (0..128)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         store.append(&session_id, &initial).await?;
         assert_eq!(store.last_seq(&session_id).await?, 128);
@@ -7417,7 +7496,10 @@ mod tests {
             source: EventSourceIdentity::external("cooperative-reader-race"),
             mob_id: None,
             stream_seq: 129,
-            event: AgentEvent::TurnStarted { turn_number: 129 },
+            event: AgentEvent::TurnStarted {
+                turn_number: 129,
+                assistant_message_id: None,
+            },
         };
         let mut appended_bytes = serde_json::to_vec(&appended)?;
         appended_bytes.push(b'\n');
@@ -7482,7 +7564,10 @@ mod tests {
         let store = FileEventStore::new(temp.path().join("events"));
         let session_id = SessionId::new();
         let events: Vec<_> = (0..128)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         store.append(&session_id, &events).await?;
         assert_eq!(store.last_seq(&session_id).await?, 128);
@@ -7575,7 +7660,10 @@ mod tests {
         let store = FileEventStore::new(temp.path().join("events"));
         let session_id = SessionId::new();
         let events: Vec<_> = (0..128)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         store.append(&session_id, &events).await?;
         assert_eq!(store.last_seq(&session_id).await?, 128);
@@ -7647,7 +7735,10 @@ mod tests {
         let store = FileEventStore::new(temp.path().join("events"));
         let session_id = SessionId::new();
         let events: Vec<_> = (0..128)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         store.append(&session_id, &events).await?;
         assert_eq!(store.last_seq(&session_id).await?, 128);
@@ -7722,7 +7813,10 @@ mod tests {
         let store = FileEventStore::new(temp.path().join("events"));
         let session_id = SessionId::new();
         let events: Vec<_> = (0..128)
-            .map(|turn_number| AgentEvent::TurnStarted { turn_number })
+            .map(|turn_number| AgentEvent::TurnStarted {
+                turn_number,
+                assistant_message_id: None,
+            })
             .collect();
         store.append(&session_id, &events).await?;
         assert_eq!(store.last_seq(&session_id).await?, 128);
@@ -7754,7 +7848,10 @@ mod tests {
             source: EventSourceIdentity::external("independent-test-writer"),
             mob_id: None,
             stream_seq: 129,
-            event: AgentEvent::TurnStarted { turn_number: 129 },
+            event: AgentEvent::TurnStarted {
+                turn_number: 129,
+                assistant_message_id: None,
+            },
         };
         let mut independent_bytes = serde_json::to_vec(&independent_row)?;
         independent_bytes.push(b'\n');
@@ -7833,7 +7930,10 @@ mod tests {
             .append(
                 &session_id,
                 &[
-                    AgentEvent::TurnStarted { turn_number: 1 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 1,
+                        assistant_message_id: None,
+                    },
                     AgentEvent::ToolConfigChanged {
                         payload: payload.clone(),
                     },
@@ -7868,9 +7968,13 @@ mod tests {
             .append(
                 &session_id,
                 &[
-                    AgentEvent::TurnStarted { turn_number: 1 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 1,
+                        assistant_message_id: None,
+                    },
                     AgentEvent::TextComplete {
                         content: "before restart".to_string(),
+                        assistant_message_id: None,
                     },
                 ],
             )
@@ -7896,6 +8000,7 @@ mod tests {
                 &session_id,
                 &[AgentEvent::TextComplete {
                     content: "after restart".to_string(),
+                    assistant_message_id: None,
                 }],
             )
             .await?;
@@ -7929,7 +8034,13 @@ mod tests {
         let session_id = SessionId::new();
 
         store
-            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
             .await?;
         projector.project(&store, &session_id, 1).await?;
 
@@ -7945,6 +8056,7 @@ mod tests {
                 &session_id,
                 &[AgentEvent::TextComplete {
                     content: "projection checkpoint is not authority".to_string(),
+                    assistant_message_id: None,
                 }],
             )
             .await?;
@@ -7972,7 +8084,13 @@ mod tests {
         let session_id = SessionId::new();
 
         let seq = store
-            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
             .await?;
         assert_eq!(seq, 1);
 
@@ -7983,6 +8101,7 @@ mod tests {
                 &session_id,
                 &[AgentEvent::TextComplete {
                     content: "legacy owner is migrated".to_string(),
+                    assistant_message_id: None,
                 }],
             )
             .await?;
@@ -8006,7 +8125,13 @@ mod tests {
         let session_id = SessionId::new();
 
         store
-            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
             .await?;
         tokio::fs::write(store.sequence_path(&session_id), b"not-a-sequence").await?;
 
@@ -8015,6 +8140,7 @@ mod tests {
                 &session_id,
                 &[AgentEvent::TextComplete {
                     content: "must not be minted".to_string(),
+                    assistant_message_id: None,
                 }],
             )
             .await?;
@@ -8039,9 +8165,13 @@ mod tests {
             .append(
                 &session_id,
                 &[
-                    AgentEvent::TurnStarted { turn_number: 1 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 1,
+                        assistant_message_id: None,
+                    },
                     AgentEvent::TextComplete {
                         content: "tail is two".to_string(),
+                        assistant_message_id: None,
                     },
                 ],
             )
@@ -8053,6 +8183,7 @@ mod tests {
                 &session_id,
                 &[AgentEvent::TextComplete {
                     content: "continues from tail, no reuse".to_string(),
+                    assistant_message_id: None,
                 }],
             )
             .await?;
@@ -8092,7 +8223,13 @@ mod tests {
         let session_id = SessionId::new();
 
         let seq = store
-            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
             .await?;
         assert_eq!(seq, 1);
         assert_eq!(
@@ -8112,6 +8249,7 @@ mod tests {
                 &session_id,
                 &[AgentEvent::TextComplete {
                     content: "no forward gap".to_string(),
+                    assistant_message_id: None,
                 }],
             )
             .await?;
@@ -8142,6 +8280,7 @@ mod tests {
             Some("mob-abc".to_string()),
             AgentEvent::TextComplete {
                 content: "from a mob runtime".to_string(),
+                assistant_message_id: None,
             },
         );
         let last_seq = store
@@ -8185,7 +8324,13 @@ mod tests {
         let session_id = SessionId::new();
 
         store
-            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
             .await?;
 
         // Hand-write a row carrying a future/unknown schema version.
@@ -8198,6 +8343,7 @@ mod tests {
             stream_seq: 0,
             event: AgentEvent::TextComplete {
                 content: "future schema".to_string(),
+                assistant_message_id: None,
             },
         };
         let mut line = serde_json::to_string(&future)?;
@@ -8243,7 +8389,10 @@ mod tests {
         // with NO source/mob_id/stream_seq fields. The event payload is encoded
         // from a real AgentEvent so the shape can't silently drift.
         let timestamp = serde_json::to_value(SystemTime::now())?;
-        let event = serde_json::to_value(AgentEvent::TurnStarted { turn_number: 1 })?;
+        let event = serde_json::to_value(AgentEvent::TurnStarted {
+            turn_number: 1,
+            assistant_message_id: None,
+        })?;
         let v1_line = serde_json::to_string(&serde_json::json!({
             "seq": 1,
             "schema_version": 1,

@@ -805,19 +805,20 @@ impl SessionAgent for FactoryAgent {
         blocks: Vec<AssistantBlock>,
         stop_reason: StopReason,
         usage: Usage,
-    ) -> Result<(), meerkat_core::error::AgentError> {
+    ) -> Result<Option<meerkat_core::types::AssistantMessageId>, meerkat_core::error::AgentError>
+    {
         let usage = meerkat_core::TurnUsage::try_from_usage(usage).map_err(|error| {
             meerkat_core::error::AgentError::ConfigError(format!(
                 "external assistant usage requires normalized provider accounting: {error}"
             ))
         })?;
-        self.agent.session_mut().append_external_assistant_blocks(
+        let assistant_message_id = self.agent.session_mut().append_external_assistant_blocks(
             blocks,
             stop_reason,
             usage.clone(),
         );
         self.agent.budget().record_turn_usage(&usage);
-        Ok(())
+        Ok(assistant_message_id)
     }
 
     fn append_realtime_transcript_event(
@@ -2270,9 +2271,10 @@ mod tests {
 
         async fn stream_response(
             &self,
+            assistant_message_id: meerkat_core::AssistantMessageId,
         ) -> Result<meerkat_core::LlmStreamResult, meerkat_core::AgentError> {
             self.stream_calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.stream_response().await
+            self.inner.stream_response(assistant_message_id).await
         }
     }
 

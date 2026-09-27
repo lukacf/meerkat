@@ -2347,6 +2347,7 @@ mod store_authority_tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: TranscriptMessageIdentity::default().with_run_id(transcript_run),
             created_at: message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let candidate_bytes = Arc::new(candidate.to_persisted_bytes().unwrap());
         let candidate_sha = format!("row-sha256:{:x}", Sha256::digest(candidate_bytes.as_ref()));

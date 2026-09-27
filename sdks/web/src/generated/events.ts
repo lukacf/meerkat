@@ -118,6 +118,8 @@ export interface AssistantImageEvent {
 
 export type AssistantImageId = string;
 
+export type AssistantMessageId = string;
+
 export type AuthBindingRef = {
   binding: BindingId;
   origin?: BindingOrigin;
@@ -916,6 +918,7 @@ export interface RunStartedEvent {
 }
 
 export interface RunCompletedEvent {
+  assistant_message_id?: AssistantMessageId | null;
   extraction_required?: boolean;
   identity?: TranscriptMessageIdentity;
   result: string;
@@ -982,31 +985,37 @@ export interface HookDeniedEvent {
 }
 
 export interface TurnStartedEvent {
+  assistant_message_id?: AssistantMessageId | null;
   turn_number: number;
   type: "turn_started";
 }
 
 export interface ReasoningDeltaEvent {
+  assistant_message_id?: AssistantMessageId | null;
   delta: string;
   type: "reasoning_delta";
 }
 
 export interface ReasoningCompleteEvent {
+  assistant_message_id?: AssistantMessageId | null;
   content: string;
   type: "reasoning_complete";
 }
 
 export interface TextDeltaEvent {
+  assistant_message_id?: AssistantMessageId | null;
   delta: string;
   type: "text_delta";
 }
 
 export interface TextCompleteEvent {
+  assistant_message_id?: AssistantMessageId | null;
   content: string;
   type: "text_complete";
 }
 
 export interface ServerToolContentEvent {
+  assistant_message_id?: AssistantMessageId | null;
   content: unknown;
   id?: string | null;
   kind: ServerToolKind;
@@ -1014,6 +1023,7 @@ export interface ServerToolContentEvent {
 }
 
 export interface AssistantImageAppendedEvent {
+  assistant_message_id?: AssistantMessageId | null;
   image: AssistantImageEvent;
   type: "assistant_image_appended";
 }
@@ -1034,6 +1044,7 @@ export interface ToolResultReceivedEvent {
 }
 
 export interface TurnCompletedEvent {
+  assistant_message_id?: AssistantMessageId | null;
   stop_reason: StopReason;
   type: "turn_completed";
   usage?: TurnUsage | null;
@@ -1089,6 +1100,7 @@ export interface BudgetWarningEvent {
 }
 
 export interface RetryingEvent {
+  assistant_message_id?: AssistantMessageId | null;
   retry: LlmRetrySchedule;
   type: "retrying";
 }

@@ -503,6 +503,7 @@ pub(crate) fn project_openai_replay_messages_for_target(
                         blocks,
                         stop_reason: assistant.stop_reason,
                         identity: assistant.identity.clone(),
+                        assistant_message_id: assistant.assistant_message_id,
                         created_at: assistant.created_at,
                     }))
                 }
@@ -5801,6 +5802,7 @@ mod tests {
                     stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
             ],
         );
@@ -6253,6 +6255,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
             ],
         );
@@ -6293,6 +6296,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
             ],
         );
@@ -6328,6 +6332,7 @@ mod tests {
                     stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
             ],
         );
@@ -6481,6 +6486,7 @@ mod tests {
                     stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
             ],
         );
@@ -7777,6 +7783,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
             ],
         );
@@ -7813,6 +7820,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
                 Message::User(UserMessage::text("Second question".to_string())),
             ],
@@ -7849,6 +7857,7 @@ mod tests {
                     stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
                 // Reasoning-only at end of one assistant message
                 Message::BlockAssistant(BlockAssistantMessage {
@@ -7864,6 +7873,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
                 // Next message is tool results; the reasoning-only message
                 // must be dropped without breaking tool-call adjacency.
@@ -7919,6 +7929,7 @@ mod tests {
                     stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
             ],
         );
@@ -7958,6 +7969,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
             ],
         );
@@ -7996,6 +8008,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::Reasoning {
@@ -8010,6 +8023,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
                 Message::User(UserMessage::text("Still here".to_string())),
             ],
@@ -8088,6 +8102,7 @@ mod tests {
                     stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
             ],
         );
@@ -8131,6 +8146,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
             ],
         );

@@ -3945,7 +3945,10 @@ mod tests {
                     "worker",
                     1,
                     Some("mob-exhausted".to_string()),
-                    AgentEvent::TurnStarted { turn_number: 1 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 1,
+                        assistant_message_id: None,
+                    },
                 ),
             )]))
         }
@@ -3980,7 +3983,10 @@ mod tests {
             "worker",
             1,
             Some("mob-exhausted".to_string()),
-            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
         );
         for durable in [true, false] {
             let log = durable
@@ -4270,6 +4276,7 @@ mod tests {
             extraction_required: false,
             usage: meerkat_core::types::Usage::default().into(),
             terminal_cause_kind: None,
+            assistant_message_id: None,
         }
     }
 
@@ -5290,7 +5297,10 @@ mod tests {
             "worker",
             1,
             Some("mob-exhausted".to_string()),
-            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
         );
         let error = state
             .push(envelope)
@@ -5317,7 +5327,10 @@ mod tests {
                     "worker",
                     u64::from(turn_number),
                     Some("mob-capacity".to_string()),
-                    AgentEvent::TurnStarted { turn_number },
+                    AgentEvent::TurnStarted {
+                        turn_number,
+                        assistant_message_id: None,
+                    },
                 ))
                 .expect("bounded ring push");
         }

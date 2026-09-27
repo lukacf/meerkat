@@ -726,6 +726,7 @@ impl AgentBuilder {
             terminal_error_metadata: None,
             run_completed_hooks_applied: false,
             run_completed_event_emitted: false,
+            run_result_assistant_message: None,
             silent_comms_intents: self.silent_comms_intents,
             checkpointer: self.checkpointer,
             model_routing_handoff_staging: self.model_routing_handoff_staging,

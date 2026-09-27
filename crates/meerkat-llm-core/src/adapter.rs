@@ -7,8 +7,9 @@ use futures::StreamExt;
 use meerkat_core::lifecycle::run_primitive::{ProviderParamsOverride, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AgentError, AgentEvent, AgentLlmClient, AgentLlmRequestAttempt, LlmStreamResult, Message,
-    OutputSchema, Provider, RequestAttemptAuthority, StopReason, ToolDef, Usage,
+    AgentError, AgentEvent, AgentLlmClient, AgentLlmRequestAttempt, AssistantMessageId,
+    LlmStreamResult, Message, OutputSchema, Provider, RequestAttemptAuthority, StopReason, ToolDef,
+    Usage,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -149,6 +150,15 @@ impl LlmClientAdapter {
     ) -> Result<Self, LlmError> {
         Self::validate_provider_binding(client.provider(), provider, &model)?;
         Ok(Self::new_bound(client, model, provider, Some(event_tx)))
+    }
+
+    /// Publish one live event to the interaction tap (best effort) and then
+    /// to the run's event channel, in that order, like the agent loop does.
+    async fn publish(&self, event: AgentEvent) {
+        meerkat_core::tap_try_send(&self.event_tap, &event);
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(event).await;
+        }
     }
 
     fn mark_visible_stream_output(&self, text: &str) {
@@ -314,10 +324,21 @@ impl LlmClientAdapter {
         ))
     }
 
+    /// Stream one prepared request, publishing its live events.
+    ///
+    /// `assistant_message_id` is the core-minted identity of the assistant
+    /// message this provider turn commits; every message-scoped live event
+    /// (`TextDelta`, `ReasoningDelta`, `ReasoningComplete`,
+    /// `ServerToolContent`) carries it on both the event channel and the tap.
+    /// `None` marks output that is not a transcript assistant message (the
+    /// legacy [`AgentLlmClient::stream_response`] path, used by the compaction
+    /// summary call). The id is event metadata only and never reaches the
+    /// provider request.
     async fn stream_prepared_response(
         &self,
         request: &PreparedLlmRequest,
         canonical_messages: &[Message],
+        assistant_message_id: Option<AssistantMessageId>,
     ) -> Result<LlmStreamResult, AgentError> {
         let cache_breakpoint_claims = self
             .client
@@ -346,15 +367,11 @@ impl LlmClientAdapter {
                     LlmEvent::TextDelta { delta, meta } => {
                         assembler.on_text_delta(&delta, meta);
                         self.mark_visible_stream_output(&delta);
-                        meerkat_core::tap_try_send(
-                            &self.event_tap,
-                            &AgentEvent::TextDelta {
-                                delta: delta.clone(),
-                            },
-                        );
-                        if let Some(ref tx) = self.event_tx {
-                            let _ = tx.send(AgentEvent::TextDelta { delta }).await;
-                        }
+                        self.publish(AgentEvent::TextDelta {
+                            delta,
+                            assistant_message_id,
+                        })
+                        .await;
                     }
                     LlmEvent::ReasoningDelta { delta } => {
                         if !reasoning_started {
@@ -365,15 +382,11 @@ impl LlmClientAdapter {
                         if let Err(error) = assembler.on_reasoning_delta(&delta) {
                             tracing::warn!(?error, "orphaned reasoning delta");
                         }
-                        meerkat_core::tap_try_send(
-                            &self.event_tap,
-                            &AgentEvent::ReasoningDelta {
-                                delta: delta.clone(),
-                            },
-                        );
-                        if let Some(ref tx) = self.event_tx {
-                            let _ = tx.send(AgentEvent::ReasoningDelta { delta }).await;
-                        }
+                        self.publish(AgentEvent::ReasoningDelta {
+                            delta,
+                            assistant_message_id,
+                        })
+                        .await;
                     }
                     LlmEvent::ReasoningComplete { text, meta } => {
                         self.mark_visible_stream_output(&text);
@@ -385,19 +398,11 @@ impl LlmClientAdapter {
                         assembler.on_reasoning_complete(meta);
                         reasoning_started = false;
                         self.mark_visible_stream_output(&reasoning_text);
-                        meerkat_core::tap_try_send(
-                            &self.event_tap,
-                            &AgentEvent::ReasoningComplete {
-                                content: reasoning_text.clone(),
-                            },
-                        );
-                        if let Some(ref tx) = self.event_tx {
-                            let _ = tx
-                                .send(AgentEvent::ReasoningComplete {
-                                    content: reasoning_text,
-                                })
-                                .await;
-                        }
+                        self.publish(AgentEvent::ReasoningComplete {
+                            content: reasoning_text,
+                            assistant_message_id,
+                        })
+                        .await;
                     }
                     LlmEvent::ToolCallDelta {
                         id,
@@ -445,15 +450,13 @@ impl LlmClientAdapter {
                     } => {
                         let event_id = id.clone();
                         assembler.on_server_tool_content(id, kind.clone(), content.clone(), meta);
-                        if let Some(ref tx) = self.event_tx {
-                            let _ = tx
-                                .send(AgentEvent::ServerToolContent {
-                                    id: event_id,
-                                    kind,
-                                    content,
-                                })
-                                .await;
-                        }
+                        self.publish(AgentEvent::ServerToolContent {
+                            id: event_id,
+                            kind,
+                            content,
+                            assistant_message_id,
+                        })
+                        .await;
                     }
                     LlmEvent::UsageUpdate { usage: update } => {
                         usage = self
@@ -489,19 +492,11 @@ impl LlmClientAdapter {
             let reasoning_text = assembler.current_reasoning_text();
             assembler.on_reasoning_complete(None);
             self.mark_visible_stream_output(&reasoning_text);
-            meerkat_core::tap_try_send(
-                &self.event_tap,
-                &AgentEvent::ReasoningComplete {
-                    content: reasoning_text.clone(),
-                },
-            );
-            if let Some(ref tx) = self.event_tx {
-                let _ = tx
-                    .send(AgentEvent::ReasoningComplete {
-                        content: reasoning_text,
-                    })
-                    .await;
-            }
+            self.publish(AgentEvent::ReasoningComplete {
+                content: reasoning_text,
+                assistant_message_id,
+            })
+            .await;
         }
         Ok(
             LlmStreamResult::new(assembler.finalize(), stop_reason, usage)
@@ -539,9 +534,16 @@ impl AgentLlmRequestAttempt for LlmClientAdapterAttempt {
             })
     }
 
-    async fn stream_response(&self) -> Result<LlmStreamResult, AgentError> {
+    async fn stream_response(
+        &self,
+        assistant_message_id: AssistantMessageId,
+    ) -> Result<LlmStreamResult, AgentError> {
         self.adapter
-            .stream_prepared_response(&self.request, &self.canonical_messages)
+            .stream_prepared_response(
+                &self.request,
+                &self.canonical_messages,
+                Some(assistant_message_id),
+            )
             .await
     }
 }
@@ -585,7 +587,10 @@ impl AgentLlmClient for LlmClientAdapter {
     ) -> Result<LlmStreamResult, AgentError> {
         let request =
             self.build_request(messages, tools, max_tokens, temperature, provider_params)?;
-        self.stream_prepared_response(&request, messages).await
+        // The legacy split path has no assistant message identity: it serves
+        // non-transcript calls such as the compaction summary.
+        self.stream_prepared_response(&request, messages, None)
+            .await
     }
 
     fn request_pressure(
@@ -1200,6 +1205,151 @@ mod tests {
         assert!(
             !adapter.stream_output_observed(),
             "liveness must not count as visible stream output"
+        );
+        Ok(())
+    }
+
+    fn scripted_message_id() -> Result<AssistantMessageId, String> {
+        // Only core mints ids; other crates obtain one the way every consumer
+        // does, from its serialized form.
+        serde_json::from_value(serde_json::json!("0190f5c2-4a1e-7c3d-8e2f-000000000001"))
+            .map_err(|error| error.to_string())
+    }
+
+    fn message_scoped_script() -> Vec<Result<LlmEvent, LlmError>> {
+        vec![
+            Ok(LlmEvent::ReasoningDelta {
+                delta: "think".to_string(),
+            }),
+            Ok(LlmEvent::ReasoningComplete {
+                text: "think".to_string(),
+                meta: None,
+            }),
+            Ok(LlmEvent::TextDelta {
+                delta: "before ".to_string(),
+                meta: None,
+            }),
+            Ok(LlmEvent::ServerToolContent {
+                id: Some("srv-1".to_string()),
+                kind: meerkat_core::ServerToolKind::WebSearch,
+                content: serde_json::json!({"query": "rust"}),
+                meta: None,
+            }),
+            Ok(LlmEvent::TextDelta {
+                delta: "after".to_string(),
+                meta: None,
+            }),
+            // Reasoning left open at the end is flushed as a trailing
+            // ReasoningComplete after the stream ends.
+            Ok(LlmEvent::ReasoningDelta {
+                delta: "trailing".to_string(),
+            }),
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: StopReason::EndTurn,
+                },
+            }),
+        ]
+    }
+
+    fn event_kinds_and_ids(
+        events: &[AgentEvent],
+    ) -> Vec<(&'static str, Option<AssistantMessageId>)> {
+        events
+            .iter()
+            .map(|event| {
+                (
+                    meerkat_core::agent_event_type(event),
+                    event.assistant_message_id(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn request_attempt_stamps_every_live_event_on_channel_and_tap() -> Result<(), String> {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (tap_tx, mut tap_rx) = mpsc::channel(64);
+        let tap = meerkat_core::new_event_tap();
+        *tap.lock() = Some(meerkat_core::EventTapState {
+            tx: tap_tx,
+            truncated: AtomicBool::new(false),
+        });
+        let adapter = Arc::new(
+            LlmClientAdapter::with_event_channel(
+                Arc::new(ScriptedClient {
+                    events: message_scoped_script(),
+                }),
+                "scripted-model".to_string(),
+                tx,
+            )
+            .with_event_tap(tap),
+        );
+        let id = scripted_message_id()?;
+
+        let attempt = Arc::clone(&adapter)
+            .prepare_request_attempt(
+                Arc::new(vec![Message::User(UserMessage::text("hello"))]),
+                Arc::from([]),
+                1024,
+                None,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        attempt
+            .stream_response(id)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let expected = vec![
+            ("reasoning_delta", Some(id)),
+            ("reasoning_complete", Some(id)),
+            ("text_delta", Some(id)),
+            ("server_tool_content", Some(id)),
+            ("text_delta", Some(id)),
+            ("reasoning_delta", Some(id)),
+            ("reasoning_complete", Some(id)),
+        ];
+        let channel = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let tapped = std::iter::from_fn(|| tap_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(event_kinds_and_ids(&channel), expected);
+        assert_eq!(
+            event_kinds_and_ids(&tapped),
+            expected,
+            "interaction taps see the same stamped live events, server tool content included"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_stream_response_publishes_no_message_identity() -> Result<(), String> {
+        let (tx, mut rx) = mpsc::channel(64);
+        let adapter = LlmClientAdapter::with_event_channel(
+            Arc::new(ScriptedClient {
+                events: message_scoped_script(),
+            }),
+            "scripted-model".to_string(),
+            tx,
+        );
+
+        adapter
+            .stream_response(
+                &[Message::User(UserMessage::text("summarize"))],
+                &[],
+                1024,
+                None,
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let channel = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(channel.len(), 7);
+        assert!(
+            channel
+                .iter()
+                .all(|event| event.assistant_message_id().is_none()),
+            "output outside the request-attempt path is not a transcript assistant message"
         );
         Ok(())
     }

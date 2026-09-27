@@ -165,9 +165,12 @@ impl meerkat_core::AgentLlmRequestAttempt for CountingAgentLlmRequestAttempt {
         self.inner.request_pressure()
     }
 
-    async fn stream_response(&self) -> Result<LlmStreamResult, AgentError> {
+    async fn stream_response(
+        &self,
+        assistant_message_id: meerkat_core::AssistantMessageId,
+    ) -> Result<LlmStreamResult, AgentError> {
         self.stream_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.stream_response().await
+        self.inner.stream_response(assistant_message_id).await
     }
 }
 

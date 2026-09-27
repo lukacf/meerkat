@@ -142,6 +142,9 @@ fn project_messages_for_summarization(messages: &[Message]) -> Vec<Message> {
                         blocks,
                         stop_reason: assistant.stop_reason,
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+                        // Summarizer input only: lineage and occurrence
+                        // identity are not dialogue.
+                        assistant_message_id: None,
                         created_at: assistant.created_at,
                     }))
                 }
@@ -1737,6 +1740,70 @@ mod tests {
             }
             other => panic!("expected original tool results, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rebuild_history_retains_assistant_message_ids_and_discards_old_ones() {
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 1,
+            ..make_config()
+        });
+        let id = |uuid: &str| -> meerkat_core::AssistantMessageId {
+            serde_json::from_value(serde_json::json!(uuid)).expect("id")
+        };
+        let old_answer = id("0190f5c2-4a1e-7c3d-8e2f-00000000f001");
+        let kept_answer = id("0190f5c2-4a1e-7c3d-8e2f-00000000f002");
+        let answer = |text: &str, id| {
+            let mut message = BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: text.to_string(),
+                    meta: None,
+                }],
+                meerkat_core::StopReason::EndTurn,
+            );
+            message.assistant_message_id = Some(id);
+            Message::BlockAssistant(message)
+        };
+        let messages = vec![
+            Message::User(UserMessage::text("old question")),
+            answer("same", old_answer),
+            Message::User(UserMessage::text("new question")),
+            answer("same", kept_answer),
+        ];
+
+        let result = c.rebuild_history(&messages, "summary");
+
+        let retained_ids = result
+            .retained
+            .iter()
+            .filter_map(|retention| match &retention.message {
+                Message::BlockAssistant(assistant) => assistant.assistant_message_id,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            retained_ids,
+            vec![kept_answer],
+            "retained rows keep their ids"
+        );
+        assert!(result.messages.iter().any(|message| matches!(
+            message,
+            Message::BlockAssistant(assistant) if assistant.assistant_message_id == Some(kept_answer)
+        )));
+        assert!(
+            result.discarded.iter().any(|discard| matches!(
+                &discard.message,
+                Message::BlockAssistant(assistant) if assistant.assistant_message_id == Some(old_answer)
+            )),
+            "the discarded occurrence is handed to the rewrite unchanged"
+        );
+        assert!(
+            result.messages.iter().all(|message| !matches!(
+                message,
+                Message::BlockAssistant(assistant) if assistant.assistant_message_id == Some(old_answer)
+            )),
+            "a discarded id is never carried into the rebuilt transcript"
+        );
     }
 
     #[test]

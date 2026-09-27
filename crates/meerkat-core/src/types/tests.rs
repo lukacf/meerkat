@@ -128,6 +128,7 @@ fn test_message_json_schema() {
         stop_reason: Some(StopReason::EndTurn),
         identity: crate::types::TranscriptMessageIdentity::default(),
         created_at: message_timestamp_now(),
+        assistant_message_id: None,
     });
     let json = serde_json::to_value(&assistant).unwrap();
     assert_eq!(json["role"], "block_assistant");
@@ -1009,6 +1010,7 @@ fn test_session_checkpoint_complex() {
                 stop_reason: Some(StopReason::ToolUse),
                 identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: message_timestamp_now(),
+                assistant_message_id: None,
             }));
 
             messages.push(Message::tool_results(vec![ToolResult::new(
@@ -1025,6 +1027,7 @@ fn test_session_checkpoint_complex() {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: message_timestamp_now(),
+                assistant_message_id: None,
             }));
         } else {
             // Without tool calls
@@ -1036,6 +1039,7 @@ fn test_session_checkpoint_complex() {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: message_timestamp_now(),
+                assistant_message_id: None,
             }));
         }
     }
@@ -1844,6 +1848,7 @@ mod ordered_transcript_types {
             stop_reason: Some(StopReason::ToolUse),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
+            assistant_message_id: None,
         };
 
         let tool_calls: Vec<_> = msg.tool_calls().collect();
@@ -1864,6 +1869,7 @@ mod ordered_transcript_types {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
+            assistant_message_id: None,
         };
 
         let tool_calls: Vec<_> = msg.tool_calls().collect();
@@ -1884,6 +1890,7 @@ mod ordered_transcript_types {
             stop_reason: Some(StopReason::ToolUse),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
+            assistant_message_id: None,
         };
         assert!(msg_with_tools.has_tool_calls());
 
@@ -1895,6 +1902,7 @@ mod ordered_transcript_types {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
+            assistant_message_id: None,
         };
         assert!(!msg_without_tools.has_tool_calls());
     }
@@ -1922,6 +1930,7 @@ mod ordered_transcript_types {
             stop_reason: Some(StopReason::ToolUse),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
+            assistant_message_id: None,
         };
 
         let found = msg.get_tool_use("tc_second");
@@ -1965,6 +1974,7 @@ mod ordered_transcript_types {
             stop_reason: Some(StopReason::ToolUse),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
+            assistant_message_id: None,
         };
 
         let display = format!("{msg}");
@@ -1978,6 +1988,7 @@ mod ordered_transcript_types {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
+            assistant_message_id: None,
         };
 
         let display = format!("{msg}");
@@ -2016,6 +2027,7 @@ mod ordered_transcript_types {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
+            assistant_message_id: None,
         };
 
         let text_blocks: Vec<_> = msg.text_blocks().collect();

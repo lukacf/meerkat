@@ -7126,6 +7126,7 @@ mod tests {
                     stop_reason: Some(meerkat_core::StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
                 Message::SystemNotice(meerkat_core::SystemNoticeMessage::new(
                     meerkat_core::SystemNoticeKind::Generic,
@@ -7527,6 +7528,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             }),
             Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
                 blocks: vec![meerkat_core::AssistantBlock::Text {
@@ -7536,6 +7538,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             }),
             Message::ToolResults {
                 results: vec![meerkat_core::ToolResult {
@@ -7728,7 +7731,7 @@ mod tests {
                 }],
                 stop_reason: Some(meerkat_core::StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
-                created_at: meerkat_core::types::message_timestamp_now(),
+                created_at: meerkat_core::types::message_timestamp_now(), assistant_message_id: None,
             }),
         ];
         for index in 0..14 {
@@ -7744,6 +7747,7 @@ mod tests {
                     stop_reason: Some(meerkat_core::StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 },
             ));
         }
@@ -12121,6 +12125,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: types::message_timestamp_now(),
+                assistant_message_id: None,
             }),
         ];
 
@@ -12279,6 +12284,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: types::message_timestamp_now(),
+                assistant_message_id: None,
             }),
         ];
         // Sanity check the history fixture independently. Refresh admission

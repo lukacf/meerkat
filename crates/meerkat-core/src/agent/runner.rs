@@ -627,11 +627,23 @@ where
     /// session `build_state` is a durable projection; the shared
     /// `mob_authority_handle` (if present) is updated from the validated
     /// in-memory effect after the projection write succeeds.
+    ///
+    /// Every assistant message an `AppendAssistantBlocks` effect commits gets
+    /// its own freshly minted occurrence id (it is a separate message from the
+    /// provider turn that requested the tool). The images those messages carry
+    /// are returned paired with that id, in commit order, for the caller to
+    /// publish.
     pub(crate) fn apply_session_effects(
         &mut self,
         effects: &[crate::ops::SessionEffect],
         run_id: Option<&crate::lifecycle::RunId>,
-    ) -> Result<(), crate::error::AgentError> {
+    ) -> Result<
+        Vec<(
+            crate::types::AssistantMessageId,
+            crate::event::AssistantImageEvent,
+        )>,
+        crate::error::AgentError,
+    > {
         use crate::error::AgentError;
 
         if self.noncommitting_live_bridge_run
@@ -657,6 +669,7 @@ where
         let mut build_state_changed = false;
         let mut visibility_changed = false;
         let mut latest_mob_authority_context = None;
+        let mut appended_images = Vec::new();
 
         for effect in effects {
             match effect {
@@ -682,9 +695,17 @@ where
                     visibility_changed = true;
                 }
                 crate::ops::SessionEffect::AppendAssistantBlocks { blocks } => {
+                    let assistant_message_id = crate::types::AssistantMessageId::mint();
                     let message = crate::types::BlockAssistantMessage::new(
                         blocks.clone(),
                         crate::types::StopReason::EndTurn,
+                    )
+                    .with_assistant_message_id(assistant_message_id);
+                    appended_images.extend(
+                        blocks
+                            .iter()
+                            .filter_map(crate::event::AssistantImageEvent::from_assistant_block)
+                            .map(|image| (assistant_message_id, image)),
                     );
                     let message = if let Some(run_id) = run_id {
                         let mut message = message;
@@ -730,7 +751,7 @@ where
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = authority;
         }
 
-        Ok(())
+        Ok(appended_images)
     }
 
     /// Complete a durably staged callback batch.
@@ -786,10 +807,14 @@ where
             .into_iter()
             .filter_map(|effect| match effect {
                 crate::ops::SessionEffect::AppendAssistantBlocks { blocks } => {
+                    // Minted once, here: the messages are persisted in the
+                    // applied receipt before they are pushed, so a replay or
+                    // an already-applied redelivery reuses these exact ids.
                     let mut message = crate::types::BlockAssistantMessage::new(
                         blocks,
                         crate::types::StopReason::EndTurn,
-                    );
+                    )
+                    .with_assistant_message_id(crate::types::AssistantMessageId::mint());
                     message.identity = self
                         .active_transcript_identity
                         .clone()
@@ -1740,6 +1765,9 @@ where
                 extraction_required,
                 usage: result.usage.clone().into(),
                 terminal_cause_kind: result.terminal_cause_kind,
+                // Tracked by the loop, not read back from `result.text`, so a
+                // RunCompleted hook that rewrites the text cannot re-point it.
+                assistant_message_id: self.run_result_assistant_message,
             },
         )
         .await;
@@ -2067,6 +2095,7 @@ where
         let saved_terminal_error_metadata = self.terminal_error_metadata.take();
         let saved_run_completed_hooks_applied = self.run_completed_hooks_applied;
         let saved_run_completed_event_emitted = self.run_completed_event_emitted;
+        let saved_run_result_assistant_message = self.run_result_assistant_message.take();
         let saved_extraction_state = std::mem::take(&mut self.extraction_state);
         let saved_pending_callback_async_ops = self.pending_callback_async_ops.take();
         let saved_dispatch_admission = self.live_bridge_dispatch_admission.take();
@@ -2156,6 +2185,7 @@ where
         self.terminal_error_metadata = saved_terminal_error_metadata;
         self.run_completed_hooks_applied = saved_run_completed_hooks_applied;
         self.run_completed_event_emitted = saved_run_completed_event_emitted;
+        self.run_result_assistant_message = saved_run_result_assistant_message;
         self.extraction_state = saved_extraction_state;
         self.pending_callback_async_ops = saved_pending_callback_async_ops;
         self.live_bridge_dispatch_admission = saved_dispatch_admission;
@@ -2205,13 +2235,14 @@ where
         &self,
         mut message: BlockAssistantMessage,
         run_id: &crate::lifecycle::RunId,
+        assistant_message_id: crate::types::AssistantMessageId,
     ) -> BlockAssistantMessage {
         message.identity = self
             .active_transcript_identity
             .clone()
             .unwrap_or_default()
             .with_run_id(run_id.clone());
-        message
+        message.with_assistant_message_id(assistant_message_id)
     }
 
     /// Run the agent using the pending continuation boundary already in the session.
@@ -2347,6 +2378,7 @@ where
         self.terminal_error_metadata = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
+        self.run_result_assistant_message = None;
         self.clear_staged_model_routing_handoff();
 
         // Apply canonical per-turn skill references staged by the surface.
@@ -2576,8 +2608,11 @@ where
                     "failed to apply callback-staged resume effects: {error}"
                 ))
             })?;
-        for image in committed_images {
-            let event = AgentEvent::AssistantImageAppended { image };
+        for (assistant_message_id, image) in committed_images {
+            let event = AgentEvent::AssistantImageAppended {
+                image,
+                assistant_message_id,
+            };
             crate::event_tap::tap_try_send(&self.event_tap, &event);
             if let Some(ref tx) = event_tx
                 && tx.send(event).await.is_err()
@@ -2595,6 +2630,7 @@ where
         self.terminal_error_metadata = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
+        self.run_result_assistant_message = None;
         self.clear_staged_model_routing_handoff();
 
         // Run-start hooks own the start veto on the pending-continuation path
@@ -2914,6 +2950,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             terminal_error_metadata: None,
             run_completed_hooks_applied: false,
             run_completed_event_emitted: false,
+            run_result_assistant_message: None,
             silent_comms_intents: self.silent_comms_intents.clone(),
             ops_lifecycle: None,
             completion_feed: None,

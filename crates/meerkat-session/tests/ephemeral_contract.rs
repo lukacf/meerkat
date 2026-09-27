@@ -551,6 +551,19 @@ impl SessionAgent for RealSessionAgent {
         }
         Ok(())
     }
+
+    fn append_external_assistant_output(
+        &mut self,
+        blocks: Vec<AssistantBlock>,
+        stop_reason: StopReason,
+        usage: Usage,
+    ) -> Result<Option<meerkat_core::AssistantMessageId>, meerkat_core::error::AgentError> {
+        let usage = meerkat_core::TurnUsage::try_from_usage(usage)
+            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))?;
+        Ok(self
+            .session
+            .append_external_assistant_blocks(blocks, stop_reason, usage))
+    }
 }
 
 struct CompactionSessionAgent {
@@ -1031,6 +1044,105 @@ async fn test_subscribe_session_events_available_before_first_turn() {
         ),
         "expected run lifecycle event, got: {first:?}"
     );
+}
+
+/// A live channel's display-text drain commits its row through
+/// `append_external_assistant_output`. Core mints the row's
+/// `assistant_message_id`, and the `text_complete` / `turn_completed` the
+/// session publishes for that commit carry the same id, so a console pairs
+/// them with the history row by id alone. A drain that commits no row names
+/// none.
+#[tokio::test]
+async fn test_external_assistant_output_events_carry_the_committed_row_id() {
+    let service = Arc::new(EphemeralSessionService::new(
+        RealAgentBuilder {
+            provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+            provider_visible_system_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            llm_delay_ms: None,
+            hook_engine: None,
+        },
+        10,
+    ));
+    let created = service
+        .create_session(create_req_deferred("live display text"))
+        .await
+        .expect("create deferred session");
+    let sid = created.session_id;
+    let mut stream = service
+        .subscribe_session_events(&sid)
+        .await
+        .expect("session stream attaches");
+    let usage = || {
+        meerkat_core::TurnUsage::host_declared(
+            meerkat_core::Provider::Other,
+            "ephemeral-contract-test",
+            Usage::default(),
+        )
+        .into_inner()
+    };
+    for blocks in [
+        vec![AssistantBlock::Text {
+            text: "same".to_string(),
+            meta: None,
+        }],
+        vec![AssistantBlock::Text {
+            text: "same".to_string(),
+            meta: None,
+        }],
+        Vec::new(),
+    ] {
+        service
+            .append_external_assistant_output(&sid, blocks, StopReason::EndTurn, usage())
+            .await
+            .expect("external assistant output appends");
+    }
+
+    let mut text_complete = Vec::new();
+    let mut turn_completed = Vec::new();
+    while turn_completed.len() < 3 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .expect("timed out waiting for session event")
+            .expect("stream closed unexpectedly");
+        match event.payload {
+            AgentEvent::TextComplete {
+                assistant_message_id,
+                ..
+            } => text_complete.push(assistant_message_id),
+            AgentEvent::TurnCompleted {
+                assistant_message_id,
+                ..
+            } => turn_completed.push(assistant_message_id),
+            _ => {}
+        }
+    }
+
+    let history = service
+        .read_history(
+            &sid,
+            SessionHistoryQuery {
+                offset: 0,
+                limit: None,
+            },
+        )
+        .await
+        .expect("history reads");
+    let row_ids = history
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            meerkat_core::types::Message::BlockAssistant(assistant) => {
+                Some(assistant.assistant_message_id)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(row_ids.len(), 2, "the empty drain commits no row");
+    let first = row_ids[0].expect("the drained row carries a core-minted id");
+    let second = row_ids[1].expect("the drained row carries a core-minted id");
+    assert_ne!(first, second, "identical text never shares an id");
+    assert_eq!(text_complete, vec![Some(first), Some(second)]);
+    assert_eq!(turn_completed, vec![Some(first), Some(second), None]);
 }
 
 #[tokio::test]

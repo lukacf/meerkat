@@ -44,6 +44,55 @@ pub struct TranscriptMessageIdentity {
     pub realtime_origin: Option<RealtimeMessageOrigin>,
 }
 
+/// Session-scoped identity of one committed assistant message occurrence.
+///
+/// The agent loop mints this id when a provider turn starts, before any
+/// streamed delta, and stamps the same value on every live event for that
+/// message (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,
+/// `server_tool_content`, `assistant_image_appended`, `turn_completed`) and on
+/// the canonical [`BlockAssistantMessage`] it commits. A consumer joins live
+/// rows to history by this id alone; it never has to compare text or rank.
+///
+/// The value is opaque. It is never derived from content, so two
+/// byte-identical answers always carry different ids, and it is not a
+/// timestamp: native builds happen to mint UUIDv7 while browser builds mint
+/// UUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints
+/// ids; other crates copy and compare them. Persisted and wire values
+/// round-trip verbatim through serde.
+///
+/// Retries of the same provider turn (same-model, empty-output, stall,
+/// timeout, model fallback, and a re-poll after compaction) reuse the id, so
+/// an id is on at most one committed message. Rows a live display-text drain
+/// commits get their own id when committed. Messages written before this
+/// field existed, rows the realtime transcript materializer commits (they
+/// pair with the live transport's realtime observations through
+/// [`RealtimeMessageOrigin::provider_item_ids`]), and compaction summaries
+/// carry none.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AssistantMessageId(#[cfg_attr(feature = "schema", schemars(with = "String"))] Uuid);
+
+impl AssistantMessageId {
+    /// Mint a fresh id. Core-owned: assistant message identity is assigned by
+    /// the provider-neutral agent loop, never by a host or provider adapter.
+    pub(crate) fn mint() -> Self {
+        Self(crate::time_compat::new_uuid_v7())
+    }
+
+    /// The underlying UUID, for hosts that key storage by UUID.
+    #[must_use]
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Display for AssistantMessageId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// Opaque provenance identifier. Its namespace is data, not admission or
 /// temporal authority; only the runtime's generated registry grants a claim.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -3016,6 +3065,14 @@ pub struct BlockAssistantMessage {
     pub stop_reason: Option<StopReason>,
     #[serde(default, skip_serializing_if = "TranscriptMessageIdentity::is_empty")]
     pub identity: TranscriptMessageIdentity,
+    /// Session-scoped occurrence id of this assistant message, identical to
+    /// the `assistant_message_id` on every live event the message streamed.
+    /// Absent on messages committed before 0.8.45, on rows the realtime
+    /// transcript materializer commits, and on rows a transcript rewrite or
+    /// fork edit replaced; it is never backfilled or derived from content. A
+    /// revision restore keeps the ids of the rows it restores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_message_id: Option<AssistantMessageId>,
     /// When this assistant message was committed to the transcript.
     #[serde(default = "message_timestamp_now")]
     pub created_at: MessageTimestamp,
@@ -3031,6 +3088,7 @@ impl BlockAssistantMessage {
             blocks,
             stop_reason: Some(stop_reason),
             identity: TranscriptMessageIdentity::default(),
+            assistant_message_id: None,
             created_at: message_timestamp_now(),
         }
     }
@@ -3041,8 +3099,15 @@ impl BlockAssistantMessage {
             blocks,
             stop_reason: None,
             identity: TranscriptMessageIdentity::default(),
+            assistant_message_id: None,
             created_at: message_timestamp_now(),
         }
+    }
+
+    /// Stamp the core-minted occurrence id this message streamed under.
+    pub(crate) fn with_assistant_message_id(mut self, id: AssistantMessageId) -> Self {
+        self.assistant_message_id = Some(id);
+        self
     }
 
     /// Iterate over tool calls without allocation.
@@ -3263,11 +3328,13 @@ pub enum SecurityMode {
 ///   [`TurnUsage::presented_tokens`]) instead, which is exactly what
 ///   [`CumulativeUsage::add_turn`] does.
 /// - Do not expect the per-call rows to reconcile with the cumulative account
-///   unconditionally. Every committed agent-loop call publishes a
-///   `turn_completed` row and every extraction request a `request_usage` row
-///   on the extraction outcome event, but the compaction summary call and a
-///   call whose turn fails after the provider answered are charged to the
-///   cumulative account without a row.
+///   unconditionally. An agent-loop call publishes a `turn_completed` row
+///   when its turn completes and every extraction request a `request_usage`
+///   row on the extraction outcome event, but the compaction summary call and
+///   a call whose turn fails after the provider answered are charged to the
+///   cumulative account without a row. That includes a call whose assistant
+///   row was already committed when a later hook failed the run, so a
+///   committed row does not imply a `turn_completed`.
 ///
 /// The worked example lives in `docs/reference/usage-accounting.mdx`. Its
 /// numbers are pinned against the agent loop by

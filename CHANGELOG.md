@@ -43,6 +43,76 @@ them.
   serde-defaulted and omitted when absent, so job records written by earlier
   releases read back unchanged.
 
+- `meerkat_core::types::BlockAssistantMessage` (re-exported as
+  `meerkat_core::BlockAssistantMessage` and `meerkat::BlockAssistantMessage`)
+  gains the public field
+  `assistant_message_id: Option<AssistantMessageId>`. Struct literals must
+  supply it (`None` outside the agent loop); `BlockAssistantMessage::new` and
+  `BlockAssistantMessage::snapshot` default it to `None`. The JSON key is
+  serde-defaulted and omitted when absent, so pre-0.8.45 transcripts load
+  unchanged and rows without an id keep their exact 0.8.44 bytes.
+- `meerkat_core::AgentEvent::TurnStarted` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::TextDelta` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::TextComplete` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::ReasoningDelta` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::ReasoningComplete` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::ServerToolContent` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::AssistantImageAppended` gains
+  `assistant_message_id`.
+- `meerkat_core::AgentEvent::TurnCompleted` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::Retrying` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::RunCompleted` gains `assistant_message_id`.
+  Every new `AgentEvent` field is `Option<AssistantMessageId>`: Rust
+  constructors must supply it and exhaustive patterns must bind it or use
+  `..`. The JSON key is optional and omitted when absent, so older event
+  records remain readable.
+- `meerkat_contracts::WireSessionMessage::BlockAssistant` gains
+  `assistant_message_id: Option<AssistantMessageId>`; variant literals and
+  exhaustive patterns must account for it.
+- `meerkat_contracts::WireSessionMessage::BlockAssistant` gains
+  `realtime_origin: Option<meerkat_core::types::RealtimeMessageOrigin>`;
+  variant literals and exhaustive patterns must account for it. The JSON key
+  is serde-defaulted and omitted when absent, so every row that is not a
+  realtime materializer row keeps its exact wire bytes.
+- `meerkat_core::AgentLlmRequestAttempt::stream_response` gains the parameter
+  `assistant_message_id: AssistantMessageId`
+  (`stream_response(&self, assistant_message_id)`). Implementations that
+  publish live events stamp them with it; decorators that wrap an attempt must
+  pass it through. It never enters the provider request. Client decorators
+  MUST also forward `AgentLlmClient::prepare_request_attempt` to the client
+  they wrap (with their transformed messages): a decorator that does not falls
+  back to the legacy `stream_response` path, and every live delta behind it
+  carries no id. MobKit's `TaintObservingLlmClient` and
+  `ReplaySanitizingAgentLlmClient` do not forward it yet; that fix is tracked
+  in MobKit.
+- `meerkat_core::Session::append_external_assistant_blocks` returns
+  `Option<AssistantMessageId>` instead of `()`: the id core minted for the
+  committed row, or `None` when `blocks` is empty and no row was committed.
+- `meerkat_session::SessionAgent::append_external_assistant_output` returns
+  `Result<Option<AssistantMessageId>, AgentError>` instead of
+  `Result<(), AgentError>`. Implementations return the id
+  `Session::append_external_assistant_blocks` minted; the session task stamps
+  the `text_complete` and `turn_completed` it publishes for the commit with it.
+- Behaviour-only (not measured by the semver gate):
+  `Session::commit_transcript_rewrite` clears `assistant_message_id` on every
+  replacement row (a supplied id is dropped, like `realtime_origin`), and
+  `Session::fork_replacing` clears it on the edited row, while
+  `session/restore_transcript_revision` (through the new
+  `Session::commit_transcript_revision_restore`) keeps the id of every
+  restored row, since core read those rows from the session's own retained
+  revision. Rows the live display-text drain commits carry a core-minted id,
+  also on the `text_complete` and `turn_completed` published for them. Live
+  deltas published
+  through the legacy `AgentLlmClient::stream_response` path (the compaction
+  summary call, custom split clients, and client decorators that do not
+  forward `prepare_request_attempt`) carry no id. Assistant message ids never
+  affect transcript revisions, rewrite span digests or the provider-cache
+  prefix identity. The retained-history byte budget of `DefaultCompactor`
+  now counts the id (about 60 bytes per row that carries one).
+- Behaviour-only: `LlmClientAdapter` now also delivers `ServerToolContent`
+  events to the interaction event tap, not only to the run's event channel,
+  so interaction-scoped streams see provider server-tool content.
+
 - `meerkat_core::SessionBuildOptions` and `meerkat::AgentBuildConfig` gain the
   public field `fork_source: Option<ForkBuildSource>`. Struct literals must
   supply it (`None` outside the mob runtime, or use `..Default::default()` for
@@ -98,6 +168,52 @@ them.
   need a wildcard arm and see the new variant there.
 
 ### Added
+
+- Assistant message identity: every assistant message the agent loop commits
+  carries a session-scoped `meerkat_core::types::AssistantMessageId`
+  (re-exported as `meerkat_core::AssistantMessageId` and
+  `meerkat::AssistantMessageId`), minted in the provider-neutral loop at
+  provider turn start, before any delta, for every provider. The same id is on
+  the committed `block_assistant` row and on every live event of that message,
+  so consoles join live rows to history by id instead of text or rank.
+  Retries of a provider turn (same-model, empty-output, stall, timeout, model
+  fallback, and a re-poll after compaction) reuse its id, a failed provider
+  turn never leaves a committed id, messages appended by tool effects get
+  their own id, and `run_completed` names the committed message whose text
+  `result` repeats. The history row carrying an id is the only commit fact.
+  `turn_completed` is a live "turn finished" signal that proves neither commit
+  nor durability: it can precede tool-turn boundary work, the run-completed
+  hooks of an output-schema run and the session save, any of which can still
+  fail the run, and it is absent when a run fails after the row was pushed
+  (for example a terminal-turn boundary or run-completed hook denial).
+  See `docs/reference/session-contracts.mdx#assistant-message-identity`.
+- `meerkat_core::Session::retained_transcript_revision_rows` and
+  `meerkat_core::Session::commit_transcript_revision_restore`, with the
+  core-constructed `meerkat_core::RetainedTranscriptRevisionRows` (re-exported
+  as `meerkat::RetainedTranscriptRevisionRows`): restore a
+  revision the session retains while keeping each restored row's
+  `assistant_message_id`, which a generic `commit_transcript_rewrite` clears.
+- `meerkat_core::AgentEvent::assistant_message_id(&self) -> Option<AssistantMessageId>`
+  reads the id from any event that carries one.
+- The Python, TypeScript and Web SDKs expose the optional
+  `assistant_message_id` / `assistantMessageId` on `turn_started`,
+  `text_delta`, `text_complete`, `turn_completed`, `retrying` and
+  `run_completed` events and on `block_assistant` history rows (the Web SDK
+  types cover all ten events and export `AssistantMessageId`); raw-preserved
+  events keep the key in their payload.
+- Realtime row pairing: `block_assistant` history and transcript-revision rows
+  the realtime transcript materializer committed now carry `realtime_origin`
+  on the wire, copied verbatim from the canonical row (the
+  `RealtimeMessageOrigin` shape run events already carry in `identity`). Its
+  `provider_item_ids` match the provider item ids on the live transport's
+  realtime observations (`provider_item_id` on `assistant_text_delta`,
+  `assistant_transcript_delta`, `assistant_transcript_final` and
+  `assistant_transcript_truncated`; `item_id` on `assistant_audio_chunk` and
+  item-scoped `realtime_transcript` events), so a console pairs a realtime row
+  with its live rendering by provider item id. These rows still carry no
+  `assistant_message_id`, and the `text_complete` / `turn_completed` published
+  for their commit carry none either. The Python and TypeScript SDKs expose it
+  as `SessionMessage.realtime_origin` / `realtimeOrigin`.
 
 - `meerkat_core::ForkBuildSource` (re-exported as `meerkat::ForkBuildSource`)
   names the source of a fork-derived member build: `source_member`, the
@@ -245,6 +361,38 @@ them.
   `restart_reason` `commit_never_landed` only when the reading at the ceiling
   was machine evidence. `fork_relink::relink_child_within` takes the ceiling
   explicitly.
+
+- Live host: assistant realtime events (display-text deltas, spoken-transcript
+  deltas and spoken-transcript finals) now reach the session with the channel
+  they streamed on, through both the RPC `SessionServiceProjectionSink` and the
+  facade `ServiceLiveProjection`, as user transcripts already did. Core stamps
+  that channel on the staged assistant item, but `LiveAdapterHost` never
+  passed it for assistant events, so outside a context observation an ordinary
+  spoken turn committed with no `realtime_origin`: no console pairing key, and
+  the live context mirror classified the row as `ParentSessionServiceTurn`
+  instead of the `LiveRealtimeTranscript` disposition the 0.8.41 entries
+  describe. Behaviour-only, no signature change: assistant projections on a
+  channel whose close has released its turn-boundary waiters now return
+  `SessionBusy` instead of waiting behind the boundary, the same as user
+  projections.
+- Live close: an explicit close of an ordinary (non-experimental) channel no
+  longer releases the channel's live projections from the member's turn
+  boundary when the embedder installs an experimental live open authority
+  (MobKit does, so every `live/close` runs the experimental close first). The
+  release is keyed on the generated close custody only experimental channels
+  hold, so ordinary channels close the same way with or without that
+  authority: their projections wait for the boundary and the ordinary close
+  defers its playback settlement to it. Before, a projection parked behind a
+  running member turn returned `SessionBusy`, the ordinary WebSocket/WebRTC
+  pump treated that as fatal, and its disconnect cleanup raced the RPC close;
+  when the cleanup committed first, `live/close` answered with an
+  unbound-channel error for a channel that did close. Behaviour-only, no
+  signature change.
+- The Python and TypeScript SDK `retrying` parsers accept the canonical wire
+  shape, which carries one typed `retry` schedule; `attempt`, `max_attempts` /
+  `maxAttempts`, `error` and `delay_ms` / `delayMs` are derived from it and the
+  schedule is kept in `retry`. Current `retrying` events previously parsed as
+  `malformed_event`.
 
 - A fork-derived member is built with its source member's build inputs. A
   `fork_off` child, a child of the `MobHandle::fork_member`,

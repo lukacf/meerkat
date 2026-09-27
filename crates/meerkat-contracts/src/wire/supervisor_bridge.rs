@@ -6858,7 +6858,10 @@ mod tests {
                         "worker-1",
                         7,
                         Some("mob-1".to_string()),
-                        meerkat_core::AgentEvent::TurnStarted { turn_number: 1 },
+                        meerkat_core::AgentEvent::TurnStarted {
+                            turn_number: 1,
+                            assistant_message_id: None,
+                        },
                     ),
                 }],
                 from_seq: 77,
@@ -7126,7 +7129,10 @@ mod tests {
                 "worker-1",
                 9,
                 Some("mob-1".to_string()),
-                meerkat_core::AgentEvent::TurnStarted { turn_number: 2 },
+                meerkat_core::AgentEvent::TurnStarted {
+                    turn_number: 2,
+                    assistant_message_id: None,
+                },
             ),
         };
         let wire = serde_json::to_value(&row).expect("serialize row");

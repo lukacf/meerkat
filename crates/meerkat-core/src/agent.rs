@@ -3,6 +3,8 @@
 //! The Agent struct ties together all components and runs the agent loop.
 
 #[cfg(test)]
+mod assistant_message_identity_tests;
+#[cfg(test)]
 mod brain_swap_promotion_tests;
 mod builder;
 pub mod comms_impl;
@@ -138,7 +140,19 @@ pub(crate) fn classify_provider_turn_usage_identity(
 pub trait AgentLlmRequestAttempt: Send + Sync {
     fn request_pressure(&self) -> Result<Option<crate::ProviderRequestPressure>, AgentError>;
 
-    async fn stream_response(&self) -> Result<LlmStreamResult, AgentError>;
+    /// Dispatch this attempt and stream the provider response.
+    ///
+    /// `assistant_message_id` is the core-minted occurrence id of the
+    /// assistant message this provider turn will commit. Implementations that
+    /// publish live events (`text_delta`, `reasoning_delta`,
+    /// `reasoning_complete`, `server_tool_content`) stamp every one of them
+    /// with it, and decorators that wrap an attempt must pass it through
+    /// unchanged. It is event metadata only: it never enters the provider
+    /// request. Retries of the same provider turn receive the same id.
+    async fn stream_response(
+        &self,
+        assistant_message_id: crate::types::AssistantMessageId,
+    ) -> Result<LlmStreamResult, AgentError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,7 +187,13 @@ where
         )
     }
 
-    async fn stream_response(&self) -> Result<LlmStreamResult, AgentError> {
+    /// A legacy split client streams through [`AgentLlmClient::stream_response`],
+    /// which has no message identity, so any live events it publishes carry
+    /// none. The loop still stamps the events it emits itself.
+    async fn stream_response(
+        &self,
+        _assistant_message_id: crate::types::AssistantMessageId,
+    ) -> Result<LlmStreamResult, AgentError> {
         self.client
             .stream_response(
                 &self.messages,
@@ -195,6 +215,14 @@ pub trait AgentLlmClient: Send + Sync {
     ///
     /// Stable custom clients receive one direct attempt by default. Dynamic
     /// adapters override this and report [`RequestAttemptAuthority::Unified`].
+    ///
+    /// A decorator that wraps another client MUST forward this method to the
+    /// inner client's `prepare_request_attempt`, passing the messages it
+    /// transforms (as it would in [`AgentLlmClient::stream_response`]).
+    /// Otherwise the loop uses the default direct attempt, which streams
+    /// through `stream_response` and carries no assistant message identity:
+    /// every live delta published below an unforwarded decorator has no
+    /// `assistant_message_id`.
     fn prepare_request_attempt(
         self: Arc<Self>,
         messages: Arc<Vec<Message>>,
@@ -2614,6 +2642,11 @@ where
     /// True once the current run's public `RunCompleted` event has been
     /// emitted. Extraction may continue afterward as a separate post-run phase.
     pub(crate) run_completed_event_emitted: bool,
+    /// The committed assistant message whose text the current run's result
+    /// repeats, referenced by `RunCompleted`. Set by the terminal commit and
+    /// by `build_result`; reset at every run entry. Run-local, never
+    /// persisted, and deliberately not part of `RunResult`.
+    pub(crate) run_result_assistant_message: Option<crate::types::AssistantMessageId>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
     #[allow(dead_code)] // Used by comms_impl when comms feature is enabled

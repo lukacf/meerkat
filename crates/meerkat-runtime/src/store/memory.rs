@@ -5377,6 +5377,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         let current_snapshot = serde_json::to_vec(&current).unwrap();
@@ -5434,6 +5435,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         let current_snapshot = serde_json::to_vec(&current).unwrap();
@@ -5566,6 +5568,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
 
@@ -5588,6 +5591,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         let parent_revision = incoming.transcript_revision().unwrap();

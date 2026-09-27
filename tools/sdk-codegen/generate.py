@@ -4003,6 +4003,21 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         system_notice_root,
         "Typed runtime-authored system-notice transcript block.",
     )
+    # `WireSessionMessage::BlockAssistant.realtime_origin` references the
+    # auto-promoted `Realtime*` def by name; emit it and the named defs it
+    # references so every reference resolves.
+    append_python_alias("SessionId", wire_session_message_root, "Session identifier.")
+    append_python_alias("LiveChannelId", wire_session_message_root, "Live channel identifier.")
+    append_python_dataclass(
+        "LiveContextObservationId",
+        wire_session_message_root,
+        "Opaque live context-observation provenance identifier.",
+    )
+    append_python_dataclass(
+        "RealtimeMessageOrigin",
+        wire_session_message_root,
+        "Realtime provenance of a transcript row the realtime materializer committed.",
+    )
     append_python_alias(
         "WireSessionMessage",
         wire_schema,
@@ -4577,6 +4592,13 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     system_notice_schema["$defs"] = wire_session_message_schema.get("$defs", {})
     system_notice_root["SystemNoticeBlock"] = system_notice_schema
     append_typescript_alias("SystemNoticeBlock", system_notice_root)
+    # `WireSessionMessage::BlockAssistant.realtime_origin` references the
+    # auto-promoted `Realtime*` def by name; emit it and the named defs it
+    # references so every reference resolves.
+    append_typescript_alias("SessionId", wire_session_message_root)
+    append_typescript_alias("LiveChannelId", wire_session_message_root)
+    append_typescript_interface("LiveContextObservationId", wire_session_message_root)
+    append_typescript_interface("RealtimeMessageOrigin", wire_session_message_root)
     append_typescript_alias("WireSessionMessage", wire_schema)
     append_typescript_alias("WireHistoryRow", wire_schema)
 

@@ -6674,6 +6674,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         let mut parent = previous.clone();
@@ -6689,6 +6690,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let parent_revision = parent.transcript_revision()?;
 
@@ -6828,6 +6830,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         });
         incoming.commit_transcript_rewrite(
             TranscriptRewriteSelection::MessageRange { start: 1, end: 1 },
@@ -6992,6 +6995,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let mut incoming = previous.clone();
         incoming.push(Message::User(UserMessage::text(
@@ -7115,6 +7119,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
@@ -7138,6 +7143,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let mut forged = previous.clone();
         forged.commit_transcript_rewrite(
@@ -7184,6 +7190,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let mut forged = previous.clone();
         forged.commit_transcript_rewrite(
@@ -7398,6 +7405,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         let mut incoming = Session::with_id(previous.id().clone());
@@ -7416,6 +7424,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let parent_revision = incoming.transcript_revision()?;
         incoming.commit_transcript_rewrite(
@@ -7483,6 +7492,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         let mut incoming = Session::with_id(previous.id().clone());
@@ -7503,6 +7513,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let parent_revision = incoming.transcript_revision()?;
         // Same rendered shape (content begins with `[Context compacted]`) but the
@@ -7549,6 +7560,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         let mut incoming = Session::with_id(previous.id().clone());
@@ -7569,6 +7581,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let parent_revision = incoming.transcript_revision()?;
         // Same rendered shape, but the boundary message carries the typed
@@ -7653,6 +7666,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         let original = session.transcript_revision()?;
@@ -7666,6 +7680,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: crate::types::message_timestamp_now(),
+                assistant_message_id: None,
             })],
             crate::TranscriptRewriteReason::new("compaction"),
             Some("unit-test".to_string()),
@@ -7681,6 +7696,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let bridge = session.transcript_revision()?;
         assert_ne!(bridge, first.revision);
@@ -7695,6 +7711,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: crate::types::message_timestamp_now(),
+                assistant_message_id: None,
             })],
             crate::TranscriptRewriteReason::new("compaction"),
             Some("unit-test".to_string()),
@@ -7797,6 +7814,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let base_revision = base.transcript_revision()?;
 
@@ -7811,6 +7829,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: crate::types::message_timestamp_now(),
+                assistant_message_id: None,
             })],
             crate::TranscriptRewriteReason::new("compaction"),
             Some("unit-test".to_string()),
@@ -7829,6 +7848,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: crate::types::message_timestamp_now(),
+                assistant_message_id: None,
             })],
             crate::TranscriptRewriteReason::new("compaction"),
             Some("unit-test".to_string()),
@@ -7875,6 +7895,7 @@ mod tests {
                 objective_id: None,
             },
             created_at,
+            assistant_message_id: None,
         })
     }
 
@@ -8155,6 +8176,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         })
     }
 

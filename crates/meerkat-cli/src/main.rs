@@ -22606,6 +22606,7 @@ default_model = "gemma"
                         None,
                         AgentEvent::TextDelta {
                             delta: "streamed".to_string(),
+                            assistant_message_id: None,
                         },
                     ))
                     .await;
@@ -23099,7 +23100,7 @@ default_model = "gemma"
             .expect("stream event channel should remain open");
         assert!(matches!(
             envelope.payload,
-            AgentEvent::TextDelta { ref delta } if delta == "streamed"
+            AgentEvent::TextDelta { ref delta, .. } if delta == "streamed"
         ));
         assert!(
             service

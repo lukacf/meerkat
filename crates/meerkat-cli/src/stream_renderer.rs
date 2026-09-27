@@ -66,10 +66,11 @@ struct ScopeRenderState {
 
 /// Per-call token rows of the run in progress on one scope.
 ///
-/// Every committed agent-loop call publishes `turn_completed` and every
-/// extraction request a `request_usage` row on the extraction outcome, so the
-/// rows are one line per provider request, and folding them the way the
-/// session does gives the run's own total.
+/// An agent-loop call publishes `turn_completed` when its turn completes and
+/// every extraction request a `request_usage` row on the extraction outcome,
+/// so the rows are one line per provider request that reached them, and
+/// folding them the way the session does gives the run's own total for those
+/// calls.
 #[derive(Debug, Default)]
 struct RunTokenLedger {
     run_usage: CumulativeUsage,
@@ -308,7 +309,7 @@ fn render_event(
 ) {
     match event {
         // ── Turn lifecycle ──────────────────────────────────────────
-        AgentEvent::TurnStarted { turn_number } => {
+        AgentEvent::TurnStarted { turn_number, .. } => {
             end_text_block(state);
             end_thinking_block(mux, scope_id, state);
             let n = turn_number + 1;
@@ -378,7 +379,7 @@ fn render_event(
         }
 
         // ── Reasoning / thinking ───────────────────────────────────
-        AgentEvent::ReasoningDelta { delta } => {
+        AgentEvent::ReasoningDelta { delta, .. } => {
             end_text_block(state);
             if !state.in_thinking {
                 state.in_thinking = true;
@@ -407,7 +408,7 @@ fn render_event(
         }
 
         // ── Text output ────────────────────────────────────────────
-        AgentEvent::TextDelta { delta } => {
+        AgentEvent::TextDelta { delta, .. } => {
             end_thinking_block(mux, scope_id, state);
             if !state.in_text {
                 state.in_text = true;
@@ -596,7 +597,7 @@ fn render_event(
             );
         }
 
-        AgentEvent::Retrying { retry } => {
+        AgentEvent::Retrying { retry, .. } => {
             chrome_line(
                 mux,
                 scope_id,
@@ -1075,12 +1076,18 @@ mod tests {
         renderer.render(&ScopedAgentEvent {
             scope_id: "mob:b".into(),
             scope_path: vec![],
-            event: AgentEvent::TextDelta { delta: "x".into() },
+            event: AgentEvent::TextDelta {
+                delta: "x".into(),
+                assistant_message_id: None,
+            },
         });
         renderer.render(&ScopedAgentEvent {
             scope_id: "mob:a".into(),
             scope_path: vec![],
-            event: AgentEvent::TextDelta { delta: "y".into() },
+            event: AgentEvent::TextDelta {
+                delta: "y".into(),
+                assistant_message_id: None,
+            },
         });
         let summary = renderer.finish();
         assert_eq!(summary.focus_requested, Some("mob:a".into()));
@@ -1104,6 +1111,7 @@ mod tests {
             scope_path: vec![],
             event: AgentEvent::TextDelta {
                 delta: "child".into(),
+                assistant_message_id: None,
             },
         });
         renderer.render(&ScopedAgentEvent {
@@ -1111,6 +1119,7 @@ mod tests {
             scope_path: vec![],
             event: AgentEvent::TextDelta {
                 delta: "parent".into(),
+                assistant_message_id: None,
             },
         });
         let summary = renderer.finish();
@@ -1167,6 +1176,7 @@ mod tests {
             }
             .into(),
             terminal_cause_kind: None,
+            assistant_message_id: None,
         }
     }
 
@@ -1199,10 +1209,12 @@ mod tests {
                 AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::ToolUse,
                     usage: Some(openai_row(1000, 10, 0)),
+                    assistant_message_id: None,
                 },
                 AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::EndTurn,
                     usage: Some(openai_row(1200, 20, 1000)),
+                    assistant_message_id: None,
                 },
                 run_completed(true),
                 AgentEvent::ExtractionSucceeded {
@@ -1242,12 +1254,14 @@ mod tests {
                 AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::EndTurn,
                     usage: Some(openai_row(100, 5, 0)),
+                    assistant_message_id: None,
                 },
                 run_completed(false),
                 run_started(),
                 AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::EndTurn,
                     usage: Some(openai_row(200, 7, 100)),
+                    assistant_message_id: None,
                 },
                 run_completed(false),
             ],
@@ -1279,6 +1293,7 @@ mod tests {
                 AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::EndTurn,
                     usage: Some(anthropic_row(120, 0, 4300, 90)),
+                    assistant_message_id: None,
                 },
                 run_completed(false),
             ],
@@ -1304,10 +1319,12 @@ mod tests {
                 AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::ToolUse,
                     usage: None,
+                    assistant_message_id: None,
                 },
                 AgentEvent::TurnCompleted {
                     stop_reason: meerkat_core::StopReason::EndTurn,
                     usage: Some(openai_row(100, 5, 0)),
+                    assistant_message_id: None,
                 },
                 run_completed(false),
             ],

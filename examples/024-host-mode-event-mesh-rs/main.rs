@@ -295,7 +295,7 @@ fn print_turn_summary(
 
     for event in events {
         match event {
-            AgentEvent::TextDelta { delta } => {
+            AgentEvent::TextDelta { delta, .. } => {
                 text_deltas += 1;
                 delta_bytes += delta.len();
             }

@@ -604,6 +604,7 @@ async fn every_request_of_a_structured_output_run_publishes_one_usage_row() {
             AgentEvent::TurnCompleted {
                 stop_reason,
                 usage: Some(usage),
+                ..
             } => {
                 turn_stop_reasons.push(stop_reason);
                 turn_rows.push(usage);

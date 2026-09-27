@@ -2780,7 +2780,13 @@ mod tests {
 
         let session_id = SessionId::new();
         event_store
-            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
             .await?;
         assert!(
             expected_paths

@@ -2680,6 +2680,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adapter_attempt_stamps_chat_completions_live_events_and_keeps_request_bytes() {
+        use meerkat_core::AgentLlmClient as _;
+        let payload = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me think. \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Final answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let (base_url, bodies, handle) =
+            spawn_compatible_replay_capture_server(OpenAiCompatibleMode::ChatCompletions, payload)
+                .await;
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            base_url,
+            None,
+            options(true, true, true, false),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let adapter = Arc::new(meerkat_llm_core::LlmClientAdapter::with_event_channel(
+            Arc::new(client),
+            "remote-model".to_string(),
+            tx,
+        ));
+        let history_id: meerkat_core::AssistantMessageId =
+            serde_json::from_value(serde_json::json!("0190f5c2-4a1e-7c3d-8e2f-00000000cc01"))
+                .unwrap();
+        let turn_id: meerkat_core::AssistantMessageId =
+            serde_json::from_value(serde_json::json!("0190f5c2-4a1e-7c3d-8e2f-00000000cc02"))
+                .unwrap();
+        let mut prior = meerkat_core::BlockAssistantMessage::new(
+            vec![meerkat_core::AssistantBlock::Text {
+                text: "prior answer".to_string(),
+                meta: None,
+            }],
+            meerkat_core::StopReason::EndTurn,
+        );
+        prior.assistant_message_id = Some(history_id);
+        let with_ids = vec![
+            Message::User(UserMessage::text("first".to_string())),
+            Message::BlockAssistant(prior.clone()),
+            Message::User(UserMessage::text("again".to_string())),
+        ];
+        prior.assistant_message_id = None;
+        let without_ids = vec![
+            with_ids[0].clone(),
+            Message::BlockAssistant(prior),
+            with_ids[2].clone(),
+        ];
+
+        for messages in [with_ids, without_ids] {
+            let attempt = Arc::clone(&adapter)
+                .prepare_request_attempt(Arc::new(messages), Arc::from([]), 1024, None, None)
+                .expect("attempt");
+            attempt.stream_response(turn_id).await.expect("stream");
+        }
+        handle.abort();
+
+        let published = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let kinds = published
+            .iter()
+            .map(meerkat_core::agent_event_type)
+            .collect::<std::collections::BTreeSet<_>>();
+        for kind in ["reasoning_delta", "reasoning_complete", "text_delta"] {
+            assert!(kinds.contains(kind), "{kind} published: {kinds:?}");
+        }
+        assert!(
+            published
+                .iter()
+                .all(|event| event.assistant_message_id() == Some(turn_id))
+        );
+        let bodies = bodies.lock().expect("bodies");
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0], bodies[1]);
+        assert!(!bodies[0].to_string().contains(&history_id.to_string()));
+    }
+
+    #[tokio::test]
     async fn chat_completions_stream_emits_reasoning_events() {
         let payload = concat!(
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me think. \"}}]}\n\n",

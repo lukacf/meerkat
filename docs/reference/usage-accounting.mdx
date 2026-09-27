@@ -100,8 +100,10 @@ should read `run_usage`, never sum `usage`.
 
 ## Which calls emit a usage row
 
-Every committed agent-loop call publishes its own per-call row, and
-structured-output extraction publishes one row per extraction request. Session
+An agent-loop call publishes its own per-call row when its turn completes, and
+structured-output extraction publishes one row per extraction request. A turn
+that fails after the provider answered publishes none, even if its assistant row
+was already committed to history before the failure. Session
 usage advances when a measured, chargeable outcome reaches the accounting path;
 measurement alone does not guarantee recording. `run_completed.usage` includes
 only calls recorded before its emission.

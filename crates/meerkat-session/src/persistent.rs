@@ -3295,8 +3295,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// runs, so a status read through it waits for that whole turn. This
     /// read never sends the task a command: it reads the watches the task
     /// publishes, which carry the last assistant text and token count as of
-    /// the actor's last published summary. It performs no authority
-    /// arbitration and never writes.
+    /// the actor's last published summary. The summary is seeded from the
+    /// session the actor was built from, so a resumed or forked session
+    /// reports its committed transcript and usage even during its first
+    /// turn. It performs no authority arbitration and never writes.
     pub async fn observe_live_session_view(
         &self,
         id: &SessionId,
@@ -24416,6 +24418,102 @@ mod tests {
 
         builder.release_notify.add_permits(1);
         active_turn.await.unwrap().unwrap();
+    }
+
+    /// A resumed live session's status view is correct from the actor's
+    /// birth. The summary watch was only published at turn end, durable sync
+    /// and a few commands, so during the first turn after a resume (a
+    /// deferred first turn, a fork child's first turn) the view reported no
+    /// preview and zero tokens as if they were observations.
+    #[tokio::test]
+    async fn live_session_view_reports_resumed_history_during_first_turn() {
+        let builder = BlockingRunBuilder::new();
+        let service = Arc::new(PersistentSessionService::new(
+            builder.clone(),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        let mut history = recoverable_store_row();
+        history.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("what is on the calendar"),
+        ));
+        history.push(meerkat_core::types::Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage {
+                blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "two meetings tomorrow".to_string(),
+                    meta: None,
+                }],
+                stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+            },
+        ));
+        history.record_cumulative_usage(meerkat_core::types::Usage {
+            input_tokens: 1200,
+            output_tokens: 34,
+            ..Default::default()
+        });
+        let seed = service.save_normalized_session(history).await.unwrap();
+        let committed_tokens = seed.total_tokens();
+        let committed_messages = seed.messages().len();
+        assert_eq!(committed_tokens, 1234);
+        let id = seed.id().clone();
+        service.create_session(resume_request(seed)).await.unwrap();
+
+        let idle_view = service
+            .observe_live_session_view(&id)
+            .await
+            .unwrap()
+            .expect("the resumed live actor publishes its view");
+        assert_eq!(
+            idle_view.state.last_assistant_text.as_deref(),
+            Some("two meetings tomorrow"),
+            "the resumed actor's view carries the committed preview before any turn"
+        );
+        assert_eq!(idle_view.billing.total_tokens, committed_tokens);
+        assert_eq!(idle_view.state.message_count, committed_messages);
+
+        let admission = service.reserve_runtime_turn_admission(&id).await.unwrap();
+        let turn_service = Arc::clone(&service);
+        let turn_id = id.clone();
+        let first_turn = tokio::spawn(async move {
+            let _boundary = turn_service
+                .acquire_runtime_turn_finalization_guard(&turn_id)
+                .await;
+            turn_service
+                .apply_runtime_turn_with_reserved_admission(
+                    &turn_id,
+                    RunId::new(),
+                    runtime_content_turn_request("first turn after resume"),
+                    RunApplyBoundary::RunStart,
+                    vec![InputId::new()],
+                    admission,
+                )
+                .await
+        });
+        builder.wait_for_entered_runs(1).await;
+        let busy_view = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.observe_live_session_view(&id),
+        )
+        .await
+        .expect("the status view must not wait for the first turn")
+        .unwrap()
+        .expect("the busy resumed actor still publishes its view");
+        assert_eq!(
+            busy_view.state.last_assistant_text.as_deref(),
+            Some("two meetings tomorrow"),
+            "mid-first-turn the view reports the committed preview, not a silent none"
+        );
+        assert_eq!(
+            busy_view.billing.total_tokens, committed_tokens,
+            "mid-first-turn the view reports the committed token total, not a silent zero"
+        );
+
+        builder.release_notify.add_permits(1);
+        first_turn.await.unwrap().unwrap();
     }
 
     #[cfg(not(target_arch = "wasm32"))]

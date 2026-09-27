@@ -2773,6 +2773,9 @@ pub enum WireMemberPreviewUnavailable {
     ReadFailed,
     /// The member's bound session has no readable view (absent or archived).
     SessionAbsent,
+    /// The member is retiring; a status read of a retiring member is answered
+    /// without reading its session.
+    NotObservedWhileRetiring,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -4598,6 +4601,10 @@ mod tests {
             (
                 WireMemberPreviewUnavailable::SessionAbsent,
                 "session_absent",
+            ),
+            (
+                WireMemberPreviewUnavailable::NotObservedWhileRetiring,
+                "not_observed_while_retiring",
             ),
         ] {
             assert_eq!(

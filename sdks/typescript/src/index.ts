@@ -530,6 +530,7 @@ export type {
   WireMemberHistoryPageBody,
   WireMemberLifecycleCapabilities,
   WireMemberLaunchMode,
+  WireMemberPreviewUnavailable,
   WireMemberRef,
   WireMobBackendKind,
   WireMobMemberStatus,

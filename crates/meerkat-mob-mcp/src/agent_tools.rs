@@ -3096,36 +3096,72 @@ struct ForkOffResult {
 }
 
 /// `mob_check_member` result. The status read never waits for the member's
-/// running turn, so while that turn is open the note says which fields are
-/// current.
+/// running turn, so while that turn is open, or when the read could not
+/// observe the member's session, the note says which fields are current.
 #[derive(Serialize)]
 struct CheckMemberResult {
     #[serde(flatten)]
     status: meerkat_contracts::MobMemberStatusResult,
     #[serde(skip_serializing_if = "Option::is_none")]
-    note: Option<&'static str>,
+    note: Option<String>,
 }
 
 const MEMBER_TURN_RUNNING_NOTE: &str = "The member's turn is still running. output_preview \
      and tokens_used are from its last completed turn.";
 
-const MEMBER_PREVIEW_UNAVAILABLE_NOTE: &str = "This status read could not observe the member's \
-     session (see preview_unavailable), so output_preview and tokens_used are missing, not empty \
-     or zero. The status and progress fields are current; check again later for the preview.";
+/// Leads the preview note while the member's turn is open: the running note's
+/// second sentence would contradict a preview that was not observed.
+const MEMBER_TURN_RUNNING_SENTENCE: &str = "The member's turn is still running.";
+
+const PREVIEW_OBSERVATION_DEADLINE_NOTE: &str = "This status read could not read the member's \
+     session in time, so output_preview and tokens_used are missing, not empty or zero. status \
+     and progress.run_state are current; the other progress fields may be from an earlier read. \
+     Check again later for the preview.";
+
+const PREVIEW_READ_FAILED_NOTE: &str = "Reading the member's session failed, so output_preview \
+     and tokens_used are missing, not empty or zero. status and progress.run_state are current; \
+     the other progress fields may be from an earlier read. Check again later for the preview.";
+
+const PREVIEW_SESSION_ABSENT_NOTE: &str = "The member has no readable session (it is missing \
+     from the session store or archived), so there is no output_preview or tokens_used to report, \
+     and checking again will not bring them back while it stays bound to that session. status is \
+     current.";
+
+const PREVIEW_NOT_OBSERVED_WHILE_RETIRING_NOTE: &str = "The member is retiring, so this status \
+     read did not read its session: output_preview and tokens_used are missing, not empty or \
+     zero. status is current.";
 
 /// The plain-language note a `mob_check_member` result carries, chosen from
-/// the typed status fields.
-fn check_member_note(status: &meerkat_contracts::MobMemberStatusResult) -> Option<&'static str> {
-    if status.preview_unavailable.is_some() {
-        return Some(MEMBER_PREVIEW_UNAVAILABLE_NOTE);
-    }
+/// the typed status fields: the preview marker's variant says why the
+/// preview is missing and whether it can come back, and an open turn keeps
+/// its running note.
+fn check_member_note(status: &meerkat_contracts::MobMemberStatusResult) -> Option<String> {
     let running = status.progress.as_ref().is_some_and(|progress| {
         matches!(
             progress.run_state,
             meerkat_contracts::WireMemberRunState::RunOpen
         )
     });
-    running.then_some(MEMBER_TURN_RUNNING_NOTE)
+    let preview_note = status.preview_unavailable.map(|marker| match marker {
+        meerkat_contracts::WireMemberPreviewUnavailable::ObservationDeadline => {
+            PREVIEW_OBSERVATION_DEADLINE_NOTE
+        }
+        meerkat_contracts::WireMemberPreviewUnavailable::ReadFailed => PREVIEW_READ_FAILED_NOTE,
+        meerkat_contracts::WireMemberPreviewUnavailable::SessionAbsent => {
+            PREVIEW_SESSION_ABSENT_NOTE
+        }
+        meerkat_contracts::WireMemberPreviewUnavailable::NotObservedWhileRetiring => {
+            PREVIEW_NOT_OBSERVED_WHILE_RETIRING_NOTE
+        }
+    });
+    match (running, preview_note) {
+        (true, Some(preview_note)) => {
+            Some(format!("{MEMBER_TURN_RUNNING_SENTENCE} {preview_note}"))
+        }
+        (true, None) => Some(MEMBER_TURN_RUNNING_NOTE.to_string()),
+        (false, Some(preview_note)) => Some(preview_note.to_string()),
+        (false, None) => None,
+    }
 }
 
 /// Immediate `fork_off` result: the child is seated and its turn admitted.
@@ -3680,64 +3716,110 @@ mod tests {
 
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 
-    /// The `mob_check_member` note is chosen from typed fields: an
-    /// unobserved preview is called out (it is missing, not empty), and a
-    /// running turn says which fields are as of its last completed turn.
+    /// The `mob_check_member` note is chosen from typed fields. Each preview
+    /// marker says why the preview is missing and whether checking again
+    /// helps, and claims only `status` and `progress.run_state` as current
+    /// where a degraded read still observed them; an open turn keeps its
+    /// running note, which alone says the preview is from the last completed
+    /// turn when the preview was observed.
     #[test]
-    fn check_member_note_calls_out_an_unobserved_preview() {
-        let status = |preview_unavailable, run_state| meerkat_contracts::MobMemberStatusResult {
-            status: meerkat_contracts::WireMobMemberStatus::Active,
-            member_ref: meerkat_contracts::WireMemberRef::encode("mob", "member"),
-            output_preview: None,
-            error: None,
-            tokens_used: 0,
-            is_final: false,
-            current_session_id: None,
-            peer_connectivity: None,
-            kickoff: None,
-            external_member: None,
-            resolved_capabilities: None,
-            progress: Some(meerkat_contracts::WireMemberProgressSnapshot {
-                run_state,
-                in_flight_work: 0,
-                last_progress_at_ms: 0,
-                last_progress_event: meerkat_contracts::WireMemberProgressEvent::Unchanged,
-                health: meerkat_contracts::WireMemberHealthClass::Unknown,
-            }),
-            activity: None,
-            detached_jobs: None,
-            placement: None,
-            control_reachability: None,
-            comms_reachability: None,
-            last_seen_ms: None,
-            freshness_reason: None,
-            lifecycle_capabilities: None,
-            non_portable_disabled: None,
-            preview_unavailable,
+    fn check_member_note_is_chosen_by_marker_and_run_state() {
+        use meerkat_contracts::{WireMemberPreviewUnavailable as Marker, WireMemberRunState};
+        let status = |preview_unavailable: Option<Marker>,
+                      run_state: Option<WireMemberRunState>| {
+            meerkat_contracts::MobMemberStatusResult {
+                status: meerkat_contracts::WireMobMemberStatus::Active,
+                member_ref: meerkat_contracts::WireMemberRef::encode("mob", "member"),
+                output_preview: None,
+                error: None,
+                tokens_used: 0,
+                is_final: false,
+                current_session_id: None,
+                peer_connectivity: None,
+                kickoff: None,
+                external_member: None,
+                resolved_capabilities: None,
+                progress: run_state.map(|run_state| {
+                    meerkat_contracts::WireMemberProgressSnapshot {
+                        run_state,
+                        in_flight_work: 0,
+                        last_progress_at_ms: 0,
+                        last_progress_event: meerkat_contracts::WireMemberProgressEvent::Unchanged,
+                        health: meerkat_contracts::WireMemberHealthClass::Unknown,
+                    }
+                }),
+                activity: None,
+                detached_jobs: None,
+                placement: None,
+                control_reachability: None,
+                comms_reachability: None,
+                last_seen_ms: None,
+                freshness_reason: None,
+                lifecycle_capabilities: None,
+                non_portable_disabled: None,
+                preview_unavailable,
+            }
         };
-        for run_state in [
-            meerkat_contracts::WireMemberRunState::Idle,
-            meerkat_contracts::WireMemberRunState::RunOpen,
-        ] {
-            assert_eq!(
-                check_member_note(&status(
-                    Some(meerkat_contracts::WireMemberPreviewUnavailable::ObservationDeadline),
-                    run_state,
-                )),
-                Some(MEMBER_PREVIEW_UNAVAILABLE_NOTE)
-            );
-        }
+        let note = |marker: Option<Marker>, run_state: Option<WireMemberRunState>| {
+            check_member_note(&status(marker, run_state))
+        };
+
+        // No marker: the running note while a turn is open, nothing when idle.
         assert_eq!(
-            check_member_note(&status(
-                None,
-                meerkat_contracts::WireMemberRunState::RunOpen
-            )),
+            note(None, Some(WireMemberRunState::RunOpen)).as_deref(),
             Some(MEMBER_TURN_RUNNING_NOTE)
         );
-        assert_eq!(
-            check_member_note(&status(None, meerkat_contracts::WireMemberRunState::Idle)),
-            None
-        );
+        assert_eq!(note(None, Some(WireMemberRunState::Idle)), None);
+        assert_eq!(note(None, None), None);
+
+        // A transient miss: retry later; only status and run_state are claimed
+        // current.
+        for (marker, expected) in [
+            (
+                Marker::ObservationDeadline,
+                PREVIEW_OBSERVATION_DEADLINE_NOTE,
+            ),
+            (Marker::ReadFailed, PREVIEW_READ_FAILED_NOTE),
+        ] {
+            assert_eq!(
+                note(Some(marker), Some(WireMemberRunState::Idle)).as_deref(),
+                Some(expected)
+            );
+            assert!(expected.contains("Check again later"));
+            assert!(expected.contains("status and progress.run_state are current"));
+            assert!(expected.contains("the other progress fields may be from an earlier read"));
+            assert_eq!(
+                note(Some(marker), Some(WireMemberRunState::RunOpen)),
+                Some(format!("{MEMBER_TURN_RUNNING_SENTENCE} {expected}")),
+                "an open turn keeps its running note alongside the marker's"
+            );
+        }
+
+        // No readable session: the preview will not come back by retrying.
+        let absent = note(Some(Marker::SessionAbsent), Some(WireMemberRunState::Idle))
+            .expect("an absent session is called out");
+        assert_eq!(absent, PREVIEW_SESSION_ABSENT_NOTE);
+        assert!(absent.contains("no readable session"));
+        assert!(absent.contains("checking again will not bring them back"));
+        assert!(!absent.contains("Check again later"));
+
+        // Retiring: the fast path reads no session and carries no progress.
+        let retiring = note(Some(Marker::NotObservedWhileRetiring), None)
+            .expect("a retiring member's unread session is called out");
+        assert_eq!(retiring, PREVIEW_NOT_OBSERVED_WHILE_RETIRING_NOTE);
+        assert!(retiring.contains("retiring"));
+        assert!(!retiring.contains("progress"));
+
+        // Every note is distinct: the variant decides it.
+        let notes = [
+            PREVIEW_OBSERVATION_DEADLINE_NOTE,
+            PREVIEW_READ_FAILED_NOTE,
+            PREVIEW_SESSION_ABSENT_NOTE,
+            PREVIEW_NOT_OBSERVED_WHILE_RETIRING_NOTE,
+            MEMBER_TURN_RUNNING_NOTE,
+        ];
+        let distinct: std::collections::BTreeSet<_> = notes.iter().collect();
+        assert_eq!(distinct.len(), notes.len());
     }
 
     /// T-B12 (DEC-P7B-18, ADJ-P7-6): the LLM-visible delegation roster is

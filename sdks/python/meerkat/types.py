@@ -278,6 +278,7 @@ from .generated.types import (
     WireNonPortableResourceKind as WireNonPortableResourceKind,
     WireProjectionProvenance as WireProjectionProvenance,
     WireReachability as WireReachability,
+    WireMemberPreviewUnavailable as WireMemberPreviewUnavailable,
     WireRouteInstallObligation as WireRouteInstallObligation,
     WireRuntimeBinding as WireRuntimeBinding,
     WireToolAccessPolicy as WireToolAccessPolicy,

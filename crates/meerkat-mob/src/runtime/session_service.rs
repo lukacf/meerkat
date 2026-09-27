@@ -1301,9 +1301,15 @@ pub trait MobSessionService:
     /// services whose sessions live in process memory is exactly their
     /// published live state. A service whose `read` arbitrates durable
     /// authority through the session task (the persistent session service)
-    /// overrides this, and every wrapper over such a service must forward it
-    /// to the inner service: a wrapper that inherits this default reads
-    /// through the wrapper's `read` and waits on the member's turn.
+    /// overrides this.
+    ///
+    /// **Wrappers over a persistent service MUST forward this method to the
+    /// inner service.** A wrapper that inherits this default falls back to
+    /// `SessionService::read`, which for a persistent service waits on the
+    /// member's running turn: every status read of a busy member then ends
+    /// at the observation deadline with `preview_unavailable =
+    /// observation_deadline` instead of reporting its preview. The RPC, CLI
+    /// and test wrappers in this workspace forward it.
     async fn observe_member_status_view(
         &self,
         session_id: &SessionId,

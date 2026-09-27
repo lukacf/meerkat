@@ -731,6 +731,13 @@ pub(super) enum MobCommand {
         reply_tx:
             oneshot::Sender<super::actor::spawn_activation::SpawnActivationQuiescence>,
     },
+    /// Test-only census of the member-status lanes: the in-flight
+    /// observation map, the free observation capacity, and the underlying
+    /// session-view reads still running.
+    #[cfg(test)]
+    MemberStatusLaneProbe {
+        reply_tx: oneshot::Sender<super::actor::member_status_lane::MemberStatusLaneProbe>,
+    },
     /// Typed compensation receipt for one pending-spawn cleanup anchor
     /// (#1105). The anchor stays retained until a typed success arrives.
     PendingSpawnAnchorSettled {
@@ -1625,6 +1632,8 @@ impl MobCommand {
             Self::PendingSpawnAnchorSettled { .. } => "PendingSpawnAnchorSettled",
             #[cfg(test)]
             Self::SpawnActivationCustodyProbe { .. } => "SpawnActivationCustodyProbe",
+            #[cfg(test)]
+            Self::MemberStatusLaneProbe { .. } => "MemberStatusLaneProbe",
             Self::PolicySpawnSettled { .. } => "PolicySpawnSettled",
             Self::MemberTurnAdmissionSettled { .. } => "MemberTurnAdmissionSettled",
             Self::ReviveMemberLiveMaterialization { .. } => "ReviveMemberLiveMaterialization",

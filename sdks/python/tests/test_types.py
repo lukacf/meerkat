@@ -5404,6 +5404,125 @@ async def test_mob_member_status_parses_tri_state_peer_connectivity():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "observation_deadline",
+        "read_failed",
+        "session_absent",
+        "not_observed_while_retiring",
+    ],
+)
+async def test_mob_member_status_surfaces_preview_unavailable(marker):
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 0,
+            "is_final": False,
+            "preview_unavailable": marker,
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    status = await client.mob_member_status("mob-1", "agent-a")
+    assert status["preview_unavailable"] == marker
+    assert "output_preview" not in status
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_omits_absent_or_null_preview_unavailable():
+    client = MeerkatClient()
+    responses = [
+        {},
+        {"preview_unavailable": None},
+    ]
+
+    for extra in responses:
+
+        async def fake_request(_method, _params, extra=extra):
+            return {
+                "status": "active",
+                "member_ref": _make_member_ref("mob-1", "agent-a"),
+                "tokens_used": 3,
+                "is_final": False,
+                **extra,
+            }
+
+        client._request = fake_request  # type: ignore[method-assign]
+        status = await client.mob_member_status("mob-1", "agent-a")
+        assert "preview_unavailable" not in status
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_rejects_unknown_preview_unavailable():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 0,
+            "is_final": False,
+            "preview_unavailable": "stale",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="invalid preview_unavailable"):
+        await client.mob_member_status("mob-1", "agent-a")
+
+    async def fake_object_request(_method, _params):
+        return {
+            "status": "active",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 0,
+            "is_final": False,
+            "preview_unavailable": {"kind": "observation_deadline"},
+        }
+
+    client._request = fake_object_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="invalid preview_unavailable"):
+        await client.mob_member_status("mob-1", "agent-a")
+
+
+@pytest.mark.asyncio
+async def test_wait_mob_members_carry_preview_unavailable():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "members": [
+                {
+                    "agent_identity": "lead",
+                    "status": "active",
+                    "tokens_used": 0,
+                    "is_final": False,
+                    "preview_unavailable": "observation_deadline",
+                },
+                {
+                    "agent_identity": "writer",
+                    "status": "active",
+                    "tokens_used": 7,
+                    "is_final": False,
+                },
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    for members in (
+        await client.wait_mob_kickoff("mob-1"),
+        await client.wait_mob_ready("mob-1"),
+    ):
+        assert members[0]["preview_unavailable"] == "observation_deadline"
+        assert "preview_unavailable" not in members[1]
+
+
+@pytest.mark.asyncio
 async def test_mob_member_status_rejects_unknown_peer_connectivity_tag():
     client = MeerkatClient()
 

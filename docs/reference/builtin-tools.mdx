@@ -510,11 +510,18 @@ tool arguments. Without manage scope over the mob, the forker can still:
   even while the member's turn runs (`progress.run_state` is `run_open`, the
   output preview and token count are from its last completed turn, and a
   `note` says so). Status reads of different members never hold each other
-  up, and concurrent reads of one member share one read. A read whose session
-  view could not be observed in time still answers, with a typed
-  `preview_unavailable` (`observation_deadline`, `read_failed`, or
-  `session_absent`) meaning the preview and token count are missing, not
-  empty;
+  up, and concurrent reads of one member share one read; a session read that
+  outlives its 1 s deadline keeps running (and keeps its share of the mob's
+  read capacity) until it finishes, and later reads of that member wait on it
+  instead of starting another. A read whose session view was not observed
+  still answers, with a typed `preview_unavailable` meaning the preview and
+  token count are missing, not empty or zero, and a `note` chosen by its
+  value: `observation_deadline` (the read did not finish in time) and
+  `read_failed` say to check again later and that only `status` and
+  `progress.run_state` are current; `session_absent` says the member has no
+  readable session, so checking again will not bring the preview back;
+  `not_observed_while_retiring` says the member is retiring and its session
+  was not read;
 - retire any of its descendants with `mob_retire_member`;
 - list its descendants, and only those, with `mob_list_members`.
 

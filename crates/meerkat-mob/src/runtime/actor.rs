@@ -27,7 +27,11 @@ mod spawn_admission_io;
 pub(super) mod wiring_io;
 
 use member_effect_lane::MemberIncarnationFence;
-use member_status_lane::{MEMBER_STATUS_OBSERVATION_DEADLINE, MemberStatusObservationWaiters};
+use member_status_lane::{
+    MEMBER_STATUS_OBSERVATION_DEADLINE, MemberStatusObservationWaiters,
+    MemberStatusSessionViewRead, MemberStatusViewReadClaim, MemberStatusViewReadDrain,
+    MemberStatusViewReadFuture, MemberStatusViewReads,
+};
 use wiring_io::{
     LocalMemberRepairCustody, LocalMemberUnwireCustody, LocalMemberWireCustody,
     WireMembersBatchContinuation, WiringIoReply, WiringIoTicket, WiringNotice, WiringPlan,
@@ -6655,8 +6659,12 @@ pub(super) struct MobActor {
     pub(super) member_status_observations:
         BTreeMap<AgentIdentity, Arc<MemberStatusObservationWaiters>>,
     /// Mob-wide bound on concurrent member-status session reads, waited for
-    /// (never try-acquired) inside each observation task.
+    /// (never try-acquired) inside each observation task and held until the
+    /// observation's underlying session-view read finishes.
     pub(super) member_status_observation_capacity: Arc<tokio::sync::Semaphore>,
+    /// The underlying member-status session-view reads still running, one
+    /// per session, shared with the observation tasks.
+    pub(super) member_status_view_reads: MemberStatusViewReads,
     /// Actor-issued order for member-status observations. MobMachine remains
     /// the authority that accepts or rejects each observation as monotonic.
     pub(super) next_member_status_observed_at_ms: u64,
@@ -7181,20 +7189,6 @@ pub(super) fn member_status_wall_clock_ms() -> Result<u64, MobError> {
     u64::try_from(elapsed.as_millis()).map_err(|_| {
         MobError::Internal("member-status observation clock exceeds u64 milliseconds".to_string())
     })
-}
-
-/// What one member-status session-view read found.
-enum MemberStatusSessionViewRead {
-    Observed {
-        output_preview: Option<String>,
-        tokens_used: u64,
-    },
-    /// The session has no readable view; `genuinely_absent` when the durable
-    /// store holds no current document for it.
-    Absent {
-        genuinely_absent: bool,
-    },
-    Unavailable(super::handle::MemberPreviewUnavailable),
 }
 
 impl MobActor {
@@ -12475,6 +12469,14 @@ impl MobActor {
         })
     }
 
+    /// Observe one member's session for a status read, bounded by
+    /// [`MEMBER_STATUS_OBSERVATION_DEADLINE`].
+    ///
+    /// Returns the observation and, when the session-view read this
+    /// observation started was still running at the deadline, that read for
+    /// the caller to drive to completion (it must not be dropped: the
+    /// underlying read may keep running regardless, and the per-session
+    /// single-flight in `view_reads` stays claimed until it finishes).
     pub(super) async fn observe_member_status_session(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
@@ -12482,10 +12484,14 @@ impl MobActor {
         bridge_session_id: Option<SessionId>,
         include_local_session_details: bool,
         observed_at_ms: u64,
-    ) -> super::state::MemberStatusSessionObservation {
-        // One deadline bounds the whole observation, so the lane it holds is
-        // released even when a session read would not finish.
-        let deadline = std::pin::pin!(tokio::time::sleep(MEMBER_STATUS_OBSERVATION_DEADLINE));
+        view_reads: &MemberStatusViewReads,
+    ) -> (
+        super::state::MemberStatusSessionObservation,
+        Option<MemberStatusViewReadDrain>,
+    ) {
+        // One deadline bounds the whole observation, so its callers are
+        // answered even when a session read would not finish.
+        let mut deadline = std::pin::pin!(tokio::time::sleep(MEMBER_STATUS_OBSERVATION_DEADLINE));
         let mut observation = super::state::MemberStatusSessionObservation {
             output_preview: None,
             tokens_used: 0,
@@ -12499,7 +12505,7 @@ impl MobActor {
             .as_ref()
             .filter(|_| include_local_session_details)
         else {
-            return observation;
+            return (observation, None);
         };
         // Status reads never queue behind the member's running turn (steer,
         // not queue). The bounded execution snapshot answers only while the
@@ -12525,17 +12531,38 @@ impl MobActor {
         }
         // Preview and token count come from the session view, which serves
         // the live actor's published state or the committed durable head and
-        // never waits on the member's session task.
-        let view = tokio::select! {
-            biased;
-            view = Self::read_member_status_session_view(
-                session_service.as_ref(),
-                &agent_identity,
-                session_id,
-            ) => view,
-            () = deadline => MemberStatusSessionViewRead::Unavailable(
+        // never waits on the member's session task. At most one underlying
+        // view read of a session runs at a time: a read still running from an
+        // earlier observation is waited on, never duplicated.
+        let deadline_reached = || {
+            MemberStatusSessionViewRead::Unavailable(
                 super::handle::MemberPreviewUnavailable::ObservationDeadline,
-            ),
+            )
+        };
+        let (view, drain) = match view_reads.claim(session_id) {
+            MemberStatusViewReadClaim::Owner(owner) => {
+                let mut read = Self::read_member_status_session_view(
+                    session_service,
+                    agent_identity,
+                    session_id.clone(),
+                );
+                tokio::select! {
+                    biased;
+                    view = &mut read => {
+                        owner.publish(view.clone());
+                        (view, None)
+                    }
+                    () = deadline.as_mut() => (
+                        deadline_reached(),
+                        Some(MemberStatusViewReadDrain::new(owner, read)),
+                    ),
+                }
+            }
+            MemberStatusViewReadClaim::Joined(result) => tokio::select! {
+                biased;
+                view = member_status_lane::joined_member_status_view(result) => (view, None),
+                () = deadline.as_mut() => (deadline_reached(), None),
+            },
         };
         match view {
             MemberStatusSessionViewRead::Observed {
@@ -12554,12 +12581,29 @@ impl MobActor {
                 observation.preview_unavailable = Some(marker);
             }
         }
-        observation
+        (observation, drain)
     }
 
     /// Read one member's status view and, when its session has none, whether
-    /// the durable store genuinely holds no current document for it.
-    async fn read_member_status_session_view(
+    /// the durable store genuinely holds no current document for it. The
+    /// read owns its inputs so it can outlive the observation that started
+    /// it.
+    fn read_member_status_session_view(
+        session_service: Arc<dyn MobSessionService>,
+        agent_identity: AgentIdentity,
+        session_id: SessionId,
+    ) -> MemberStatusViewReadFuture {
+        Box::pin(async move {
+            Self::classify_member_status_session_view(
+                session_service.as_ref(),
+                &agent_identity,
+                &session_id,
+            )
+            .await
+        })
+    }
+
+    async fn classify_member_status_session_view(
         session_service: &dyn MobSessionService,
         agent_identity: &AgentIdentity,
         session_id: &SessionId,
@@ -23684,6 +23728,10 @@ impl MobActor {
                 #[cfg(test)]
                 MobCommand::SpawnActivationCustodyProbe { reply_tx } => {
                     let _ = reply_tx.send(self.spawn_activation_quiescence());
+                }
+                #[cfg(test)]
+                MobCommand::MemberStatusLaneProbe { reply_tx } => {
+                    let _ = reply_tx.send(self.member_status_lane_probe());
                 }
                 MobCommand::PendingSpawnAnchorSettled {
                     spawn_ticket,

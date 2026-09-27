@@ -1669,6 +1669,51 @@ impl Drop for AtomicInFlightGuard<'_> {
     }
 }
 
+/// Session reads of one session: calls, reads in flight, and the most in
+/// flight at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SessionReadCounts {
+    calls: u64,
+    in_flight: u64,
+    max_in_flight: u64,
+}
+
+type SessionReadCountsBySession = std::sync::Mutex<HashMap<SessionId, SessionReadCounts>>;
+
+/// Counts one read of `session_id` in flight until dropped.
+struct SessionReadInFlightGuard<'a> {
+    reads: &'a SessionReadCountsBySession,
+    session_id: SessionId,
+}
+
+impl<'a> SessionReadInFlightGuard<'a> {
+    fn enter(reads: &'a SessionReadCountsBySession, session_id: &SessionId) -> Self {
+        let mut counts = reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = counts.entry(session_id.clone()).or_default();
+        entry.calls += 1;
+        entry.in_flight += 1;
+        entry.max_in_flight = entry.max_in_flight.max(entry.in_flight);
+        Self {
+            reads,
+            session_id: session_id.clone(),
+        }
+    }
+}
+
+impl Drop for SessionReadInFlightGuard<'_> {
+    fn drop(&mut self) {
+        let mut counts = self
+            .reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = counts.get_mut(&self.session_id) {
+            entry.in_flight = entry.in_flight.saturating_sub(1);
+        }
+    }
+}
+
 /// A mock session service that creates sessions with mock comms runtimes.
 /// Parks trusted-peer installs on one mock runtime behind a barrier.
 ///
@@ -1909,6 +1954,9 @@ struct MockSessionService {
     execution_snapshot_delays_for: std::sync::Mutex<HashMap<SessionId, Duration>>,
     execution_snapshot_failures_for: std::sync::Mutex<HashSet<SessionId>>,
     session_read_delays_for: std::sync::Mutex<HashMap<SessionId, Duration>>,
+    /// Per-session read counts, so a test can pin the reads of one member's
+    /// session while other sessions are read in the background.
+    session_reads_for: SessionReadCountsBySession,
     load_persisted_session_delays_for: std::sync::Mutex<HashMap<SessionId, Duration>>,
     execution_snapshot_calls: AtomicU64,
     execution_snapshots: std::sync::Mutex<VecDeque<meerkat_core::agent::AgentExecutionSnapshot>>,
@@ -2068,6 +2116,7 @@ impl MockSessionService {
             execution_snapshot_delays_for: std::sync::Mutex::new(HashMap::new()),
             execution_snapshot_failures_for: std::sync::Mutex::new(HashSet::new()),
             session_read_delays_for: std::sync::Mutex::new(HashMap::new()),
+            session_reads_for: std::sync::Mutex::new(HashMap::new()),
             load_persisted_session_delays_for: std::sync::Mutex::new(HashMap::new()),
             execution_snapshot_calls: AtomicU64::new(0),
             execution_snapshots: std::sync::Mutex::new(VecDeque::new()),
@@ -2750,6 +2799,16 @@ impl MockSessionService {
 
     fn session_read_calls(&self) -> u64 {
         self.session_read_calls.load(Ordering::Relaxed)
+    }
+
+    /// Reads of `session_id` so far.
+    fn session_reads_of(&self, session_id: &SessionId) -> SessionReadCounts {
+        self.session_reads_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Most session reads in flight at once since the last reset.
@@ -3744,6 +3803,7 @@ impl SessionService for MockSessionService {
         self.session_read_max_in_flight
             .fetch_max(in_flight, Ordering::Relaxed);
         let _in_flight_guard = AtomicInFlightGuard(&self.session_read_in_flight);
+        let _session_in_flight_guard = SessionReadInFlightGuard::enter(&self.session_reads_for, id);
         if let Some(delay) = Self::per_session_delay(&self.session_read_delays_for, id) {
             tokio::time::sleep(delay).await;
         }
@@ -58929,6 +58989,251 @@ async fn test_wait_all_polls_members_without_refusing_itself() {
     handle.shutdown().await.expect("shutdown test mob");
 }
 
+async fn member_status_lane_probe(
+    handle: &MobHandle,
+) -> super::actor::member_status_lane::MemberStatusLaneProbe {
+    handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::MemberStatusLaneProbe { reply_tx })
+        .await
+        .expect("enqueue member-status lane probe")
+        .await
+        .expect("member-status lane probe reply")
+}
+
+/// Poll the member-status lanes until `settled` holds, for at most `budget`.
+async fn wait_for_member_status_lanes(
+    handle: &MobHandle,
+    budget: Duration,
+    settled: impl Fn(&super::actor::member_status_lane::MemberStatusLaneProbe) -> bool,
+) -> super::actor::member_status_lane::MemberStatusLaneProbe {
+    let deadline = Instant::now() + budget;
+    loop {
+        let probe = member_status_lane_probe(handle).await;
+        if settled(&probe) || Instant::now() >= deadline {
+            return probe;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A read whose every caller gives up while it waits for the mob-wide
+/// capacity leaves no entry behind in the actor's in-flight map: its task
+/// tells the actor to forget it. Unique `fork_off` child identities read once
+/// and abandoned must not accumulate in a long-lived mob.
+#[tokio::test]
+async fn test_abandoned_member_status_observation_leaves_no_lane_entry() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let mut blocked = Vec::new();
+    for index in 0..super::actor::member_status_lane::MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS {
+        let identity = AgentIdentity::from(format!("status-capacity-{index}"));
+        let session_id = handle
+            .spawn(ProfileName::from("worker"), identity.clone(), None)
+            .await
+            .expect("spawn capacity member")
+            .bridge_session_id()
+            .expect("capacity member is session-backed")
+            .clone();
+        let barrier = service.install_session_read_barrier(session_id).await;
+        let reply_rx = handle
+            .enqueue_actor_command_for_test(|reply_tx| MobCommand::ProjectMemberStatus {
+                agent_identity: identity,
+                reply_tx,
+            })
+            .await
+            .expect("enqueue capacity read");
+        tokio::time::timeout(Duration::from_secs(1), service.wait_for_session_read())
+            .await
+            .expect("the capacity read enters its session read");
+        blocked.push((barrier, reply_rx));
+    }
+
+    let abandoned = AgentIdentity::from("status-abandoned-child");
+    handle
+        .spawn(ProfileName::from("worker"), abandoned.clone(), None)
+        .await
+        .expect("spawn abandoned member");
+    let abandoned_rx = handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::ProjectMemberStatus {
+            agent_identity: abandoned.clone(),
+            reply_tx,
+        })
+        .await
+        .expect("enqueue the read that will be abandoned");
+    let registered = wait_for_member_status_lanes(&handle, Duration::from_secs(1), |probe| {
+        probe.observed_identities.contains(&abandoned)
+    })
+    .await;
+    assert!(
+        registered.observed_identities.contains(&abandoned),
+        "the waiting read is registered: {registered:?}"
+    );
+    drop(abandoned_rx);
+
+    let after = wait_for_member_status_lanes(&handle, Duration::from_secs(1), |probe| {
+        !probe.observed_identities.contains(&abandoned)
+    })
+    .await;
+    assert!(
+        !after.observed_identities.contains(&abandoned),
+        "an abandoned observation's entry is forgotten, not retained until the identity is \
+         read again: {after:?}"
+    );
+
+    for (barrier, reply_rx) in blocked {
+        barrier.release_all();
+        let _ = tokio::time::timeout(Duration::from_secs(3), reply_rx).await;
+    }
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// A session-view read still running at the observation deadline answers its
+/// callers with the typed marker but keeps its capacity unit and its
+/// per-session single flight until it finishes: a durable read on a blocking
+/// thread keeps running when its future is dropped, so a 1 Hz poller must not
+/// stack concurrent underlying reads. A later read of the same member waits
+/// on the draining read (bounded by its own deadline) and receives its result
+/// when it lands in time.
+#[tokio::test]
+async fn test_member_status_read_past_deadline_holds_capacity_and_is_not_duplicated() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("status-draining");
+    let session_id = handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn draining member")
+        .bridge_session_id()
+        .expect("draining member is session-backed")
+        .clone();
+    let capacity = super::actor::member_status_lane::MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS;
+    let reads_before = service.session_reads_of(&session_id).calls;
+    let barrier = service
+        .install_session_read_barrier(session_id.clone())
+        .await;
+
+    let first = tokio::time::timeout(Duration::from_secs(3), handle.member_status(&identity))
+        .await
+        .expect("a hung session read is bounded by the observation deadline")
+        .expect("a hung session read degrades instead of failing");
+    assert_eq!(
+        first.preview_unavailable,
+        Some(crate::runtime::handle::MemberPreviewUnavailable::ObservationDeadline)
+    );
+    let draining = member_status_lane_probe(&handle).await;
+    assert_eq!(
+        draining.view_reads_in_flight, 1,
+        "the underlying read outlives the answered observation"
+    );
+    assert_eq!(
+        draining.available_capacity,
+        capacity - 1,
+        "the draining read keeps its capacity unit until it finishes"
+    );
+    assert!(
+        draining.observed_identities.is_empty(),
+        "the answered observation's callers are settled: {draining:?}"
+    );
+
+    let second = tokio::time::timeout(Duration::from_secs(3), handle.member_status(&identity))
+        .await
+        .expect("a read joining a draining read is bounded")
+        .expect("a read joining a draining read degrades instead of failing");
+    assert_eq!(
+        second.preview_unavailable,
+        Some(crate::runtime::handle::MemberPreviewUnavailable::ObservationDeadline)
+    );
+    let reads = service.session_reads_of(&session_id);
+    assert_eq!(
+        reads.calls - reads_before,
+        1,
+        "no second underlying read starts while the first drains: {reads:?}"
+    );
+    assert_eq!(reads.max_in_flight, 1, "{reads:?}");
+
+    let third = {
+        let handle = handle.clone();
+        let identity = identity.clone();
+        tokio::spawn(async move { handle.member_status(&identity).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    barrier.release_all();
+    let third = tokio::time::timeout(Duration::from_secs(2), third)
+        .await
+        .expect("the joined read resolves when the draining read lands")
+        .expect("joined read task")
+        .expect("the joined read succeeds");
+    assert_eq!(
+        third.preview_unavailable, None,
+        "a read that joined the draining read receives its result"
+    );
+    assert_eq!(
+        service.session_reads_of(&session_id).calls - reads_before,
+        1,
+        "the joined read shares the drained read"
+    );
+    let drained = wait_for_member_status_lanes(&handle, Duration::from_secs(1), |probe| {
+        probe.view_reads_in_flight == 0 && probe.available_capacity == capacity
+    })
+    .await;
+    assert_eq!(drained.view_reads_in_flight, 0, "{drained:?}");
+    assert_eq!(
+        drained.available_capacity, capacity,
+        "a finished read returns its capacity unit: {drained:?}"
+    );
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// A retiring member's status is answered from the mob's machine state
+/// without reading its session, so its preview and token count carry a typed
+/// marker instead of reading as an empty member.
+#[tokio::test]
+async fn test_retiring_member_status_marks_preview_not_observed() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("status-retiring");
+    let mut spec = SpawnMemberSpec::new("worker", identity.as_str());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn retiring member");
+    let session_id = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("retiring member is session-backed");
+    service.set_archive_failure(&session_id).await;
+    handle
+        .retire(identity.clone())
+        .await
+        .expect_err("an archive failure retains the member as retiring");
+
+    let snapshot = handle
+        .member_status(&identity)
+        .await
+        .expect("retiring member status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Retiring
+    );
+    assert_eq!(snapshot.output_preview, None);
+    assert_eq!(snapshot.tokens_used, 0);
+    assert_eq!(
+        snapshot.preview_unavailable,
+        Some(crate::runtime::handle::MemberPreviewUnavailable::NotObservedWhileRetiring),
+        "the unread session is marked, never a silent zero"
+    );
+    let wire = snapshot
+        .to_member_status_result(meerkat_contracts::WireMemberRef::encode(
+            "status-mob",
+            identity.as_str(),
+        ))
+        .expect("project the retiring snapshot to the wire");
+    assert_eq!(
+        wire.preview_unavailable,
+        Some(meerkat_contracts::WireMemberPreviewUnavailable::NotObservedWhileRetiring)
+    );
+    service.clear_archive_failure(&session_id).await;
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestActorLoopProbeEvent {
     ActorLoopStalled { stall_id: u64 },
@@ -59538,8 +59843,14 @@ async fn test_actor_loop_probe_does_not_stall_when_member_status_read_is_availab
     handle.shutdown().await.expect("shutdown test mob");
 }
 
+/// A caller dropping its receiver does not orphan the underlying session
+/// read: dropping a read's future does not stop a durable read on a blocking
+/// thread, so the observation keeps the read, and its capacity unit, until
+/// it finishes, then releases both and forgets the abandoned entry. The actor
+/// stays responsive meanwhile; shutdown still aborts the read
+/// (`test_shutdown_aborts_owned_member_status_read`).
 #[tokio::test]
-async fn test_dropped_member_status_receiver_cancels_owned_session_read() {
+async fn test_dropped_member_status_receiver_keeps_underlying_read_until_it_finishes() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let identity = AgentIdentity::from("status-closed-receiver");
     let session_id = handle
@@ -59563,16 +59874,44 @@ async fn test_dropped_member_status_receiver_cancels_owned_session_read() {
     assert_eq!(Arc::strong_count(&read_barrier), 2);
 
     drop(status_rx);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        Arc::strong_count(&read_barrier),
+        2,
+        "the underlying read is not orphaned when its caller leaves"
+    );
+    assert_eq!(
+        handle.status().await.expect("actor remains responsive"),
+        MobState::Running
+    );
+    let capacity = super::actor::member_status_lane::MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS;
+    let draining = member_status_lane_probe(&handle).await;
+    assert_eq!(draining.view_reads_in_flight, 1, "{draining:?}");
+    assert_eq!(
+        draining.available_capacity,
+        capacity - 1,
+        "the abandoned read keeps its capacity unit while it runs: {draining:?}"
+    );
+
+    read_barrier.release_all();
     tokio::time::timeout(Duration::from_secs(1), async {
         while Arc::strong_count(&read_barrier) != 1 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("closed receiver should cancel the owned read future");
-    assert_eq!(
-        handle.status().await.expect("actor remains responsive"),
-        MobState::Running
+    .expect("the released read finishes and drops its handle");
+    let drained = wait_for_member_status_lanes(&handle, Duration::from_secs(2), |probe| {
+        probe.view_reads_in_flight == 0
+            && probe.available_capacity == capacity
+            && probe.observed_identities.is_empty()
+    })
+    .await;
+    assert_eq!(drained.view_reads_in_flight, 0, "{drained:?}");
+    assert_eq!(drained.available_capacity, capacity, "{drained:?}");
+    assert!(
+        drained.observed_identities.is_empty(),
+        "the abandoned observation's entry is forgotten: {drained:?}"
     );
 
     handle.shutdown().await.expect("shutdown test mob");

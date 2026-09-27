@@ -36,6 +36,7 @@ import type {
   WireHostBindingDescriptor,
   WireHostRef,
   WireMemberLifecycleCapabilities,
+  WireMemberPreviewUnavailable,
   WireMobMemberStatus,
   WireMobBackendKind,
   WireMobRuntimeMode,
@@ -133,6 +134,12 @@ export interface MobMemberSnapshot {
   freshnessReason?: string;
   lifecycleCapabilities?: WireMemberLifecycleCapabilities;
   nonPortableDisabled?: WireNonPortableResourceKind[];
+  /**
+   * Set when this read did not observe the member's session: `outputPreview`
+   * and `tokensUsed` are then missing, not an empty preview and a zero count.
+   * Absent when they are observations.
+   */
+  previewUnavailable?: WireMemberPreviewUnavailable;
 }
 
 export interface MobKickoffWaitOptions {
@@ -153,6 +160,8 @@ export interface MobKickoffMemberSnapshot {
   tokensUsed: number;
   isFinal: boolean;
   peerConnectivity?: MobPeerConnectivity;
+  /** As on {@link MobMemberSnapshot.previewUnavailable}. */
+  previewUnavailable?: WireMemberPreviewUnavailable;
 }
 
 export type MobReadyWaitOptions = MobKickoffWaitOptions;

@@ -57,6 +57,22 @@ them.
   (`LifecycleOperationAdmissionPending`, stage `observation_lane_saturated`)
   only after waiting 2 s for the mob-wide capacity of 16 concurrent reads, so
   its `deadline_reached: true` is now accurate.
+- Behavior-only: a member status read whose callers all go away no longer
+  cancels its session read. Dropping a read's future does not stop a durable
+  read running on a blocking thread, so the observation keeps the read, and
+  its unit of the mob-wide capacity, until it finishes; the same holds for a
+  read still running at the 1 s observation deadline, whose callers are
+  answered with `preview_unavailable: observation_deadline` meanwhile. A later
+  read of the same session waits (bounded by its own deadline) on the read
+  still running instead of starting a second one. Actor shutdown still
+  aborts it.
+- Behavior-only: `mob_check_member`'s `note` is chosen by the
+  `preview_unavailable` variant: `observation_deadline` and `read_failed` say
+  to check again later and that only `status` and `progress.run_state` are
+  current; `session_absent` says the member has no readable session and that
+  checking again will not bring the preview back; `not_observed_while_retiring`
+  says the retiring member's session was not read. While `progress.run_state`
+  is `run_open` the note keeps saying the turn is still running.
 
 ### Added
 
@@ -68,18 +84,32 @@ them.
   other session from the committed durable head; it never waits on the
   member's session task, never writes, and never replays the rewrite audit.
   The default reads through `SessionService::read`, which is correct for
-  in-memory services; wrappers over a persistent service must forward it (the
-  RPC, CLI and test wrappers do).
+  in-memory services. Wrappers over a persistent service MUST forward
+  `observe_member_status_view` to the inner service: a wrapper that inherits
+  the default falls back to `SessionService::read`, which waits on the
+  member's running turn, so every status read of a busy member ends at the
+  observation deadline with `preview_unavailable: observation_deadline`. The
+  RPC, CLI and test wrappers forward it.
 - `PersistentSessionService::observe_live_session_view` reads a live
   session's view from its summary and state watches without a command to the
   session task.
 - `MobMemberSnapshot::preview_unavailable` and the wire twin
   `MobMemberStatusResult::preview_unavailable` carry a typed
   `MemberPreviewUnavailable` / `WireMemberPreviewUnavailable`
-  (`observation_deadline`, `read_failed`, `session_absent`) whenever a status
-  read did not observe the member's session view, so a missing
-  `output_preview` and a zero `tokens_used` are never a silent zero.
+  (`observation_deadline`, `read_failed`, `session_absent`,
+  `not_observed_while_retiring`) whenever a status read did not observe the
+  member's session view, so a missing `output_preview` and a zero
+  `tokens_used` are never a silent zero. A retiring member's status, answered
+  from machine state without reading its session, carries
+  `not_observed_while_retiring` when the member is session-backed and local.
   `mob_check_member` adds a plain-language note when it is set.
+- The Python, TypeScript and Web SDKs parse the marker on member status
+  (`mob_member_status` / `mobMemberStatus` / `Mob.memberStatus`) and on the
+  `wait_kickoff` / `wait_ready` members of the Python and TypeScript clients,
+  as `preview_unavailable` (Python, Web) / `previewUnavailable` (TypeScript),
+  typed as the generated `WireMemberPreviewUnavailable` (now exported from
+  each package root) and absent when unset. A value outside the closed
+  vocabulary fails closed with `INVALID_RESPONSE`.
 
 ### Changed
 
@@ -107,6 +137,21 @@ them.
   run state comes from the runtime machine) instead of idle. The session
   reads of one observation stop at a 1 s deadline and return the runtime run
   state with the typed `observation_deadline` marker.
+- A live session resumed or forked into a new session actor reports its
+  committed transcript from the actor's birth: `SessionService::read`,
+  `list` and `PersistentSessionService::observe_live_session_view` gave
+  `message_count` 0, `total_tokens` 0 and no `last_assistant_text` until the
+  actor first published its summary (turn end, durable sync). A member status
+  read during the first turn after a resume (a deferred first turn) or of a
+  `fork_off` child's first turn therefore reported no preview and zero
+  tokens as observations. The summary watch is now seeded from the session
+  the actor is built from; its `updated_at` is still the actor's creation
+  time.
+- The member-status in-flight map no longer keeps an entry for an identity
+  whose observation every caller abandoned: the observation tells the actor
+  to forget it, and registering an observation prunes any closed entry, so
+  unique `fork_off` child identities read once do not accumulate in a
+  long-lived mob.
 
 ## [0.8.44] - 2026-09-26
 

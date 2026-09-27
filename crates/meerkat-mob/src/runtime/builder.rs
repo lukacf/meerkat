@@ -9605,6 +9605,8 @@ impl MobBuilder {
                 member_status_observation_capacity: Arc::new(tokio::sync::Semaphore::new(
                     super::actor::member_status_lane::MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS,
                 )),
+                member_status_view_reads:
+                    super::actor::member_status_lane::MemberStatusViewReads::default(),
                 next_member_status_observed_at_ms,
                 member_live_mutation_tasks: tokio::task::JoinSet::new(),
                 member_effect_tasks: tokio::task::JoinSet::new(),

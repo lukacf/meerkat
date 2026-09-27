@@ -992,6 +992,9 @@ pub enum MemberPreviewUnavailable {
     /// The member's bound session has no readable view: it is absent from
     /// the durable store or archived.
     SessionAbsent,
+    /// The member is retiring, and a status read of a retiring member is
+    /// answered from the mob's machine state without reading its session.
+    NotObservedWhileRetiring,
 }
 
 /// Machine-owned liveness classification.
@@ -1190,6 +1193,9 @@ fn wire_preview_unavailable(
         }
         MemberPreviewUnavailable::SessionAbsent => {
             meerkat_contracts::WireMemberPreviewUnavailable::SessionAbsent
+        }
+        MemberPreviewUnavailable::NotObservedWhileRetiring => {
+            meerkat_contracts::WireMemberPreviewUnavailable::NotObservedWhileRetiring
         }
     }
 }
@@ -8505,6 +8511,21 @@ impl MobHandle {
         let machine_runtime = machine_state
             .member_runtime_material_for_identity(&dsl_identity)
             .map(|material| material.to_domain_for_identity(identity))?;
+        // This fast path never reads the member's session, so a
+        // session-backed local member reports its preview and token count as
+        // unobserved rather than as an empty member. Retirement may already
+        // have released the machine's session binding, so the roster's bridge
+        // session also counts. A member with no session, or placed on another
+        // host, has no local session view to observe, as on the ordinary
+        // status path.
+        let session_backed = current_bridge_session_id.is_some()
+            || entry
+                .as_ref()
+                .is_some_and(|entry| entry.bridge_session_id().is_some());
+        let has_local_session =
+            session_backed && !machine_state.member_placement.contains_key(&dsl_identity);
+        let preview_unavailable =
+            has_local_session.then_some(MemberPreviewUnavailable::NotObservedWhileRetiring);
 
         Some(
             MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
@@ -8520,7 +8541,8 @@ impl MobHandle {
                 kickoff,
                 progress: None,
             })
-            .to_snapshot(),
+            .to_snapshot()
+            .with_preview_unavailable(preview_unavailable),
         )
     }
 

@@ -2455,7 +2455,7 @@ class MobMemberStatusResult:
     output_preview: Optional[str] = None
     peer_connectivity: Optional[WirePeerConnectivity] = None
     placement: Optional[WireHostRef] = None
-    preview_unavailable: Optional[Literal['observation_deadline', 'read_failed', 'session_absent']] = None
+    preview_unavailable: Optional[WireMemberPreviewUnavailable] = None
     progress: Optional[WireMemberProgressSnapshot] = None
     resolved_capabilities: Optional[WireResolvedModelCapabilities] = None
 
@@ -6152,6 +6152,10 @@ WireReachability = Literal['reachable', 'stale', 'unreachable', 'unknown']
 # remote members, so no producer for that kind can exist — the wire and
 # machine vocabularies agree on these six.
 WireNonPortableResourceKind = Literal['rust_bundles', 'per_spawn_external_tools', 'mob_default_external_tools', 'default_llm_client_override', 'host_surface_mcp_allowlist', 'workgraph_tools']
+
+# Why a member status read carries no observation of the member's session
+# view.
+WireMemberPreviewUnavailable = Literal['observation_deadline', 'read_failed', 'session_absent', 'not_observed_while_retiring']
 
 # Lifecycle status of a flow run on the wire. Mirrors
 # `meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than

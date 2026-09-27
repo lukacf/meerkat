@@ -107882,6 +107882,11 @@
             "const": "session_absent",
             "description": "The member's bound session has no readable view (absent or archived).",
             "type": "string"
+          },
+          {
+            "const": "not_observed_while_retiring",
+            "description": "The member is retiring; a status read of a retiring member is answered\nwithout reading its session.",
+            "type": "string"
           }
         ]
       },
@@ -151156,6 +151161,11 @@
       {
         "const": "session_absent",
         "description": "The member's bound session has no readable view (absent or archived).",
+        "type": "string"
+      },
+      {
+        "const": "not_observed_while_retiring",
+        "description": "The member is retiring; a status read of a retiring member is answered\nwithout reading its session.",
         "type": "string"
       }
     ],

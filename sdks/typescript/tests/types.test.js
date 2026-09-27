@@ -4604,6 +4604,61 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
       });
     }
 
+    for (const marker of [
+      "observation_deadline",
+      "read_failed",
+      "session_absent",
+      "not_observed_while_retiring",
+    ]) {
+      it(`surfaces the typed preview_unavailable marker '${marker}'`, async () => {
+        const client = memberStatusClient(validResponse({ preview_unavailable: marker }));
+        const result = await client.mobMemberStatus("mob-1", "worker-1");
+        assert.equal(result.previewUnavailable, marker);
+        assert.equal(result.outputPreview, undefined);
+      });
+    }
+
+    it("omits previewUnavailable when the wire omits or nulls it", async () => {
+      for (const response of [validResponse(), validResponse({ preview_unavailable: null })]) {
+        const result = await memberStatusClient(response).mobMemberStatus("mob-1", "worker-1");
+        assert.equal(Object.prototype.hasOwnProperty.call(result, "previewUnavailable"), false);
+      }
+    });
+
+    it("rejects a preview_unavailable outside the closed vocabulary", async () => {
+      const client = memberStatusClient(validResponse({ preview_unavailable: "stale" }));
+      await assert.rejects(
+        () => client.mobMemberStatus("mob-1", "worker-1"),
+        (error) =>
+          error instanceof MeerkatError &&
+          error.code === "INVALID_RESPONSE" &&
+          /preview_unavailable/.test(String(error.message)),
+      );
+    });
+
+    it("carries preview_unavailable on wait_kickoff and wait_ready members", async () => {
+      const client = new MeerkatClient();
+      client.request = async () => ({
+        members: [
+          {
+            agent_identity: "lead",
+            status: "active",
+            tokens_used: 0,
+            is_final: false,
+            preview_unavailable: "observation_deadline",
+          },
+          { agent_identity: "writer", status: "active", tokens_used: 7, is_final: false },
+        ],
+      });
+      for (const members of [
+        await client.waitMobKickoff("mob-1"),
+        await client.waitMobReady("mob-1"),
+      ]) {
+        assert.equal(members[0].previewUnavailable, "observation_deadline");
+        assert.equal(Object.prototype.hasOwnProperty.call(members[1], "previewUnavailable"), false);
+      }
+    });
+
     it("rejects an absent status instead of fabricating 'unknown'", async () => {
       const response = validResponse();
       delete response.status;

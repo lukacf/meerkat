@@ -5462,12 +5462,20 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let archive_snapshot_gate = ArchiveSnapshotGate::open();
         let (state_tx, state_rx) = watch::channel(initial_session_state);
         let state_tx_handle = state_tx.clone();
+        // Seed the summary from the built agent's session, so a resumed or
+        // forked session reports its committed transcript and usage from the
+        // actor's birth: the watch is otherwise only published at turn end,
+        // durable sync and a few commands, and a read during the first turn
+        // would report no preview and zero tokens. `updated_at` stays the
+        // actor's creation time, as before: it is the mutation clock
+        // `wait_for_session_mutation_after` follows.
+        let initial_summary = agent.snapshot();
         let (summary_tx, summary_rx) = watch::channel(SessionSummaryCache {
             updated_at: created_at,
-            message_count: 0,
-            total_tokens: 0,
-            usage: Usage::default(),
-            last_assistant_text: None,
+            message_count: initial_summary.message_count,
+            total_tokens: initial_summary.total_tokens,
+            usage: initial_summary.usage,
+            last_assistant_text: initial_summary.last_assistant_text,
         });
         let (llm_identity_tx, llm_identity_rx) = watch::channel(llm_identity);
         let (session_event_tx, session_event_rx) = tokio::sync::broadcast::channel::<

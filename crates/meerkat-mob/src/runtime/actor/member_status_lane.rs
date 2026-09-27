@@ -23,13 +23,31 @@
 //!   observation for the same waiters. When the actor exits, the in-flight map
 //!   and every observation task are dropped, so each waiter's reply channel
 //!   closes.
+//! - **The map holds only observations with callers.** Settling an
+//!   observation removes its entry; an observation every caller abandoned
+//!   tells the actor to forget its entry without waiting on a full mailbox,
+//!   and registering a new observation prunes every closed entry first. The
+//!   map therefore never grows with identities that are no longer read, such
+//!   as the unique children `fork_off` seats in a long-lived mob.
+//! - **An underlying session read is never duplicated or orphaned.** The
+//!   session-view read an observation starts can outlive the observation's
+//!   deadline (a durable read may run on a blocking thread that dropping its
+//!   future does not stop). The observation's callers are answered at the
+//!   deadline with a typed marker, but the task keeps driving the read to
+//!   completion while holding its mob-wide capacity unit, and a later
+//!   observation of the same session waits (bounded by its own deadline) on
+//!   that read through [`MemberStatusViewReads`] instead of starting a second
+//!   one.
 //!
 //! This is actor-owned shell state for read admission. It holds no MobMachine
 //! fact; the machine stays the only authority over what an observation means.
 
 use super::*;
+use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::task::Poll;
+use tokio::sync::watch;
 
 /// How many member-status observations may read session state at once across
 /// one mob. Sized for the fan-out of polling surfaces (console progress
@@ -47,7 +65,8 @@ pub(in crate::runtime) const MEMBER_STATUS_OBSERVATION_ADMISSION_TIMEOUT: Durati
 
 /// Upper bound on one observation's session reads. A read still running at
 /// this deadline yields a degraded observation carrying a typed
-/// preview-unavailable marker instead of holding the lane.
+/// preview-unavailable marker; the underlying read keeps its capacity unit
+/// until it finishes (see [`MemberStatusViewReads`]).
 pub(in crate::runtime) const MEMBER_STATUS_OBSERVATION_DEADLINE: Duration = Duration::from_secs(1);
 
 /// Reply channel of one `member_status` caller.
@@ -112,6 +131,12 @@ impl MemberStatusObservationWaiters {
                 }
             }
         })
+    }
+
+    /// Whether the set is settled or abandoned. A closed set has no caller
+    /// left and admits no joiner.
+    pub(in crate::runtime) fn is_closed(&self) -> bool {
+        matches!(&*self.lock(), WaiterSet::Closed)
     }
 
     /// Close the set when every caller has already gone.
@@ -191,6 +216,171 @@ pub(in crate::runtime) enum MemberStatusObservationOutcome {
     AdmissionDeadline,
     /// The capacity refused admission for a reason other than time.
     AdmissionRefused,
+    /// Every caller went away before the observation could be delivered; the
+    /// actor only forgets the observation's entry.
+    Abandoned,
+}
+
+/// What one member-status session-view read found.
+#[derive(Debug, Clone)]
+pub(in crate::runtime) enum MemberStatusSessionViewRead {
+    Observed {
+        output_preview: Option<String>,
+        tokens_used: u64,
+    },
+    /// The session has no readable view; `genuinely_absent` when the durable
+    /// store holds no current document for it.
+    Absent {
+        genuinely_absent: bool,
+    },
+    Unavailable(super::super::handle::MemberPreviewUnavailable),
+}
+
+/// One underlying session-view read, owning everything it reads through.
+pub(in crate::runtime) type MemberStatusViewReadFuture =
+    Pin<Box<dyn Future<Output = MemberStatusSessionViewRead> + Send>>;
+
+/// The result slot of one underlying session-view read: `None` until the
+/// read finishes.
+type MemberStatusViewReadResult = watch::Receiver<Option<MemberStatusSessionViewRead>>;
+
+/// Underlying member-status session-view reads in flight, at most one per
+/// session.
+///
+/// A session-view read can outlive the observation that started it: a
+/// durable read may run on a blocking thread that dropping its future does
+/// not stop. The observation that starts a read owns it until it finishes,
+/// holding its mob-wide capacity unit, even after its callers were answered
+/// at the observation deadline; a later observation of the same session
+/// waits on that read instead of starting a second one. An entry removes
+/// itself when its read finishes or its owner is dropped (the owning task
+/// aborted at actor exit), so the registry holds exactly the reads that are
+/// running.
+#[derive(Clone, Default)]
+pub(in crate::runtime) struct MemberStatusViewReads(
+    Arc<std::sync::Mutex<HashMap<SessionId, MemberStatusViewReadResult>>>,
+);
+
+impl MemberStatusViewReads {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, MemberStatusViewReadResult>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Join the read of `session_id` in flight, or become the owner of a new
+    /// one.
+    pub(in crate::runtime) fn claim(&self, session_id: &SessionId) -> MemberStatusViewReadClaim {
+        let mut reads = self.lock();
+        if let Some(result) = reads.get(session_id) {
+            return MemberStatusViewReadClaim::Joined(result.clone());
+        }
+        let (result_tx, result_rx) = watch::channel(None);
+        reads.insert(session_id.clone(), result_rx.clone());
+        MemberStatusViewReadClaim::Owner(MemberStatusViewReadOwner {
+            reads: self.clone(),
+            session_id: session_id.clone(),
+            result_tx,
+            result_rx,
+        })
+    }
+
+    /// How many underlying reads are running.
+    pub(in crate::runtime) fn in_flight(&self) -> usize {
+        self.lock().len()
+    }
+}
+
+/// The outcome of [`MemberStatusViewReads::claim`].
+pub(in crate::runtime) enum MemberStatusViewReadClaim {
+    /// No read of the session was running: the claimant starts one and must
+    /// drive it to completion.
+    Owner(MemberStatusViewReadOwner),
+    /// A read of the session is running: wait for its result.
+    Joined(MemberStatusViewReadResult),
+}
+
+/// Custody of one session's underlying view read. Publishing its result, or
+/// dropping the custody unpublished, removes the registry entry.
+pub(in crate::runtime) struct MemberStatusViewReadOwner {
+    reads: MemberStatusViewReads,
+    session_id: SessionId,
+    result_tx: watch::Sender<Option<MemberStatusSessionViewRead>>,
+    /// Identifies this read's entry, so a successor read is never removed.
+    result_rx: MemberStatusViewReadResult,
+}
+
+impl MemberStatusViewReadOwner {
+    /// Deliver the finished read to every joined observation and release the
+    /// session's entry.
+    pub(in crate::runtime) fn publish(self, view: MemberStatusSessionViewRead) {
+        self.result_tx.send_replace(Some(view));
+    }
+}
+
+impl Drop for MemberStatusViewReadOwner {
+    fn drop(&mut self) {
+        let mut reads = self.reads.lock();
+        if reads
+            .get(&self.session_id)
+            .is_some_and(|entry| entry.same_channel(&self.result_rx))
+        {
+            reads.remove(&self.session_id);
+        }
+    }
+}
+
+/// Wait for a joined read's result. An owner dropped without a result (its
+/// task aborted) reads as a failed read.
+pub(in crate::runtime) async fn joined_member_status_view(
+    mut result: MemberStatusViewReadResult,
+) -> MemberStatusSessionViewRead {
+    match result.wait_for(Option::is_some).await {
+        Ok(view) => match &*view {
+            Some(view) => view.clone(),
+            None => MemberStatusSessionViewRead::Unavailable(
+                super::super::handle::MemberPreviewUnavailable::ReadFailed,
+            ),
+        },
+        Err(_owner_dropped) => MemberStatusSessionViewRead::Unavailable(
+            super::super::handle::MemberPreviewUnavailable::ReadFailed,
+        ),
+    }
+}
+
+/// An underlying session-view read still running after its observation
+/// answered at the deadline.
+pub(in crate::runtime) struct MemberStatusViewReadDrain {
+    owner: MemberStatusViewReadOwner,
+    read: MemberStatusViewReadFuture,
+}
+
+impl MemberStatusViewReadDrain {
+    pub(in crate::runtime) fn new(
+        owner: MemberStatusViewReadOwner,
+        read: MemberStatusViewReadFuture,
+    ) -> Self {
+        Self { owner, read }
+    }
+
+    /// Drive the read to completion and publish its result to every
+    /// observation that joined it.
+    pub(in crate::runtime) async fn finish(self) {
+        let view = self.read.await;
+        self.owner.publish(view);
+    }
+}
+
+/// Test-only census of the member-status lanes.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::runtime) struct MemberStatusLaneProbe {
+    /// Identities with an entry in the in-flight observation map.
+    pub(in crate::runtime) observed_identities: Vec<AgentIdentity>,
+    /// Unused units of the mob-wide observation capacity.
+    pub(in crate::runtime) available_capacity: usize,
+    /// Underlying session-view reads still running.
+    pub(in crate::runtime) view_reads_in_flight: usize,
 }
 
 /// Result of waiting for the mob-wide observation capacity.
@@ -232,6 +422,30 @@ pub(in crate::runtime) fn member_status_admission_deadline_error() -> MobError {
     }
 }
 
+/// Join `agent_identity`'s in-flight observation, or register a new one and
+/// return its waiters for the caller to drive.
+///
+/// Registering prunes every closed entry first (settled, or abandoned by all
+/// its callers without the actor hearing of it), so the map only holds
+/// observations that still have callers.
+pub(in crate::runtime) fn admit_member_status_caller(
+    observations: &mut BTreeMap<AgentIdentity, Arc<MemberStatusObservationWaiters>>,
+    agent_identity: &AgentIdentity,
+    reply_tx: MemberStatusReply,
+) -> Option<Arc<MemberStatusObservationWaiters>> {
+    let reply_tx = match observations.get(agent_identity) {
+        Some(in_flight) => match in_flight.join(reply_tx) {
+            Ok(()) => return None,
+            Err(reply_tx) => reply_tx,
+        },
+        None => reply_tx,
+    };
+    observations.retain(|_, in_flight| !in_flight.is_closed());
+    let waiters = MemberStatusObservationWaiters::new(reply_tx);
+    observations.insert(agent_identity.clone(), Arc::clone(&waiters));
+    Some(waiters)
+}
+
 impl MobActor {
     /// Admit one `member_status` caller: join the member's in-flight
     /// observation, or start one.
@@ -243,17 +457,23 @@ impl MobActor {
         if reply_tx.is_closed() {
             return;
         }
-        let reply_tx = match self.member_status_observations.get(&agent_identity) {
-            Some(in_flight) => match in_flight.join(reply_tx) {
-                Ok(()) => return,
-                Err(reply_tx) => reply_tx,
-            },
-            None => reply_tx,
-        };
-        let waiters = MemberStatusObservationWaiters::new(reply_tx);
-        self.member_status_observations
-            .insert(agent_identity.clone(), Arc::clone(&waiters));
-        self.drive_member_status_observation(agent_identity, waiters);
+        if let Some(waiters) = admit_member_status_caller(
+            &mut self.member_status_observations,
+            &agent_identity,
+            reply_tx,
+        ) {
+            self.drive_member_status_observation(agent_identity, waiters);
+        }
+    }
+
+    /// Test-only census of the member-status lanes.
+    #[cfg(test)]
+    pub(super) fn member_status_lane_probe(&self) -> MemberStatusLaneProbe {
+        MemberStatusLaneProbe {
+            observed_identities: self.member_status_observations.keys().cloned().collect(),
+            available_capacity: self.member_status_observation_capacity.available_permits(),
+            view_reads_in_flight: self.member_status_view_reads.in_flight(),
+        }
     }
 
     /// Start one observation of `agent_identity`'s current target for
@@ -283,46 +503,71 @@ impl MobActor {
         #[cfg(not(feature = "runtime-adapter"))]
         let runtime_adapter = None;
         let capacity = Arc::clone(&self.member_status_observation_capacity);
+        let view_reads = self.member_status_view_reads.clone();
         let command_tx = self.command_tx.clone();
         self.actor_io_tasks.spawn(async move {
-            let outcome = match admit_member_status_observation(
+            let refusal = match admit_member_status_observation(
                 capacity,
                 &waiters,
                 MEMBER_STATUS_OBSERVATION_ADMISSION_TIMEOUT,
             )
             .await
             {
-                MemberStatusObservationAdmission::Abandoned => return,
+                MemberStatusObservationAdmission::Admitted(permit) => {
+                    // Bounded by the observation deadline, so it is not raced
+                    // against the callers leaving: an abandoned observation
+                    // still hands back its entry and its underlying read.
+                    let (observation, drain) = Self::observe_member_status_session(
+                        session_service,
+                        runtime_adapter,
+                        agent_identity.clone(),
+                        expected_target.bridge_session_id.clone(),
+                        expected_target.include_local_session_details,
+                        observed_at_ms,
+                        &view_reads,
+                    )
+                    .await;
+                    // The capacity unit bounds concurrent session reads, so a
+                    // read still running after the deadline keeps it until it
+                    // finishes; the callers are answered meanwhile, and the
+                    // actor-side completion never holds it.
+                    let release = async move {
+                        if let Some(drain) = drain {
+                            drain.finish().await;
+                        }
+                        drop(permit);
+                    };
+                    let deliver = enqueue_member_status_observation(
+                        command_tx,
+                        agent_identity,
+                        expected_target,
+                        MemberStatusObservationOutcome::Observed(Box::new(observation)),
+                        waiters,
+                    );
+                    let ((), _delivered) = tokio::join!(release, deliver);
+                    return;
+                }
+                MemberStatusObservationAdmission::Abandoned => {
+                    try_forget_member_status_observation(
+                        &command_tx,
+                        agent_identity,
+                        expected_target,
+                        waiters,
+                    );
+                    return;
+                }
                 MemberStatusObservationAdmission::Deadline => {
                     MemberStatusObservationOutcome::AdmissionDeadline
                 }
                 MemberStatusObservationAdmission::Refused => {
                     MemberStatusObservationOutcome::AdmissionRefused
                 }
-                MemberStatusObservationAdmission::Admitted(permit) => {
-                    let observation = tokio::select! {
-                        biased;
-                        () = waiters.abandoned() => return,
-                        observation = Self::observe_member_status_session(
-                            session_service,
-                            runtime_adapter,
-                            agent_identity.clone(),
-                            expected_target.bridge_session_id.clone(),
-                            expected_target.include_local_session_details,
-                            observed_at_ms,
-                        ) => observation,
-                    };
-                    // The capacity bounds concurrent session reads only; the
-                    // actor-side completion does not hold it.
-                    drop(permit);
-                    MemberStatusObservationOutcome::Observed(Box::new(observation))
-                }
             };
             enqueue_member_status_observation(
                 command_tx,
                 agent_identity,
                 expected_target,
-                outcome,
+                refusal,
                 waiters,
             )
             .await;
@@ -358,6 +603,12 @@ impl MobActor {
                         "member-status observation capacity was closed".to_string(),
                     )),
                 );
+                return;
+            }
+            // An abandoned set is closed for good, so the check above already
+            // forgot it; kept exhaustive for the typed outcome.
+            MemberStatusObservationOutcome::Abandoned => {
+                self.forget_member_status_observation(&agent_identity, &waiters);
                 return;
             }
         };
@@ -413,8 +664,9 @@ impl MobActor {
     }
 }
 
-/// Hand an observation back to the actor, giving up when every waiter has
-/// gone while the mailbox was full.
+/// Hand an observation back to the actor. When every waiter has gone while
+/// the mailbox was full, the observation is dropped and the actor is told to
+/// forget its entry if the mailbox has room.
 pub(in crate::runtime) async fn enqueue_member_status_observation(
     command_tx: mpsc::Sender<RoutedMobCommand>,
     agent_identity: AgentIdentity,
@@ -424,7 +676,15 @@ pub(in crate::runtime) async fn enqueue_member_status_observation(
 ) -> bool {
     let permit = tokio::select! {
         biased;
-        () = waiters.abandoned() => return false,
+        () = waiters.abandoned() => {
+            try_forget_member_status_observation(
+                &command_tx,
+                agent_identity,
+                expected_target,
+                waiters,
+            );
+            return false;
+        }
         permit = command_tx.reserve() => permit,
     };
     let Ok(permit) = permit else {
@@ -439,6 +699,25 @@ pub(in crate::runtime) async fn enqueue_member_status_observation(
         },
     ));
     true
+}
+
+/// Tell the actor to forget an abandoned observation's entry without waiting
+/// on a full mailbox. An entry this cannot reach is closed, and the next
+/// registration prunes it.
+fn try_forget_member_status_observation(
+    command_tx: &mpsc::Sender<RoutedMobCommand>,
+    agent_identity: AgentIdentity,
+    expected_target: super::super::state::MemberStatusProjectionTarget,
+    waiters: Arc<MemberStatusObservationWaiters>,
+) {
+    let _ = command_tx.try_send(RoutedMobCommand::internal(
+        MobCommand::ProjectMemberStatusObserved {
+            agent_identity,
+            expected_target,
+            outcome: Box::new(MemberStatusObservationOutcome::Abandoned),
+            waiters,
+        },
+    ));
 }
 
 #[cfg(test)]
@@ -543,6 +822,95 @@ mod tests {
             waiters.join(late_tx).is_err(),
             "an abandoned observation admits no joiner"
         );
+    }
+
+    /// Registering an observation prunes every closed entry: one abandoned
+    /// by all its callers without the actor hearing of it (a forget that met
+    /// a full mailbox) and one settled outside the actor's completion path
+    /// (the scope gate's reject). Joining never registers, so it prunes
+    /// nothing and keeps the member's observation.
+    #[tokio::test]
+    async fn registering_an_observation_prunes_closed_entries() {
+        let mut observations = BTreeMap::new();
+        let live = AgentIdentity::from("live-member");
+        let (live_tx, _live_rx) = reply_channel();
+        assert!(admit_member_status_caller(&mut observations, &live, live_tx).is_some());
+
+        let abandoned = AgentIdentity::from("abandoned-fork-child");
+        let (abandoned_tx, abandoned_rx) = reply_channel();
+        let abandoned_waiters =
+            admit_member_status_caller(&mut observations, &abandoned, abandoned_tx)
+                .expect("a new identity registers an observation");
+        let settled = AgentIdentity::from("settled-fork-child");
+        let (settled_tx, _settled_rx) = reply_channel();
+        let settled_waiters = admit_member_status_caller(&mut observations, &settled, settled_tx)
+            .expect("a new identity registers an observation");
+        assert_eq!(observations.len(), 3, "open entries are never pruned");
+
+        drop(abandoned_rx);
+        assert!(abandoned_waiters.close_if_abandoned());
+        settled_waiters.settle(Err(member_status_admission_deadline_error()));
+
+        let (joined_tx, _joined_rx) = reply_channel();
+        assert!(
+            admit_member_status_caller(&mut observations, &live, joined_tx).is_none(),
+            "a second caller of a live observation joins it"
+        );
+        assert_eq!(observations.len(), 3, "joining prunes nothing");
+
+        let next = AgentIdentity::from("next-member");
+        let (next_tx, _next_rx) = reply_channel();
+        assert!(admit_member_status_caller(&mut observations, &next, next_tx).is_some());
+        assert_eq!(
+            observations.keys().cloned().collect::<Vec<_>>(),
+            vec![live, next],
+            "closed entries are pruned when an observation registers"
+        );
+    }
+
+    /// One underlying read per session: a second claim joins the first and
+    /// receives its published result; the entry is released once published,
+    /// or when the owner is dropped unpublished (its joiners read that as a
+    /// failed read).
+    #[tokio::test]
+    async fn view_reads_are_single_flight_per_session_and_release_their_entry() {
+        let reads = MemberStatusViewReads::default();
+        let session = SessionId::new();
+        let MemberStatusViewReadClaim::Owner(owner) = reads.claim(&session) else {
+            panic!("the first claim owns the read");
+        };
+        let MemberStatusViewReadClaim::Joined(joined) = reads.claim(&session) else {
+            panic!("a second claim of the same session joins the read");
+        };
+        assert!(matches!(
+            reads.claim(&SessionId::new()),
+            MemberStatusViewReadClaim::Owner(_)
+        ));
+        assert_eq!(reads.in_flight(), 1, "a dropped owner releases its entry");
+        owner.publish(MemberStatusSessionViewRead::Observed {
+            output_preview: Some("done".to_string()),
+            tokens_used: 7,
+        });
+        assert!(matches!(
+            joined_member_status_view(joined).await,
+            MemberStatusSessionViewRead::Observed { tokens_used: 7, .. }
+        ));
+        assert_eq!(reads.in_flight(), 0, "a published read releases its entry");
+
+        let MemberStatusViewReadClaim::Owner(owner) = reads.claim(&session) else {
+            panic!("a finished read is not joined again");
+        };
+        let MemberStatusViewReadClaim::Joined(joined) = reads.claim(&session) else {
+            panic!("a second claim joins the new read");
+        };
+        drop(owner);
+        assert_eq!(reads.in_flight(), 0);
+        assert!(matches!(
+            joined_member_status_view(joined).await,
+            MemberStatusSessionViewRead::Unavailable(
+                super::super::super::handle::MemberPreviewUnavailable::ReadFailed
+            )
+        ));
     }
 
     /// Every joined caller receives the one result; an error is shared by

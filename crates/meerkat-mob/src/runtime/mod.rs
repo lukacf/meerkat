@@ -451,6 +451,7 @@ pub use session_service::{
     ResumeVerdictTerminality, SessionResumeAuthority, SessionResumeLifecycle,
     SessionResumeMaterialization, SessionResumePreparationReceipt, SessionResumeRejection,
     SessionResumeVerdict, materialize_nonpersistent_session_resume_verdict,
+    observe_member_status_view_via_read,
 };
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
 use spawn_profile_authority::{

@@ -83,9 +83,9 @@ pub(in crate::runtime) const MEMBER_STATUS_OBSERVATION_DEADLINE: Duration = Dura
 ///
 /// The drain exists so a poller cannot stack concurrent underlying reads of
 /// one slow session; the ceiling exists so a stalled store (a hung network
-/// filesystem, or a wrapper that does not forward
-/// `MobSessionService::observe_member_status_view` while members run long
-/// turns) cannot hold the mob's whole capacity until the actor exits, which
+/// filesystem, or a wrapper over a persistent service that serves
+/// `MobSessionService::observe_member_status_view` from `read` instead of
+/// forwarding it, while members run long turns) cannot hold the mob's whole capacity until the actor exits, which
 /// would refuse every status read in the mob, live members included, with
 /// `observation_lane_saturated`.
 ///
@@ -162,6 +162,16 @@ impl MemberStatusObservationWaiters {
                 }
             }
         })
+    }
+
+    /// Callers registered on the observation: the one that started it and
+    /// every caller that joined it. A closed set has none.
+    #[cfg(test)]
+    pub(in crate::runtime) fn callers(&self) -> usize {
+        match &*self.lock() {
+            WaiterSet::Open(waiters) => waiters.len(),
+            WaiterSet::Closed => 0,
+        }
     }
 
     /// Whether the set is settled or abandoned. A closed set has no caller
@@ -526,6 +536,9 @@ impl MemberStatusViewReadDrain {
 pub(in crate::runtime) struct MemberStatusLaneProbe {
     /// Identities with an entry in the in-flight observation map.
     pub(in crate::runtime) observed_identities: Vec<AgentIdentity>,
+    /// Callers registered on each in-flight observation (the caller that
+    /// started it plus every caller that joined it).
+    pub(in crate::runtime) observation_callers: BTreeMap<AgentIdentity, usize>,
     /// Unused units of the mob-wide observation capacity.
     pub(in crate::runtime) available_capacity: usize,
     /// Underlying session-view reads still running.
@@ -623,6 +636,11 @@ impl MobActor {
     pub(super) fn member_status_lane_probe(&self) -> MemberStatusLaneProbe {
         MemberStatusLaneProbe {
             observed_identities: self.member_status_observations.keys().cloned().collect(),
+            observation_callers: self
+                .member_status_observations
+                .iter()
+                .map(|(identity, waiters)| (identity.clone(), waiters.callers()))
+                .collect(),
             available_capacity: self.member_status_observation_capacity.available_permits(),
             view_reads_in_flight: self.member_status_view_reads.in_flight(),
             view_read_joiners: self.member_status_view_reads.joiners(),

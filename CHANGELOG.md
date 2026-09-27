@@ -41,6 +41,21 @@ them.
   `preview_unavailable: Option<WireMemberPreviewUnavailable>`; struct
   literals must supply it. It is serde-defaulted and omitted when absent, so
   released SDKs keep reading the payload unchanged.
+- `meerkat_mob::MobSessionService` gains the required trait method
+  `observe_member_status_view(&self, session_id: &SessionId) ->
+  Result<MemberStatusSessionView, SessionError>`, with no default body, so
+  every implementor must add it. Migration: a wrapper over a persistent
+  service (for example one delegating to `PersistentSessionService`) forwards
+  it to the inner service's `observe_member_status_view`; a service whose
+  sessions live in process memory, whose `SessionService::read` is its
+  published live state, calls
+  `meerkat_mob::observe_member_status_view_via_read(self, session_id)`.
+  There is deliberately no default: serving it from `SessionService::read` on
+  a wrapper over a persistent service waits on the member's running turn, so
+  every status read of a busy member would end at the observation deadline
+  with `preview_unavailable: observation_deadline` and hold a unit of the
+  mob's status capacity meanwhile, refusing every status read in the mob with
+  `observation_lane_saturated` once 16 members run turns.
 - Behavior-only: the model-facing `fork_off` results (`meerkat-mob-mcp`
   `AgentMobToolSurface`, both the detached `status: "running"` result and the
   blocking result) no longer carry `cache_inheritance`. Mob forks always
@@ -84,24 +99,20 @@ them.
 
 ### Added
 
-- `MobSessionService::observe_member_status_view` (provided method) returns
-  a `MemberStatusSessionView { last_assistant_text, total_tokens, source }`
-  with `MemberStatusViewSource::{LiveWatch, DurableHead, Absent}`: the
-  read-only preview and token count a status read reports. The persistent
-  service serves a live session from the actor's published watches and any
-  other session from the committed durable head; it never waits on the
-  member's session task, never writes, and never replays the rewrite audit.
-  The default reads through `SessionService::read`, which is correct for
-  in-memory services. Wrappers over a persistent service MUST forward
-  `observe_member_status_view` to the inner service: a wrapper that inherits
-  the default falls back to `SessionService::read`, which waits on the
-  member's running turn, so every status read of a busy member ends at the
-  observation deadline with `preview_unavailable: observation_deadline`, and
-  each such read keeps a unit of the mob's status capacity until the turn ends
-  or the 30 s drain ceiling passes. While 16 or more members run turns behind
-  such a wrapper, every status read in the mob, live members included, can be
-  refused with `observation_lane_saturated` for up to that ceiling. The
-  RPC, CLI and test wrappers forward it.
+- `MobSessionService::observe_member_status_view` (required, see Breaking)
+  returns a `MemberStatusSessionView { last_assistant_text, total_tokens,
+  source }` with `MemberStatusViewSource::{LiveWatch, DurableHead, Absent}`:
+  the read-only preview and token count a status read reports. The
+  persistent service serves a live session from the actor's published
+  watches and any other session from the committed durable head; it never
+  waits on the member's session task, never writes, and never replays the
+  rewrite audit. The ephemeral service serves it from its in-memory `read`.
+  The RPC and CLI wrappers over the persistent service forward it.
+- `meerkat_mob::observe_member_status_view_via_read` serves
+  `observe_member_status_view` from `SessionService::read` (`LiveWatch`, or
+  `Absent` when the session is not found), for implementors whose sessions
+  live in process memory. It must not be used by a wrapper over a persistent
+  service.
 - `PersistentSessionService::observe_live_session_view` reads a live
   session's view from its summary and state watches without a command to the
   session task.
@@ -136,12 +147,7 @@ them.
   `BoundedHelperResultUnavailable`.
 - The fork_off re-link pass backs off between status reads that did not
   observe a child (250 ms doubling to 5 s, reset by an observed read) instead
-  of retrying every 100 ms. It takes a local child whose status reads idle as
-  finished only once the child's runtime state agrees: a status read no
-  longer waits on the child's session task, so it reports idle as soon as the
-  turn returns, before the runtime commits the run and the child's reply
-  reaches its durable transcript, and the pass would otherwise deliver
-  `restart_interrupted` for a child that completed.
+  of retrying every 100 ms.
 
 ### Fixed
 

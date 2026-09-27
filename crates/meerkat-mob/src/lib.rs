@@ -305,7 +305,8 @@ pub use runtime::{
     SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
     SpawnToolAdmission, SupervisorRotationReport, WorkBoundedTurnResult, WorkDeliveryReceipt,
     WorkTurnHandle, materialize_nonpersistent_session_resume_verdict, mob_error_wire_code,
-    profile_to_wire, render_bounded_delegation_task, stored_realm_profile_to_wire,
+    observe_member_status_view_via_read, profile_to_wire, render_bounded_delegation_task,
+    stored_realm_profile_to_wire,
 };
 #[cfg(feature = "openai-live")]
 pub use runtime::{

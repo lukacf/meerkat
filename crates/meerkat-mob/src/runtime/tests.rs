@@ -4304,6 +4304,14 @@ impl SessionServiceControlExt for MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberStatusSessionView, SessionError> {
+        // In-memory test double: `read` is the published live state.
+        crate::observe_member_status_view_via_read(self, session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &meerkat_core::SessionId,
@@ -11371,6 +11379,13 @@ impl SessionServiceControlExt for PersistedListingSessionService {
 
 #[async_trait]
 impl MobSessionService for PersistedListingSessionService {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberStatusSessionView, SessionError> {
+        self.inner.observe_member_status_view(session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &meerkat_core::SessionId,
@@ -11780,6 +11795,14 @@ impl SessionServiceControlExt for InactiveReadSessionService {
 
 #[async_trait]
 impl MobSessionService for InactiveReadSessionService {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberStatusSessionView, SessionError> {
+        // Serve the view from this wrapper's own inactive-session `read`.
+        crate::observe_member_status_view_via_read(self, session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &meerkat_core::SessionId,
@@ -51318,6 +51341,14 @@ impl SessionServiceControlExt for RealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RealCommsSessionService {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberStatusSessionView, SessionError> {
+        // In-memory test double: `read` is the published live state.
+        crate::observe_member_status_view_via_read(self, session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         _source_session_id: &meerkat_core::SessionId,
@@ -52651,6 +52682,14 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::MemberStatusSessionView, SessionError> {
+        // In-memory test double: `read` is the published live state.
+        crate::observe_member_status_view_via_read(self, session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         _source_session_id: &meerkat_core::SessionId,
@@ -58912,7 +58951,15 @@ async fn test_same_member_status_reads_join_one_session_read() {
         let identity = identity.clone();
         tokio::spawn(async move { handle.member_status(&identity).await })
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let joined = wait_for_member_status_lanes(&handle, Duration::from_secs(5), |probe| {
+        probe.observation_callers.get(&identity) == Some(&2)
+    })
+    .await;
+    assert_eq!(
+        joined.observation_callers.get(&identity),
+        Some(&2),
+        "the second read joins the observation in flight before it is released: {joined:?}"
+    );
     barrier.release_all();
     let first = first
         .await
@@ -59656,7 +59703,15 @@ async fn test_member_status_lane_serializes_absence_before_success() {
         let identity = identity.clone();
         tokio::spawn(async move { handle.member_status(&identity).await })
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let lanes = wait_for_member_status_lanes(&handle, Duration::from_secs(5), |probe| {
+        probe.observation_callers.get(&identity) == Some(&2)
+    })
+    .await;
+    assert_eq!(
+        lanes.observation_callers.get(&identity),
+        Some(&2),
+        "the second read joins the observation in flight: {lanes:?}"
+    );
     assert!(
         !joined.is_finished(),
         "the joined read waits for the observation in flight"

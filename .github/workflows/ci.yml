@@ -795,7 +795,7 @@ jobs:
     env:
       RUSTC_WRAPPER: sccache
       # The suites need a working runtime, not a size-optimized one: skip
-      # wasm-opt, which spends many minutes on the opt-level 0 release build.
+      # wasm-opt, which spends many minutes on the release build.
       MEERKAT_WEB_WASM_OPT: "0"
     steps:
       - name: Checkout

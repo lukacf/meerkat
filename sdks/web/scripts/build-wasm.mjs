@@ -41,10 +41,9 @@ const BUILD_PROFILE = (() => {
     `invalid MEERKAT_WEB_WASM_PROFILE=${value}; expected release, dev, or profiling`,
   );
 })();
-// MEERKAT_WEB_WASM_OPT=0 skips the wasm-opt pass. The release profile builds
-// at opt-level 0 with 256 codegen units, and wasm-opt then spends many
-// minutes on that binary; the browser suites that only need a working
-// runtime (the example web suites in CI) skip it.
+// MEERKAT_WEB_WASM_OPT=0 skips the wasm-opt pass. wasm-opt spends many
+// minutes on the release binary (most of the build); the browser suites that
+// only need a working runtime (the example web suites in CI) skip it.
 const WASM_OPT = (() => {
   const value = process.env.MEERKAT_WEB_WASM_OPT ?? "1";
   if (value === "0" || value === "1") {
@@ -58,15 +57,36 @@ const WASM_OPT = (() => {
 // (scripts/wasm-rustflags.mjs), so no environment can drop `-zstack-size`.
 const WASM_BUILD = wasmBuildEnv(process.env);
 const WASM_RUSTFLAGS = WASM_BUILD.flags;
+// The release build runs at opt-level "s" with 256 codegen units (both
+// overridable through the environment). Measured on one tree, one build at a
+// time through this script (wasm-opt capped at 8 cores), "s" was best or tied
+// on every axis against 0, 1 and 2: a turn's wasm shadow-stack high-water of
+// 133 KB (1.46 MB at 0, where LLVM colours no stack slots and every awaited
+// future keeps its own slot in its parent's poll frame), a 32.3 MB wasm
+// (10.1 MB gzip; 43.1 / 12.7 MB at 0, 60.5 / 16.2 MB at 2) and the shortest
+// build, since wasm-opt's time follows the size of its input. The commit that
+// chose opt-level 0 states no reason; the likely one is that the generated
+// machine catalog then made rustc's optimizer run out of memory, since fixed
+// at its root by chunking the catalog.
 const RELEASE_CARGO_PROFILE_ENV =
   BUILD_PROFILE === "release"
     ? {
         CARGO_PROFILE_RELEASE_CODEGEN_UNITS:
           process.env.CARGO_PROFILE_RELEASE_CODEGEN_UNITS ?? "256",
         CARGO_PROFILE_RELEASE_OPT_LEVEL:
-          process.env.CARGO_PROFILE_RELEASE_OPT_LEVEL ?? "0",
+          process.env.CARGO_PROFILE_RELEASE_OPT_LEVEL ?? "s",
       }
     : {};
+// How the module was built, recorded in the cache manifest the package ships
+// (wasm/.meerkat-wasm-build.json). The packed-package smoke reads it to decide
+// whether the release build's stack budget applies. The opt-level is the one
+// this script sets (release) or `null` for Cargo's own profile default.
+const BUILD_SETTINGS = {
+  profile: BUILD_PROFILE,
+  opt_level: RELEASE_CARGO_PROFILE_ENV.CARGO_PROFILE_RELEASE_OPT_LEVEL ?? null,
+  codegen_units: RELEASE_CARGO_PROFILE_ENV.CARGO_PROFILE_RELEASE_CODEGEN_UNITS ?? null,
+  wasm_opt: WASM_OPT,
+};
 // Lock timeout must exceed (wasm_build_seconds * max_parallel_tests). A cold
 // wasm-pack build takes ~60s on M-series; the e2e-smoke lane can run ~5 browser
 // tests that all compete for this lock. 15 minutes gives comfortable headroom
@@ -345,7 +365,12 @@ async function cacheIsValid(sourceHash) {
   }
   try {
     const manifest = JSON.parse(await readFile(CACHE_MANIFEST, "utf8"));
-    return manifest.source_hash === sourceHash;
+    // A module whose manifest records other (or no) build settings is
+    // rebuilt, so the settings the package ships are the module's own.
+    return (
+      manifest.source_hash === sourceHash &&
+      JSON.stringify(manifest.build ?? null) === JSON.stringify(BUILD_SETTINGS)
+    );
   } catch {
     return false;
   }
@@ -428,6 +453,7 @@ async function run() {
           source_hash: source.hash,
           input_count: source.inputCount,
           built_at: new Date().toISOString(),
+          build: BUILD_SETTINGS,
         },
         null,
         2,

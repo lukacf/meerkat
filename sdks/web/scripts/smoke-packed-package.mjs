@@ -10,8 +10,12 @@
 //   3. one turn runs end to end in Node through the packed JS and wasm, with
 //      `fetch` stubbed to an Anthropic SSE stream (as browser_contract.rs does);
 //   4. that turn's shadow-stack high-water, measured by painting the idle stack
-//      (scripts/wasm-stack-highwater.mjs), stays within its 2 MiB budget. The
-//      measurement is logged on every run.
+//      (scripts/wasm-stack-highwater.mjs), stays within the release build's
+//      512 KiB budget. The measurement is logged on every run; the budget is
+//      enforced for the release build (profile release, opt-level "s", as the
+//      package's wasm/.meerkat-wasm-build.json records it) and only logged
+//      for other builds, such as the dev-profile build of the manual sdk-web
+//      lane.
 //
 // Usage:
 //   node scripts/smoke-packed-package.mjs <rkat-web-X.Y.Z.tgz>
@@ -26,10 +30,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertWasmStack } from "./wasm-stack.mjs";
 import {
-  TURN_STACK_BUDGET_BYTES,
   assertStackWithinBudget,
   paintIdleStack,
   stackHighWater,
+  turnStackBudget,
 } from "./wasm-stack-highwater.mjs";
 
 const SDK_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -106,6 +110,13 @@ async function main(argv) {
       });
     }
 
+    // The build settings build-wasm.mjs records in the manifest it ships;
+    // absent in packages from before they were recorded.
+    const manifest = await readFile(path.join(packageDir, "wasm", ".meerkat-wasm-build.json"), "utf8")
+      .then((text) => JSON.parse(text))
+      .catch(() => null);
+    const build = manifest?.build ?? null;
+
     const wasmPath = path.join(packageDir, "wasm", "meerkat_web_runtime_bg.wasm");
     const wasmBytes = await readFile(wasmPath);
     const stack = assertWasmStack(new Uint8Array(wasmBytes), undefined, `${path.basename(tarball)} wasm`);
@@ -149,10 +160,23 @@ async function main(argv) {
       const turnStack = stackHighWater(instance.memory, stack);
       assert.equal(result.text, REPLY, "the packed runtime's turn returned the stubbed reply");
       assert.ok(requests.length >= 1, "the turn reached the provider through fetch");
-      console.log(
-        `packed wasm turn stack high-water: ${turnStack} bytes (budget ${TURN_STACK_BUDGET_BYTES})`,
-      );
-      assertStackWithinBudget(turnStack, TURN_STACK_BUDGET_BYTES, `${path.basename(tarball)} turn`);
+      const budget = turnStackBudget(build);
+      if (budget.enforced) {
+        console.log(
+          `packed wasm turn stack high-water: ${turnStack} bytes (budget ${budget.budget}, ${budget.label})`,
+        );
+        assertStackWithinBudget(
+          turnStack,
+          budget.budget,
+          `${path.basename(tarball)} turn`,
+          budget.label,
+        );
+      } else {
+        console.log(
+          `packed wasm turn stack high-water: ${turnStack} bytes (no budget enforced for ${budget.label}; ` +
+            "the budget is for the release build)",
+        );
+      }
     } finally {
       runtime.destroy();
     }

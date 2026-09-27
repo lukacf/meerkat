@@ -9,6 +9,7 @@ import {
   assertStackWithinBudget,
   paintIdleStack,
   stackHighWater,
+  turnStackBudget,
 } from "../scripts/wasm-stack-highwater.mjs";
 
 const KiB = 1024;
@@ -45,6 +46,25 @@ test("a turn over its budget is refused, at or under it passes", () => {
   assert.equal(assertStackWithinBudget(TURN_STACK_BUDGET_BYTES), TURN_STACK_BUDGET_BYTES);
   assert.throws(
     () => assertStackWithinBudget(TURN_STACK_BUDGET_BYTES + 1),
-    /over its 2097152-byte budget/,
+    /over its 524288-byte budget for this build \(profile release, opt-level s\)/,
   );
+});
+
+test("the budget is enforced for the release build at opt-level s, and fails closed without settings", () => {
+  const release = turnStackBudget({ profile: "release", opt_level: "s", codegen_units: "256", wasm_opt: true });
+  assert.equal(release.enforced, true);
+  assert.equal(release.budget, TURN_STACK_BUDGET_BYTES);
+  assert.equal(release.label, "profile release, opt-level s");
+  const unrecorded = turnStackBudget(null);
+  assert.equal(unrecorded.enforced, true, "a package without recorded settings is budgeted as release");
+  assert.equal(unrecorded.budget, TURN_STACK_BUDGET_BYTES);
+});
+
+test("a dev-profile or overridden build is logged, not budgeted", () => {
+  const dev = turnStackBudget({ profile: "dev", opt_level: null, codegen_units: null, wasm_opt: true });
+  assert.equal(dev.enforced, false);
+  assert.equal(dev.label, "profile dev, opt-level Cargo's profile default");
+  const overridden = turnStackBudget({ profile: "release", opt_level: "0", codegen_units: "256", wasm_opt: true });
+  assert.equal(overridden.enforced, false);
+  assert.equal(overridden.label, "profile release, opt-level 0");
 });

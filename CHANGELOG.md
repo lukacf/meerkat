@@ -35,6 +35,24 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- The release doctor's dispatch-binding check covers more of the ways a
+  future edit could let a publishing run bind the wrong ref. It now refuses:
+  - a run on the version's tag that names another `release_tag` (a branch,
+    a tag on another commit, or the alpha tag on the same commit outside the
+    alpha lane), which a binding preferring `github.ref` would publish;
+  - the alpha lane on another version's alpha tag, named or as the ref;
+  - near misses of the allowed names (`v<version>1`,
+    `alpha/v<version>-rc.1`, `alpha/v<version>1`), which a prefix comparison
+    would accept;
+  - dispatches from branches named exactly like an allowed tag
+    (`refs/heads/v<version>`, `refs/heads/alpha/v<version>`).
+  It also models `github.ref_name` / `GITHUB_REF_NAME` as GitHub sets them:
+  the ref without `refs/heads/` or `refs/tags/`, so `refs/tags/alpha/v<version>`
+  is `alpha/v<version>`, not its last path segment. Every new scenario has a
+  doctor fixture that goes red when that scenario is removed.
+
 ## [0.8.45] - 2026-09-27
 
 ### Breaking

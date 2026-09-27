@@ -241,6 +241,8 @@ impl MobActor {
                     );
                     return;
                 };
+                // The rebuild request carries the overlay the member is rebuilt
+                // with (see `recustomized_rebuild_overlay`).
                 let recipe = profile
                     .and_then(|profile| self.explicit_resume_provision_recipe(&work, *profile));
                 match recipe {
@@ -320,7 +322,11 @@ impl MobActor {
                 .restore_spec
                 .compaction_curator_override
                 .clone(),
+            // No context: the rebuild carries the session's persisted one
+            // forward (`build_resumed_agent_config`).
             context: None,
+            // A fork-derived member is rebuilt with its persisted lineage.
+            fork_source: entry.fork_source.clone(),
             labels: Some(entry.labels.clone()),
             additional_instructions: None,
             shell_env: None,

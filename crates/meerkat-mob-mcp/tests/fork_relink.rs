@@ -1072,6 +1072,671 @@ async fn relink_of_several_running_children_delivers_each_real_reply() {
     fixture.teardown().await;
 }
 
+/// Member status reads a child's live agent, which is terminal before the
+/// service commits the turn, while the re-link reads the outcome from the
+/// durable transcript. Holding the child's boundary commit opens that window
+/// deterministically: the child reads idle while its reply exists only in the
+/// live transcript. The re-link waits for the commit and delivers the real
+/// reply; reading the store in the window delivered `restart_interrupted` for
+/// a child that had answered (nightly 36275543570, ~10% on a 4-vCPU runner).
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_waits_for_a_finished_child_turn_to_commit() {
+    let gate = TurnGate::new();
+    let turn_gate = Arc::clone(&gate);
+    let store = Arc::new(support::commit_gate::CommitGateRuntimeStore::new());
+    let fixture = CouncilFixture::new_with_runtime_store(
+        move |request| {
+            if support::last_user_text(request).contains(CHILD_TASK) {
+                ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+            } else {
+                ScriptedTurn::Text("noted".to_string())
+            }
+        },
+        store.clone(),
+    );
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let child = "commit-window-child";
+    let job_id = "job-commit-window".to_string();
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec(child),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    // The custodian dies with the "old process".
+    drop(run);
+    gate.wait_entered(1).await;
+    let child_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from(child))
+        .await
+        .expect("child session");
+    // The fact the re-link settles on, exactly as MeerkatMachine documents
+    // it: true for the whole active turn.
+    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
+        .expect("the service derives its runtime");
+    assert!(
+        runtime
+            .session_has_uncommitted_run_input(&child_session)
+            .await
+            .unwrap(),
+        "an active turn's input awaits its boundary"
+    );
+    store.arm(meerkat_runtime::LogicalRuntimeId::for_session(
+        &child_session,
+    ));
+
+    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new(
+        fixture.service.clone(),
+        meerkat_mob::MobControlPrincipal::Owner,
+    ));
+    restarted
+        .mob_insert_handle(fixture.source_mob_id(), handle.clone())
+        .await;
+    // The turn ends; its commit is held at the store.
+    gate.open();
+    store.entered().await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.session_has_uncommitted_run_input(&child_session),
+        )
+        .await
+        .is_err(),
+        "the read queues behind the boundary commit in progress"
+    );
+    // Terminal in its live agent, reply not durable: many re-link
+    // observations of exactly the state that used to be read as idle. The
+    // window outlasts the re-link's bounded run-input read, so a read that
+    // timed out behind the held commit is inconclusive and must never be
+    // taken as settled.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let premature = if completion_records(&fixture, &owner, &job_id).await > 0 {
+        Some(completion_record_text(&fixture, &owner, &job_id).await)
+    } else {
+        None
+    };
+    store.release();
+    assert_eq!(
+        premature, None,
+        "the re-link reported the child before its finished turn was committed"
+    );
+    await_completion_record(&fixture, &owner, &job_id).await;
+    assert!(
+        !runtime
+            .session_has_uncommitted_run_input(&child_session)
+            .await
+            .unwrap(),
+        "no input awaits a boundary once the commit landed"
+    );
+    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
+    let record = completion_record_text(&fixture, &owner, &job_id).await;
+    assert!(
+        record.contains(CHILD_REPLY) && !record.contains("restart_interrupted"),
+        "the child is delivered its real reply once its turn is committed: {record}"
+    );
+    fixture.teardown().await;
+}
+
+/// A child whose turn fails leaves no reply. Its failed turn must not leave
+/// the re-link waiting for a commit that never comes: the child settles, and
+/// its outcome is delivered as failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_settles_a_running_child_whose_turn_fails() {
+    let gate = TurnGate::new();
+    let turn_gate = Arc::clone(&gate);
+    let fixture = CouncilFixture::new(move |request| {
+        if support::last_user_text(request).contains(CHILD_TASK) {
+            ScriptedTurn::GatedFail(Arc::clone(&turn_gate), "provider rejected the turn".into())
+        } else {
+            ScriptedTurn::Text("noted".to_string())
+        }
+    });
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-failing-turn".to_string();
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec("failing-child"),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    // The custodian dies with the "old process".
+    drop(run);
+    gate.wait_entered(1).await;
+
+    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new(
+        fixture.service.clone(),
+        meerkat_mob::MobControlPrincipal::Owner,
+    ));
+    restarted
+        .mob_insert_handle(fixture.source_mob_id(), handle.clone())
+        .await;
+    // Observed running, then the turn fails with no reply.
+    gate.open();
+    await_completion_record(&fixture, &owner, &job_id).await;
+    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
+    let record = completion_record_text(&fixture, &owner, &job_id).await;
+    assert!(
+        record.contains("finished (failed)") && !record.contains(CHILD_REPLY),
+        "a child whose turn failed settles as failed: {record}"
+    );
+    fixture.teardown().await;
+}
+
+/// The runtime-backed composition (RPC, REST, keep-alive CLI) with the same
+/// held boundary commit. It races the same way: without the run-input check
+/// this test delivers `restart_interrupted` inside the window, because the
+/// child's member status reads idle before its service-turn commit lands
+/// here too. The check closes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_backed_relink_waits_for_a_finished_child_turn_to_commit() {
+    let gate = TurnGate::new();
+    let turn_gate = Arc::clone(&gate);
+    let store = Arc::new(support::commit_gate::CommitGateRuntimeStore::new());
+    let fixture = CouncilFixture::new_runtime_backed_with_runtime_store(
+        move |request| {
+            if support::last_user_text(request).contains(CHILD_TASK) {
+                ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+            } else {
+                ScriptedTurn::Text("noted".to_string())
+            }
+        },
+        store.clone(),
+    );
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let child = "runtime-commit-window-child";
+    let job_id = "job-runtime-commit-window".to_string();
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec(child),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    drop(run);
+    gate.wait_entered(1).await;
+    let child_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from(child))
+        .await
+        .expect("child session");
+    store.arm(meerkat_runtime::LogicalRuntimeId::for_session(
+        &child_session,
+    ));
+
+    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+        fixture.service.clone(),
+        fixture.runtime_adapter.clone(),
+        meerkat_mob::MobControlPrincipal::Owner,
+    ));
+    restarted
+        .mob_insert_handle(fixture.source_mob_id(), handle.clone())
+        .await;
+    gate.open();
+    tokio::time::timeout(Duration::from_secs(30), store.entered())
+        .await
+        .expect("the runtime-backed turn's boundary commit reaches the held store method");
+    // Outlasts the re-link's bounded run-input read (see the test above).
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let premature = if completion_records(&fixture, &owner, &job_id).await > 0 {
+        Some(completion_record_text(&fixture, &owner, &job_id).await)
+    } else {
+        None
+    };
+    store.release();
+    assert_eq!(
+        premature, None,
+        "the re-link reported the child before its finished turn was committed"
+    );
+    await_completion_record(&fixture, &owner, &job_id).await;
+    let record = completion_record_text(&fixture, &owner, &job_id).await;
+    assert!(
+        record.contains(CHILD_REPLY) && !record.contains("restart_interrupted"),
+        "the child is delivered its real reply once its turn is committed: {record}"
+    );
+    fixture.teardown().await;
+}
+
+/// A finished turn whose boundary commit is held for good keeps the child's
+/// session driver busy, so every read of its run inputs times out. A timeout
+/// is inconclusive: the re-link keeps watching, but only until the ceiling,
+/// and then delivers `restart_interrupted` without naming a cause, since no
+/// reading was machine evidence of an unlanded commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_stops_waiting_on_unanswered_commit_reads_without_naming_a_cause() {
+    let gate = TurnGate::new();
+    let turn_gate = Arc::clone(&gate);
+    let store = Arc::new(support::commit_gate::CommitGateRuntimeStore::new());
+    let fixture = CouncilFixture::new_with_runtime_store(
+        move |request| {
+            if support::last_user_text(request).contains(CHILD_TASK) {
+                ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+            } else {
+                ScriptedTurn::Text("noted".to_string())
+            }
+        },
+        store.clone(),
+    );
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let child = AgentIdentity::from("stuck-commit-child");
+    let job_id = "job-stuck-commit".to_string();
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec("stuck-commit-child"),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    drop(run);
+    gate.wait_entered(1).await;
+    let child_session = handle
+        .resolve_bridge_session_id(&child)
+        .await
+        .expect("child session");
+    store.arm(meerkat_runtime::LogicalRuntimeId::for_session(
+        &child_session,
+    ));
+    gate.open();
+    store.entered().await;
+
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    let ceiling = Duration::from_secs(2);
+    let started = tokio::time::Instant::now();
+    let action = meerkat_mob_mcp::fork_relink::relink_child_within(
+        fixture.state.session_service(),
+        &relink_delivery(&fixture),
+        &fixture.source_mob_id(),
+        &handle,
+        &child,
+        &job,
+        ceiling,
+    )
+    .await;
+    assert_eq!(action, ForkRelinkAction::Delivered);
+    assert!(
+        started.elapsed() >= ceiling,
+        "the re-link waited out the ceiling first"
+    );
+    await_completion_record(&fixture, &owner, &job_id).await;
+    let record = completion_record_text(&fixture, &owner, &job_id).await;
+    assert!(
+        record.contains("restart_interrupted") && !record.contains("commit_never_landed"),
+        "timed-out reads settle as restart_interrupted, with no typed cause: {record}"
+    );
+    store.release();
+    fixture.teardown().await;
+}
+
+/// A boundary commit that fails after the run consumed its inputs in memory
+/// leaves the child's runtime with degraded durability: its live state shows
+/// nothing awaiting a boundary while its durable history lacks the turn. The
+/// runtime's read refuses to answer from that state (an error, never "no
+/// input pending"). A session the runtime does not hold is an error too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_boundary_commit_makes_the_run_input_read_an_error() {
+    let store = Arc::new(support::commit_gate::CommitGateRuntimeStore::new());
+    let gate = TurnGate::new();
+    let turn_gate = Arc::clone(&gate);
+    let fixture = CouncilFixture::new_with_runtime_store(
+        move |request| {
+            if support::last_user_text(request).contains(CHILD_TASK) {
+                ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+            } else {
+                ScriptedTurn::Text("noted".to_string())
+            }
+        },
+        store.clone(),
+    );
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let child = AgentIdentity::from("failed-commit-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec("failed-commit-child"),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: "job-failed-commit".to_string(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    gate.wait_entered(1).await;
+    let child_session = handle
+        .resolve_bridge_session_id(&child)
+        .await
+        .expect("child session");
+    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
+        .expect("the service derives its runtime");
+    assert!(
+        runtime
+            .session_has_uncommitted_run_input(&child_session)
+            .await
+            .unwrap(),
+        "the running turn's input awaits its boundary"
+    );
+    store.arm_failure(meerkat_runtime::LogicalRuntimeId::for_session(
+        &child_session,
+    ));
+    gate.open();
+    store.failed().await;
+
+    let degraded = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match runtime
+                .session_has_uncommitted_run_input(&child_session)
+                .await
+            {
+                Err(error) => break error,
+                // The failed commit is still unwinding.
+                Ok(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    })
+    .await
+    .expect("the runtime refuses to answer from degraded durability");
+    assert!(
+        matches!(
+            degraded,
+            meerkat_runtime::RuntimeDriverError::RecoveryRepairBlocked { .. }
+        ),
+        "degraded durability is an error, never 'no input pending': {degraded:?}"
+    );
+    let unheld = runtime
+        .session_has_uncommitted_run_input(&meerkat_core::SessionId::new())
+        .await
+        .expect_err("a session the runtime does not hold is not 'nothing pending'");
+    assert!(
+        matches!(unheld, meerkat_runtime::RuntimeDriverError::NotReady { .. }),
+        "{unheld:?}"
+    );
+    drop(run);
+    // No teardown: destroying a mob whose member session has degraded
+    // durability waits on that session's durable reload, which nothing here
+    // performs. The test process ends with the test.
+}
+
+/// Fork a child whose turn is held at its model call, and return the child,
+/// its session and the gate that holds the turn.
+async fn fork_held_child(
+    fixture: &CouncilFixture,
+    handle: &meerkat_mob::MobHandle,
+    gate: &Arc<TurnGate>,
+    child: &str,
+    job_id: &str,
+    owner: &meerkat_core::SessionId,
+) -> (AgentIdentity, meerkat_core::SessionId) {
+    let _ = fixture;
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec(child),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.to_string(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    // The custodian dies with the "old process".
+    drop(run);
+    gate.wait_entered(1).await;
+    let child = AgentIdentity::from(child);
+    let child_session = handle
+        .resolve_bridge_session_id(&child)
+        .await
+        .expect("child session");
+    (child, child_session)
+}
+
+fn held_child_fixture(gate: &Arc<TurnGate>) -> CouncilFixture {
+    let turn_gate = Arc::clone(gate);
+    CouncilFixture::new(move |request| {
+        if support::last_user_text(request).contains(CHILD_TASK) {
+            ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+        } else {
+            ScriptedTurn::Text("noted".to_string())
+        }
+    })
+}
+
+/// The typed arm, without a timeout anywhere: the child's turn is terminal in
+/// its live agent while its commit has not started, so its session driver is
+/// free and its run input is still applied. The runtime answers `true` at
+/// once, and the re-link keeps watching on that machine evidence; once the
+/// commit lands it delivers the real reply.
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_waits_while_a_finished_turn_s_run_input_awaits_its_boundary() {
+    let gate = TurnGate::new();
+    let fixture = held_child_fixture(&gate);
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-applied-input";
+    let (child, child_session) = fork_held_child(
+        &fixture,
+        &handle,
+        &gate,
+        "applied-input-child",
+        job_id,
+        &owner,
+    )
+    .await;
+    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
+        .expect("the service derives its runtime");
+    let (entered, release) =
+        runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
+    gate.open();
+    entered.await.expect("the finished turn reaches its commit");
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.session_has_uncommitted_run_input(&child_session),
+        )
+        .await
+        .expect("the driver is free: the read answers at once")
+        .expect("healthy durability"),
+        "the finished turn's run input awaits its boundary"
+    );
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    let relink = tokio::spawn({
+        let service = fixture.state.session_service();
+        let delivery = relink_delivery(&fixture);
+        let mob_id = fixture.source_mob_id();
+        let handle = handle.clone();
+        let child = child.clone();
+        async move {
+            meerkat_mob_mcp::fork_relink::relink_child(
+                service, &delivery, &mob_id, &handle, &child, &job,
+            )
+            .await
+        }
+    });
+    // Many observations of a settled member whose commit has not landed.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        completion_records(&fixture, &owner, job_id).await,
+        0,
+        "the re-link reported the child before its turn committed"
+    );
+    assert!(!relink.is_finished());
+    let _ = release.send(());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(30), relink)
+            .await
+            .expect("the re-link finishes once the commit lands")
+            .unwrap(),
+        ForkRelinkAction::Delivered
+    );
+    await_completion_record(&fixture, &owner, job_id).await;
+    assert_eq!(completion_records(&fixture, &owner, job_id).await, 1);
+    let record = completion_record_text(&fixture, &owner, job_id).await;
+    assert!(
+        record.contains(CHILD_REPLY) && !record.contains("restart_interrupted"),
+        "the child is delivered its real reply once its turn is committed: {record}"
+    );
+    fixture.teardown().await;
+}
+
+/// The typed arm at the ceiling: a finished turn whose run input never
+/// reaches its boundary. The runtime keeps answering `true` (machine
+/// evidence, not a timeout), so past the ceiling the re-link delivers
+/// `restart_interrupted` with the typed reason `commit_never_landed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_names_commit_never_landed_when_a_run_input_never_reaches_its_boundary() {
+    let gate = TurnGate::new();
+    let fixture = held_child_fixture(&gate);
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-input-never-consumed";
+    let (child, child_session) = fork_held_child(
+        &fixture,
+        &handle,
+        &gate,
+        "input-never-consumed-child",
+        job_id,
+        &owner,
+    )
+    .await;
+    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
+        .expect("the service derives its runtime");
+    let (entered, release) =
+        runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
+    gate.open();
+    entered.await.expect("the finished turn reaches its commit");
+
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    let ceiling = Duration::from_secs(2);
+    let started = tokio::time::Instant::now();
+    let action = tokio::time::timeout(
+        Duration::from_secs(60),
+        meerkat_mob_mcp::fork_relink::relink_child_within(
+            fixture.state.session_service(),
+            &relink_delivery(&fixture),
+            &fixture.source_mob_id(),
+            &handle,
+            &child,
+            &job,
+            ceiling,
+        ),
+    )
+    .await
+    .expect("the ceiling bounds the wait");
+    assert_eq!(action, ForkRelinkAction::Delivered);
+    let waited = started.elapsed();
+    await_completion_record(&fixture, &owner, job_id).await;
+    let record = completion_record_text(&fixture, &owner, job_id).await;
+    assert!(
+        record.contains("restart_interrupted") && record.contains("commit_never_landed"),
+        "an input that never reaches its boundary settles as restart_interrupted, typed: {record}"
+    );
+    assert!(
+        waited >= ceiling,
+        "the re-link kept watching until the ceiling (waited {waited:?})"
+    );
+    let _ = release.send(());
+    fixture.teardown().await;
+}
+
 /// A host that restores a stopped mob inserts its handle before activating
 /// it (MobKit's identity-first gateway after a clean shutdown). The forker is
 /// not live and cannot be revived while its mob is stopped: the re-link

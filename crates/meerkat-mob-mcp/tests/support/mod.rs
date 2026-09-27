@@ -15,6 +15,8 @@
     clippy::manual_assert
 )]
 
+pub mod commit_gate;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -51,6 +53,9 @@ pub enum ScriptedTurn {
     /// member turns are genuinely in progress, so the temporary mob, its
     /// wiring, and its capability attachments are all live and readable.
     Gated(Arc<TurnGate>, String),
+    /// Block until the gate opens, then fail the provider call: a turn that
+    /// was running when observed and then ends with no reply.
+    GatedFail(Arc<TurnGate>, String),
 }
 
 /// A release gate a scripted turn blocks on.
@@ -232,6 +237,19 @@ impl LlmClient for ScriptedCouncilClient {
                     futures::stream::once(released),
                     |events| futures::stream::iter(events.into_iter().map(Ok)),
                 ));
+            }
+            ScriptedTurn::GatedFail(gate, reason) => {
+                let released = async move {
+                    gate.entered.fetch_add(1, Ordering::SeqCst);
+                    let mut rx = gate.receiver();
+                    while !*rx.borrow_and_update() {
+                        if rx.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(LlmError::InvalidRequest { message: reason })
+                };
+                return Box::pin(futures::stream::once(released));
             }
         };
         Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
@@ -419,7 +437,7 @@ impl CouncilFixture {
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
         customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
     ) -> Self {
-        Self::build(script, customize, FixtureRuntime::DerivedFromService)
+        Self::build(script, customize, FixtureRuntime::DerivedFromService, None)
     }
 
     /// A fixture over the runtime-backed composition product surfaces use
@@ -428,7 +446,12 @@ impl CouncilFixture {
     pub fn new_runtime_backed(
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
     ) -> Self {
-        Self::build(script, |state, _root| state, FixtureRuntime::RuntimeBacked)
+        Self::build(
+            script,
+            |state, _root| state,
+            FixtureRuntime::RuntimeBacked,
+            None,
+        )
     }
 
     /// A fixture whose mob state has NO runtime adapter: the host shape that
@@ -436,13 +459,41 @@ impl CouncilFixture {
     pub fn new_without_runtime_adapter(
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
     ) -> Self {
-        Self::build(script, |state, _root| state, FixtureRuntime::Absent)
+        Self::build(script, |state, _root| state, FixtureRuntime::Absent, None)
+    }
+
+    /// [`Self::new`] over a caller-supplied runtime store (for example one
+    /// that can hold a session's durable boundary commit).
+    pub fn new_with_runtime_store(
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+        runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    ) -> Self {
+        Self::build(
+            script,
+            |state, _root| state,
+            FixtureRuntime::DerivedFromService,
+            Some(runtime_store),
+        )
+    }
+
+    /// [`Self::new_runtime_backed`] over a caller-supplied runtime store.
+    pub fn new_runtime_backed_with_runtime_store(
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+        runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    ) -> Self {
+        Self::build(
+            script,
+            |state, _root| state,
+            FixtureRuntime::RuntimeBacked,
+            Some(runtime_store),
+        )
     }
 
     fn build(
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
         customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
         runtime: FixtureRuntime,
+        runtime_store: Option<Arc<dyn meerkat_runtime::RuntimeStore>>,
     ) -> Self {
         let temp = tempfile::tempdir().expect("council temp dir");
         let root = temp.path().to_path_buf();
@@ -450,7 +501,7 @@ impl CouncilFixture {
         let client = Arc::new(ScriptedCouncilClient::new(script));
         let calls = client.calls();
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
-            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+            runtime_store.unwrap_or_else(|| Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()));
         let (service, runtime_adapter) = if runtime == FixtureRuntime::RuntimeBacked {
             let (service, runtime) = runtime_backed_service(&root, runtime_store.clone(), client);
             (service, Some(runtime))

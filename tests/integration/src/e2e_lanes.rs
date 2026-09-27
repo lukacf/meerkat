@@ -1369,8 +1369,25 @@ async fn run_command(
     for (key, value) in env_overrides {
         child.env(key, value);
     }
+    // The command leads a process group of its own, and dropping it (on a
+    // timeout, or when this future is dropped) kills that whole group:
+    // repo-cargo runs cargo and rustc as its descendants, which killing the
+    // direct child alone would leave running. Its own group is out of reach
+    // of a signal sent to the harness's group (Ctrl-C, nextest's forwarding),
+    // and a signal-killed harness runs no destructors, so the group is also
+    // registered with the interrupt handler, which kills it then.
+    #[cfg(unix)]
+    {
+        ensure_interrupt_handler();
+        child.process_group(0);
+    }
+    child.kill_on_drop(true);
+    let child = child
+        .spawn()
+        .map_err(|error| format!("failed to run {display}: {error}"))?;
+    let mut group = ProcessGroupKillOnDrop::new(child.id());
 
-    let output = timeout(Duration::from_secs(timeout_secs), child.output())
+    let output = timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
         .await
         .map_err(|_| {
             format!(
@@ -1379,6 +1396,9 @@ async fn run_command(
             )
         })?
         .map_err(|error| format!("failed to run {display}: {error}"))?;
+    // The command exited and closed its output: what it left running is its
+    // own business.
+    group.disarm();
     let elapsed = started.elapsed();
 
     let combined = combine_output(&output.stdout, &output.stderr);
@@ -1397,6 +1417,131 @@ async fn run_command(
     );
 
     Ok(CompletedCommand { output: combined })
+}
+
+/// Kills a spawned command's process group when dropped, unless disarmed,
+/// and keeps it registered with the interrupt handler while it is armed.
+/// The group id is the command's pid, captured at spawn (the command leads
+/// its own group, see [`run_command`]).
+struct ProcessGroupKillOnDrop {
+    pgid: Option<u32>,
+}
+
+impl ProcessGroupKillOnDrop {
+    fn new(pgid: Option<u32>) -> Self {
+        #[cfg(unix)]
+        if let Some(pgid) = pgid {
+            live_command_groups().insert(pgid);
+        }
+        Self { pgid }
+    }
+
+    fn disarm(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid {
+            live_command_groups().remove(&pgid);
+        }
+        self.pgid = None;
+    }
+}
+
+impl Drop for ProcessGroupKillOnDrop {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid.take() {
+            live_command_groups().remove(&pgid);
+            kill_process_group(pgid);
+        }
+    }
+}
+
+/// Process groups of lane commands still running (see [`run_command`]).
+#[cfg(unix)]
+static LIVE_COMMAND_GROUPS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+#[cfg(unix)]
+fn live_command_groups() -> std::sync::MutexGuard<'static, BTreeSet<u32>> {
+    LIVE_COMMAND_GROUPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(unix)]
+fn kill_process_group(pgid: u32) {
+    // A group that already exited leaves nothing to kill; kill's failure then
+    // says only that.
+    let _ = StdCommand::new("kill")
+        .args(["-KILL", "--", &format!("-{pgid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Install, once per process and before the first command spawns, the
+/// handler that runs when the harness is interrupted (SIGINT, SIGTERM or
+/// SIGHUP): it kills every registered command group, then exits as that
+/// signal would have (status 128 plus the signal number). It runs on a thread
+/// with a runtime of its own, so it outlives any one test's runtime.
+#[cfg(unix)]
+fn ensure_interrupt_handler() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let spawned = std::thread::Builder::new()
+            .name("e2e-interrupt".to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+                runtime.block_on(async move {
+                    use tokio::signal::unix::{SignalKind, signal};
+                    let registered = signal(SignalKind::interrupt()).and_then(|interrupt| {
+                        Ok((
+                            interrupt,
+                            signal(SignalKind::terminate())?,
+                            signal(SignalKind::hangup())?,
+                        ))
+                    });
+                    let (mut interrupt, mut terminate, mut hangup) = match registered {
+                        Ok(signals) => signals,
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(error.to_string()));
+                            return;
+                        }
+                    };
+                    let _ = ready_tx.send(Ok(()));
+                    let signal_number = tokio::select! {
+                        _ = interrupt.recv() => 2,
+                        _ = terminate.recv() => 15,
+                        _ = hangup.recv() => 1,
+                    };
+                    let groups = std::mem::take(&mut *live_command_groups());
+                    for pgid in groups {
+                        kill_process_group(pgid);
+                    }
+                    std::process::exit(128 + signal_number);
+                });
+            });
+        let ready = match spawned {
+            Ok(_) => ready_rx
+                .recv()
+                .unwrap_or_else(|_| Err("the interrupt handler thread ended".to_string())),
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(error) = ready {
+            eprintln!(
+                "e2e interrupt handler not installed ({error}); an interrupted run may leave lane commands running"
+            );
+        }
+    });
 }
 
 fn inherited_cargo_build_context(key: &std::ffi::OsStr) -> bool {
@@ -6146,10 +6291,11 @@ mod tests {
         ArtifactManifest, ArtifactRequirement, CommandLockMode, CommandSpec, E2eSelection,
         ExecutionMode, Lane, SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler,
         bazel_build_event_provenance, build_commands_for_mode, inherited_cargo_build_context,
-        normalize_command_with_env, order_smoke_specs_for_runtime, plan_for_selection,
-        pre_command_lock_mode, repo_cargo, require_built_by_recorded_invocation,
-        sanitize_artifact_key, scenario_env, scenario_spec, smoke_runtime_class,
-        smoke_test_filter_for_selection, source_revision_key, suite_spec,
+        normalize_command_with_env, order_smoke_specs_for_runtime, parse_cargo_build_requirement,
+        plan_for_selection, pre_command_lock_mode, repo_cargo,
+        require_built_by_recorded_invocation, run_command, sanitize_artifact_key, scenario_env,
+        scenario_spec, smoke_runtime_class, smoke_test_filter_for_selection, source_revision_key,
+        suite_spec, workspace_root,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -6274,6 +6420,246 @@ mod tests {
         let error = bazel_build_event_provenance(&foreign_bep, &workspace, &bazel_bin)
             .expect_err("a receipt outside the current output base must refuse");
         assert!(error.contains("outside the current output base"), "{error}");
+    }
+
+    /// The e2e-system lane prebuilds (scripts/run-build-backend-lane,
+    /// `prebuild_e2e_system_bins`) exactly the binaries the suites in
+    /// tests/e2e_system_lane.rs build as cargo-build pre-commands inside their
+    /// behaviour timeouts: a suite's build missing from the prebuild runs cold
+    /// inside its timeout again, and a prebuild no suite needs is stale.
+    #[test]
+    fn system_lane_prebuild_builds_exactly_the_system_suites_pre_command_binaries() {
+        let root = workspace_root();
+        let script_path = root.join("scripts/run-build-backend-lane");
+        let lane_path = root.join("tests/integration/tests/e2e_system_lane.rs");
+        let (Ok(script), Ok(lane)) = (
+            std::fs::read_to_string(&script_path),
+            std::fs::read_to_string(&lane_path),
+        ) else {
+            // The Bazel unit target's runfiles do not carry scripts/; the
+            // Cargo unit lane runs this drift gate on every CI push.
+            eprintln!(
+                "skipping system prebuild coverage: {} or {} not present in this sandbox",
+                script_path.display(),
+                lane_path.display()
+            );
+            return;
+        };
+
+        // Each `system_suite!(test_name, "suite")` wires one suite.
+        let suites: Vec<&str> = lane
+            .split("system_suite!(")
+            .skip(1)
+            .map(|invocation| {
+                invocation
+                    .split('"')
+                    .nth(1)
+                    .expect("every system_suite! names its suite")
+            })
+            .collect();
+        assert!(
+            !suites.is_empty(),
+            "no system suites found in {}",
+            lane_path.display()
+        );
+        let mut needed = BTreeSet::new();
+        for suite in &suites {
+            let spec =
+                suite_spec(suite).unwrap_or_else(|| panic!("system suite '{suite}' has no spec"));
+            assert!(
+                matches!(spec.lane, Lane::System),
+                "'{suite}' is not a system suite"
+            );
+            needed.extend(
+                spec.pre_commands
+                    .iter()
+                    .filter_map(|command| parse_cargo_build_requirement(command)),
+            );
+        }
+
+        let body = script
+            .split("prebuild_e2e_system_bins() {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("prebuild_e2e_system_bins is defined");
+        let prebuilt: BTreeSet<_> = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("\"${cargo_bin}\" "))
+            .map(|arguments| {
+                let command: Vec<&str> = std::iter::once("cargo")
+                    .chain(arguments.split_whitespace())
+                    .collect();
+                parse_cargo_build_requirement(&command)
+                    .unwrap_or_else(|| panic!("not a cargo build of one binary: {arguments}"))
+            })
+            .collect();
+
+        let missing: Vec<_> = needed.difference(&prebuilt).collect();
+        let stale: Vec<_> = prebuilt.difference(&needed).collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "prebuild_e2e_system_bins is out of step with the system suites' pre-commands; \
+             missing: {missing:?}; stale: {stale:?}"
+        );
+    }
+
+    /// Whether `pid` names a process that is running (not gone, and not a
+    /// zombie awaiting its parent's reap).
+    #[cfg(unix)]
+    fn process_running(pid: u32) -> bool {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        let stat = String::from_utf8_lossy(&output.stdout);
+        let stat = stat.trim();
+        !stat.is_empty() && !stat.starts_with('Z')
+    }
+
+    /// A shell command that backgrounds a long `sleep`, writes its pid
+    /// atomically to `pid_file`, and waits.
+    #[cfg(unix)]
+    fn backgrounding_command(pid_file: &std::path::Path) -> Vec<String> {
+        let tmp = pid_file.with_extension("tmp");
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "sleep 300 & echo $! > '{}' && mv '{}' '{}'; wait",
+                tmp.display(),
+                tmp.display(),
+                pid_file.display()
+            ),
+        ]
+    }
+
+    /// The pid `pid_file` records, once it exists; it must name a running
+    /// process.
+    #[cfg(unix)]
+    fn wait_for_running_descendant(pid_file: &std::path::Path, within: Duration) -> u32 {
+        let deadline = std::time::Instant::now() + within;
+        let pid = loop {
+            if let Ok(text) = std::fs::read_to_string(pid_file) {
+                break text
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or_else(|_| panic!("{} holds a pid: {text:?}", pid_file.display()));
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the command never recorded its descendant"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(
+            process_running(pid),
+            "the descendant {pid} runs before any kill"
+        );
+        pid
+    }
+
+    #[cfg(unix)]
+    fn assert_stops_running(pid: u32, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while process_running(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what}: descendant {pid} is still running"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// A command that outlives its timeout is killed with everything it
+    /// started: repo-cargo's cargo and rustc are its descendants, which
+    /// killing the direct child alone would leave running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_command_leaves_nothing_it_started_running() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let pid_file = temp.path().join("descendant.pid");
+        let command = backgrounding_command(&pid_file);
+        let cwd = temp.path().to_path_buf();
+        let run = tokio::spawn(async move { run_command(&command, &cwd, &[], 5).await });
+        let pid = tokio::task::spawn_blocking({
+            let pid_file = pid_file.clone();
+            move || wait_for_running_descendant(&pid_file, Duration::from_secs(4))
+        })
+        .await
+        .expect("wait for the descendant");
+        let error = run
+            .await
+            .expect("run task")
+            .err()
+            .expect("the command outlives its timeout");
+        assert!(error.contains("timed out"), "{error}");
+        assert_stops_running(pid, "a timed-out command");
+    }
+
+    /// Run by [`an_interrupted_harness_leaves_nothing_it_started_running`],
+    /// which re-executes this test binary for it; it does nothing otherwise.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "helper process for an_interrupted_harness_leaves_nothing_it_started_running"]
+    async fn interrupt_helper_runs_a_command_until_interrupted() {
+        let Some(dir) = std::env::var_os(INTERRUPT_HELPER_DIR) else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let command = backgrounding_command(&dir.join("descendant.pid"));
+        let _ = run_command(&command, &dir, &[], 600).await;
+    }
+
+    #[cfg(unix)]
+    const INTERRUPT_HELPER_DIR: &str = "MEERKAT_E2E_INTERRUPT_HELPER_DIR";
+
+    /// An interrupted harness (Ctrl-C's SIGINT, the SIGTERM a runner
+    /// forwards, a SIGHUP) runs no destructors. The command's group is out of
+    /// reach of the signal sent to the harness, so the interrupt handler kills
+    /// it before the harness exits: nothing the command started keeps running.
+    #[cfg(unix)]
+    #[test]
+    fn an_interrupted_harness_leaves_nothing_it_started_running() {
+        for (signal, code) in [("INT", 130), ("TERM", 143), ("HUP", 129)] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let mut helper =
+                std::process::Command::new(std::env::current_exe().expect("this test binary"))
+                    .args([
+                        "--exact",
+                        "e2e_lanes::tests::interrupt_helper_runs_a_command_until_interrupted",
+                        "--ignored",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(INTERRUPT_HELPER_DIR, temp.path())
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("start the helper harness");
+            let pid = wait_for_running_descendant(
+                &temp.path().join("descendant.pid"),
+                Duration::from_secs(60),
+            );
+            let sent = std::process::Command::new("kill")
+                .args([format!("-{signal}"), helper.id().to_string()])
+                .status()
+                .expect("run kill");
+            assert!(sent.success(), "SIG{signal} delivered to the helper");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let status = loop {
+                if let Some(status) = helper.try_wait().expect("poll the helper") {
+                    break status;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the interrupted helper exits"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            };
+            assert_eq!(status.code(), Some(code), "SIG{signal}: {status:?}");
+            assert_stops_running(pid, &format!("a harness interrupted by SIG{signal}"));
+        }
     }
 
     /// Every artifact the smoke-lane plan can require from bazel-bin must be

@@ -3156,6 +3156,20 @@ pub(crate) struct ForkOffCompletion {
     pub(crate) max_run_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) retirement_error: Option<String>,
+    /// Why a `restart_interrupted` outcome was reached, when the re-link
+    /// knows more than "the turn did not survive".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) restart_reason: Option<RestartInterruptedReason>,
+}
+
+/// Why the restart re-link delivered `restart_interrupted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RestartInterruptedReason {
+    /// The child's turn finished, but its boundary commit never landed
+    /// within the re-link's ceiling (a commit that failed together with its
+    /// discard leaves the turn's input staged).
+    CommitNeverLanded,
 }
 
 #[derive(Serialize)]
@@ -3207,6 +3221,7 @@ impl ForkOffCompletion {
             error: None,
             max_run_secs: None,
             retirement_error: None,
+            restart_reason: None,
         }
     }
 
@@ -3227,6 +3242,7 @@ impl ForkOffCompletion {
             error: None,
             max_run_secs: None,
             retirement_error: None,
+            restart_reason: None,
         };
         match outcome {
             Some(meerkat_mob::ForkChildRunOutcome::Completed(turn)) => {

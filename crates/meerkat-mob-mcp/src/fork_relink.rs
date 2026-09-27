@@ -57,7 +57,9 @@ use meerkat_mob::{
 };
 
 use crate::MobMcpState;
-use crate::agent_tools::{ForkOffCompletion, ForkOffCompletionStatus, TOOL_FORK_OFF};
+use crate::agent_tools::{
+    ForkOffCompletion, ForkOffCompletionStatus, RestartInterruptedReason, TOOL_FORK_OFF,
+};
 use crate::detached_delivery::{DetachedOwnerHost, OwnerRevivalDeferral};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -208,6 +210,25 @@ impl ManagedMobs {
 }
 
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How long a child may stay settled in its member status while its last
+/// turn's input is still staged, unconsumed, on the run (its boundary commit
+/// has not landed) before the re-link stops waiting for that commit.
+///
+/// A boundary commit is one store transaction behind the run; under a loaded
+/// 4-core runner the whole window measured 23-76 ms. Five minutes is orders
+/// of magnitude past any commit that is going to land. It bounds the one
+/// that is not: a commit that failed while its discard failed too, which
+/// leaves the input staged forever. The re-link then delivers
+/// `restart_interrupted` with the typed reason `commit_never_landed` instead
+/// of waiting for good (a job without `max_run` would otherwise never be
+/// delivered). [`relink_child_within`] takes the ceiling explicitly.
+pub const COMMIT_PENDING_CEILING: Duration = Duration::from_secs(300);
+
+/// Upper bound on one read of a child's run inputs. The runtime serializes
+/// those reads behind a boundary commit in progress; a read that has not
+/// answered in this long is behind such a commit, so the commit is pending.
+const RUN_INPUT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Pause before reading a child's status again after a read that did not
 /// observe it (another reader held the mob's status lane).
@@ -454,8 +475,17 @@ async fn relink_mob_fork_children_where(
         let mob_id = mob_id.clone();
         let handle = handle.clone();
         tokio::spawn(async move {
-            let action =
-                relink_owned_child(service, &delivery, &mob_id, &handle, &child, &job, owner).await;
+            let action = relink_owned_child(
+                service,
+                &delivery,
+                &mob_id,
+                &handle,
+                &child,
+                &job,
+                owner,
+                COMMIT_PENDING_CEILING,
+            )
+            .await;
             ForkRelinkReport {
                 mob_id,
                 child,
@@ -542,10 +572,44 @@ pub async fn relink_child(
     child: &AgentIdentity,
     job: &ForkJobRecord,
 ) -> ForkRelinkAction {
-    let owner = JobOwner::resolve(handle, child, &job.owner_session_id).await;
-    relink_owned_child(service, delivery, mob_id, handle, child, job, owner).await
+    relink_child_within(
+        service,
+        delivery,
+        mob_id,
+        handle,
+        child,
+        job,
+        COMMIT_PENDING_CEILING,
+    )
+    .await
 }
 
+/// [`relink_child`] with an explicit bound on how long a finished turn's
+/// boundary commit is waited for (see [`COMMIT_PENDING_CEILING`]).
+pub async fn relink_child_within(
+    service: Arc<dyn meerkat_mob::MobSessionService>,
+    delivery: &RelinkDelivery,
+    mob_id: &MobId,
+    handle: &MobHandle,
+    child: &AgentIdentity,
+    job: &ForkJobRecord,
+    commit_pending_ceiling: Duration,
+) -> ForkRelinkAction {
+    let owner = JobOwner::resolve(handle, child, &job.owner_session_id).await;
+    relink_owned_child(
+        service,
+        delivery,
+        mob_id,
+        handle,
+        child,
+        job,
+        owner,
+        commit_pending_ceiling,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn relink_owned_child(
     service: Arc<dyn meerkat_mob::MobSessionService>,
     delivery: &RelinkDelivery,
@@ -554,6 +618,7 @@ async fn relink_owned_child(
     child: &AgentIdentity,
     job: &ForkJobRecord,
     owner: JobOwner,
+    commit_pending_ceiling: Duration,
 ) -> ForkRelinkAction {
     let runtime = delivery.runtime.as_deref();
     // A job whose completion the forker's runtime already admitted is over.
@@ -590,6 +655,9 @@ async fn relink_owned_child(
     let deadline_ms = job
         .max_run_ms
         .map(|limit| job.started_at_ms.saturating_add(limit));
+    // When the child was first read settled with its boundary commit still
+    // pending; cleared by any other reading.
+    let mut commit_pending_since: Option<tokio::time::Instant> = None;
     loop {
         // A limit already passed decides at once: the child's run is over
         // unless its reply is durable. Racing a status read against a
@@ -601,7 +669,7 @@ async fn relink_owned_child(
             }
             return limit_elapsed(delivery, &owner, mob_id, handle, child, job).await;
         }
-        let observe = observe_child(&service, runtime, handle, child);
+        let observe = observe_child(runtime, handle, child);
         let observed = match remaining_ms {
             None => Some(observe.await),
             Some(remaining_ms) => {
@@ -616,8 +684,37 @@ async fn relink_owned_child(
             // iteration decides it.
             continue;
         };
+        if observed != ChildObservation::CommitPending {
+            commit_pending_since = None;
+        }
         match observed {
             ChildObservation::Running => tokio::time::sleep(WATCH_INTERVAL).await,
+            ChildObservation::CommitPending => {
+                let since = *commit_pending_since.get_or_insert_with(tokio::time::Instant::now);
+                if since.elapsed() >= commit_pending_ceiling {
+                    // A reply that did land wins over the bound.
+                    if let Some(completion) =
+                        durable_reply(&service, mob_id, handle, child, job).await
+                    {
+                        return deliver(delivery, &owner, mob_id, job, completion).await;
+                    }
+                    tracing::warn!(
+                        mob_id = %mob_id,
+                        child = %child,
+                        waited_ms = since.elapsed().as_millis() as u64,
+                        "fork_off re-link: the child's finished turn never committed; \
+                         delivering restart_interrupted"
+                    );
+                    let mut completion = ForkOffCompletion::empty(
+                        child.to_string(),
+                        member_ref(mob_id, child),
+                        ForkOffCompletionStatus::RestartInterrupted,
+                    );
+                    completion.restart_reason = Some(RestartInterruptedReason::CommitNeverLanded);
+                    return deliver(delivery, &owner, mob_id, job, completion).await;
+                }
+                tokio::time::sleep(WATCH_INTERVAL).await;
+            }
             ChildObservation::Settled => {
                 let completion = settled_outcome(&service, mob_id, handle, child, job).await;
                 return deliver(delivery, &owner, mob_id, job, completion).await;
@@ -647,6 +744,11 @@ async fn relink_owned_child(
 enum ChildObservation {
     /// The child has a run open or work in flight.
     Running,
+    /// The child's member status reads settled, but its last turn's input is
+    /// still staged on the run, unconsumed: the turn is terminal in the live
+    /// agent while its boundary commit (which makes its reply durable and
+    /// consumes the input) has not landed. Its outcome is not readable yet.
+    CommitPending,
     /// The child is not running: idle, no longer seated, its runtime no
     /// longer holds it, or its mob's actor is gone (nothing runs it any
     /// more).
@@ -683,33 +785,88 @@ impl ProgressVerdict {
 }
 
 /// Read a fork child's status (see [`observe_child_run`]), where "settled"
-/// also requires its turn to be committed. Member status reads the live
-/// agent, which is terminal before the service commits the turn, while the
-/// outcome is read from the durable transcript: a child whose live
-/// transcript is still ahead of its store has a turn that ended but is not
-/// readable yet, so it is still running here. Its commit landing is what
-/// settles it, never a delay. A failed read says nothing about the child.
+/// also requires its last turn to be committed.
+///
+/// Member status reads the live agent, which is terminal before the service
+/// commits the turn, while the outcome is read from the durable transcript.
+/// The runtime owns the fact in between: the turn's input stays staged (or
+/// applied) on the run until the boundary commit consumes it, which is also
+/// what makes the reply durable. That is a machine phase, not a comparison
+/// of transcripts, so a turn that compacted inside the window reads the same.
+/// A read of it queues behind a commit in progress, so the commit landing,
+/// not a delay, is what settles the child. A failed read says nothing.
 async fn observe_child(
-    service: &Arc<dyn meerkat_mob::MobSessionService>,
     runtime: Option<&meerkat_runtime::MeerkatMachine>,
     handle: &MobHandle,
     child: &AgentIdentity,
 ) -> ChildObservation {
-    match observe_child_run(runtime, handle, child).await {
-        ChildObservation::Settled => {
-            let Some(session_id) = handle.resolve_bridge_session_id(child).await else {
-                return ChildObservation::Settled;
-            };
-            match service.live_transcript_awaits_commit(&session_id).await {
-                Ok(true) => ChildObservation::Running,
-                Ok(false) => ChildObservation::Settled,
-                Err(error) => ChildObservation::Unobserved(format!(
-                    "could not tell whether the child's turn is committed: {error}"
-                )),
-            }
-        }
-        observed => observed,
+    let observed = observe_child_run(runtime, handle, child).await;
+    if observed != ChildObservation::Settled {
+        return observed;
     }
+    // Without a runtime nothing can be delivered on this host either.
+    let Some(runtime) = runtime else {
+        return ChildObservation::Settled;
+    };
+    let Some(session_id) = handle.resolve_bridge_session_id(child).await else {
+        return ChildObservation::Settled;
+    };
+    match tokio::time::timeout(
+        RUN_INPUT_READ_TIMEOUT,
+        run_input_uncommitted(runtime, &session_id),
+    )
+    .await
+    {
+        // Still queued behind a boundary commit in progress.
+        Err(_elapsed) => ChildObservation::CommitPending,
+        Ok(Ok(true)) => ChildObservation::CommitPending,
+        Ok(Ok(false)) => ChildObservation::Settled,
+        Ok(Err(detail)) => {
+            ChildObservation::Unobserved(format!("could not read the child's run inputs: {detail}"))
+        }
+    }
+}
+
+/// Whether the child's runtime holds an input staged or applied on a run
+/// whose boundary has not consumed it. A runtime that no longer holds the
+/// session has nothing pending.
+async fn run_input_uncommitted(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    session_id: &meerkat_core::SessionId,
+) -> Result<bool, String> {
+    use meerkat_runtime::input_state::InputLifecycleState;
+    use meerkat_runtime::{RuntimeDriverError, SessionServiceRuntimeExt as _};
+    let gone = |error: &RuntimeDriverError| {
+        matches!(
+            error,
+            RuntimeDriverError::NotFound { .. }
+                | RuntimeDriverError::Destroyed
+                | RuntimeDriverError::NotReady { .. }
+        )
+    };
+    let inputs = match runtime.list_active_inputs(session_id).await {
+        Ok(inputs) => inputs,
+        Err(error) if gone(&error) => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    for input in inputs {
+        let state = match runtime.input_state(session_id, &input).await {
+            Ok(state) => state,
+            Err(error) if gone(&error) => return Ok(false),
+            Err(error) => return Err(error.to_string()),
+        };
+        if state.is_some_and(|state| {
+            matches!(
+                state.seed.phase,
+                InputLifecycleState::Staged
+                    | InputLifecycleState::Applied
+                    | InputLifecycleState::AppliedPendingConsumption
+            )
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Read a fork child's run state: its member status, and when that leaves

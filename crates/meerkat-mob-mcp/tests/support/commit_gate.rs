@@ -1,9 +1,11 @@
 //! A `RuntimeStore` that can hold one session's durable boundary commit.
 //!
-//! Wraps the fixture's `InMemoryRuntimeStore` and forwards every method. While
-//! armed for a runtime id, `commit_prepared_session_boundary` (the WholeBlob
-//! turn's terminal boundary commit; intra-turn checkpoints do not pass it)
-//! for that runtime stops before the commit, reports it was entered, and
+//! Wraps the fixture's `InMemoryRuntimeStore` and forwards every
+//! `RuntimeStore` method it implements (the trait methods `InMemoryRuntimeStore`
+//! itself leaves at their defaults stay at their defaults here too). While
+//! armed for a runtime id, `commit_prepared_session_boundary` and its fenced
+//! variant (the turn's terminal boundary commit; intra-turn checkpoints do not
+//! pass it) for that runtime stop before the commit, reports it was entered, and
 //! continues when released. That opens, deterministically, the window in which a turn is
 //! terminal in its live agent but its rows have not reached the durable
 //! store: the window a restart re-link must never read an outcome from.
@@ -683,5 +685,101 @@ impl meerkat_runtime::RuntimeStore for CommitGateRuntimeStore {
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         meerkat_runtime::RuntimeStore::delete_ops_lifecycle(&self.inner, runtime_id).await
+    }
+    async fn admit_direct_member_incarnation_high_water(
+        &self,
+        member_session_id: &str,
+        candidate: &meerkat_contracts::wire::supervisor_bridge::BridgeDirectMemberIncarnation,
+    ) -> Result<
+        meerkat_contracts::wire::supervisor_bridge::BridgeDirectMemberIncarnation,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .admit_direct_member_incarnation_high_water(member_session_id, candidate)
+            .await
+    }
+
+    async fn commit_prepared_session_boundary_with_fence(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        request: meerkat_runtime::store::PreparedRuntimeSessionCommit,
+        write_fence: Arc<dyn meerkat_runtime::store::RuntimeStoreWriteFence>,
+    ) -> Result<
+        meerkat_runtime::store::FencedPreparedRuntimeSessionCommitOutcome,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.pause_if_gated(runtime_id).await;
+        self.inner
+            .commit_prepared_session_boundary_with_fence(runtime_id, request, write_fence)
+            .await
+    }
+
+    async fn compare_and_swap_runtime_delivery_authority(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        expected_revision: Option<u64>,
+        replacement: meerkat_runtime::store::RuntimeDeliveryAuthorityRecord,
+        inserted_delivery: Option<meerkat_runtime::store::RuntimeDeliveryStoreRecord>,
+    ) -> Result<
+        meerkat_runtime::store::RuntimeDeliveryAuthorityCasOutcome,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .compare_and_swap_runtime_delivery_authority(
+                runtime_id,
+                expected_revision,
+                replacement,
+                inserted_delivery,
+            )
+            .await
+    }
+
+    async fn list_runtime_delivery_authorities(
+        &self,
+    ) -> Result<
+        Vec<(
+            meerkat_runtime::LogicalRuntimeId,
+            meerkat_runtime::store::RuntimeDeliveryAuthorityRecord,
+        )>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner.list_runtime_delivery_authorities().await
+    }
+
+    async fn list_runtime_delivery_records(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        after_sequence: u64,
+        limit: usize,
+    ) -> Result<
+        Vec<meerkat_runtime::store::RuntimeDeliveryStoreRecord>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .list_runtime_delivery_records(runtime_id, after_sequence, limit)
+            .await
+    }
+
+    async fn load_runtime_delivery_authority(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<
+        Option<meerkat_runtime::store::RuntimeDeliveryAuthorityRecord>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner.load_runtime_delivery_authority(runtime_id).await
+    }
+
+    async fn load_runtime_delivery_record(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        delivery_id: &str,
+    ) -> Result<
+        Option<meerkat_runtime::store::RuntimeDeliveryStoreRecord>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .load_runtime_delivery_record(runtime_id, delivery_id)
+            .await
     }
 }

@@ -41,14 +41,17 @@ them.
   no longer reports `restart_interrupted` for a child that answered. Member
   status reads the live agent, which is terminal before the session service
   commits the turn, while the re-link reads the outcome from the durable
-  transcript. In that window it found no reply. `MobSessionService` gains
-  `live_transcript_awaits_commit` (default `false`; `PersistentSessionService`
-  answers from the session document machine's uncommitted-transcript verdict),
-  and the re-link keeps such a child running until its commit lands. A
-  `MobSessionService` wrapper over a persistent service MUST forward
-  `live_transcript_awaits_commit`. Without the forward it silently answers
-  the default `false` and the race returns. The in-repo RPC and CLI wrappers
-  forward it; out-of-tree wrappers (MobKit's) must add the forward.
+  transcript, and in that window it found no reply. The re-link now also
+  asks the runtime whether the child's last turn input is still staged or
+  applied on its run, unconsumed. That machine phase clears exactly when the
+  boundary commit lands, and a read of it queues behind a commit in
+  progress. Until then the child counts as running, whatever its transcript
+  looks like (a turn that compacted inside the window included). A commit
+  that never lands (it failed together with its discard) no longer keeps
+  the job waiting for good: after `COMMIT_PENDING_CEILING` (5 minutes) the
+  re-link delivers `restart_interrupted` with the typed reason
+  `commit_never_landed`. `fork_relink::relink_child_within` takes the
+  ceiling explicitly.
 
 - Full-fresh BuildBuddy validation no longer runs out of its 50-minute SLO
   on integration-fast. The Native submitter waited for the `//...` prebuild

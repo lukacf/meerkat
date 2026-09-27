@@ -877,8 +877,11 @@ async fn relink_waits_for_a_finished_child_turn_to_commit() {
     gate.open();
     store.entered().await;
     // Terminal in its live agent, reply not durable: many re-link
-    // observations of exactly the state that used to be read as idle.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // observations of exactly the state that used to be read as idle. The
+    // window outlasts the re-link's bounded run-input read, so a read that
+    // timed out behind the held commit must be taken as "commit pending",
+    // never as settled.
+    tokio::time::sleep(Duration::from_secs(8)).await;
     let premature = if completion_records(&fixture, &owner, &job_id).await > 0 {
         Some(completion_record_text(&fixture, &owner, &job_id).await)
     } else {
@@ -961,11 +964,10 @@ async fn relink_settles_a_running_child_whose_turn_fails() {
 }
 
 /// The runtime-backed composition (RPC, REST, keep-alive CLI) with the same
-/// held boundary commit. It races the same way: with the
-/// uncommitted-transcript check disabled this test delivers
-/// `restart_interrupted` inside the window, because the child's member
-/// status reads idle before its service-turn commit lands here too. The
-/// check closes it.
+/// held boundary commit. It races the same way: without the run-input check
+/// this test delivers `restart_interrupted` inside the window, because the
+/// child's member status reads idle before its service-turn commit lands
+/// here too. The check closes it.
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_backed_relink_waits_for_a_finished_child_turn_to_commit() {
     let gate = TurnGate::new();
@@ -1028,7 +1030,8 @@ async fn runtime_backed_relink_waits_for_a_finished_child_turn_to_commit() {
     tokio::time::timeout(Duration::from_secs(30), store.entered())
         .await
         .expect("the runtime-backed turn's boundary commit reaches the held store method");
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Outlasts the re-link's bounded run-input read (see the test above).
+    tokio::time::sleep(Duration::from_secs(8)).await;
     let premature = if completion_records(&fixture, &owner, &job_id).await > 0 {
         Some(completion_record_text(&fixture, &owner, &job_id).await)
     } else {
@@ -1045,6 +1048,95 @@ async fn runtime_backed_relink_waits_for_a_finished_child_turn_to_commit() {
         record.contains(CHILD_REPLY) && !record.contains("restart_interrupted"),
         "the child is delivered its real reply once its turn is committed: {record}"
     );
+    fixture.teardown().await;
+}
+
+/// A finished turn whose boundary commit never lands (here: held for good,
+/// standing in for a commit that failed together with its discard) must not
+/// keep the re-link waiting for ever. Past the ceiling it delivers
+/// `restart_interrupted` with the typed reason `commit_never_landed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_stops_waiting_for_a_commit_that_never_lands() {
+    let gate = TurnGate::new();
+    let turn_gate = Arc::clone(&gate);
+    let store = Arc::new(support::commit_gate::CommitGateRuntimeStore::new());
+    let fixture = CouncilFixture::new_with_runtime_store(
+        move |request| {
+            if support::last_user_text(request).contains(CHILD_TASK) {
+                ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+            } else {
+                ScriptedTurn::Text("noted".to_string())
+            }
+        },
+        store.clone(),
+    );
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let child = AgentIdentity::from("stuck-commit-child");
+    let job_id = "job-stuck-commit".to_string();
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec("stuck-commit-child"),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    drop(run);
+    gate.wait_entered(1).await;
+    let child_session = handle
+        .resolve_bridge_session_id(&child)
+        .await
+        .expect("child session");
+    store.arm(meerkat_runtime::LogicalRuntimeId::for_session(
+        &child_session,
+    ));
+    gate.open();
+    store.entered().await;
+
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    let ceiling = Duration::from_secs(2);
+    let started = tokio::time::Instant::now();
+    let action = meerkat_mob_mcp::fork_relink::relink_child_within(
+        fixture.state.session_service(),
+        &relink_delivery(&fixture),
+        &fixture.source_mob_id(),
+        &handle,
+        &child,
+        &job,
+        ceiling,
+    )
+    .await;
+    assert_eq!(action, ForkRelinkAction::Delivered);
+    assert!(
+        started.elapsed() >= ceiling,
+        "the re-link waited out the ceiling first"
+    );
+    await_completion_record(&fixture, &owner, &job_id).await;
+    let record = completion_record_text(&fixture, &owner, &job_id).await;
+    assert!(
+        record.contains("restart_interrupted") && record.contains("commit_never_landed"),
+        "a commit that never lands settles as restart_interrupted, typed: {record}"
+    );
+    store.release();
     fixture.teardown().await;
 }
 

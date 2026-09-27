@@ -10921,17 +10921,6 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
-    async fn live_transcript_awaits_commit(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<bool, meerkat_core::service::SessionError> {
-        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::live_transcript_awaits_commit(
-            &self.inner,
-            session_id,
-        )
-        .await
-    }
-
     async fn tool_scope_snapshot(
         &self,
         session_id: &SessionId,
@@ -14391,17 +14380,6 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
     ) -> Result<Option<meerkat_core::AgentExecutionSnapshot>, meerkat_core::service::SessionError>
     {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::execution_snapshot(
-            &self.inner,
-            session_id,
-        )
-        .await
-    }
-
-    async fn live_transcript_awaits_commit(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<bool, meerkat_core::service::SessionError> {
-        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::live_transcript_awaits_commit(
             &self.inner,
             session_id,
         )

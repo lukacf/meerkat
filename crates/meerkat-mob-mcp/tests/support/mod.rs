@@ -546,11 +546,18 @@ impl CouncilFixture {
     /// every fork taken from it.
     pub async fn seed_source_mob_with_description(&self, members: &[&str], description: &str) {
         let mob_id = self.source_mob_id();
+        self.seed_source_mob_from(
+            council_definition_with_description(mob_id.as_str(), description),
+            members,
+        )
+        .await;
+    }
+
+    /// [`Self::seed_source_mob`] from an explicit definition.
+    pub async fn seed_source_mob_from(&self, definition: MobDefinition, members: &[&str]) {
+        let mob_id = self.source_mob_id();
         self.state
-            .mob_create_definition(council_definition_with_description(
-                mob_id.as_str(),
-                description,
-            ))
+            .mob_create_definition(definition)
             .await
             .expect("create source mob");
         for member in members {

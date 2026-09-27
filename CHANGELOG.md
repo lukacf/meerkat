@@ -37,6 +37,12 @@ them.
 
 ### Breaking
 
+- `meerkat_mob::ForkJobRecord` gains the public field
+  `turn_delivery: Option<meerkat_mob::store::MobDeliveryIdentity>`. Struct
+  literals must supply it (`None` keeps the transcript read). It is
+  serde-defaulted and omitted when absent, so job records written by earlier
+  releases read back unchanged.
+
 - `meerkat_contracts::MobMemberStatusResult` gains the public field
   `preview_unavailable: Option<WireMemberPreviewUnavailable>`; struct
   literals must supply it. It is serde-defaulted and omitted when absent, so
@@ -425,6 +431,41 @@ them.
   of retrying every 100 ms.
 
 ### Fixed
+
+- A fork_off child whose transcript was compacted during its job is
+  delivered its real reply when a restarted host re-links it, not
+  `restart_interrupted`. The re-link located the child's reply at the fork
+  prefix length recorded in its `ForkJobRecord`, and compaction rewrites the
+  transcript that index points into. On a runtime-backed host the job turn is
+  now admitted under a stable delivery identity recorded in the job record
+  (`ForkJobRecord::turn_delivery`), and the re-link settles such a job from
+  the runtime's terminal receipt for that input alone, through
+  `MobHandle::wait_bounded_work_for_identity_with_delivery_identity`:
+  - a completed turn delivers `completed` with the turn's `usage`, `turns`
+    and `tool_calls`, as the live custodian reports them;
+  - the turn's own failure (abandoned with an error, extraction failed,
+    completed without a result or with a finalization failure, a pending
+    callback, stage attempts exhausted) delivers `failed` with the typed
+    error and retires the child, as the live custodian does;
+  - an end imposed from outside (runtime stopped or destroyed, cancelled,
+    retired or reset), an input no run answered, or an input never admitted
+    delivers `restart_interrupted` and leaves the child seated;
+  - an input still owed a terminal is watched, not settled from member
+    status. After a restart the runtime requeues it and the child can read
+    idle before the recovered run opens; before, the re-link delivered
+    `restart_interrupted` there and dropped the later real reply. The watch
+    is bounded by the commit ceiling only while the child is not seen
+    running. At the ceiling the receipt is read once more, waiting on the
+    runtime, and only a read that is evidence delivers
+    `restart_interrupted`: a read that timed out behind the turn's own
+    commit, or failed, keeps the watch going, for at most three such reads
+    in a row. `meerkat_mob::DeliveryNotTerminalCause` gains
+    `EvidenceReadTimedOut` (the enum is `#[non_exhaustive]`): the delivery
+    waiter reports it when its final evidence read ran out and the pending
+    facts are from the read before, so they say nothing about the input now.
+    Before, that stale reading was reported as `DeadlineElapsed`.
+  Records without the field (earlier releases, or hosts without a runtime)
+  keep the transcript read.
 
 - `mob_check_member` on an idle fork child no longer fails with
   `observation_lane_saturated` while anything else reads a member's status.

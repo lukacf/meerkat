@@ -36,6 +36,13 @@ use meerkat_mob_mcp::MobMcpState;
 
 /// What the scripted client should do for one turn.
 pub enum ScriptedTurn {
+    /// Request one call of tool `name` with `args`: the turn continues with
+    /// the tool's result and a further provider call.
+    ToolCall {
+        id: String,
+        name: String,
+        args: serde_json::Value,
+    },
     /// Emit this exact assistant text.
     Text(String),
     /// Fail the provider call, so the member turn fails terminally.
@@ -154,6 +161,26 @@ impl LlmClient for ScriptedCouncilClient {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let events = match (self.script)(request) {
+            ScriptedTurn::ToolCall { id, name, args } => vec![
+                LlmEvent::ToolCallComplete {
+                    id,
+                    name,
+                    args,
+                    meta: None,
+                },
+                LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                },
+                LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::ToolUse,
+                    },
+                },
+            ],
             ScriptedTurn::Text(text) => vec![
                 LlmEvent::TextDelta {
                     delta: text,

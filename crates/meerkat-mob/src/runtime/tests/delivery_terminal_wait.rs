@@ -53,9 +53,13 @@ async fn admitted_pending(fixture: &Fixture, delivery: &MobDeliveryIdentity) -> 
             )
             .await;
             match report.work() {
+                // Pending at the final read, or at the last read before a
+                // final read that ran out: admitted and owed a terminal.
                 DeliveryTerminalWait::NotTerminal {
                     input_id,
-                    cause: DeliveryNotTerminalCause::DeadlineElapsed,
+                    cause:
+                        DeliveryNotTerminalCause::DeadlineElapsed
+                        | DeliveryNotTerminalCause::EvidenceReadTimedOut,
                     terminal: None,
                     ..
                 } => break input_id.clone(),
@@ -343,7 +347,8 @@ async fn elapsed_wait_reports_not_terminal_and_a_later_wait_returns_the_terminal
         input_id,
         terminal: None,
         attempt_count,
-        cause: DeliveryNotTerminalCause::DeadlineElapsed,
+        cause:
+            DeliveryNotTerminalCause::DeadlineElapsed | DeliveryNotTerminalCause::EvidenceReadTimedOut,
         ..
     } = report.work()
     else {

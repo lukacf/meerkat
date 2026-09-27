@@ -3227,7 +3227,7 @@ pub(crate) enum RestartInterruptedReason {
     CommitNeverLanded,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ForkOffCompletionStatus {
     /// The turn completed; the child stays seated for further work.
@@ -3244,6 +3244,13 @@ pub(crate) enum ForkOffCompletionStatus {
 }
 
 impl ForkOffCompletionStatus {
+    /// Whether delivering this outcome retires the child: a job that ended
+    /// by its limit, or whose own turn failed. The child of any other outcome
+    /// stays seated for its forker.
+    pub(crate) fn retires_child(&self) -> bool {
+        matches!(self, Self::MaxRunElapsed | Self::Failed)
+    }
+
     /// The typed status of the forker's completion record. One mapping for
     /// the live custodian and the restart re-link: an opt-in max_run
     /// autokill is `Terminated`, every other outcome that is not a
@@ -3280,6 +3287,17 @@ impl ForkOffCompletion {
         }
     }
 
+    /// Record the child's completed turn. One mapping for the live custodian
+    /// and the restart re-link, which reads the same result from the
+    /// runtime's terminal receipt.
+    pub(crate) fn record_completed_turn(&mut self, turn: &meerkat_mob::BoundedTurnResult) {
+        self.status = ForkOffCompletionStatus::Completed;
+        self.bounded_result = Some(turn.result().to_wire());
+        self.usage = Some(turn.usage().clone());
+        self.turns = Some(turn.turns());
+        self.tool_calls = Some(turn.tool_calls());
+    }
+
     /// Returns the completion and whether it reports a failure.
     fn from_outcome(
         agent_identity: String,
@@ -3301,11 +3319,7 @@ impl ForkOffCompletion {
         };
         match outcome {
             Some(meerkat_mob::ForkChildRunOutcome::Completed(turn)) => {
-                completion.status = ForkOffCompletionStatus::Completed;
-                completion.bounded_result = Some(turn.result().result().to_wire());
-                completion.usage = Some(turn.result().usage().clone());
-                completion.turns = Some(turn.result().turns());
-                completion.tool_calls = Some(turn.result().tool_calls());
+                completion.record_completed_turn(turn.result());
             }
             Some(meerkat_mob::ForkChildRunOutcome::Failed(error)) => {
                 completion.status = ForkOffCompletionStatus::Failed;

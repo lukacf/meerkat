@@ -1074,6 +1074,16 @@ impl EphemeralRuntimeDriver {
         Ok(false)
     }
 
+    /// Drop `input_id`'s generated phase while keeping its ledger row: the
+    /// incomplete phase authority a reader must refuse to answer from.
+    #[cfg(test)]
+    pub(crate) fn forget_input_phase_for_test(&self, input_id: &InputId) {
+        let mut authority = self.dsl.lock();
+        let mut state = authority.state().clone();
+        state.input_phases.remove(&input_id.to_string());
+        *authority = recover_ingress_dsl_authority(state);
+    }
+
     fn input_is_non_terminal_by_authority(&self, input_id: &InputId) -> bool {
         match self.input_is_terminal_by_authority(input_id) {
             Ok(terminal) => !terminal,

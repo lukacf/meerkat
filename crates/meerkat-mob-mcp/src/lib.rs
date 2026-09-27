@@ -4924,6 +4924,14 @@ impl SessionServiceHistoryExt for LocalSessionService {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobSessionService for LocalSessionService {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::MemberStatusSessionView, SessionError> {
+        // In-memory sessions: `read` is the published live state.
+        meerkat_mob::observe_member_status_view_via_read(self, session_id).await
+    }
+
     async fn publish_boundary_appends_discarded_for_actor(
         &self,
         actor_witness: &meerkat_session::LiveSessionActorWitness,
@@ -8175,6 +8183,13 @@ mod tests {
 
     #[async_trait]
     impl MobSessionService for MockSessionSvc {
+        async fn observe_member_status_view(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<meerkat_mob::MemberStatusSessionView, SessionError> {
+            meerkat_mob::observe_member_status_view_via_read(self, session_id).await
+        }
+
         async fn fork_persisted_session_at_turn_boundary(
             &self,
             _source_session_id: &meerkat_core::SessionId,

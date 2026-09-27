@@ -592,8 +592,9 @@ declares `DetachedCompletionDelivery::Available` and has a runtime adapter
 (the default for hosts built with one: the JSON-RPC, REST and MCP servers,
 MobKit; also `rkat run --keep-alive` and `rkat mob deploy --surface rpc`). It
 returns once the child is seated and its turn admitted: `status: "running"`,
-`agent_identity`, `member_ref`, `fork_session_id`, `cache_inheritance`, a
-`job_id`, and a `note`. When the child's turn ends, its outcome is recorded
+`agent_identity`, `member_ref`, `fork_session_id`, a `job_id`, and a `note`
+(no `cache_inheritance`: that host-side accounting stays on
+`ForkMemberResult`). When the child's turn ends, its outcome is recorded
 once in the forker's transcript as a durable `BackgroundJob` system notice
 (header "Background fork_off job <id> finished (<status>):" with status
 `completed`, `terminated` for an autokill, or `failed`; the outcome JSON is the
@@ -632,8 +633,13 @@ The forker owns its child, and transitively every member that child forks
 (`RosterEntry::spawned_by`, kept across resume, respawn and successor-spec
 respawn) checked against the caller's own session binding, never against
 arguments. Without manage scope the forker can still observe its descendants
-with `mob_check_member`, retire them with `mob_retire_member`, and see them,
-and only them, in `mob_list_members`; the member operator tools
+with `mob_check_member` (a status read never waits on the member's turn; when
+it could not observe the member's session it still answers, with a typed
+`preview_unavailable` of `observation_deadline`, `read_failed`,
+`session_absent` or `not_observed_while_retiring`, meaning `output_preview`
+and `tokens_used` are missing rather than empty, and a `note` that says
+whether checking again helps), retire them with `mob_retire_member`, and see
+them, and only them, in `mob_list_members`; the member operator tools
 `member_status`, `retire_member`, `force_cancel_member`, and `list_members`
 apply the same rule. Retirement cascades to descendants, deepest first, in
 the core retire (`MobHandle::retire`; `retire_with_descendants` is an alias):

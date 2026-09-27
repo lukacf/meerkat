@@ -10921,6 +10921,17 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::MemberStatusSessionView, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::observe_member_status_view(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn tool_scope_snapshot(
         &self,
         session_id: &SessionId,
@@ -14382,6 +14393,17 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
     ) -> Result<Option<meerkat_core::AgentExecutionSnapshot>, meerkat_core::service::SessionError>
     {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::execution_snapshot(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::MemberStatusSessionView, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::observe_member_status_view(
             &self.inner,
             session_id,
         )
@@ -22340,6 +22362,13 @@ default_model = "gemma"
     #[cfg(feature = "mob")]
     #[async_trait]
     impl meerkat_mob::MobSessionService for TestMobSessionService {
+        async fn observe_member_status_view(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<meerkat_mob::MemberStatusSessionView, SessionError> {
+            meerkat_mob::observe_member_status_view_via_read(self, session_id).await
+        }
+
         async fn fork_persisted_session_at_turn_boundary(
             &self,
             _source_session_id: &meerkat_core::SessionId,

@@ -10,7 +10,7 @@
 //   3. one turn runs end to end in Node through the packed JS and wasm, with
 //      `fetch` stubbed to an Anthropic SSE stream (as browser_contract.rs does);
 //   4. that turn's shadow-stack high-water, measured by painting the idle stack
-//      (scripts/wasm-stack-highwater.mjs), stays within its 2 MiB budget. The
+//      (scripts/wasm-stack-highwater.mjs), stays within its 512 KiB budget. The
 //      measurement is logged on every run.
 //
 // Usage:

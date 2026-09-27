@@ -35,6 +35,23 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- The `@rkat/web` wasm runtime is built at opt-level `"s"` instead of `0`
+  (`sdks/web/scripts/build-wasm.mjs`, still overridable through
+  `CARGO_PROFILE_RELEASE_OPT_LEVEL`). Measured one build at a time on the
+  same tree, `"s"` was best or tied on every axis against 0, 1 and 2:
+  - a turn's wasm shadow-stack high-water is 133 KB instead of 1.46 MB (at
+    0 LLVM colours no stack slots, so every awaited future kept its own slot
+    in its parent's poll frame);
+  - the wasm is 32.3 MB (10.1 MB gzip) instead of 43.1 MB (12.7 MB);
+  - the build is the shortest of the four, since wasm-opt's time follows its
+    input's size.
+  The packed-package smoke's turn stack budget drops from 2 MiB to 512 KiB
+  (about four times the measured high-water) so it still catches growth.
+  Opt-level 0 dated from when the generated machine catalog made rustc's
+  optimizer run out of memory, since fixed by chunking the catalog.
+
 ## [0.8.45] - 2026-09-27
 
 ### Breaking

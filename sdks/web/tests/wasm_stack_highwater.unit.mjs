@@ -45,6 +45,6 @@ test("a turn over its budget is refused, at or under it passes", () => {
   assert.equal(assertStackWithinBudget(TURN_STACK_BUDGET_BYTES), TURN_STACK_BUDGET_BYTES);
   assert.throws(
     () => assertStackWithinBudget(TURN_STACK_BUDGET_BYTES + 1),
-    /over its 2097152-byte budget/,
+    /over its 524288-byte budget/,
   );
 });

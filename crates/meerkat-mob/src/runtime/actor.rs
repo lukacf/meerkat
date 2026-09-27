@@ -18227,6 +18227,9 @@ impl MobActor {
             .filter(|entry| {
                 !broken_members.contains(&entry.agent_identity)
                     && !placed_members.contains(&entry.agent_identity)
+                    && !lifecycle.runtime_retire_pending_sessions.contains_key(
+                        &mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                    )
             })
             .map(|entry| MemberReadinessTarget {
                 entry: entry.clone(),

@@ -16697,7 +16697,17 @@ async fn assert_stopped_cold_restart_accepts_first_cleanup(destroy: bool) {
         .resolve_bridge_session_id(&identity)
         .await
         .expect("local worker session");
-    handle.shutdown().await.expect("persist stopped lifecycle");
+    handle.stop().await.expect("persist stopped lifecycle");
+    handle.shutdown().await.expect("close stopped actor");
+    assert!(
+        events
+            .replay_all()
+            .await
+            .expect("replay durable stopped lifecycle")
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobStopped)),
+        "the fixture must contain a durable Stop before cold recovery"
+    );
     assert!(
         events
             .replay_all()
@@ -64650,9 +64660,22 @@ async fn assert_retire_consumer_refusal_survives_cold_restart(crash_restart: boo
         MobState::Running
     } else {
         handle
+            .stop()
+            .await
+            .expect("persist stopped lifecycle before cold restart");
+        handle
             .shutdown()
             .await
             .expect("shutdown refused actor before cold restart");
+        assert!(
+            events
+                .replay_all()
+                .await
+                .expect("replay stopped retirement lifecycle")
+                .iter()
+                .any(|event| matches!(event.kind, MobEventKind::MobStopped)),
+            "stopped retry coverage requires a durable Stop journal"
+        );
         MobState::Stopped
     };
 

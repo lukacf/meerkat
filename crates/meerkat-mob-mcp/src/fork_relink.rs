@@ -251,6 +251,11 @@ pub const COMMIT_PENDING_CEILING: Duration = Duration::from_secs(300);
 /// with a commit or with other work), not evidence of a pending commit.
 const RUN_INPUT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Upper bound on one read of a child's member status in the receipt watch
+/// (it reads the mob actor, and may read the runtime); a read that does not
+/// answer in this long is inconclusive.
+const STATUS_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How long one wait on a job turn's receipt lasts before the re-link looks
 /// at the child's status again (the wait returns as soon as the receipt
 /// exists).
@@ -650,9 +655,12 @@ async fn relink_owned_child(
     // A job whose completion the forker's runtime already admitted is over.
     // The child stays seated for further work that is no longer this job's,
     // so neither the job's limit nor another delivery applies to it. A job
-    // that ended by its limit is the exception: its child is retired, which
-    // a crash or failure after delivery can have left undone (retiring is
-    // idempotent).
+    // whose delivered outcome retires its child (it ended by its limit, or
+    // its own turn failed) is the exception: the child is retired, which a
+    // crash or failure after delivery can have left undone (retiring is
+    // idempotent). The delivered outcome is read typed from the committed
+    // record: `restart_interrupted` shares the record's `failed` notice
+    // status and must stay seated.
     if let Some(runtime) = runtime
         && crate::detached_delivery::detached_completion_admitted(
             runtime,
@@ -662,15 +670,16 @@ async fn relink_owned_child(
         )
         .await
     {
-        if committed_completion_status(&service, &job.owner_session_id, &job.job_id).await
-            == Some(meerkat_core::event::BackgroundJobTerminalStatus::Terminated)
+        if let Some(committed) =
+            committed_completion(&service, &job.owner_session_id, &job.job_id).await
+            && committed.retires_child()
             && let Err(error) = handle.retire_with_descendants(child.clone()).await
         {
             tracing::warn!(
                 mob_id = %mob_id,
                 child = %child,
                 error = %error,
-                "fork_off re-link could not retire a child whose job ended by its limit"
+                "fork_off re-link could not retire a child whose delivered outcome retires it"
             );
         }
         return ForkRelinkAction::AlreadyDelivered;
@@ -749,7 +758,18 @@ async fn relink_owned_child(
                 tokio::time::sleep(UNOBSERVED_RETRY_INTERVAL).await;
                 continue;
             }
-            ChildObservation::CommitPending(evidence) => (Some(evidence), None),
+            ChildObservation::CommitPending(evidence) => {
+                // Degraded durability does not say the turn's own commit
+                // failed: a reply that is durable is delivered now, not
+                // held back to the ceiling.
+                if evidence == CommitEvidence::DurabilityDegraded
+                    && let Some(completion) =
+                        durable_reply(&service, mob_id, handle, child, job).await
+                {
+                    return deliver(delivery, &owner, mob_id, job, completion).await;
+                }
+                (Some(evidence), None)
+            }
             ChildObservation::CommitUnconfirmed(detail) => (None, Some(detail)),
         };
         let CommitWatchStep::Ceiling { reason } =
@@ -787,9 +807,11 @@ enum CommitEvidence {
     /// A run input is still `Staged`, `Applied` or
     /// `AppliedPendingConsumption`: the run's boundary has not consumed it.
     InputAwaitsBoundary,
-    /// The child's runtime reports degraded durability: a boundary commit
-    /// failed after the run consumed its inputs in memory, so the durable
-    /// history lacks the turn.
+    /// The child's runtime reports durability degraded: a durable write
+    /// failed after the runtime changed its live state (a boundary commit
+    /// that failed after the run consumed its inputs, or another operation's
+    /// durable write), so the durable history may lag the live state. The
+    /// turn's reply may still be durable, so the re-link checks for it.
     DurabilityDegraded,
 }
 
@@ -1185,13 +1207,45 @@ async fn relink_by_receipt(
         if limit_passed {
             return limit_elapsed(delivery, owner, mob_id, handle, child, job).await;
         }
-        let status = observe_child_run(runtime, handle, child).await;
+        // The status read is bounded, and never outlasts the limit: a read
+        // that does not answer in time is inconclusive, and the deadline is
+        // evaluated again before anything else.
+        let status_bound = deadline_ms.map_or(STATUS_READ_TIMEOUT, |deadline| {
+            STATUS_READ_TIMEOUT.min(Duration::from_millis(deadline.saturating_sub(now_ms())))
+        });
+        let status =
+            match tokio::time::timeout(status_bound, observe_child_run(runtime, handle, child))
+                .await
+            {
+                Ok(status) => status,
+                Err(_elapsed) => ChildObservation::Unobserved(format!(
+                    "the child's status read did not answer within {status_bound:?}"
+                )),
+            };
+        if deadline_ms.is_some_and(|deadline| now_ms() >= deadline) {
+            continue;
+        }
         if let CommitWatchStep::Ceiling { reason } = in_flight_step(
             phase,
             &status,
             &mut stall_watch,
             meerkat_core::time_compat::Instant::now(),
         ) {
+            // A receipt that landed while the status was read wins over the
+            // bound: one last read of the exact receipt, bounded by the
+            // waiter's evidence-read floor.
+            if let Ok(report) = handle
+                .wait_bounded_work_for_identity_with_delivery_identity(
+                    child,
+                    turn_delivery,
+                    &spec,
+                    meerkat_core::time_compat::Instant::now(),
+                )
+                .await
+                && let meerkat_mob::DeliveryTerminalWait::Terminal(record) = report.into_parts().1
+            {
+                return deliver_receipt(delivery, owner, mob_id, handle, child, job, *record).await;
+            }
             tracing::warn!(
                 mob_id = %mob_id,
                 child = %child,
@@ -1434,13 +1488,41 @@ fn member_ref(mob_id: &MobId, child: &AgentIdentity) -> meerkat_contracts::WireM
     meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), child.as_str())
 }
 
-/// The typed status of job `job_id`'s completion record in the owner's
-/// durable transcript, once the record is committed there.
-async fn committed_completion_status(
+/// Job `job_id`'s completion record, once committed in the owner's durable
+/// transcript: its typed notice status and the outcome it delivered.
+struct CommittedCompletion {
+    status: meerkat_core::event::BackgroundJobTerminalStatus,
+    /// The delivered outcome's typed `status`, read from the record's detail
+    /// (the completion's own serialization). `None` when the detail does not
+    /// carry one.
+    outcome: Option<ForkOffCompletionStatus>,
+}
+
+impl CommittedCompletion {
+    /// Whether the delivered outcome retires the child. A record whose detail
+    /// carries no typed outcome falls back to its notice status, where only
+    /// `terminated` (a limit autokill) is unambiguous.
+    fn retires_child(&self) -> bool {
+        match &self.outcome {
+            Some(outcome) => outcome.retires_child(),
+            None => self.status == meerkat_core::event::BackgroundJobTerminalStatus::Terminated,
+        }
+    }
+}
+
+/// The delivered outcome carried in a completion record's detail.
+#[derive(serde::Deserialize)]
+struct CommittedOutcome {
+    status: ForkOffCompletionStatus,
+}
+
+/// Job `job_id`'s completion record in the owner's durable transcript, once
+/// the record is committed there.
+async fn committed_completion(
     service: &Arc<dyn meerkat_mob::MobSessionService>,
     owner_session_id: &meerkat_core::SessionId,
     job_id: &str,
-) -> Option<meerkat_core::event::BackgroundJobTerminalStatus> {
+) -> Option<CommittedCompletion> {
     let session = service
         .load_persisted_session(owner_session_id)
         .await
@@ -1455,9 +1537,16 @@ async fn committed_completion_status(
                 job_id: recorded,
                 display_name: Some(tool),
                 status,
+                detail,
                 persisted: true,
                 ..
-            } if recorded == job_id && tool == TOOL_FORK_OFF => Some(*status),
+            } if recorded == job_id && tool == TOOL_FORK_OFF => Some(CommittedCompletion {
+                status: *status,
+                outcome: detail
+                    .as_deref()
+                    .and_then(|detail| serde_json::from_str::<CommittedOutcome>(detail).ok())
+                    .map(|committed| committed.status),
+            }),
             _ => None,
         })
     })

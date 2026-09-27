@@ -3174,7 +3174,7 @@ pub(crate) enum RestartInterruptedReason {
     CommitNeverLanded,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ForkOffCompletionStatus {
     /// The turn completed; the child stays seated for further work.
@@ -3191,6 +3191,13 @@ pub(crate) enum ForkOffCompletionStatus {
 }
 
 impl ForkOffCompletionStatus {
+    /// Whether delivering this outcome retires the child: a job that ended
+    /// by its limit, or whose own turn failed. The child of any other outcome
+    /// stays seated for its forker.
+    pub(crate) fn retires_child(&self) -> bool {
+        matches!(self, Self::MaxRunElapsed | Self::Failed)
+    }
+
     /// The typed status of the forker's completion record. One mapping for
     /// the live custodian and the restart re-link: an opt-in max_run
     /// autokill is `Terminated`, every other outcome that is not a

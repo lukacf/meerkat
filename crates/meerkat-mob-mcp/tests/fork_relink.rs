@@ -1645,20 +1645,13 @@ async fn a_failed_boundary_commit_makes_the_run_input_read_an_error() {
     gate.open();
     store.failed().await;
 
-    let degraded = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            match runtime
-                .session_has_uncommitted_run_input(&child_session)
-                .await
-            {
-                Err(error) => break error,
-                // The failed commit is still unwinding.
-                Ok(_) => tokio::time::sleep(Duration::from_millis(20)).await,
-            }
-        }
-    })
-    .await
-    .expect("the runtime refuses to answer from degraded durability");
+    // The failure is marked under the driver lock the commit holds, so the
+    // very first read after it already refuses to answer: never a transient
+    // Ok(false) from the consumed-in-memory state.
+    let degraded = runtime
+        .session_has_uncommitted_run_input(&child_session)
+        .await
+        .expect_err("the runtime refuses to answer from degraded durability");
     assert!(
         matches!(
             degraded,
@@ -1678,6 +1671,273 @@ async fn a_failed_boundary_commit_makes_the_run_input_read_an_error() {
     // No teardown: destroying a mob whose member session has degraded
     // durability waits on that session's durable reload, which nothing here
     // performs. The test process ends with the test.
+}
+
+/// A receipt that lands while the ceiling-deciding status read is held is
+/// the job's outcome: before delivering `restart_interrupted` at the ceiling
+/// the re-link reads the exact receipt once more. (Review P1: without that
+/// read, the stale phase decided, and the completion dedupe then suppressed
+/// the real reply for good.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_receipt_that_lands_during_the_ceiling_status_read_is_delivered() {
+    let gate = TurnGate::new();
+    let fixture = held_child_fixture(&gate);
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-receipt-at-ceiling";
+    let (child, child_session) = fork_held_child(
+        &fixture,
+        &handle,
+        &gate,
+        "receipt-at-ceiling-child",
+        job_id,
+        &owner,
+    )
+    .await;
+    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
+        .expect("the service derives its runtime");
+    let (commit_entered, release_commit) =
+        runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
+    gate.open();
+    commit_entered
+        .await
+        .expect("the finished turn reaches its commit");
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    let turn_delivery = job.turn_delivery.clone().expect("receipt-anchored job");
+
+    // A zero ceiling: the first idle reading decides.
+    let (status_entered, release_status) =
+        meerkat_mob::MobHandle::arm_member_status_read_test_gate(child.clone());
+    let relink = tokio::spawn({
+        let service = fixture.state.session_service();
+        let delivery = relink_delivery(&fixture);
+        let mob_id = fixture.source_mob_id();
+        let handle = handle.clone();
+        let child = child.clone();
+        async move {
+            meerkat_mob_mcp::fork_relink::relink_child_within(
+                service,
+                &delivery,
+                &mob_id,
+                &handle,
+                &child,
+                &job,
+                Duration::ZERO,
+            )
+            .await
+        }
+    });
+    // The receipt wait found the input still owed; the status read that
+    // decides the ceiling is held here while the commit lands.
+    status_entered
+        .await
+        .expect("the re-link reads the child's status");
+    let _ = release_commit.send(());
+    let spec = meerkat_mob::BoundedResultSpec::new("fork_off_result", 16 * 1024).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let report = handle
+            .wait_bounded_work_for_identity_with_delivery_identity(
+                &child,
+                &turn_delivery,
+                &spec,
+                meerkat_core::time_compat::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("receipt read");
+        if matches!(
+            report.work(),
+            meerkat_mob::DeliveryTerminalWait::Terminal(_)
+        ) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the released commit publishes the receipt"
+        );
+    }
+    let _ = release_status.send(());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(30), relink)
+            .await
+            .expect("the re-link decides at the ceiling")
+            .unwrap(),
+        ForkRelinkAction::Delivered
+    );
+    await_completion_record(&fixture, &owner, job_id).await;
+    let outcome = completion_record_outcome(&fixture, &owner, job_id).await;
+    assert_eq!(outcome["status"], "completed", "{outcome}");
+    assert_eq!(outcome["bounded_result"]["text"], CHILD_REPLY, "{outcome}");
+    fixture.teardown().await;
+}
+
+/// A status read held past an active `max_run` does not hold the limit
+/// back: the read is bounded by the deadline, and the re-link cancels,
+/// delivers `max_run_elapsed` and retires the child at the deadline while the
+/// read is still held. (Review P2b.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_status_read_held_past_max_run_still_retires_the_child_at_the_deadline() {
+    let gate = TurnGate::new();
+    let fixture = held_child_fixture(&gate);
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-status-held-past-limit";
+    // The turn stays running: its gate is never opened.
+    let (child, _child_session) = fork_held_child(
+        &fixture,
+        &handle,
+        &gate,
+        "status-held-past-limit-child",
+        job_id,
+        &owner,
+    )
+    .await;
+    let mut job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    assert!(job.turn_delivery.is_some());
+    job.max_run_ms = Some(now_ms().saturating_sub(job.started_at_ms) + 2_500);
+    let deadline_ms = job.started_at_ms + job.max_run_ms.unwrap();
+
+    let (status_entered, release_status) =
+        meerkat_mob::MobHandle::arm_member_status_read_test_gate(child.clone());
+    let action = tokio::time::timeout(
+        Duration::from_secs(20),
+        meerkat_mob_mcp::fork_relink::relink_child(
+            fixture.state.session_service(),
+            &relink_delivery(&fixture),
+            &fixture.source_mob_id(),
+            &handle,
+            &child,
+            &job,
+        ),
+    )
+    .await
+    .expect("the limit decides although the status read is held");
+    assert_eq!(action, ForkRelinkAction::Delivered);
+    assert!(
+        now_ms() >= deadline_ms,
+        "decided at the deadline, not before"
+    );
+    status_entered
+        .await
+        .expect("the re-link's status read was held");
+    await_completion_record(&fixture, &owner, job_id).await;
+    let outcome = completion_record_outcome(&fixture, &owner, job_id).await;
+    assert_eq!(outcome["status"], "max_run_elapsed", "{outcome}");
+    assert!(
+        handle.get_member(&child).await.unwrap().is_none(),
+        "retired"
+    );
+    drop(release_status);
+    gate.open();
+    fixture.teardown().await;
+}
+
+/// A job whose delivered outcome retires its child (its own turn failed) but
+/// whose child was left seated (a crash between delivery and retirement) has
+/// the child retired by the next pass. A delivered `restart_interrupted`
+/// shares the record's `failed` notice status, and its child stays seated.
+/// (Review P2a.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delivered_failure_retires_its_seated_child_but_restart_interrupted_stays_seated() {
+    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let runtime = relink_runtime(&fixture).expect("runtime-backed fixture");
+    for (name, delivered_status, retired) in [
+        ("failed-kept-child", "failed", true),
+        ("interrupted-kept-child", "restart_interrupted", false),
+    ] {
+        let child = AgentIdentity::from(name);
+        let job_id = format!("job-{name}");
+        let (_fork, run) = handle
+            .fork_member_then_run_detached(
+                &AgentIdentity::from("forker"),
+                child_spec(name),
+                None,
+                "fork_off_result",
+                16 * 1024,
+                meerkat_core::DurableForkSourceAdmission::Quiescent,
+                None,
+                Some(ForkJobBinding {
+                    job_id: job_id.clone(),
+                    owner_session_id: owner.clone(),
+                }),
+            )
+            .await
+            .expect("fork");
+        assert!(matches!(
+            run.outcome().await,
+            Some(ForkChildRunOutcome::Completed(_))
+        ));
+        // The outcome was delivered before the crash; the retirement that
+        // should have followed it was not.
+        meerkat_mob_mcp::detached_delivery::deliver_detached_completion_to_member(
+            &runtime,
+            &handle,
+            &AgentIdentity::from("forker"),
+            &owner,
+            "fork_off",
+            &job_id,
+            meerkat_core::event::BackgroundJobTerminalStatus::Failed,
+            serde_json::json!({
+                "agent_identity": name,
+                "status": delivered_status,
+                "error": "the job's turn failed",
+            }),
+        )
+        .await
+        .expect("pre-admit the completion");
+        await_completion_record(&fixture, &owner, &job_id).await;
+        let job = handle
+            .roster()
+            .await
+            .get_by_identity(&child)
+            .and_then(|entry| entry.fork_job.clone())
+            .expect("durable fork job record");
+
+        let action = meerkat_mob_mcp::fork_relink::relink_child(
+            fixture.state.session_service(),
+            &relink_delivery(&fixture),
+            &fixture.source_mob_id(),
+            &handle,
+            &child,
+            &job,
+        )
+        .await;
+        assert_eq!(action, ForkRelinkAction::AlreadyDelivered, "{name}");
+        assert_eq!(
+            handle.get_member(&child).await.unwrap().is_none(),
+            retired,
+            "{name}: retired only when its delivered outcome retires it"
+        );
+        assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
+    }
+    fixture.teardown().await;
 }
 
 /// Fork a child whose turn is held at its model call, and return the child,

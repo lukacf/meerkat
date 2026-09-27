@@ -12285,6 +12285,28 @@ impl MobHandle {
         .await?
     }
 
+    /// Pause the next [`Self::member_status`] read of `identity`, through any
+    /// handle in this process, before it reads anything. The first receiver
+    /// resolves when a read reaches the gate; sending on (or dropping) the
+    /// returned sender lets it go on. Exposed only by test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_member_status_read_test_gate(
+        identity: AgentIdentity,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mut gate = MEMBER_STATUS_READ_TEST_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(gate.is_none(), "member status read test gate already armed");
+        *gate = Some((identity, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
     /// Test witness that crash-stop acknowledgement followed actor teardown.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
@@ -12623,6 +12645,8 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<MobMemberSnapshot, MobError> {
+        #[cfg(any(test, feature = "test-support"))]
+        run_member_status_read_test_gate(identity).await;
         let mut snapshot = match self
             .project_retiring_member_status_from_machine_state(identity)
             .await
@@ -17420,5 +17444,39 @@ mod tests {
             exact_flow_root_output_values(&run_id, &outputs).expect("multi-root output"),
             r#"{"a":[3,2,1],"z":{"a":2,"z":1}}"#
         );
+    }
+}
+
+/// One-shot gate a test arms to hold a member status read (see
+/// [`MobHandle::arm_member_status_read_test_gate`]).
+#[cfg(any(test, feature = "test-support"))]
+type MemberStatusReadTestGate = (
+    AgentIdentity,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(any(test, feature = "test-support"))]
+static MEMBER_STATUS_READ_TEST_GATE: std::sync::Mutex<Option<MemberStatusReadTestGate>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(any(test, feature = "test-support"))]
+async fn run_member_status_read_test_gate(identity: &AgentIdentity) {
+    let armed = {
+        let mut gate = MEMBER_STATUS_READ_TEST_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if gate
+            .as_ref()
+            .is_some_and(|(armed_identity, _, _)| armed_identity == identity)
+        {
+            gate.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, entered_tx, release_rx)) = armed {
+        let _ = entered_tx.send(());
+        let _ = release_rx.await;
     }
 }

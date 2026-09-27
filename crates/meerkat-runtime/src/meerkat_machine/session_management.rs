@@ -1275,9 +1275,10 @@ impl MeerkatMachine {
     /// start, or that background operations are done.
     ///
     /// Everything else is an error, never `Ok(false)`:
-    /// - no runtime holds the session: [`RuntimeDriverError::NotReady`];
-    /// - the session's driver was replaced or removed while this waited for
-    ///   it: [`RuntimeDriverError::StaleAuthority`];
+    /// - no runtime holds the session, including a session removed while this
+    ///   waited for its driver: [`RuntimeDriverError::NotReady`];
+    /// - the session was given a new driver while this waited for the old
+    ///   one: [`RuntimeDriverError::StaleAuthority`];
     /// - durability is degraded, for example after a failed boundary commit,
     ///   which consumes the inputs in memory before persistence fails:
     ///   [`RuntimeDriverError::RecoveryRepairBlocked`];
@@ -1301,8 +1302,9 @@ impl MeerkatMachine {
         };
         let driver_guard = driver.lock().await;
         // Only the session's current driver answers: while this waited for
-        // the lock, the session may have been unregistered or given a new
-        // driver, and the one held here would describe nothing current.
+        // the lock, the session may have been removed (NotReady) or given a
+        // new driver (StaleAuthority), and the one held here would describe
+        // nothing current.
         {
             let sessions = self.sessions.read().await;
             let entry = sessions

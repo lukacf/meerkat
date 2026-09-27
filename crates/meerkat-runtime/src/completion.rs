@@ -1014,12 +1014,62 @@ pub(crate) fn authorized_interaction_terminal_events(
 #[derive(Default)]
 pub(crate) struct CompletionRegistry {
     waiters: Arc<StdMutex<CompletionWaiterMap>>,
+    receipt_less_observers: Arc<StdMutex<ReceiptLessTerminalObserverMap>>,
 }
 
 type CompletionWaiterMap = HashMap<
     InputId,
     HashMap<uuid::Uuid, oneshot::Sender<Result<CompletionDelivery, CompletionWaitError>>>,
 >;
+
+/// Wake-only observers of an input terminal that resolves no completion
+/// waiter.
+///
+/// Supersession and coalescing terminalize a queued input inside a later
+/// admission: the machine stages no terminal-completion receipt for them and
+/// no completion is delivered, so a completion waiter on that input is never
+/// resolved. The terminal-receipt wait parks on one of these next to its
+/// completion waiter, and the admission that committed the transition wakes
+/// it. A wake carries nothing; the woken wait re-reads machine-owned state.
+/// Like the waiter map, this is plumbing only and never runtime truth.
+type ReceiptLessTerminalObserverMap = HashMap<InputId, HashMap<uuid::Uuid, oneshot::Sender<()>>>;
+
+/// Wake-only registration returned by
+/// [`CompletionRegistry::observe_receipt_less_terminal`]. Dropping it
+/// unregisters it.
+#[derive(Debug)]
+pub(crate) struct ReceiptLessTerminalObserver {
+    rx: Option<oneshot::Receiver<()>>,
+    registry: Weak<StdMutex<ReceiptLessTerminalObserverMap>>,
+    input_id: InputId,
+    observer_id: uuid::Uuid,
+}
+
+impl ReceiptLessTerminalObserver {
+    /// Resolve on the next wake for the input, or once the registry is
+    /// dropped (session teardown). Either way the caller re-reads.
+    pub(crate) async fn woken(mut self) {
+        if let Some(rx) = self.rx.take() {
+            let _closed_or_woken = rx.await;
+        }
+    }
+}
+
+impl Drop for ReceiptLessTerminalObserver {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            let mut observers = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(input_observers) = observers.get_mut(&self.input_id) {
+                input_observers.remove(&self.observer_id);
+                if input_observers.is_empty() {
+                    observers.remove(&self.input_id);
+                }
+            }
+        }
+    }
+}
 
 impl CompletionRegistry {
     pub(crate) fn new() -> Self {
@@ -1136,6 +1186,48 @@ impl CompletionRegistry {
                 input_id,
                 waiter_id,
             }),
+        }
+    }
+
+    /// Register a wake-only observer for a terminal of `input_id` that
+    /// delivers no completion (supersession or coalescing).
+    pub(crate) fn observe_receipt_less_terminal(
+        &mut self,
+        input_id: InputId,
+    ) -> ReceiptLessTerminalObserver {
+        let (tx, rx) = oneshot::channel();
+        let observer_id = meerkat_core::time_compat::new_uuid_v7();
+        self.receipt_less_observers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(input_id.clone())
+            .or_default()
+            .insert(observer_id, tx);
+        ReceiptLessTerminalObserver {
+            rx: Some(rx),
+            registry: Arc::downgrade(&self.receipt_less_observers),
+            input_id,
+            observer_id,
+        }
+    }
+
+    /// Wake every observer of these inputs. Called only after the machine
+    /// committed the receipt-less terminal, under the same driver-then-registry
+    /// lock order every resolver uses.
+    pub(crate) fn wake_receipt_less_terminal_observers<I>(&mut self, input_ids: I)
+    where
+        I: IntoIterator<Item = InputId>,
+    {
+        let mut observers = self
+            .receipt_less_observers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for input_id in input_ids {
+            if let Some(input_observers) = observers.remove(&input_id) {
+                for tx in input_observers.into_values() {
+                    let _ = tx.send(());
+                }
+            }
         }
     }
 
@@ -1582,6 +1674,17 @@ impl CompletionRegistry {
     #[cfg(test)]
     pub fn debug_waiter_count(&self) -> usize {
         self.waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(HashMap::len)
+            .sum()
+    }
+
+    /// Number of registered receipt-less terminal observers. Test-only.
+    #[cfg(test)]
+    pub(crate) fn debug_receipt_less_observer_count(&self) -> usize {
+        self.receipt_less_observers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()

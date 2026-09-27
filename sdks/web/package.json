@@ -30,6 +30,7 @@
     "prepublishOnly": "npm run build",
     "test": "npm run build:ts && tsc --noEmit -p tests/tsconfig.json && node --test tests/*.unit.mjs",
     "test:e2e": "npm run build && node --test tests/e2e_wasm_runtime.test.mjs",
+    "test:packed": "node ./scripts/smoke-packed-package.mjs --pack",
     "test:live-smoke": "npm run build && node --test tests/live_smoke.test.mjs"
   },
   "license": "MIT OR Apache-2.0",

@@ -1089,6 +1089,7 @@ mod live_context_preparation;
 mod llm_reconfigure;
 mod runtime_control;
 mod session_management;
+mod terminal_receipt;
 mod traits;
 mod visibility;
 
@@ -9876,3 +9877,6 @@ mod tests;
 
 #[cfg(test)]
 mod durable_steer_tests;
+
+#[cfg(test)]
+mod terminal_receipt_tests;

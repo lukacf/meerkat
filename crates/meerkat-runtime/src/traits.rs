@@ -45,6 +45,20 @@ pub enum RuntimeDriverError {
     #[error("Recovery corruption: {reason}")]
     RecoveryCorruption { reason: String },
 
+    /// The input is terminal through a machine transition that stages no
+    /// terminal-completion receipt: superseded or coalesced by a later
+    /// admission, consumed on accept, cancelled by member-host boot revival,
+    /// or abandoned at the stage-attempt cap after a failed batch start. No
+    /// public completion exists for it; this is neither corruption nor
+    /// retryable absence. `terminal` is the input's machine-owned terminal.
+    /// [`crate::MeerkatMachine::input_terminal_receipt`] reports the same rows
+    /// as `InputTerminalReceiptRead::TerminalWithoutReceipt`.
+    #[error("input {input_id} is terminal ({terminal:?}) without a terminal-completion receipt")]
+    InputTerminalWithoutReceipt {
+        input_id: InputId,
+        terminal: crate::input_state::InputTerminalOutcome,
+    },
+
     /// Fresh lifecycle observation or actuation is temporarily unavailable.
     #[error("Runtime recovery should back off: {reason}")]
     RecoveryBackoff { reason: String },

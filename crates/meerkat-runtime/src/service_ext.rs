@@ -87,10 +87,19 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
     /// durable receipt authority used after runtime teardown.
     ///
     /// `Ok(None)` means an admitted input has no finalized receipt yet,
-    /// including the durable pre-finalization window. A terminal 0.8.10 row
-    /// whose rich result was never recorded is repair-blocked rather than
-    /// reported as retryable absence. `InputTerminalOutcome::Consumed` is not
-    /// evidence for any particular public completion class.
+    /// including the durable pre-finalization window. A terminal the machine
+    /// reached through a transition that stages no receipt (superseded or
+    /// coalesced by a later admission, consumed on accept, cancelled by
+    /// member-host boot revival, abandoned at the stage-attempt cap after a
+    /// failed batch start) fails
+    /// [`RuntimeDriverError::InputTerminalWithoutReceipt`]: no public
+    /// completion exists for it. This is the classification
+    /// `MeerkatMachine::input_terminal_receipt` reports as
+    /// `TerminalWithoutReceipt` for the same row. A terminal 0.8.10 row whose
+    /// rich result was never recorded is repair-blocked rather than reported
+    /// as retryable absence, and any other terminal row without a receipt is
+    /// `RecoveryCorruption`. `InputTerminalOutcome::Consumed` is not evidence
+    /// for any particular public completion class.
     async fn input_terminal_completion(
         &self,
         session_id: &SessionId,

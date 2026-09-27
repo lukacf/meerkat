@@ -398,7 +398,9 @@ runner and then executed for verification on a windows-latest runner.
 is a separate workflow triggered by `Cargo.toml`/`CHANGELOG.md` changes on
 `main` pushes and PRs, or by manual dispatch. For unpublished candidate
 versions, it measures declared breaks and uploads exact-tree, exact-version
-evidence with 30-day configured retention. Only its successful `main`-push
+evidence with 30-day configured retention. A post-release tree, whose notes
+sit under `## [Unreleased]` above the stamped workspace version, is measured
+against that version's own tag and gets no attestation. Only its successful `main`-push
 artifact, `meerkat-semver-attestation-main-<tree_sha>`, qualifies for the normal
 release semver gate; PR and manual artifacts are previews.
 

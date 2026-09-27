@@ -5,6 +5,10 @@ use meerkat_core::lifecycle::run_primitive::TurnRequestContext;
 use meerkat_core::types::TranscriptUserRole;
 use meerkat_runtime::{LogicalRuntimeId, RuntimeStore};
 
+// Shares this module's real-factory autonomous fixture.
+#[path = "delivery_terminal_wait.rs"]
+mod delivery_terminal_wait;
+
 const WAIT: Duration = Duration::from_secs(30);
 const HUMAN: &str = "Please compare these options.\nKeep my exact wording: café & <human>.";
 const INJECTED: &str = "host-only retrieval context";

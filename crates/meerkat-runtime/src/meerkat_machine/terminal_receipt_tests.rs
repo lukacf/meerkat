@@ -183,7 +183,7 @@ impl Harness {
         .expect("receipt wait resolves")
         .expect("receipt wait succeeds")
         {
-            InputTerminalReceiptWait::Resolved(read) => read,
+            Some(InputTerminalReceiptWait::Resolved(read)) => read,
             other => panic!("expected a resolved receipt, got {other:?}"),
         }
     }
@@ -291,7 +291,7 @@ async fn batched_inputs_share_one_run_receipt_and_waiters_resolve_after_release(
         .expect("waiter task joins")
         .expect("waiter succeeds")
     {
-        InputTerminalReceiptWait::Resolved(read) => read,
+        Some(InputTerminalReceiptWait::Resolved(read)) => read,
         other => panic!("expected resolved, got {other:?}"),
     };
     assert_eq!(resolved.source, TerminalWitnessSource::LiveRuntime);
@@ -393,7 +393,7 @@ async fn requeued_attempt_does_not_resolve_the_wait() {
         .expect("waiter joins")
         .expect("waiter succeeds")
     {
-        InputTerminalReceiptWait::Resolved(read) => read,
+        Some(InputTerminalReceiptWait::Resolved(read)) => read,
         other => panic!("expected resolved, got {other:?}"),
     };
     let receipt = finalized(&resolved.report);
@@ -427,7 +427,7 @@ async fn retired_queued_input_reads_runtime_termination_receipt() {
             .expect("retired receipt wait resolves")
             .expect("wait succeeds")
         {
-            InputTerminalReceiptWait::Resolved(read) => read,
+            Some(InputTerminalReceiptWait::Resolved(read)) => read,
             other => panic!("expected resolved, got {other:?}"),
         };
     let receipt = finalized(&read.report);
@@ -460,42 +460,12 @@ async fn coalesced_input_reads_terminal_without_receipt() {
         .register_session(session_id.clone())
         .await
         .expect("register session");
-    let progress = |label: &str| {
-        Input::Peer(crate::input::PeerInput {
-            directed_interaction_id: None,
-            objective_id: None,
-            system_prompts: Vec::new(),
-            injected_context: Vec::new(),
-            sender_taint: None,
-            header: crate::input::InputHeader {
-                id: InputId::new(),
-                timestamp: Utc::now(),
-                source: crate::input::InputOrigin::Peer {
-                    peer_id: "peer-1".into(),
-                    display_identity: None,
-                    runtime_id: None,
-                },
-                durability: crate::input::InputDurability::Durable,
-                visibility: crate::input::InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: Some(crate::identifiers::SupersessionKey::new("same-window")),
-                correlation_id: None,
-            },
-            convention: Some(crate::input::PeerConvention::ResponseProgress {
-                request_id: format!("request-{label}"),
-                phase: crate::input::ResponseProgressPhase::InProgress,
-            }),
-            content: format!("progress {label}").into(),
-            payload: None,
-            handling_mode: None,
-        })
-    };
-    let first = progress("first");
+    let first = response_progress("first");
     let first_id = first.id().clone();
     <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(&machine, &session_id, first)
         .await
         .expect("accept first");
-    let second = progress("second");
+    let second = response_progress("second");
     let second_id = second.id().clone();
     <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(&machine, &session_id, second)
         .await
@@ -520,18 +490,21 @@ async fn coalesced_input_reads_terminal_without_receipt() {
         }
         other => panic!("expected a receipt-less terminal, got {other:?}"),
     }
-    // The exact completion reader keeps its existing classification of the
-    // same row; only the receipt reader types receipt-less terminals.
+    // The exact completion reader gives the same verdict for the same row
+    // through its typed error: terminal, no receipt, no public completion.
     let legacy = <MeerkatMachine as SessionServiceRuntimeExt>::input_terminal_completion(
         &machine,
         &session_id,
         &first_id,
     )
     .await;
-    assert!(
-        matches!(legacy, Err(RuntimeDriverError::RecoveryCorruption { .. })),
-        "input_terminal_completion behaviour is unchanged: {legacy:?}"
-    );
+    match legacy {
+        Err(RuntimeDriverError::InputTerminalWithoutReceipt { input_id, terminal }) => {
+            assert_eq!(input_id, first_id);
+            assert!(matches!(terminal, InputTerminalOutcome::Coalesced { .. }));
+        }
+        other => panic!("both readers classify a coalesced row alike, got {other:?}"),
+    }
     let waited = tokio::time::timeout(
         BOUND,
         machine.wait_input_terminal_receipt(&session_id, &first_id),
@@ -541,43 +514,344 @@ async fn coalesced_input_reads_terminal_without_receipt() {
     .expect("wait succeeds");
     assert!(matches!(
         waited,
-        InputTerminalReceiptWait::Resolved(Sourced {
+        Some(InputTerminalReceiptWait::Resolved(Sourced {
             report: InputTerminalReceiptRead::TerminalWithoutReceipt { .. },
             ..
-        })
+        }))
     ));
 }
 
-/// Without a live registration there is nothing to wait on: an unknown
-/// session on a store-less machine detaches at once, and an unknown input
-/// on a registered session is a typed validation failure.
-#[tokio::test]
-async fn unregistered_session_detaches_and_unknown_input_is_rejected() {
-    let machine = MeerkatMachine::ephemeral();
-    let detached = tokio::time::timeout(
-        BOUND,
-        machine.wait_input_terminal_receipt(&SessionId::new(), &InputId::new()),
-    )
-    .await
-    .expect("detached wait returns at once")
-    .expect("detached wait succeeds");
-    assert!(matches!(detached, InputTerminalReceiptWait::Detached(None)));
+/// Response-progress peer input: a second one with the same supersession key
+/// coalesces the first while it is still queued.
+fn response_progress(label: &str) -> Input {
+    Input::Peer(crate::input::PeerInput {
+        directed_interaction_id: None,
+        objective_id: None,
+        system_prompts: Vec::new(),
+        injected_context: Vec::new(),
+        sender_taint: None,
+        header: crate::input::InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: "peer-1".into(),
+                display_identity: None,
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: Some(crate::identifiers::SupersessionKey::new("same-window")),
+            correlation_id: None,
+        },
+        convention: Some(crate::input::PeerConvention::ResponseProgress {
+            request_id: format!("request-{label}"),
+            phase: crate::input::ResponseProgressPhase::InProgress,
+        }),
+        content: format!("progress {label}").into(),
+        payload: None,
+        handling_mode: None,
+    })
+}
 
+async fn session_completions(
+    machine: &MeerkatMachine,
+    session_id: &SessionId,
+) -> SharedCompletionRegistry {
+    let sessions = machine.sessions.read().await;
+    sessions
+        .get(session_id)
+        .expect("registered session")
+        .completions
+        .clone()
+}
+
+async fn registered_waiter_count(machine: &MeerkatMachine, session_id: &SessionId) -> usize {
+    session_completions(machine, session_id)
+        .await
+        .lock()
+        .await
+        .debug_waiter_count()
+}
+
+async fn registered_observer_count(machine: &MeerkatMachine, session_id: &SessionId) -> usize {
+    session_completions(machine, session_id)
+        .await
+        .lock()
+        .await
+        .debug_receipt_less_observer_count()
+}
+
+/// Bound for "the wait returned because the transition woke it", well below
+/// any caller bound, so a waiter that is never woken fails the test.
+const PROMPT: Duration = Duration::from_secs(5);
+
+/// Coalescing terminalizes a queued input inside a later admission and
+/// stages no receipt. A waiter armed on that input before the admission is
+/// woken at the admission's commit and returns the receipt-less terminal at
+/// once instead of sleeping until its caller's bound.
+#[tokio::test]
+async fn waiter_armed_before_coalescing_returns_promptly_with_terminal_without_receipt() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     machine
         .register_session(session_id.clone())
         .await
         .expect("register session");
-    let error = machine
-        .wait_input_terminal_receipt(&session_id, &InputId::new())
+    let first = response_progress("first");
+    let first_id = first.id().clone();
+    <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(&machine, &session_id, first)
         .await
-        .expect_err("unknown input id");
+        .expect("accept first");
+
+    let baseline = registered_waiter_count(&machine, &session_id).await;
+    let waiter = {
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        let first_id = first_id.clone();
+        tokio::spawn(async move {
+            machine
+                .wait_input_terminal_receipt(&session_id, &first_id)
+                .await
+        })
+    };
+    tokio::time::timeout(BOUND, async {
+        while registered_waiter_count(&machine, &session_id).await <= baseline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("waiter arms while the input is queued");
+    assert!(!waiter.is_finished(), "a queued input must not resolve");
+
+    let second = response_progress("second");
+    let second_id = second.id().clone();
+    <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(&machine, &session_id, second)
+        .await
+        .expect("accept the coalescing input");
+
+    let waited = tokio::time::timeout(PROMPT, waiter)
+        .await
+        .expect("coalescing wakes the armed waiter")
+        .expect("waiter joins")
+        .expect("wait succeeds");
+    match waited {
+        Some(InputTerminalReceiptWait::Resolved(Sourced {
+            source: TerminalWitnessSource::LiveRuntime,
+            report:
+                InputTerminalReceiptRead::TerminalWithoutReceipt {
+                    input_id, terminal, ..
+                },
+        })) => {
+            assert_eq!(input_id, first_id);
+            assert_eq!(
+                terminal,
+                InputTerminalOutcome::Coalesced {
+                    aggregate_id: second_id
+                }
+            );
+        }
+        other => panic!("expected a live receipt-less terminal, got {other:?}"),
+    }
+    assert_eq!(
+        registered_waiter_count(&machine, &session_id).await,
+        baseline,
+        "the woken waiter leaves no registration behind"
+    );
+    assert_eq!(
+        registered_observer_count(&machine, &session_id).await,
+        0,
+        "the woken observer leaves no registration behind"
+    );
+}
+
+/// Member-host boot revival silently cancels the interrupted predecessor's
+/// inputs: `Abandoned { Cancelled }` with no receipt and no interaction
+/// terminal. That is a machine transition, not a lost receipt, so the reader
+/// types it, and a waiter armed before the revival returns it promptly.
+#[tokio::test]
+async fn boot_revival_abandonment_reads_terminal_without_receipt() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register predecessor session");
+    let input = keyed_external_event("revived-x");
+    let x = input.id().clone();
+    <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(&machine, &session_id, input)
+        .await
+        .expect("queue the predecessor input");
+
+    let baseline = registered_waiter_count(&machine, &session_id).await;
+    let waiter = {
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        let x = x.clone();
+        tokio::spawn(async move { machine.wait_input_terminal_receipt(&session_id, &x).await })
+    };
+    tokio::time::timeout(BOUND, async {
+        while registered_waiter_count(&machine, &session_id).await <= baseline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("waiter arms on the predecessor input");
+
+    let permits = Arc::new(crate::tokio::sync::Semaphore::new(0));
+    let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pending = match machine
+        .ensure_session_with_executor_factory(session_id.clone(), {
+            let session_id = session_id.clone();
+            move |_| {
+                Box::new(GatedResultExecutor {
+                    session_id: session_id.clone(),
+                    permits: Arc::clone(&permits),
+                    batches: Arc::clone(&batches),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    failing_calls: Vec::new(),
+                }) as Box<dyn CoreExecutor>
+            }
+        })
+        .await
+        .expect("prepare the replacement attachment")
+    {
+        EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+        EnsureRuntimeExecutorAttachment::Existing(witness) => {
+            panic!("replacement fixture unexpectedly found {witness:?}")
+        }
+    };
+    let mut publication = pending
+        .try_commit_with_retained_publication_lease_under_runtime_turn_finalization_boundary()
+        .await
+        .expect("retain the replacement publication boundary");
+    assert_eq!(
+        publication
+            .abandon_recovered_predecessor_inputs()
+            .await
+            .expect("silently abandon the predecessor input"),
+        1
+    );
+
+    let cancelled = InputTerminalOutcome::Abandoned {
+        reason: crate::input_state::InputAbandonReason::Cancelled,
+    };
+    let waited = tokio::time::timeout(PROMPT, waiter)
+        .await
+        .expect("boot revival wakes the armed waiter")
+        .expect("waiter joins")
+        .expect("boot revival is not a lost receipt");
+    match waited {
+        Some(InputTerminalReceiptWait::Resolved(Sourced {
+            report:
+                InputTerminalReceiptRead::TerminalWithoutReceipt {
+                    input_id, terminal, ..
+                },
+            ..
+        })) => {
+            assert_eq!(input_id, x);
+            assert_eq!(terminal, cancelled);
+        }
+        other => panic!("expected a receipt-less terminal, got {other:?}"),
+    }
+    let read = machine
+        .input_terminal_receipt(&session_id, InteractionSelector::InputId(x.clone()))
+        .await
+        .expect("boot revival abandonment reads")
+        .expect("known input");
     assert!(
-        matches!(error, RuntimeDriverError::ValidationFailed { .. }),
-        "unexpected error {error:?}"
+        matches!(
+            &read.report,
+            InputTerminalReceiptRead::TerminalWithoutReceipt { terminal, .. } if terminal == &cancelled
+        ),
+        "unexpected read {read:?}"
+    );
+    // The exact completion reader classifies the same row the same way.
+    match <MeerkatMachine as SessionServiceRuntimeExt>::input_terminal_completion(
+        &machine,
+        &session_id,
+        &x,
+    )
+    .await
+    {
+        Err(RuntimeDriverError::InputTerminalWithoutReceipt { input_id, terminal }) => {
+            assert_eq!(input_id, x);
+            assert_eq!(terminal, cancelled);
+        }
+        other => panic!("both readers classify boot revival alike, got {other:?}"),
+    }
+
+    let witness = publication
+        .commit_with(|_| Ok(()))
+        .await
+        .expect("publish the replacement after predecessor abandonment");
+    machine
+        .unregister_executor_attachment_if_current(&witness)
+        .await
+        .expect("clean replacement attachment");
+}
+
+/// An unknown input reads the same through the read and the wait, whether
+/// or not the session is registered: `Ok(None)` for a known session that
+/// holds no such input, `NotReady` for an unregistered session on a
+/// store-less machine, and `NotFound` for a never-admitted session on a
+/// persistent machine. A pending durable row with no live registration
+/// detaches instead of waiting.
+#[tokio::test]
+async fn unknown_input_reads_the_same_through_read_and_wait_with_or_without_registration() {
+    async fn wait(
+        machine: &MeerkatMachine,
+        session_id: &SessionId,
+        input_id: &InputId,
+    ) -> Result<Option<InputTerminalReceiptWait>, RuntimeDriverError> {
+        tokio::time::timeout(
+            BOUND,
+            machine.wait_input_terminal_receipt(session_id, input_id),
+        )
+        .await
+        .expect("a wait with nothing to wait on returns at once")
+    }
+    async fn read(
+        machine: &MeerkatMachine,
+        session_id: &SessionId,
+        input_id: &InputId,
+    ) -> Result<Option<Sourced<InputTerminalReceiptRead>>, RuntimeDriverError> {
+        machine
+            .input_terminal_receipt(session_id, InteractionSelector::InputId(input_id.clone()))
+            .await
+    }
+
+    // Store-less machine.
+    let ephemeral = MeerkatMachine::ephemeral();
+    let unregistered = SessionId::new();
+    let unknown = InputId::new();
+    assert!(matches!(
+        read(&ephemeral, &unregistered, &unknown).await,
+        Err(RuntimeDriverError::NotReady { .. })
+    ));
+    assert!(matches!(
+        wait(&ephemeral, &unregistered, &unknown).await,
+        Err(RuntimeDriverError::NotReady { .. })
+    ));
+    let session_id = SessionId::new();
+    ephemeral
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    assert!(
+        read(&ephemeral, &session_id, &unknown)
+            .await
+            .expect("read")
+            .is_none()
     );
     assert!(
-        machine
+        wait(&ephemeral, &session_id, &unknown)
+            .await
+            .expect("wait")
+            .is_none()
+    );
+    assert!(
+        ephemeral
             .input_terminal_receipt(
                 &session_id,
                 InteractionSelector::IdempotencyKey("never-admitted".into())
@@ -586,6 +860,63 @@ async fn unregistered_session_detaches_and_unknown_input_is_rejected() {
             .expect("key read")
             .is_none()
     );
+
+    // Persistent machine: the same store read registered and unregistered.
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let attached = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    let session_id = SessionId::new();
+    attached
+        .register_session(session_id.clone())
+        .await
+        .expect("register persistent session");
+    let queued = keyed_external_event("queued-x");
+    let queued_id = queued.id().clone();
+    <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(&attached, &session_id, queued)
+        .await
+        .expect("queue a durable input");
+    assert!(
+        read(&attached, &session_id, &unknown)
+            .await
+            .expect("read")
+            .is_none()
+    );
+    assert!(
+        wait(&attached, &session_id, &unknown)
+            .await
+            .expect("wait")
+            .is_none()
+    );
+
+    let detached = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    assert!(
+        read(&detached, &session_id, &unknown)
+            .await
+            .expect("read")
+            .is_none()
+    );
+    assert!(
+        wait(&detached, &session_id, &unknown)
+            .await
+            .expect("wait")
+            .is_none()
+    );
+    let never_admitted = SessionId::new();
+    assert!(matches!(
+        read(&detached, &never_admitted, &unknown).await,
+        Err(RuntimeDriverError::NotFound { .. })
+    ));
+    assert!(matches!(
+        wait(&detached, &never_admitted, &unknown).await,
+        Err(RuntimeDriverError::NotFound { .. })
+    ));
+    match wait(&detached, &session_id, &queued_id).await {
+        Ok(Some(InputTerminalReceiptWait::Detached(Sourced {
+            source: TerminalWitnessSource::DurableStore,
+            report: InputTerminalReceiptRead::Pending { input_id, .. },
+        }))) => assert_eq!(input_id, queued_id),
+        other => panic!("a pending row with no live registration detaches, got {other:?}"),
+    }
 }
 
 /// A finalized receipt survives restart: a fresh machine over the same store
@@ -645,7 +976,7 @@ async fn finalized_receipt_is_read_from_the_store_after_restart() {
         .await
         .expect("unregistered wait");
     match waited {
-        InputTerminalReceiptWait::Resolved(read) => {
+        Some(InputTerminalReceiptWait::Resolved(read)) => {
             assert_eq!(read.source, TerminalWitnessSource::DurableStore);
             assert_eq!(finalized(&read.report).run_id(), live_receipt.run_id());
         }

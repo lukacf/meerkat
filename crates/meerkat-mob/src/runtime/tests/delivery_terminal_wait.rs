@@ -124,7 +124,7 @@ async fn autonomous_delivery_returns_its_own_run_receipt_and_bounded_answer() {
     let report = wait_delivery(&fixture, &key, &small, deadline()).await;
     assert!(matches!(
         report.member(),
-        DurableBoundedMemberState::Active { session_id } if session_id == &fixture.session_id
+        Some(DurableBoundedMemberState::Active { session_id }) if session_id == &fixture.session_id
     ));
     let view = receipt(&report);
     let admitted = fixture.input_for_delivery(&key).await;
@@ -350,7 +350,13 @@ async fn elapsed_wait_reports_not_terminal_and_a_later_wait_returns_the_terminal
         panic!("expected a pending delivery, got {:?}", report.work());
     };
     assert_eq!(*attempt_count, 1);
-    assert!(elapsed >= Duration::from_millis(400), "waited {elapsed:?}");
+    // The wait runs until the deadline less the 100 ms evidence floor, not
+    // until a quarter of the budget is left.
+    assert!(elapsed >= Duration::from_millis(500), "waited {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_millis(600) + Duration::from_millis(400),
+        "returned by the deadline: {elapsed:?}"
+    );
     assert!(elapsed < Duration::from_secs(5), "waited {elapsed:?}");
     let input_id = input_id.clone();
 
@@ -363,6 +369,100 @@ async fn elapsed_wait_reports_not_terminal_and_a_later_wait_returns_the_terminal
         format!("executor-answer-{}", requests_before + 1)
     );
     fixture.finish().await;
+}
+
+/// The budget up to the deadline (less the evidence floor) is spent waiting:
+/// a terminal that lands in the last quarter of the budget is returned, not
+/// reported as an elapsed deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_terminal_late_in_the_budget_is_returned_before_the_deadline() {
+    let fixture = Fixture::new().await;
+    let requests_before = fixture.client.requests().len();
+    fixture.client.block();
+    let key = delivery("terminal-late");
+    fixture
+        .submit_generic(
+            WorkSpec::new("late delivery", WorkOrigin::External),
+            key.clone(),
+        )
+        .await;
+    fixture.client.wait_for_requests(requests_before + 1).await;
+
+    let started = std::time::Instant::now();
+    let release_after = Duration::from_millis(3200);
+    let release = {
+        let client = fixture.client.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(release_after.saturating_sub(started.elapsed())).await;
+            client.release();
+        })
+    };
+    let report = wait_delivery(&fixture, &key, &bound(), started + Duration::from_secs(4)).await;
+    let elapsed = started.elapsed();
+    release.await.expect("release task joins");
+    let view = receipt(&report);
+    assert_eq!(
+        view.result.result().text(),
+        format!("executor-answer-{}", requests_before + 1)
+    );
+    assert!(
+        elapsed >= release_after,
+        "returned before the run: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "returned by the deadline: {elapsed:?}"
+    );
+    fixture.finish().await;
+}
+
+/// The member-lifecycle read is bounded by the caller's deadline too. For a
+/// member the machine state does not know it replays the mob event log; a
+/// replay that outlasts the deadline must not hold the call past it.
+#[tokio::test]
+async fn a_stalled_member_lifecycle_read_returns_by_the_deadline() {
+    let events = Arc::new(super::super::FaultInjectedMobEventStore::new());
+    let (handle, _service) = super::super::create_test_mob_with_events(
+        with_unique_mob_id(sample_definition(), "delivery-wait-stalled-replay"),
+        events.clone(),
+    )
+    .await;
+    events.stall_replay();
+    let started = std::time::Instant::now();
+    let report = tokio::time::timeout(
+        Duration::from_secs(5),
+        handle.wait_bounded_work_for_identity_with_delivery_identity(
+            &AgentIdentity::from("never-spawned-member"),
+            &delivery("terminal-stalled-replay"),
+            &bound(),
+            started + Duration::from_millis(300),
+        ),
+    )
+    .await
+    .expect("the wait returns by its deadline despite a stalled replay")
+    .expect("delivery wait runs");
+    let elapsed = started.elapsed();
+    events.release_replay();
+    assert!(
+        elapsed < Duration::from_millis(300) + Duration::from_millis(250),
+        "returned {elapsed:?} after the call"
+    );
+    assert!(
+        report.member().is_none(),
+        "the member lifecycle was never read: {:?}",
+        report.member()
+    );
+    assert!(
+        matches!(
+            report.work(),
+            DeliveryTerminalWait::Unknown {
+                cause: DeliveryUnknownCause::NotObservedByDeadline
+            }
+        ),
+        "nothing about the delivery was observed: {:?}",
+        report.work()
+    );
+    handle.shutdown().await.expect("mob shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -430,7 +530,10 @@ async fn unknown_delivery_reports_typed_unknown_by_deadline_and_for_retired_memb
     let started = std::time::Instant::now();
     let report = wait_delivery(&fixture, &never_sent, &bound(), deadline()).await;
     assert!(
-        matches!(report.member(), DurableBoundedMemberState::Retired { .. }),
+        matches!(
+            report.member(),
+            Some(DurableBoundedMemberState::Retired { .. })
+        ),
         "member lifecycle: {:?}",
         report.member()
     );

@@ -6,13 +6,14 @@
 //! completion reader projects. Nothing here decides or records a lifecycle
 //! fact.
 //!
-//! The completion registry is used purely as a wake signal. A waiter is
-//! registered under the driver lock after a `Pending` read; finalization of a
-//! terminal batch needs that same lock, and every resolver delivers only after
-//! finalizing, so a wake cannot be lost between the read and the registration.
-//! Whatever a wake carries (an outcome, a process-local attempt failure, an
-//! error, a closed channel) is ignored: the receipt is re-read after every
-//! wake, so a requeued input simply re-arms.
+//! The completion registry is used purely as a wake signal. A completion
+//! waiter and a receipt-less terminal observer are registered under the driver
+//! lock after a `Pending` read; every terminal transition needs that same
+//! lock, and every waker delivers only after the transition committed, so a
+//! wake cannot be lost between the read and the registration. Whatever a wake
+//! carries (an outcome, a process-local attempt failure, an error, a closed
+//! channel, a bare observer wake) is ignored: the receipt is re-read after
+//! every wake, so a requeued input simply re-arms.
 
 use super::*;
 use crate::input_state::StoredInputState;
@@ -22,9 +23,15 @@ use crate::terminal_status::{
 };
 
 impl MeerkatMachine {
-    /// Read the terminal receipt of one input: its finalized receipt (run
-    /// scope, full recipient set and finalized outcome), a receipt-less
-    /// terminal, or its current pending lifecycle facts.
+    /// Read the terminal receipt of one input: its finalized receipt (the
+    /// scope, recipients and finalized outcome of the terminal batch the
+    /// runtime committed it in), a receipt-less terminal, or its current
+    /// pending lifecycle facts.
+    ///
+    /// A receipt proves which inputs were finalized together with one
+    /// outcome; it does not prove that a run's result answers every input
+    /// that run touched. See
+    /// [`crate::terminal_status::InputTerminalReceiptScope::Run`].
     ///
     /// Selector resolution matches [`SessionServiceRuntimeExt::interaction_terminal_status`]:
     /// a registered session resolves keys through the machine-owned admission
@@ -94,7 +101,14 @@ impl MeerkatMachine {
             .await
     }
 
-    /// Wait until one admitted input's terminal receipt resolves.
+    /// Wait until one input's terminal receipt resolves.
+    ///
+    /// The input is resolved exactly as [`Self::input_terminal_receipt`]
+    /// resolves an [`InteractionSelector::InputId`], whether or not the
+    /// session is registered: `Ok(None)` means the session exists but holds
+    /// no such input, an unregistered session on a store-less machine fails
+    /// `NotReady`, and a never-admitted session on a persistent machine fails
+    /// `NotFound`.
     ///
     /// Returns `Resolved` with a finalized receipt or a receipt-less terminal,
     /// read live or (for rows archived after their durable obligations
@@ -105,16 +119,18 @@ impl MeerkatMachine {
     /// (session never registered, or unregistered while waiting) the wait
     /// returns `Detached` with the current durable read instead of polling.
     ///
-    /// The wait is event-driven and unbounded; callers bound it. Machine
-    /// transitions that never deliver a completion (supersession or
-    /// coalescing by a later admission) are observed by the caller's next
-    /// read. Dropping the future unregisters its waiter. An input id the
-    /// session and its store do not know fails `ValidationFailed`.
+    /// The wait is event-driven and unbounded; callers bound it. Every
+    /// transition that can terminalize a pending input wakes it: batch
+    /// finalization and runtime termination resolve its completion waiter,
+    /// boot revival and a failed batch start fail that waiter mechanically,
+    /// and the admission that coalesces or supersedes the input wakes its
+    /// receipt-less terminal observer. A wake carries nothing; the receipt is
+    /// re-read. Dropping the future unregisters both registrations.
     pub async fn wait_input_terminal_receipt(
         &self,
         session_id: &SessionId,
         input_id: &InputId,
-    ) -> Result<InputTerminalReceiptWait, RuntimeDriverError> {
+    ) -> Result<Option<InputTerminalReceiptWait>, RuntimeDriverError> {
         loop {
             let entry = {
                 let sessions = self.sessions.read().await;
@@ -124,62 +140,74 @@ impl MeerkatMachine {
             };
             let Some((driver, completions)) = entry else {
                 let target = self
-                    .durable_input_witness_by_id(session_id, input_id)
+                    .durable_session_input_witness_by_id(session_id, input_id)
                     .await?;
-                return match self
-                    .durable_input_terminal_receipt_read(session_id, target)
-                    .await?
-                {
-                    Some(read) if read.report.is_resolved() => {
-                        Ok(InputTerminalReceiptWait::Resolved(read))
-                    }
-                    read => Ok(InputTerminalReceiptWait::Detached(read)),
-                };
+                return self
+                    .durable_input_terminal_receipt_wait(session_id, target)
+                    .await;
             };
-            let wake = {
+            let (completion, observer) = {
                 let guard = driver.lock().await;
                 match Self::live_input_terminal_receipt_read(&guard, input_id)? {
                     Some(report) if report.is_resolved() => {
-                        return Ok(InputTerminalReceiptWait::Resolved(Sourced {
+                        return Ok(Some(InputTerminalReceiptWait::Resolved(Sourced {
                             source: TerminalWitnessSource::LiveRuntime,
                             report,
-                        }));
+                        })));
                     }
                     // Same lock order as every resolver: driver, then
                     // registry. Registering before the driver guard drops
-                    // orders this waiter before any later finalization.
-                    Some(_) => completions.lock().await.register(input_id.clone()),
+                    // orders both registrations before any later terminal
+                    // transition, so no wake can be lost.
+                    Some(_) => {
+                        let mut registry = completions.lock().await;
+                        (
+                            registry.register(input_id.clone()),
+                            registry.observe_receipt_less_terminal(input_id.clone()),
+                        )
+                    }
                     None => {
                         drop(guard);
+                        // Not held live: a row archived after its durable
+                        // obligations closed, or no such input at all.
                         let target = self
                             .durable_input_witness_by_id(session_id, input_id)
                             .await?;
-                        return match self
-                            .durable_input_terminal_receipt_read(session_id, target)
-                            .await?
-                        {
-                            Some(read) if read.report.is_resolved() => {
-                                Ok(InputTerminalReceiptWait::Resolved(read))
-                            }
-                            // A pending row that is not held live has no
-                            // registration to wait on.
-                            Some(read) => Ok(InputTerminalReceiptWait::Detached(Some(read))),
-                            None => Err(RuntimeDriverError::ValidationFailed {
-                                reason: format!(
-                                    "input {input_id} is unknown to runtime session {session_id}"
-                                ),
-                            }),
-                        };
+                        return self
+                            .durable_input_terminal_receipt_wait(session_id, target)
+                            .await;
                     }
                 }
             };
             // Hold no session resources while parked, so teardown can drop
-            // the registry and close this waiter.
+            // the registry and close both registrations.
             drop(completions);
             drop(driver);
+            let completion = std::pin::pin!(completion.try_wait());
+            let observer = std::pin::pin!(observer.woken());
             // A wake carries no semantics; the loop re-reads the receipt.
-            let _wake = wake.try_wait().await;
+            let _wake = futures::future::select(completion, observer).await;
         }
+    }
+
+    /// Settle a wait from the durable store: resolved, or `Detached` while
+    /// the stored row is still pending. `None` for an input the store does
+    /// not hold.
+    async fn durable_input_terminal_receipt_wait(
+        &self,
+        session_id: &SessionId,
+        target: Option<StoredInputState>,
+    ) -> Result<Option<InputTerminalReceiptWait>, RuntimeDriverError> {
+        Ok(self
+            .durable_input_terminal_receipt_read(session_id, target)
+            .await?
+            .map(|read| {
+                if read.report.is_resolved() {
+                    InputTerminalReceiptWait::Resolved(read)
+                } else {
+                    InputTerminalReceiptWait::Detached(read)
+                }
+            }))
     }
 
     fn live_input_terminal_receipt_read(

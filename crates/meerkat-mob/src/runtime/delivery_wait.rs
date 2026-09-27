@@ -8,11 +8,12 @@
 //! carried, without changing how it was delivered.
 //!
 //! Every fact comes from the member runtime's own input lifecycle: the
-//! machine-owned key-to-input binding, the input's terminal receipt (the run
-//! that answered it and every input that run answered), and the batch's
-//! finalized outcome. The result is projected through the same bounded
-//! projection as [`super::WorkTurnHandle::wait_bounded`]. Nothing here records
-//! or decides a lifecycle fact, and no mob actor command is sent.
+//! machine-owned key-to-input binding, the input's terminal receipt (the
+//! terminal batch the runtime finalized it in: the run that committed that
+//! batch and the inputs finalized with it), and the batch's finalized
+//! outcome. The result is projected through the same bounded projection as
+//! [`super::WorkTurnHandle::wait_bounded`]. Nothing here records or decides a
+//! lifecycle fact, and no mob actor command is sent.
 
 use super::handle::{
     BoundedResultSpec, BoundedTurnFailure, BoundedTurnResult, DurableBoundedMemberState,
@@ -37,14 +38,21 @@ pub enum DeliveryUnknownCause {
     /// The member is retired and its runtime holds no input for the delivery
     /// identity, so none can arrive.
     MemberRetired,
+    /// The deadline elapsed before the member lifecycle or the member's
+    /// runtime could be read even once, so nothing is known about the
+    /// delivery. Waiting again with a later deadline is safe.
+    NotObservedByDeadline,
 }
 
 /// Why an admitted delivery had no terminal by the deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeliveryNotTerminalCause {
-    /// The deadline elapsed while the live runtime still owed the input a
-    /// terminal. Waiting again later is safe: waiting cancels nothing.
+    /// The live runtime still owed the input a terminal when the deadline
+    /// came: the wait ran until the deadline less the 100 ms evidence-read
+    /// floor, and the final read in that last slice (or, if it could not
+    /// finish in time, the last read before it) still found the input
+    /// pending. Waiting again later is safe: waiting cancels nothing.
     DeadlineElapsed,
     /// The deadline elapsed while the member's session had no live runtime
     /// registration, so the input could not advance (for example between a
@@ -56,23 +64,39 @@ pub enum DeliveryNotTerminalCause {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DeliveryTerminalResolution {
-    /// The runtime finalized a terminal receipt for the input.
+    /// The runtime finalized a terminal receipt for the input: the terminal
+    /// batch it finalized the input in, with one outcome shared by every
+    /// input of that batch.
+    ///
+    /// The receipt proves which inputs share `result`; it does not prove
+    /// that a run's answer covers every input the run touched. A delivery
+    /// joined into a running run at a live boundary (a steer injected as
+    /// turn context) is finalized alone in its own batch of that run, with
+    /// `result` = `Err(BoundedTurnFailure::CompletedWithoutResult)`: the
+    /// run's text answers the run's own batch, not this delivery.
     Receipt {
-        /// The run that answered the input; `None` when the runtime stopped,
-        /// retired or was destroyed with the input pending.
+        /// The run whose terminal transaction committed the input's batch;
+        /// `None` when the runtime terminalized the input outside any run
+        /// (stop, reset, retire, destroy, executor replacement, or
+        /// cancellation while queued).
         runtime_run_id: Option<RuntimeRunId>,
         /// The canonical owner input of the batch (its first recipient).
         owner_input_id: InputId,
-        /// Every input the same batch answered, in canonical (input-id)
-        /// order, including this one. More than one entry means one run
-        /// answered several deliveries together and `result` is that run's
-        /// shared answer.
+        /// Every input finalized in the same batch, in canonical (input-id)
+        /// order, including this one; all of them share `result`. More than
+        /// one entry means one terminal transaction finalized several
+        /// deliveries together, for example queued deliveries one run
+        /// consumed as one batch. It is the batch, not every input the run
+        /// touched.
         recipient_input_ids: Vec<InputId>,
         /// The batch outcome through the bounded result projection.
         result: Result<BoundedTurnResult, BoundedTurnFailure>,
     },
-    /// The input reached a terminal the runtime never stages a receipt for
-    /// (superseded, coalesced, or consumed on accept); no run answered it.
+    /// The input reached a terminal through a runtime transition that stages
+    /// no receipt: superseded or coalesced by a later admission, consumed on
+    /// accept, cancelled by member-host boot revival, or abandoned at the
+    /// stage-attempt cap after a failed batch start. No run answered it;
+    /// `last_run_id` is the last run it was staged into, if any.
     WithoutRun { last_run_id: Option<RuntimeRunId> },
 }
 
@@ -151,15 +175,17 @@ pub enum DeliveryTerminalWait {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct DeliveryTerminalWaitReport {
-    member: DurableBoundedMemberState,
+    member: Option<DurableBoundedMemberState>,
     work: DeliveryTerminalWait,
 }
 
 impl DeliveryTerminalWaitReport {
-    /// The member lifecycle observed when the wait started.
+    /// The member lifecycle observed when the wait started. `None` only when
+    /// the deadline elapsed before it could be read; `work` is then
+    /// `Unknown { cause: NotObservedByDeadline }`.
     #[must_use]
-    pub fn member(&self) -> &DurableBoundedMemberState {
-        &self.member
+    pub fn member(&self) -> Option<&DurableBoundedMemberState> {
+        self.member.as_ref()
     }
 
     /// What the wait observed for the delivery.
@@ -170,7 +196,7 @@ impl DeliveryTerminalWaitReport {
 
     /// Take both parts.
     #[must_use]
-    pub fn into_parts(self) -> (DurableBoundedMemberState, DeliveryTerminalWait) {
+    pub fn into_parts(self) -> (Option<DurableBoundedMemberState>, DeliveryTerminalWait) {
         (self.member, self.work)
     }
 }
@@ -202,10 +228,12 @@ impl super::MobHandle {
     /// paths for members that cannot hand out a completion-bearing admission
     /// (`MobRuntimeMode::AutonomousHost`): the delivery is found by its stable
     /// idempotency key in the member runtime's own admission map, and the
-    /// report carries that input's own terminal - the run that answered it,
-    /// every input that run answered (so a batched answer reports its batch),
-    /// the input's terminal outcome, and the run's result through the same
-    /// bounded projection as [`super::WorkTurnHandle::wait_bounded`].
+    /// report carries that input's own terminal - the terminal batch the
+    /// runtime finalized it in (the run that committed the batch and every
+    /// input finalized with it, so a batched answer reports its batch), the
+    /// input's terminal outcome, and the batch's result through the same
+    /// bounded projection as [`super::WorkTurnHandle::wait_bounded`]. See
+    /// [`DeliveryTerminalResolution::Receipt`] for what that proves.
     ///
     /// The method only reads. It never sends a mob actor command, spawns,
     /// submits, retries or cancels work, and waiting past the deadline cancels
@@ -214,12 +242,13 @@ impl super::MobHandle {
     /// [`Self::recover_bounded_work_for_identity_with_delivery_identity`]; a
     /// delivery made to an earlier session of the member reads as unknown.
     ///
-    /// The call returns by `deadline`: the last quarter of the remaining time
-    /// (at least 100 ms, at most 5 s) is reserved for one final bounded read,
-    /// so a deadline that has passed or is closer than 100 ms takes one
-    /// snapshot read bounded by 100 ms. A terminal the runtime has durably
-    /// finalized is returned from the store even before the member's session
-    /// is registered again after a restart.
+    /// The call returns by `deadline`, or within the 100 ms evidence-read
+    /// floor for a deadline that has passed or is closer than that. Every
+    /// step is bounded by that end: the member lifecycle read, the wait on
+    /// the member runtime (which runs until the end less the floor), and one
+    /// final read in the floor. A terminal the runtime has durably finalized
+    /// is returned from the store even before the member's session is
+    /// registered again after a restart.
     pub async fn wait_bounded_work_for_identity_with_delivery_identity(
         &self,
         identity: &AgentIdentity,
@@ -239,13 +268,22 @@ impl super::MobHandle {
             .runtime_adapter
             .as_ref()
             .ok_or(DeliveryTerminalWaitError::RuntimeAdapterUnavailable)?;
-        let member = self
-            .durable_bounded_member_state(identity)
-            .await
-            .map_err(DeliveryTerminalWaitError::MemberState)?;
+        let end = observe::call_end(deadline);
+        // For a member the machine state no longer (or never) knows this
+        // replays the mob event log, so it is bounded like every other step.
+        let Some(member) = observe::within(end, self.durable_bounded_member_state(identity)).await
+        else {
+            return Ok(DeliveryTerminalWaitReport {
+                member: None,
+                work: DeliveryTerminalWait::Unknown {
+                    cause: DeliveryUnknownCause::NotObservedByDeadline,
+                },
+            });
+        };
+        let member = member.map_err(DeliveryTerminalWaitError::MemberState)?;
         let Some(session_id) = member.session_id().cloned() else {
             return Ok(DeliveryTerminalWaitReport {
-                member,
+                member: Some(member),
                 work: DeliveryTerminalWait::Unknown {
                     cause: DeliveryUnknownCause::MemberHasNoSession,
                 },
@@ -257,10 +295,13 @@ impl super::MobHandle {
             &delivery_identity.idempotency_key,
             result_spec,
             matches!(member, DurableBoundedMemberState::Retired { .. }),
-            deadline,
+            end,
         )
         .await?;
-        Ok(DeliveryTerminalWaitReport { member, work })
+        Ok(DeliveryTerminalWaitReport {
+            member: Some(member),
+            work,
+        })
     }
 }
 
@@ -275,23 +316,45 @@ mod observe {
     };
     use std::time::Duration;
 
-    /// The evidence slice follows `meerkat_runtime::SubmitBound`: a quarter
-    /// of the caller's bound, floored and capped, so the final read cannot run
-    /// the call past its deadline.
-    const MIN_EVIDENCE_READ_BOUND: Duration = Duration::from_millis(100);
-    const MAX_EVIDENCE_READ_BOUND: Duration = Duration::from_secs(5);
+    /// Time kept back from the wait for one final evidence read, so the
+    /// call reports fresh facts and still returns by its deadline. It is the
+    /// floor `meerkat_runtime::SubmitBound` gives its own classification read,
+    /// the shortest slice the runtime allots one evidence-backed read: here
+    /// one driver-lock acquisition, or at most three store point reads for a
+    /// receipt batch. It is also the whole budget of a call whose deadline has
+    /// passed or is closer than this.
+    const EVIDENCE_READ_FLOOR: Duration = Duration::from_millis(100);
     /// Polling covers only what the runtime cannot notify: a key not yet
     /// bound (the inbox gap) and a session without a live registration.
     const POLL_START: Duration = Duration::from_millis(10);
     const POLL_MAX: Duration = Duration::from_millis(250);
     /// While armed on the runtime's waiter, re-read at least this often.
-    /// Transitions that never deliver a completion (supersession or
-    /// coalescing by a later admission) are observed by that read.
+    /// Every terminal transition wakes that waiter; this bounded re-read is
+    /// defense in depth for a wake that lags receipt finalization (the
+    /// runtime resolves waiters after finalizing, and a directed terminal can
+    /// finalize before its publication succeeds).
     const REREAD_INTERVAL: Duration = Duration::from_secs(1);
 
-    fn split(bound: Duration) -> (Duration, Duration) {
-        let evidence = (bound / 4).clamp(MIN_EVIDENCE_READ_BOUND, MAX_EVIDENCE_READ_BOUND);
-        (bound.saturating_sub(evidence), evidence)
+    /// When the call must return: the caller's deadline, or one evidence
+    /// floor from now for a deadline that has passed or is closer than that.
+    pub(super) fn call_end(deadline: Instant) -> Instant {
+        deadline.max(Instant::now() + EVIDENCE_READ_FLOOR)
+    }
+
+    /// Until when the wait may park before the final evidence read.
+    fn wait_until(end: Instant) -> Instant {
+        end.checked_sub(EVIDENCE_READ_FLOOR)
+            .map_or_else(Instant::now, |until| until.max(Instant::now()))
+    }
+
+    /// Run `future` until `end`; `None` when `end` came first.
+    pub(super) async fn within<F: std::future::Future>(
+        end: Instant,
+        future: F,
+    ) -> Option<F::Output> {
+        tokio::time::timeout(end.saturating_duration_since(Instant::now()), future)
+            .await
+            .ok()
     }
 
     struct PendingFacts {
@@ -420,16 +483,16 @@ mod observe {
         }
     }
 
-    /// Observe one delivery's terminal on one member session until
-    /// `deadline`, returning by the deadline (or within the evidence-read
-    /// floor for a nearly elapsed one).
+    /// Observe one delivery's terminal on one member session, returning by
+    /// `end` (see [`call_end`]): wait until `end` less the evidence floor,
+    /// then take one final read bounded by the time left.
     pub(super) async fn observe_delivery_terminal(
         runtime: &meerkat_runtime::MeerkatMachine,
         session_id: &SessionId,
         idempotency_key: &str,
         result_spec: &BoundedResultSpec,
         member_retired: bool,
-        deadline: Instant,
+        end: Instant,
     ) -> Result<DeliveryTerminalWait, DeliveryTerminalWaitError> {
         let observer = DeliveryObserver {
             runtime,
@@ -437,11 +500,11 @@ mod observe {
             idempotency_key,
             result_spec,
         };
-        let started = Instant::now();
-        let (wait_budget, evidence_budget) = split(deadline.saturating_duration_since(started));
-        let wait_until = started + wait_budget;
+        let wait_until = wait_until(end);
         let mut input_id: Option<InputId> = None;
         let mut last_pending: Option<PendingFacts> = None;
+        // Whether some read completed and found no input for the key.
+        let mut observed_unadmitted = false;
         let mut poll = POLL_START;
 
         loop {
@@ -468,6 +531,7 @@ mod observe {
                             cause: DeliveryUnknownCause::MemberRetired,
                         });
                     }
+                    observed_unadmitted = true;
                     None
                 }
             };
@@ -484,14 +548,15 @@ mod observe {
                 {
                     // Re-read on expiry; the loop re-arms if still pending.
                     Err(_elapsed) => continue,
-                    Ok(Ok(InputTerminalReceiptWait::Resolved(read))) => {
+                    Ok(Ok(Some(InputTerminalReceiptWait::Resolved(read)))) => {
                         if let Observation::Terminal(record) = observer.classify(read)? {
                             return Ok(DeliveryTerminalWait::Terminal(record));
                         }
                         continue;
                     }
-                    // The session lost its live registration; poll below.
-                    Ok(Ok(_detached)) => {}
+                    // The session lost its live registration (or the row
+                    // left it); poll below.
+                    Ok(Ok(_detached_or_unknown)) => {}
                     Ok(Err(
                         RuntimeDriverError::NotFound { .. } | RuntimeDriverError::NotReady { .. },
                     )) => {}
@@ -503,12 +568,11 @@ mod observe {
             poll = (poll * 2).min(POLL_MAX);
         }
 
-        // Final evidence read, bounded by the reserved slice.
-        let observation =
-            match tokio::time::timeout(evidence_budget, observer.read(input_id.as_ref())).await {
-                Ok(observation) => Some(observation?),
-                Err(_elapsed) => None,
-            };
+        // Final evidence read in the floor kept back before `end`.
+        let observation = match within(end, observer.read(input_id.as_ref())).await {
+            Some(observation) => Some(observation?),
+            None => None,
+        };
         Ok(match observation {
             Some(Observation::Terminal(record)) => DeliveryTerminalWait::Terminal(record),
             Some(Observation::Pending(facts)) => {
@@ -538,8 +602,11 @@ mod observe {
                     };
                     not_terminal(facts, cause)
                 }
-                None => DeliveryTerminalWait::Unknown {
+                None if observed_unadmitted => DeliveryTerminalWait::Unknown {
                     cause: DeliveryUnknownCause::NotAdmittedByDeadline,
+                },
+                None => DeliveryTerminalWait::Unknown {
+                    cause: DeliveryUnknownCause::NotObservedByDeadline,
                 },
             },
         })
@@ -549,20 +616,24 @@ mod observe {
     mod tests {
         use super::*;
 
+        /// Only the evidence floor is kept back from the wait, whatever the
+        /// budget; a passed or too-close deadline gets exactly the floor.
         #[test]
-        fn split_reserves_an_evidence_slice_inside_the_bound() {
-            assert_eq!(
-                split(Duration::from_secs(4)),
-                (Duration::from_secs(3), Duration::from_secs(1))
-            );
-            assert_eq!(
-                split(Duration::from_secs(60)),
-                (Duration::from_secs(55), MAX_EVIDENCE_READ_BOUND)
-            );
-            assert_eq!(
-                split(Duration::ZERO),
-                (Duration::ZERO, MIN_EVIDENCE_READ_BOUND)
-            );
+        fn only_the_evidence_floor_is_kept_back_from_the_wait() {
+            let now = Instant::now();
+            for budget in [Duration::from_secs(4), Duration::from_secs(60)] {
+                let end = call_end(now + budget);
+                assert_eq!(end, now + budget);
+                assert_eq!(Some(wait_until(end)), end.checked_sub(EVIDENCE_READ_FLOOR));
+            }
+            for deadline in [now, now + EVIDENCE_READ_FLOOR / 2] {
+                let before = Instant::now();
+                let end = call_end(deadline);
+                assert!(end >= before + EVIDENCE_READ_FLOOR);
+                assert!(end <= Instant::now() + EVIDENCE_READ_FLOOR);
+                let until = wait_until(end);
+                assert!(until <= end && end.duration_since(until) <= EVIDENCE_READ_FLOOR);
+            }
         }
     }
 }

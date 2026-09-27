@@ -23,6 +23,7 @@ use crate::input_state::{
     InputAbandonReason, InputLifecycleState, InputTerminalCompletionBatchKey,
     InputTerminalCompletionBatchRead, InputTerminalCompletionPhase,
     InputTerminalCompletionReadError, InputTerminalOutcome, StoredInputState,
+    receipt_less_terminal,
 };
 
 /// Exactly-one lookup key for an interaction terminal-status query.
@@ -99,25 +100,40 @@ pub struct Sourced<T> {
     pub report: T,
 }
 
-/// Which exact terminal batch produced an input's terminal receipt.
+/// Which terminal transaction committed an input's terminal-completion batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InputTerminalReceiptScope {
-    /// The run that consumed (or failed) the input. Every input the same run
-    /// committed shares this scope and one recipient set.
+    /// A terminal transaction of run `run_id` committed the batch.
+    ///
+    /// One run can commit more than one batch, so this does not mean the
+    /// input shares a recipient set or an outcome with every input the run
+    /// touched. An input joined into a running run at a live boundary (a
+    /// request-only steer injected as turn context, or a retained durable
+    /// join of a run that ends without a committed boundary) is finalized
+    /// alone in its own `Run { run_id }` batch with
+    /// `CompletedWithoutResult`, separate from the batch that carries the
+    /// run's own result. A failed run's batch holds only the contributors the
+    /// failure terminalized; requeued contributors get no receipt from it.
     Run { run_id: RunId },
-    /// The runtime stopped, retired or was destroyed with the input pending;
-    /// no run answered it.
+    /// No run answered the input: the runtime terminalized it outside any
+    /// run, in one runless batch (stop, reset, retire, destroy, executor
+    /// attachment replacement, or cancellation of the still-queued input).
     RuntimeTermination,
 }
 
 /// The finalized terminal receipt of one input, read from the runtime's own
 /// durable terminal-completion batch.
 ///
-/// The recipient set and the outcome come from the batch's canonical owner
-/// row, so every recipient of one batch reads the same set and the same
-/// outcome. `input_id`, `terminal` and `attempt_count` are the target input's
-/// own machine-owned facts.
+/// What it proves: the runtime finalized `input_id` in one terminal batch
+/// together with exactly [`Self::recipient_input_ids`], all of which share
+/// [`Self::outcome`], in a transaction of [`Self::scope`]. The recipient set
+/// and the outcome come from the batch's canonical owner row, so every
+/// recipient of one batch reads the same set and the same outcome. It does
+/// not prove that the outcome answers every input a run touched, nor that a
+/// run's result answers this input: see [`InputTerminalReceiptScope::Run`].
+/// `input_id`, `terminal` and `attempt_count` are the target input's own
+/// machine-owned facts.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct InputTerminalReceipt {
@@ -155,7 +171,9 @@ impl InputTerminalReceipt {
         &self.scope
     }
 
-    /// The run that produced the receipt, when a run did.
+    /// The run whose terminal transaction committed the input's batch, when
+    /// a run did. For an input joined into that run at a live boundary this
+    /// names the run, but the run's result is not this input's outcome.
     #[must_use]
     pub fn run_id(&self) -> Option<&RunId> {
         match &self.scope {
@@ -170,15 +188,18 @@ impl InputTerminalReceipt {
         &self.owner_input_id
     }
 
-    /// Every input the same batch answered, in canonical (input-id) order.
-    /// It always contains [`Self::input_id`]; more than one entry means one
-    /// run answered several inputs together.
+    /// Every input finalized in the same batch, in canonical (input-id)
+    /// order; all of them share [`Self::outcome`]. It always contains
+    /// [`Self::input_id`]. More than one entry means one terminal transaction
+    /// finalized several inputs with one outcome (for example queued inputs
+    /// one run consumed together). It is the batch, not every input the run
+    /// touched.
     #[must_use]
     pub fn recipient_input_ids(&self) -> &[InputId] {
         &self.recipient_input_ids
     }
 
-    /// The batch's finalized public outcome.
+    /// The batch's finalized public outcome, shared by every recipient.
     #[must_use]
     pub fn outcome(&self) -> &CompletionOutcome {
         &self.outcome
@@ -206,8 +227,12 @@ pub enum InputTerminalReceiptRead {
     },
     /// The runtime finalized the input's terminal receipt.
     Finalized(Box<InputTerminalReceipt>),
-    /// The input reached a terminal the machine never stages a receipt for:
-    /// superseded, coalesced, or consumed on accept without a run.
+    /// The input reached a terminal through a machine transition that stages
+    /// no receipt: superseded or coalesced by a later admission, consumed on
+    /// accept, cancelled by member-host boot revival, or abandoned at the
+    /// stage-attempt cap after a failed batch start. No run result exists
+    /// for it. `last_run_id` is the last run the input was staged into, if
+    /// any; that run did not answer it.
     TerminalWithoutReceipt {
         input_id: InputId,
         terminal: InputTerminalOutcome,
@@ -242,22 +267,23 @@ impl InputTerminalReceiptRead {
 pub enum InputTerminalReceiptWait {
     /// The input's receipt resolved (`Finalized` or `TerminalWithoutReceipt`).
     Resolved(Sourced<InputTerminalReceiptRead>),
-    /// The input is not resolved and the session has no live registration
-    /// to wait on. Carries the current durable read (`None` when there is no
-    /// durable row for the input). A `Pending` read here can only advance
-    /// once the session is registered and recovery runs it.
-    Detached(Option<Sourced<InputTerminalReceiptRead>>),
+    /// The input is still `Pending` in the durable store and its session has
+    /// no live registration to wait on (never registered, or unregistered
+    /// while waiting). Carries that durable read. It can only advance once
+    /// the session is registered again and recovery runs it.
+    Detached(Sourced<InputTerminalReceiptRead>),
 }
 
 /// Classify the terminal receipt of `input_id` from rows that hold the target
 /// and every row of its terminal-completion batch.
 ///
-/// `Ok(None)` means the target is not among the rows. This shares the batch
-/// validation of the public completion reader; only the classification of
-/// receipt-less terminals differs: the machine transitions that never stage a
-/// receipt (supersede, coalesce, consume-on-accept) are typed here instead of
-/// being reported as a lost receipt. Every other receipt-less terminal keeps
-/// the reader's repair-blocked / corruption classification.
+/// `Ok(None)` means the target is not among the rows. Batch validation and
+/// the classification of receipt-less rows are shared with the public
+/// completion reader ([`crate::input_state::receipt_less_terminal`]), so both
+/// readers give the same verdict for the same row: a receipt-less machine
+/// transition is `TerminalWithoutReceipt` here and
+/// `RuntimeDriverError::InputTerminalWithoutReceipt` there, and every other
+/// receipt-less terminal is repair-blocked or corrupt in both.
 pub(crate) fn input_terminal_receipt_read(
     states: &[StoredInputState],
     input_id: &InputId,
@@ -266,23 +292,21 @@ pub(crate) fn input_terminal_receipt_read(
         InputTerminalCompletionBatchRead::TargetAbsent => Ok(None),
         InputTerminalCompletionBatchRead::NoReceipt { target } => {
             let seed = &target.seed;
-            match &seed.terminal_outcome {
-                None => Ok(Some(InputTerminalReceiptRead::Pending {
+            Ok(Some(match receipt_less_terminal(target)? {
+                None => InputTerminalReceiptRead::Pending {
                     input_id: target.state.input_id.clone(),
                     phase: seed.phase,
                     terminal: None,
                     last_run_id: seed.last_run_id.clone(),
                     attempt_count: seed.attempt_count,
-                })),
-                Some(
-                    terminal @ (InputTerminalOutcome::Superseded { .. }
-                    | InputTerminalOutcome::Coalesced { .. }),
-                ) => Ok(Some(receipt_less_terminal(target, terminal.clone()))),
-                Some(terminal @ InputTerminalOutcome::Consumed) if seed.last_run_id.is_none() => {
-                    Ok(Some(receipt_less_terminal(target, terminal.clone())))
-                }
-                Some(_) => Err(crate::input_state::receipt_less_terminal_read_error(target)),
-            }
+                },
+                Some(terminal) => InputTerminalReceiptRead::TerminalWithoutReceipt {
+                    input_id: target.state.input_id.clone(),
+                    terminal,
+                    last_run_id: seed.last_run_id.clone(),
+                    attempt_count: seed.attempt_count,
+                },
+            }))
         }
         InputTerminalCompletionBatchRead::Batch { target, owner } => {
             let seed = &target.seed;
@@ -331,18 +355,6 @@ pub(crate) fn input_terminal_receipt_read(
                 }
             }
         }
-    }
-}
-
-fn receipt_less_terminal(
-    target: &StoredInputState,
-    terminal: InputTerminalOutcome,
-) -> InputTerminalReceiptRead {
-    InputTerminalReceiptRead::TerminalWithoutReceipt {
-        input_id: target.state.input_id.clone(),
-        terminal,
-        last_run_id: target.seed.last_run_id.clone(),
-        attempt_count: target.seed.attempt_count,
     }
 }
 
@@ -637,6 +649,138 @@ mod tests {
             find_by_idempotency_key(&inputs, "interaction-12").is_none(),
             "superstring must not match"
         );
+    }
+
+    /// Every terminal the machine can produce, with and without a run and on
+    /// a migrated 0.8.10 row, classifies the same way in the receipt reader
+    /// and the exact completion reader when the row carries no receipt.
+    #[test]
+    fn receipt_less_rows_classify_alike_in_both_readers() {
+        #[derive(Debug, PartialEq)]
+        enum Verdict {
+            WithoutReceipt,
+            RepairBlocked,
+            Corrupt,
+        }
+        use Verdict::{Corrupt, RepairBlocked, WithoutReceipt};
+        let run_id = RunId::new();
+        let displaced_by = InputId::new();
+        let abandoned = |reason| InputTerminalOutcome::Abandoned { reason };
+        let cases = [
+            (
+                InputTerminalOutcome::Superseded {
+                    superseded_by: displaced_by.clone(),
+                },
+                false,
+                WithoutReceipt,
+                WithoutReceipt,
+            ),
+            (
+                InputTerminalOutcome::Coalesced {
+                    aggregate_id: displaced_by.clone(),
+                },
+                false,
+                WithoutReceipt,
+                WithoutReceipt,
+            ),
+            (
+                InputTerminalOutcome::Consumed,
+                false,
+                WithoutReceipt,
+                RepairBlocked,
+            ),
+            (InputTerminalOutcome::Consumed, true, Corrupt, RepairBlocked),
+            (
+                abandoned(InputAbandonReason::Cancelled),
+                true,
+                WithoutReceipt,
+                RepairBlocked,
+            ),
+            (
+                abandoned(InputAbandonReason::MaxAttemptsExhausted { attempts: 3 }),
+                true,
+                WithoutReceipt,
+                RepairBlocked,
+            ),
+            (
+                abandoned(InputAbandonReason::Retired),
+                false,
+                Corrupt,
+                RepairBlocked,
+            ),
+            (
+                abandoned(InputAbandonReason::Reset),
+                false,
+                Corrupt,
+                RepairBlocked,
+            ),
+            (
+                abandoned(InputAbandonReason::Stopped),
+                false,
+                Corrupt,
+                RepairBlocked,
+            ),
+            (
+                abandoned(InputAbandonReason::Destroyed),
+                false,
+                Corrupt,
+                RepairBlocked,
+            ),
+            (
+                abandoned(InputAbandonReason::NeverExecuted),
+                true,
+                Corrupt,
+                RepairBlocked,
+            ),
+        ];
+        for (terminal, ran, current, migrated) in cases {
+            for (unavailable, expected) in [(false, &current), (true, &migrated)] {
+                let mut row = witness(ran.then_some(&run_id), Some(terminal.clone()), None, None);
+                row.state.terminal_completion_unavailable = unavailable;
+                let input_id = row.state.input_id.clone();
+                let rows = std::slice::from_ref(&row);
+                let receipt = match input_terminal_receipt_read(rows, &input_id) {
+                    Ok(Some(InputTerminalReceiptRead::TerminalWithoutReceipt {
+                        terminal: read,
+                        last_run_id,
+                        ..
+                    })) => {
+                        assert_eq!(read, terminal);
+                        assert_eq!(last_run_id.as_ref(), ran.then_some(&run_id));
+                        WithoutReceipt
+                    }
+                    Err(InputTerminalCompletionReadError::MigratedReceiptUnavailable) => {
+                        RepairBlocked
+                    }
+                    Err(InputTerminalCompletionReadError::Corrupt(_)) => Corrupt,
+                    other => panic!("unexpected receipt read {other:?} for {terminal:?}"),
+                };
+                let completion =
+                    match crate::input_state::input_terminal_completion_outcome(rows, &input_id) {
+                        Err(InputTerminalCompletionReadError::TerminalWithoutReceipt {
+                            input_id: read_id,
+                            terminal: read,
+                        }) => {
+                            assert_eq!(read_id, input_id);
+                            assert_eq!(read, terminal);
+                            WithoutReceipt
+                        }
+                        Err(InputTerminalCompletionReadError::MigratedReceiptUnavailable) => {
+                            RepairBlocked
+                        }
+                        Err(InputTerminalCompletionReadError::Corrupt(_)) => Corrupt,
+                        other => panic!("unexpected completion read {other:?} for {terminal:?}"),
+                    };
+                assert_eq!(
+                    &receipt, expected,
+                    "{terminal:?} ran={ran} migrated={unavailable}"
+                );
+                assert_eq!(
+                    receipt, completion,
+                    "both readers agree for {terminal:?} ran={ran} migrated={unavailable}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -590,9 +590,16 @@ impl MeerkatMachine {
 
                         let result = {
                             let mut drv = driver.lock().await;
+                            let displaced_input_id = resolved.displaced_queued_input_id().cloned();
                             let result = drv.accept_resolved_input(input, resolved).await.map_err(
                                 |err| RuntimeControlPlaneError::Internal(err.to_string()),
                             )?;
+                            Self::wake_displaced_input_observers(
+                                &completions,
+                                displaced_input_id,
+                                &result,
+                            )
+                            .await;
                             if !Self::accept_outcome_matches_preview(&preview_result, &result) {
                                 return Err(RuntimeControlPlaneError::Internal(format!(
                                     "direct ingest admission preview diverged from committed outcome: preview={preview_result:?}, committed={result:?}"

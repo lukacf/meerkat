@@ -1342,10 +1342,13 @@ pub(crate) fn input_terminal_completion_outcome(
     match input_terminal_completion_batch(states, input_id)? {
         InputTerminalCompletionBatchRead::TargetAbsent => Ok(None),
         InputTerminalCompletionBatchRead::NoReceipt { target } => {
-            if target.seed.terminal_outcome.is_some() {
-                return Err(receipt_less_terminal_read_error(target));
+            match receipt_less_terminal(target)? {
+                None => Ok(None),
+                Some(terminal) => Err(InputTerminalCompletionReadError::TerminalWithoutReceipt {
+                    input_id: target.state.input_id.clone(),
+                    terminal,
+                }),
             }
-            Ok(None)
         }
         InputTerminalCompletionBatchRead::Batch { owner, .. } => match &owner.phase {
             InputTerminalCompletionPhase::Pending => Ok(None),
@@ -1360,16 +1363,68 @@ pub(crate) fn input_terminal_completion_outcome(
     }
 }
 
-/// Classify a terminal input row that carries no exact completion receipt.
-pub(crate) fn receipt_less_terminal_read_error(
+/// Classify one input row that carries no terminal-completion receipt.
+///
+/// This is the one classification both public readers share: the exact
+/// completion reader ([`input_terminal_completion_outcome`]) and the
+/// terminal-receipt reader in [`crate::terminal_status`]. `Ok(None)` means the
+/// input is not terminal. `Ok(Some(terminal))` means the machine reached that
+/// terminal through a transition that never stages a receipt:
+///
+/// - `Superseded` / `Coalesced`: a later admission displaced the queued input
+///   (`SupersedeInput` / `CoalesceInput` when that admission commits). No
+///   runtime version ever staged a receipt for them, so a migrated 0.8.10 row
+///   classifies the same way.
+/// - `Consumed` with no run: the admission plan consumed the input on accept
+///   (`ConsumeOnAccept`).
+/// - `Abandoned { Cancelled }`: member-host boot revival silently cancels the
+///   interrupted predecessor's inputs
+///   (`abandon_recovered_predecessor_inputs`), with no receipt and no
+///   interaction terminal by design.
+/// - `Abandoned { MaxAttemptsExhausted }`: a batch start that fails after
+///   staging (stage realization or staged-binding persistence) rolls its
+///   inputs back through `ResolveStagedRollback`, which abandons an input at
+///   the stage-attempt cap without a receipt.
+///
+/// `Cancelled` and `MaxAttemptsExhausted` are also reached with a receipt
+/// (tracked cancel, attachment replacement, a failed run's batch); a row of
+/// either kind without one is read as the receipt-less transition above.
+/// Every other receipt-less terminal is an evidence gap: a migrated 0.8.10
+/// row is repair-blocked, and anything else is corruption, because every
+/// other terminalizing path stages its batch in the same transaction - runs
+/// that consume their inputs, failed and refused runs (`NeverExecuted`), and
+/// runtime termination (`Retired`, `Reset`, `Stopped`, `Destroyed`).
+pub(crate) fn receipt_less_terminal(
     target: &StoredInputState,
-) -> InputTerminalCompletionReadError {
-    if target.state.terminal_completion_unavailable {
-        InputTerminalCompletionReadError::MigratedReceiptUnavailable
+) -> Result<Option<InputTerminalOutcome>, InputTerminalCompletionReadError> {
+    let Some(terminal) = target.seed.terminal_outcome.as_ref() else {
+        return Ok(None);
+    };
+    let never_receipted = matches!(
+        terminal,
+        InputTerminalOutcome::Superseded { .. } | InputTerminalOutcome::Coalesced { .. }
+    );
+    if !never_receipted && target.state.terminal_completion_unavailable {
+        return Err(InputTerminalCompletionReadError::MigratedReceiptUnavailable);
+    }
+    let staged_without_receipt = match terminal {
+        InputTerminalOutcome::Superseded { .. } | InputTerminalOutcome::Coalesced { .. } => true,
+        InputTerminalOutcome::Consumed => target.seed.last_run_id.is_none(),
+        InputTerminalOutcome::Abandoned { reason } => match reason {
+            InputAbandonReason::Cancelled | InputAbandonReason::MaxAttemptsExhausted { .. } => true,
+            InputAbandonReason::Retired
+            | InputAbandonReason::Reset
+            | InputAbandonReason::Stopped
+            | InputAbandonReason::Destroyed
+            | InputAbandonReason::NeverExecuted => false,
+        },
+    };
+    if staged_without_receipt {
+        Ok(Some(terminal.clone()))
     } else {
-        InputTerminalCompletionReadError::Corrupt(
+        Err(InputTerminalCompletionReadError::Corrupt(
             "v5 terminal input lost its exact completion receipt".to_string(),
-        )
+        ))
     }
 }
 
@@ -1386,6 +1441,12 @@ impl InputTerminalCompletionReadError {
             Self::Corrupt(reason) => {
                 crate::traits::RuntimeDriverError::RecoveryCorruption { reason }
             }
+            Self::TerminalWithoutReceipt { input_id, terminal } => {
+                crate::traits::RuntimeDriverError::InputTerminalWithoutReceipt {
+                    input_id,
+                    terminal,
+                }
+            }
         }
     }
 }
@@ -1398,6 +1459,13 @@ pub(crate) enum InputTerminalCompletionReadError {
     MigratedReceiptUnavailable,
     #[error("{0}")]
     Corrupt(String),
+    /// A terminal the machine reached without staging a receipt (see
+    /// [`receipt_less_terminal`]); no public completion exists for it.
+    #[error("input {input_id} is terminal ({terminal:?}) without a terminal-completion receipt")]
+    TerminalWithoutReceipt {
+        input_id: InputId,
+        terminal: InputTerminalOutcome,
+    },
 }
 
 /// Store-write wrapper for an input-state bundle whose DSL-owned seed facts

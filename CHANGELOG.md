@@ -44,7 +44,11 @@ them.
   transcript. In that window it found no reply. `MobSessionService` gains
   `live_transcript_awaits_commit` (default `false`; `PersistentSessionService`
   answers from the session document machine's uncommitted-transcript verdict),
-  and the re-link keeps such a child running until its commit lands.
+  and the re-link keeps such a child running until its commit lands. A
+  `MobSessionService` wrapper over a persistent service MUST forward
+  `live_transcript_awaits_commit`. Without the forward it silently answers
+  the default `false` and the race returns. The in-repo RPC and CLI wrappers
+  forward it; out-of-tree wrappers (MobKit's) must add the forward.
 
 - Full-fresh BuildBuddy validation no longer runs out of its 50-minute SLO
   on integration-fast. The Native submitter waited for the `//...` prebuild

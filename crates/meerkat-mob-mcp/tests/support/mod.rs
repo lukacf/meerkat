@@ -46,6 +46,9 @@ pub enum ScriptedTurn {
     /// member turns are genuinely in progress, so the temporary mob, its
     /// wiring, and its capability attachments are all live and readable.
     Gated(Arc<TurnGate>, String),
+    /// Block until the gate opens, then fail the provider call: a turn that
+    /// was running when observed and then ends with no reply.
+    GatedFail(Arc<TurnGate>, String),
 }
 
 /// A release gate a scripted turn blocks on.
@@ -207,6 +210,19 @@ impl LlmClient for ScriptedCouncilClient {
                     futures::stream::once(released),
                     |events| futures::stream::iter(events.into_iter().map(Ok)),
                 ));
+            }
+            ScriptedTurn::GatedFail(gate, reason) => {
+                let released = async move {
+                    gate.entered.fetch_add(1, Ordering::SeqCst);
+                    let mut rx = gate.receiver();
+                    while !*rx.borrow_and_update() {
+                        if rx.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(LlmError::InvalidRequest { message: reason })
+                };
+                return Box::pin(futures::stream::once(released));
             }
         };
         Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
@@ -429,6 +445,19 @@ impl CouncilFixture {
             script,
             |state, _root| state,
             FixtureRuntime::DerivedFromService,
+            Some(runtime_store),
+        )
+    }
+
+    /// [`Self::new_runtime_backed`] over a caller-supplied runtime store.
+    pub fn new_runtime_backed_with_runtime_store(
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+        runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    ) -> Self {
+        Self::build(
+            script,
+            |state, _root| state,
+            FixtureRuntime::RuntimeBacked,
             Some(runtime_store),
         )
     }

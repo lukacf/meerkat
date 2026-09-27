@@ -1559,6 +1559,13 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         self.service.execution_snapshot(session_id).await
     }
 
+    async fn live_transcript_awaits_commit(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        self.service.live_transcript_awaits_commit(session_id).await
+    }
+
     async fn tool_scope_snapshot(
         &self,
         session_id: &SessionId,

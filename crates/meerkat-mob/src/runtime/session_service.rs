@@ -1123,6 +1123,12 @@ pub trait MobSessionService:
     ///
     /// Default: `Ok(false)`. A service without a separate durable store has
     /// nothing to await.
+    ///
+    /// A wrapper over a persistent service MUST forward this to the service
+    /// it wraps. Without the forward it silently answers the default
+    /// `Ok(false)`, and a restart re-link reads a finished child's outcome
+    /// from the store before the turn's rows reach it (delivering
+    /// `restart_interrupted` for a child that answered).
     async fn live_transcript_awaits_commit(
         &self,
         _session_id: &SessionId,

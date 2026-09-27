@@ -862,6 +862,17 @@ async fn relink_waits_for_a_finished_child_turn_to_commit() {
         .resolve_bridge_session_id(&AgentIdentity::from(child))
         .await
         .expect("child session");
+    // The fact the re-link settles on, exactly as MeerkatMachine documents
+    // it: true for the whole active turn.
+    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
+        .expect("the service derives its runtime");
+    assert!(
+        runtime
+            .session_has_uncommitted_run_input(&child_session)
+            .await
+            .unwrap(),
+        "an active turn's input awaits its boundary"
+    );
     store.arm(meerkat_runtime::LogicalRuntimeId::for_session(
         &child_session,
     ));
@@ -876,6 +887,15 @@ async fn relink_waits_for_a_finished_child_turn_to_commit() {
     // The turn ends; its commit is held at the store.
     gate.open();
     store.entered().await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.session_has_uncommitted_run_input(&child_session),
+        )
+        .await
+        .is_err(),
+        "the read queues behind the boundary commit in progress"
+    );
     // Terminal in its live agent, reply not durable: many re-link
     // observations of exactly the state that used to be read as idle. The
     // window outlasts the re-link's bounded run-input read, so a read that
@@ -893,6 +913,13 @@ async fn relink_waits_for_a_finished_child_turn_to_commit() {
         "the re-link reported the child before its finished turn was committed"
     );
     await_completion_record(&fixture, &owner, &job_id).await;
+    assert!(
+        !runtime
+            .session_has_uncommitted_run_input(&child_session)
+            .await
+            .unwrap(),
+        "no input awaits a boundary once the commit landed"
+    );
     assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
     let record = completion_record_text(&fixture, &owner, &job_id).await;
     assert!(

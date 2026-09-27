@@ -789,9 +789,10 @@ impl ProgressVerdict {
 ///
 /// Member status reads the live agent, which is terminal before the service
 /// commits the turn, while the outcome is read from the durable transcript.
-/// The runtime owns the fact in between: the turn's input stays staged (or
-/// applied) on the run until the boundary commit consumes it, which is also
-/// what makes the reply durable. That is a machine phase, not a comparison
+/// The runtime owns the fact in between
+/// ([`meerkat_runtime::MeerkatMachine::session_has_uncommitted_run_input`]):
+/// the turn's input stays staged (or applied) on the run until the boundary
+/// commit consumes it, which is also what makes the reply durable. That is a machine phase, not a comparison
 /// of transcripts, so a turn that compacted inside the window reads the same.
 /// A read of it queues behind a commit in progress, so the commit landing,
 /// not a delay, is what settles the child. A failed read says nothing.
@@ -813,7 +814,7 @@ async fn observe_child(
     };
     match tokio::time::timeout(
         RUN_INPUT_READ_TIMEOUT,
-        run_input_uncommitted(runtime, &session_id),
+        runtime.session_has_uncommitted_run_input(&session_id),
     )
     .await
     {
@@ -825,48 +826,6 @@ async fn observe_child(
             ChildObservation::Unobserved(format!("could not read the child's run inputs: {detail}"))
         }
     }
-}
-
-/// Whether the child's runtime holds an input staged or applied on a run
-/// whose boundary has not consumed it. A runtime that no longer holds the
-/// session has nothing pending.
-async fn run_input_uncommitted(
-    runtime: &meerkat_runtime::MeerkatMachine,
-    session_id: &meerkat_core::SessionId,
-) -> Result<bool, String> {
-    use meerkat_runtime::input_state::InputLifecycleState;
-    use meerkat_runtime::{RuntimeDriverError, SessionServiceRuntimeExt as _};
-    let gone = |error: &RuntimeDriverError| {
-        matches!(
-            error,
-            RuntimeDriverError::NotFound { .. }
-                | RuntimeDriverError::Destroyed
-                | RuntimeDriverError::NotReady { .. }
-        )
-    };
-    let inputs = match runtime.list_active_inputs(session_id).await {
-        Ok(inputs) => inputs,
-        Err(error) if gone(&error) => return Ok(false),
-        Err(error) => return Err(error.to_string()),
-    };
-    for input in inputs {
-        let state = match runtime.input_state(session_id, &input).await {
-            Ok(state) => state,
-            Err(error) if gone(&error) => return Ok(false),
-            Err(error) => return Err(error.to_string()),
-        };
-        if state.is_some_and(|state| {
-            matches!(
-                state.seed.phase,
-                InputLifecycleState::Staged
-                    | InputLifecycleState::Applied
-                    | InputLifecycleState::AppliedPendingConsumption
-            )
-        }) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Read a fork child's run state: its member status, and when that leaves

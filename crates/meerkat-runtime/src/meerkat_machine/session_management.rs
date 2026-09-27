@@ -1256,6 +1256,68 @@ async fn retire_ops_lifecycle_owner_for_unregister(
 }
 
 impl MeerkatMachine {
+    /// Whether `session_id` holds a run input that its run has taken up but
+    /// whose boundary has not consumed it yet: an input `Staged`, `Applied`
+    /// or `AppliedPendingConsumption`.
+    ///
+    /// That is exactly the stretch from staging an input onto a run until the
+    /// run's boundary commit consumes it, the same commit that makes the
+    /// turn's transcript durable. So it is `true` for the WHOLE active turn,
+    /// and in particular for a turn that is already terminal in the live
+    /// agent while its boundary commit is still landing. It is a machine
+    /// phase, not a comparison of transcripts: a turn that compacted reads
+    /// the same.
+    ///
+    /// `false` means no run input awaits a boundary: every staged turn has
+    /// committed (or its input reached another terminal phase). It says
+    /// nothing about work that is queued but not yet staged, i.e. whether a
+    /// new turn is about to start. A runtime that no longer holds the session
+    /// (not found, destroyed, not ready) holds nothing pending and reads
+    /// `false`.
+    ///
+    /// Reads queue behind a boundary commit in progress (the commit holds the
+    /// session driver), so the call can wait for as long as that commit
+    /// takes. Callers bound it; one that times out is behind an in-progress
+    /// commit, which is itself "pending".
+    pub async fn session_has_uncommitted_run_input(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        use crate::input_state::InputLifecycleState;
+        use crate::service_ext::SessionServiceRuntimeExt as _;
+        let gone = |error: &RuntimeDriverError| {
+            matches!(
+                error,
+                RuntimeDriverError::NotFound { .. }
+                    | RuntimeDriverError::Destroyed
+                    | RuntimeDriverError::NotReady { .. }
+            )
+        };
+        let inputs = match self.list_active_inputs(session_id).await {
+            Ok(inputs) => inputs,
+            Err(error) if gone(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        for input in inputs {
+            let state = match self.input_state(session_id, &input).await {
+                Ok(state) => state,
+                Err(error) if gone(&error) => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            if state.is_some_and(|state| {
+                matches!(
+                    state.seed.phase,
+                    InputLifecycleState::Staged
+                        | InputLifecycleState::Applied
+                        | InputLifecycleState::AppliedPendingConsumption
+                )
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn binding_unregister_observer(
         &self,
         session_id: &SessionId,

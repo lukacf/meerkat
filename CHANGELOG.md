@@ -42,8 +42,9 @@ them.
   status reads the live agent, which is terminal before the session service
   commits the turn, while the re-link reads the outcome from the durable
   transcript, and in that window it found no reply. The re-link now also
-  asks the runtime whether the child's last turn input is still staged or
-  applied on its run, unconsumed. That machine phase clears exactly when the
+  asks the runtime, through the new public
+  `MeerkatMachine::session_has_uncommitted_run_input`, whether the child's
+  last turn input is still staged or applied on its run, unconsumed. That machine phase clears exactly when the
   boundary commit lands, and a read of it queues behind a commit in
   progress. Until then the child counts as running, whatever its transcript
   looks like (a turn that compacted inside the window included). A commit

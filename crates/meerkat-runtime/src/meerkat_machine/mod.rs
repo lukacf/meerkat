@@ -5350,6 +5350,60 @@ impl MeerkatMachine {
         }
     }
 
+    /// Deterministically pause the runtime loop's next terminal run commit
+    /// of `session_id` before it takes the session driver (the turn is
+    /// terminal in its live agent, its run input applied and unconsumed).
+    /// The first receiver resolves when the commit reaches the gate; sending
+    /// on (or dropping) the returned sender lets it go on. Exposed only by
+    /// test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_runtime_loop_before_terminal_commit_test_hook(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        let mut hook = self
+            .test_runtime_loop_before_terminal_commit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            hook.is_none(),
+            "runtime-loop terminal-commit test hook already armed"
+        );
+        *hook = Some((session_id, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn run_runtime_loop_before_terminal_commit_test_hook(
+        &self,
+        session_id: &SessionId,
+    ) {
+        let armed = {
+            let mut hook = self
+                .test_runtime_loop_before_terminal_commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hook
+                .as_ref()
+                .is_some_and(|(armed_session_id, _, _)| armed_session_id == session_id)
+            {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered_tx, release_rx)) = armed {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
+    }
+
     /// Deterministically pause the runtime loop after its ready-effect drain
     /// and before queue authority is acquired. Exposed only by test builds so
     /// cross-crate integration tests can admit a complete same-boundary batch.
@@ -7842,6 +7896,19 @@ pub struct MeerkatMachineShared {
     /// reconcile a committed transition after a recoverable dispatch error.
     #[cfg(test)]
     test_fail_next_typed_dsl_post_commit_dispatch: std::sync::atomic::AtomicBool,
+    /// One-shot deterministic gate before the runtime loop's terminal run
+    /// commit takes the session driver. The turn is terminal in its live
+    /// agent while its run input is still applied and unconsumed, and the
+    /// driver is free: cross-crate tests read that state without racing the
+    /// commit.
+    #[cfg(any(test, feature = "test-support"))]
+    test_runtime_loop_before_terminal_commit: StdMutex<
+        Option<(
+            SessionId,
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// One-shot deterministic gate after the runtime loop's first ready-effect
     /// drain but before it acquires queue authority. Tests publish an executor
     /// effect in this exact gap and prove the consumed wake is retained.
@@ -9202,6 +9269,8 @@ impl MeerkatMachine {
                     false,
                 ),
                 #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_terminal_commit: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
@@ -9290,6 +9359,8 @@ impl MeerkatMachine {
                     false,
                 ),
                 #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_terminal_commit: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_reload_required_discard_after_successor_publication: StdMutex::new(None),
@@ -9377,6 +9448,8 @@ impl MeerkatMachine {
                 test_fail_next_typed_dsl_post_commit_dispatch: std::sync::atomic::AtomicBool::new(
                     false,
                 ),
+                #[cfg(any(test, feature = "test-support"))]
+                test_runtime_loop_before_terminal_commit: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_queue_authority: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]

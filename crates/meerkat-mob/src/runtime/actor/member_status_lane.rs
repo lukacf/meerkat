@@ -85,9 +85,9 @@ pub(in crate::runtime) const MEMBER_STATUS_OBSERVATION_DEADLINE: Duration = Dura
 /// one slow session; the ceiling exists so a stalled store (a hung network
 /// filesystem, or a wrapper over a persistent service that serves
 /// `MobSessionService::observe_member_status_view` from `read` instead of
-/// forwarding it, while members run long turns) cannot hold the mob's whole capacity until the actor exits, which
-/// would refuse every status read in the mob, live members included, with
-/// `observation_lane_saturated`.
+/// forwarding it, while members run long turns) cannot hold the mob's whole
+/// capacity until the actor exits, which would refuse every status read in
+/// the mob, live members included, with `observation_lane_saturated`.
 ///
 /// 30 s is 30 times the observation deadline and 15 times the admission
 /// wait, and more than three times the slowest healthy read seen in the

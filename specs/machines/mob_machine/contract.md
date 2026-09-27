@@ -566,6 +566,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverPlacedCarrierCleanup`(obligation: PlacedCarrierCleanupObligation)
 - `ClassifyMemberLiveMaterialization`(agent_identity: AgentIdentity, observation: MemberLiveMaterializationObservationKind, reason: String)
 - `ResolveMemberRevivalSucceeded`(agent_identity: AgentIdentity)
+- `ResolveRecreatedMemberSessionSucceeded`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, bridge_session_id: SessionId)
 - `ResolveMemberRevivalFailed`(agent_identity: AgentIdentity, reason: String)
 - `AdmitDestroyCleanup`
 - `AdmitDestroyStorageFinalizing`
@@ -7856,6 +7857,26 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_present`
   - `generation_binding_present`
   - `session_binding_present`
+- Emits: `RequestRuntimeBinding`
+- To: `Running`
+
+### `ResolveRecreatedMemberSessionSucceededRunningLocal`
+- From: `Running`
+- On: `ResolveRecreatedMemberSessionSucceeded`(agent_identity, agent_runtime_id, fence_token, generation, bridge_session_id)
+- Guards:
+  - `lifecycle_origin_open`
+  - `member_is_local`
+  - `identity_runtime_matches`
+  - `runtime_live`
+  - `member_not_retiring`
+  - `retirement_not_pending`
+  - `identity_fence_matches`
+  - `runtime_fence_matches`
+  - `generation_matches`
+  - `session_binding_matches`
+  - `not_broken`
+  - `revival_not_pending`
+  - `no_explicit_resume_work`
 - Emits: `RequestRuntimeBinding`
 - To: `Running`
 

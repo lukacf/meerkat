@@ -11519,6 +11519,15 @@ mod tests {
             "the explicitly nonpersistent session fixture must rotate its bridge session after a cold restart"
         );
 
+        assert_eq!(
+            restored_state
+                .mob_status(&mob_id)
+                .await
+                .expect("restored mob status"),
+            MobState::Running,
+            "fresh session recreation must restore its generated runtime binding before admission"
+        );
+
         let restored_schedule_store = Arc::new(
             meerkat_store::SqliteScheduleStore::open(&schedule_path)
                 .expect("reopen schedule store"),

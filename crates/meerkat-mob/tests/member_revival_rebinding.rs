@@ -22,13 +22,14 @@
 //! empty session id or a zero fence token into the consumer - a silently wrong
 //! binding instead of a loud one.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_mob::machines::mob_machine::{
     AgentIdentity, AgentRuntimeId, FenceToken, Generation,
     MemberLiveMaterializationObservationKind, MemberRevivalVerdictKind, MobMachineAuthority,
-    MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal, MobMachineTransition,
-    SessionId, SpawnPolicyRuntimeMode,
+    MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal, MobMachineState,
+    MobMachineTransition, MobMemberState, MobPhase, PlacedCompletionLifecycleIntentKind,
+    ResumeMemberBinding, SessionId, SpawnPolicyRuntimeMode,
 };
 
 const MEMBER: &str = "worker-1";
@@ -291,4 +292,195 @@ fn revival_resolution_refuses_without_an_authorized_obligation() {
             "resolution is only admissible against a machine-authorized revival \
              obligation; an unsolicited resolution must never mint a binding request",
         );
+}
+
+fn recreation_completed() -> MobMachineSignal {
+    MobMachineSignal::ResolveRecreatedMemberSessionSucceeded {
+        agent_identity: identity(MEMBER),
+        agent_runtime_id: runtime_id(MEMBER, GENERATION),
+        fence_token: FenceToken(FENCE),
+        generation: Generation(GENERATION),
+        bridge_session_id: session_id("recreated-session"),
+    }
+}
+
+fn recreated_member_authority() -> MobMachineAuthority {
+    let mut authority = MobMachineAuthority::new();
+    authorize_spawn_profile(&mut authority, MEMBER);
+    apply_local_spawn_ladder(&mut authority, MEMBER);
+    authority
+        .apply_signal(MobMachineSignal::RecoverMemberSessionBinding {
+            agent_identity: identity(MEMBER),
+            agent_runtime_id: runtime_id(MEMBER, GENERATION),
+            bridge_session_id: session_id("recreated-session"),
+            replacing: Some(session_id(BRIDGE_SESSION)),
+        })
+        .expect("fresh recreation recovers the new session binding first");
+    authority
+}
+
+#[test]
+fn recreated_member_completion_emits_only_its_exact_current_binding() {
+    let mut authority = recreated_member_authority();
+    let before = authority.state().clone();
+    for _ in 0..2 {
+        let transition = authority
+            .apply_signal(recreation_completed())
+            .expect("an exact successful recreation is idempotent");
+        assert_eq!(transition.effects().len(), 1);
+        assert_eq!(
+            binding_requests(&transition),
+            vec![(
+                identity(MEMBER),
+                runtime_id(MEMBER, GENERATION),
+                FenceToken(FENCE),
+                Some(Generation(GENERATION)),
+                session_id("recreated-session"),
+            )],
+        );
+        assert_eq!(authority.state(), &before);
+    }
+}
+
+#[test]
+fn recreated_member_completion_refuses_stale_receipt_fields_without_effects() {
+    let before = recreated_member_authority().state().clone();
+    for (label, member, runtime, fence, generation, session) in [
+        (
+            "identity",
+            "other-member",
+            MEMBER,
+            FENCE,
+            GENERATION,
+            "recreated-session",
+        ),
+        (
+            "runtime",
+            MEMBER,
+            "other-runtime",
+            FENCE,
+            GENERATION,
+            "recreated-session",
+        ),
+        (
+            "fence",
+            MEMBER,
+            MEMBER,
+            FENCE + 1,
+            GENERATION,
+            "recreated-session",
+        ),
+        (
+            "generation",
+            MEMBER,
+            MEMBER,
+            FENCE,
+            GENERATION + 1,
+            "recreated-session",
+        ),
+        ("session", MEMBER, MEMBER, FENCE, GENERATION, BRIDGE_SESSION),
+    ] {
+        let mut authority = MobMachineAuthority::recover_from_state(before.clone())
+            .expect("recover exact baseline");
+        authority
+            .apply_signal(MobMachineSignal::ResolveRecreatedMemberSessionSucceeded {
+                agent_identity: identity(member),
+                agent_runtime_id: runtime_id(runtime, GENERATION),
+                fence_token: FenceToken(fence),
+                generation: Generation(generation),
+                bridge_session_id: session_id(session),
+            })
+            .unwrap_err();
+        assert_eq!(
+            authority.state(),
+            &before,
+            "stale {label} changed authority"
+        );
+    }
+}
+
+#[test]
+fn recreated_member_completion_refuses_obsolete_authority_without_effects() {
+    let baseline = recreated_member_authority().state().clone();
+    type AuthorityMutation = fn(&mut MobMachineState);
+    let cases: &[(&str, AuthorityMutation)] = &[
+        ("stopped", |state| state.lifecycle_phase = MobPhase::Stopped),
+        ("quiescing", |state| {
+            state.placed_completion_lifecycle_quiescing = true;
+            state.placed_completion_lifecycle_intent =
+                Some(PlacedCompletionLifecycleIntentKind::Stop);
+        }),
+        ("not live", |state| {
+            state
+                .live_runtime_ids
+                .remove(&runtime_id(MEMBER, GENERATION));
+        }),
+        ("retiring", |state| {
+            state
+                .member_state_markers
+                .insert(runtime_id(MEMBER, GENERATION), MobMemberState::Retiring);
+        }),
+        ("retirement pending", |state| {
+            state.runtime_retire_pending_sessions.insert(
+                runtime_id(MEMBER, GENERATION),
+                session_id("recreated-session"),
+            );
+        }),
+        ("session rotated", |state| {
+            state
+                .member_session_bindings
+                .insert(identity(MEMBER), session_id("successor"));
+        }),
+        ("session absent", |state| {
+            state.member_session_bindings.remove(&identity(MEMBER));
+        }),
+        ("runtime fence absent", |state| {
+            state
+                .runtime_fence_tokens
+                .remove(&runtime_id(MEMBER, GENERATION));
+        }),
+        ("runtime fence changed", |state| {
+            state
+                .runtime_fence_tokens
+                .insert(runtime_id(MEMBER, GENERATION), FenceToken(FENCE + 1));
+        }),
+        ("broken", |state| {
+            state
+                .member_restore_failures
+                .insert(identity(MEMBER), "restore failed".into());
+        }),
+        ("revival pending", |state| {
+            state.member_revival_pending.insert(identity(MEMBER));
+        }),
+        ("explicit resume pending", |state| {
+            state.explicit_resume_member_work.insert(
+                identity(MEMBER),
+                ResumeMemberBinding {
+                    agent_runtime_id: runtime_id(MEMBER, GENERATION),
+                    fence_token: FenceToken(FENCE),
+                    session_id: session_id("recreated-session"),
+                    definition_epoch: 0,
+                },
+            );
+        }),
+    ];
+    for &(label, mutate) in cases {
+        let mut before = baseline.clone();
+        mutate(&mut before);
+        let mut authority = MobMachineAuthority::recover_from_state(before.clone())
+            .unwrap_or_else(|error| panic!("{label} fixture must recover: {error}"));
+        authority.apply_signal(recreation_completed()).unwrap_err();
+        assert_eq!(authority.state(), &before, "{label} changed authority");
+    }
+}
+
+#[test]
+fn recreated_member_recovery_refuses_lifecycle_intent_without_quiescence() {
+    let mut state = recreated_member_authority().state().clone();
+    assert!(!state.placed_completion_lifecycle_quiescing);
+    state.placed_completion_lifecycle_intent = Some(PlacedCompletionLifecycleIntentKind::Stop);
+    assert!(
+        MobMachineAuthority::recover_from_state(state).is_err(),
+        "an intent-only snapshot must fail invariant validation before any recreation completion"
+    );
 }

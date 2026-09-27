@@ -2202,6 +2202,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveMemberRevivalSucceededRunningLocal`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveRecreatedMemberSessionSucceededRunningLocal`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveMemberRevivalSucceededRunningPlaced`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

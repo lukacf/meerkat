@@ -9317,6 +9317,14 @@ pub mod signals {
         pub agent_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveRecreatedMemberSessionSucceeded {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub bridge_session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveMemberRevivalFailed {
         pub agent_identity: AgentIdentity,
         pub reason: String,
@@ -9427,6 +9435,7 @@ pub enum Signal {
     RecoverPlacedCarrierCleanup(signals::RecoverPlacedCarrierCleanup),
     ClassifyMemberLiveMaterialization(signals::ClassifyMemberLiveMaterialization),
     ResolveMemberRevivalSucceeded(signals::ResolveMemberRevivalSucceeded),
+    ResolveRecreatedMemberSessionSucceeded(signals::ResolveRecreatedMemberSessionSucceeded),
     ResolveMemberRevivalFailed(signals::ResolveMemberRevivalFailed),
     AdmitDestroyCleanup(signals::AdmitDestroyCleanup),
     AdmitDestroyStorageFinalizing(signals::AdmitDestroyStorageFinalizing),
@@ -9532,6 +9541,9 @@ impl Signal {
                 SignalKind::ClassifyMemberLiveMaterialization
             }
             Self::ResolveMemberRevivalSucceeded(_) => SignalKind::ResolveMemberRevivalSucceeded,
+            Self::ResolveRecreatedMemberSessionSucceeded(_) => {
+                SignalKind::ResolveRecreatedMemberSessionSucceeded
+            }
             Self::ResolveMemberRevivalFailed(_) => SignalKind::ResolveMemberRevivalFailed,
             Self::AdmitDestroyCleanup(_) => SignalKind::AdmitDestroyCleanup,
             Self::AdmitDestroyStorageFinalizing(_) => SignalKind::AdmitDestroyStorageFinalizing,
@@ -9610,6 +9622,7 @@ pub enum SignalKind {
     RecoverPlacedCarrierCleanup,
     ClassifyMemberLiveMaterialization,
     ResolveMemberRevivalSucceeded,
+    ResolveRecreatedMemberSessionSucceeded,
     ResolveMemberRevivalFailed,
     AdmitDestroyCleanup,
     AdmitDestroyStorageFinalizing,
@@ -11641,6 +11654,7 @@ pub enum TransitionId {
     ClassifyMemberLiveMaterializationRevivable,
     ClassifyMemberLiveMaterializationTerminal,
     ResolveMemberRevivalSucceededRunningLocal,
+    ResolveRecreatedMemberSessionSucceededRunningLocal,
     ResolveMemberRevivalSucceededRunningPlaced,
     ResolveMemberRevivalFailedRunning,
     AdmitDestroyCleanup,

@@ -37,6 +37,9 @@ them.
 
 ### Breaking
 
+- `MobMachineSignal` gains `ResolveRecreatedMemberSessionSucceeded` for exact
+  runtime binding after a nonpersistent member session is recreated. Exhaustive
+  signal matches must handle the new generated completion.
 - `MeerkatMachine::set_composition_signal_dispatcher` is removed. Each mob's
   exact `PreparedSessionMaterialization` now installs its reverse signal
   endpoint before routed inputs can bind the runtime-session registration. `MeerkatConsumerSurface::new`,

@@ -9020,6 +9020,27 @@ impl MobBuilder {
                 &created_bridge_session_id,
                 "resume_fresh_member_session_binding",
             )?;
+            // Fresh recreation has no durable snapshot revival verdict. Feed
+            // the successful receipt back to the existing member authority so
+            // it emits the exact runtime binding before startup readiness.
+            let transition = apply_seeded_mob_signal_transition(
+                dsl_authority,
+                mob_dsl::MobMachineSignal::ResolveRecreatedMemberSessionSucceeded {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                    fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
+                    generation: mob_dsl::Generation::from_domain(entry.generation),
+                    bridge_session_id: mob_dsl::SessionId::from_domain(&created_bridge_session_id),
+                },
+                "resume_resolve_recreated_member_session",
+            )?;
+            for effect in transition.effects().iter().cloned() {
+                if let Some(effect) = super::composition::MobSeamEffect::routed(effect) {
+                    super::composition::dispatch_routed_effect(composition_binding, effect)
+                        .await
+                        .map_err(super::composition::dispatch_refusal_to_mob_error)?;
+                }
+            }
             let _ = roster
                 .set_bridge_session_id(&entry.agent_identity, created_bridge_session_id.clone());
             tool_handle

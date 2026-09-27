@@ -3662,6 +3662,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MobSessionService for BoundarySessionService {
+        async fn observe_member_status_view(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<crate::MemberStatusSessionView, meerkat_core::service::SessionError> {
+            crate::observe_member_status_view_via_read(self, session_id).await
+        }
+
         async fn fork_persisted_session_at_turn_boundary(
             &self,
             _source_session_id: &meerkat_core::SessionId,

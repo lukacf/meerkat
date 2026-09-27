@@ -108745,6 +108745,31 @@
         ],
         "type": "object"
       },
+      "WireMemberPreviewUnavailable": {
+        "description": "Why a member status read carries no observation of the member's session\nview.",
+        "oneOf": [
+          {
+            "const": "observation_deadline",
+            "description": "The bounded session-view read did not finish before the status\nobservation deadline.",
+            "type": "string"
+          },
+          {
+            "const": "read_failed",
+            "description": "The session-view read failed.",
+            "type": "string"
+          },
+          {
+            "const": "session_absent",
+            "description": "The member's bound session has no readable view (absent or archived).",
+            "type": "string"
+          },
+          {
+            "const": "not_observed_while_retiring",
+            "description": "The member is retiring; a status read of a retiring member is answered\nwithout reading its session.",
+            "type": "string"
+          }
+        ]
+      },
       "WireMemberProgressEvent": {
         "enum": [
           "execution_advanced",
@@ -109098,6 +109123,17 @@
           }
         ],
         "description": "Host the member is materialized on; `None` = controlling host."
+      },
+      "preview_unavailable": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMemberPreviewUnavailable"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Present when the status read could not observe the member's session\nview: `output_preview` and `tokens_used` are then unavailable, not an\nempty preview and a zero count. Absent-omitted for byte-compat with\nreleased SDKs."
       },
       "progress": {
         "anyOf": [
@@ -152271,6 +152307,33 @@
     ],
     "title": "WireMemberLifecycleCapabilities",
     "type": "object"
+  },
+  "WireMemberPreviewUnavailable": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Why a member status read carries no observation of the member's session\nview.",
+    "oneOf": [
+      {
+        "const": "observation_deadline",
+        "description": "The bounded session-view read did not finish before the status\nobservation deadline.",
+        "type": "string"
+      },
+      {
+        "const": "read_failed",
+        "description": "The session-view read failed.",
+        "type": "string"
+      },
+      {
+        "const": "session_absent",
+        "description": "The member's bound session has no readable view (absent or archived).",
+        "type": "string"
+      },
+      {
+        "const": "not_observed_while_retiring",
+        "description": "The member is retiring; a status read of a retiring member is answered\nwithout reading its session.",
+        "type": "string"
+      }
+    ],
+    "title": "WireMemberPreviewUnavailable"
   },
   "WireMemberProgressEvent": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

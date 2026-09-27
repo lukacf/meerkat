@@ -787,6 +787,102 @@ impl SessionActorMaterializationRoute {
     }
 }
 
+/// Where a [`MemberStatusSessionView`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemberStatusViewSource {
+    /// The live session's own published state (for a persistent service,
+    /// the actor's summary and state watches), read without a command to the
+    /// session task.
+    LiveWatch,
+    /// The committed durable head: no live actor holds the session.
+    DurableHead,
+    /// The session has no readable view: it is not live and the durable
+    /// store holds no current document for it, or it is archived.
+    Absent,
+}
+
+/// The preview and token count a member status read reports for one session.
+///
+/// Produced by [`MobSessionService::observe_member_status_view`], a
+/// read-only observation that never waits on the member's session task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemberStatusSessionView {
+    /// The last committed assistant text, when the session has one.
+    pub last_assistant_text: Option<String>,
+    /// Cumulative token usage of the session.
+    pub total_tokens: u64,
+    /// Where this view came from.
+    pub source: MemberStatusViewSource,
+}
+
+impl MemberStatusSessionView {
+    /// A view served from the live session's published state.
+    #[must_use]
+    pub fn live_watch(last_assistant_text: Option<String>, total_tokens: u64) -> Self {
+        Self {
+            last_assistant_text,
+            total_tokens,
+            source: MemberStatusViewSource::LiveWatch,
+        }
+    }
+
+    /// A view served from the committed durable head.
+    #[must_use]
+    pub fn durable_head(last_assistant_text: Option<String>, total_tokens: u64) -> Self {
+        Self {
+            last_assistant_text,
+            total_tokens,
+            source: MemberStatusViewSource::DurableHead,
+        }
+    }
+
+    /// The session has no readable view.
+    #[must_use]
+    pub fn absent() -> Self {
+        Self {
+            last_assistant_text: None,
+            total_tokens: 0,
+            source: MemberStatusViewSource::Absent,
+        }
+    }
+}
+
+/// [`MobSessionService::observe_member_status_view`] served from
+/// [`SessionService::read`], for services whose sessions live in process
+/// memory.
+///
+/// Explicit opt-in for implementors whose `read` returns the session's
+/// published in-memory state without waiting on the member's session task
+/// (the ephemeral session service and in-memory test doubles). A live
+/// session's view is reported as [`MemberStatusViewSource::LiveWatch`], and a
+/// session `read` does not find as [`MemberStatusViewSource::Absent`]; any
+/// other read error is returned.
+///
+/// **Do not use this in a wrapper over a persistent service**: forward
+/// `observe_member_status_view` to the inner service instead. A persistent
+/// service's `read` arbitrates durable authority through the session task, so
+/// it waits on the member's running turn, and every status read of a busy
+/// member would end at the observation deadline and hold a unit of the mob's
+/// member-status capacity meanwhile.
+pub async fn observe_member_status_view_via_read<S>(
+    session_service: &S,
+    session_id: &SessionId,
+) -> Result<MemberStatusSessionView, SessionError>
+where
+    S: SessionService + ?Sized,
+{
+    match session_service.read(session_id).await {
+        Ok(view) => Ok(MemberStatusSessionView::live_watch(
+            view.state.last_assistant_text,
+            view.billing.total_tokens,
+        )),
+        Err(SessionError::NotFound { .. }) => Ok(MemberStatusSessionView::absent()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Worst-case read shape of [`MobSessionService::observe_persisted_session_authority`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersistedSessionAuthorityReadCost {
@@ -1235,6 +1331,37 @@ pub trait MobSessionService:
     ) -> Result<Option<AgentExecutionSnapshot>, SessionError> {
         Ok(None)
     }
+
+    /// Read-only preview and token count for a member status read.
+    ///
+    /// Member status reads run concurrently with the member's own turns, so
+    /// this observation must never queue behind the member's session task,
+    /// never write, and never run durable reconciliation (rewrite-audit
+    /// replay, finalization). Implementations serve the live session's
+    /// published state when it is live and the committed durable head
+    /// otherwise.
+    ///
+    /// There is no default: every implementor chooses where the view comes
+    /// from.
+    ///
+    /// - **A wrapper over a persistent service MUST forward this method to
+    ///   the inner service.** Serving it from `SessionService::read` instead
+    ///   would wait on the member's running turn (a persistent service's
+    ///   `read` arbitrates durable authority through the session task): every
+    ///   status read of a busy member would end at the observation deadline
+    ///   with `preview_unavailable = observation_deadline`, and each such read
+    ///   would keep one unit of the mob's member-status capacity until the
+    ///   turn ends or the read is orphaned at the 30 s drain ceiling, so while
+    ///   as many members as that capacity (16) run turns, every status read in
+    ///   the mob, live members included, would be refused with
+    ///   `observation_lane_saturated` for up to that ceiling.
+    /// - A service whose sessions live in process memory, whose `read` is
+    ///   exactly its published live state, calls
+    ///   [`observe_member_status_view_via_read`].
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<MemberStatusSessionView, SessionError>;
 
     async fn tool_scope_snapshot(
         &self,
@@ -1774,6 +1901,14 @@ impl<B> MobSessionService for meerkat_session::EphemeralSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<MemberStatusSessionView, SessionError> {
+        // In-memory sessions: `read` is the published live state.
+        observe_member_status_view_via_read(self, session_id).await
+    }
+
     async fn publish_boundary_appends_discarded_for_actor(
         &self,
         actor_witness: &meerkat_session::LiveSessionActorWitness,
@@ -2760,6 +2895,41 @@ where
             return Ok(None);
         }
         Ok(Some(session))
+    }
+
+    /// Live members answer from the actor's published watches, never from
+    /// the session task (which serves no command while a turn runs); other
+    /// members answer from the committed durable head through the read-only
+    /// body observation, which never writes and never replays the rewrite
+    /// audit. An archived session has no readable view.
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<MemberStatusSessionView, SessionError> {
+        if let Some(view) =
+            meerkat_session::PersistentSessionService::<B>::observe_live_session_view(
+                self, session_id,
+            )
+            .await?
+        {
+            return Ok(MemberStatusSessionView::live_watch(
+                view.state.last_assistant_text,
+                view.billing.total_tokens,
+            ));
+        }
+        let Some(session) = self.observe_authoritative_session_body(session_id).await? else {
+            return Ok(MemberStatusSessionView::absent());
+        };
+        if self
+            .session_archived_by_authority(session_id, &session)
+            .await?
+        {
+            return Ok(MemberStatusSessionView::absent());
+        }
+        Ok(MemberStatusSessionView::durable_head(
+            session.last_assistant_text(),
+            session.total_tokens(),
+        ))
     }
 
     async fn fork_persisted_session(

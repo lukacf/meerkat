@@ -30,6 +30,7 @@ from .generated.types import (
     WireMobRuntimeMode,
     WireNonPortableResourceKind,
     WireReachability,
+    WireMemberPreviewUnavailable,
     WireRuntimeBinding,
     WireToolAccessPolicy,
     WireToolFilter,
@@ -191,6 +192,10 @@ MobMemberSnapshot = TypedDict(
         "freshness_reason": NotRequired[str],
         "lifecycle_capabilities": NotRequired[MobMemberLifecycleCapabilities],
         "non_portable_disabled": NotRequired[list[WireNonPortableResourceKind]],
+        # Set when this read did not observe the member's session:
+        # output_preview and tokens_used are then missing, not an empty
+        # preview and a zero count. Absent when they are observations.
+        "preview_unavailable": NotRequired[WireMemberPreviewUnavailable],
     },
 )
 
@@ -208,6 +213,8 @@ MobKickoffMemberSnapshot = TypedDict(
         "is_final": bool,
         "peer_connectivity": NotRequired[MobPeerConnectivity],
         "kickoff": NotRequired[dict[str, Any]],
+        # As on MobMemberSnapshot.
+        "preview_unavailable": NotRequired[WireMemberPreviewUnavailable],
     },
 )
 

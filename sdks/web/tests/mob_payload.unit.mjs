@@ -943,6 +943,39 @@ test('Mob result decoders preserve generated result truth after validation', asy
   assert.deepEqual(flowStatus.step_ledger, []);
 });
 
+test('memberStatus surfaces the typed preview_unavailable marker and omits it when unset', async () => {
+  const statusMob = (extra) =>
+    new Mob('mob-web-unit', {
+      async mob_member_status() {
+        return JSON.stringify({
+          status: 'active',
+          member_ref: 'runtime-owned-ref-worker-1',
+          tokens_used: 0,
+          is_final: false,
+          ...extra,
+        });
+      },
+    });
+  for (const marker of [
+    'observation_deadline',
+    'read_failed',
+    'session_absent',
+    'not_observed_while_retiring',
+  ]) {
+    const snapshot = await statusMob({ preview_unavailable: marker }).memberStatus('worker-1');
+    assert.equal(snapshot.preview_unavailable, marker);
+    assert.equal(snapshot.output_preview, undefined);
+  }
+  for (const extra of [{}, { preview_unavailable: null }]) {
+    const snapshot = await statusMob(extra).memberStatus('worker-1');
+    assert.equal(Object.prototype.hasOwnProperty.call(snapshot, 'preview_unavailable'), false);
+  }
+  await assert.rejects(
+    () => statusMob({ preview_unavailable: 'stale' }).memberStatus('worker-1'),
+    /preview_unavailable must be a valid preview-unavailable reason/,
+  );
+});
+
 test('memberStatus rejects malformed resolved_capabilities booleans instead of coercing', async () => {
   // A non-boolean capability flag must fail closed; the SDK must NOT coerce it
   // (e.g. Boolean("false") === true would silently flip the meaning).

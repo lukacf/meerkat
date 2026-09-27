@@ -240,6 +240,8 @@ export interface WireResolvedModelCapabilities {
   web_search?: boolean;
 }
 
+export type WireMemberPreviewUnavailable = "observation_deadline" | "read_failed" | "session_absent" | "not_observed_while_retiring";
+
 export interface MobMemberStatusResult {
   activity?: Record<string, unknown> | null;
   comms_reachability?: WireReachability | null;
@@ -258,6 +260,7 @@ export interface MobMemberStatusResult {
   output_preview?: string | null;
   peer_connectivity?: WirePeerConnectivity | null;
   placement?: WireHostRef | null;
+  preview_unavailable?: WireMemberPreviewUnavailable | null;
   progress?: WireMemberProgressSnapshot | null;
   resolved_capabilities?: WireResolvedModelCapabilities | null;
   status: WireMobMemberStatus;

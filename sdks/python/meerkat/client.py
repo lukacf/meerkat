@@ -176,6 +176,7 @@ from .generated.types import (
     WireMobRuntimeMode,
     WireProjectionProvenance,
     WireReachability,
+    WireMemberPreviewUnavailable,
     WireRouteInstallObligation,
     WireRuntimeBinding,
     WireToolAccessPolicy,
@@ -3348,6 +3349,9 @@ class MeerkatClient:
             "kickoff",
             "Invalid mob/member_status response",
         )
+        preview_unavailable = self._parse_member_preview_unavailable(
+            result, "Invalid mob/member_status response"
+        )
         return {
             "status": self._require_string_field(
                 result,
@@ -3414,6 +3418,11 @@ class MeerkatClient:
                 if isinstance(result.get("current_session_id"), str)
                 else {}
             ),
+            **(
+                {"preview_unavailable": preview_unavailable}
+                if preview_unavailable is not None
+                else {}
+            ),
         }
 
     async def wait_mob_kickoff(
@@ -3447,6 +3456,9 @@ class MeerkatClient:
                 entry,
                 "kickoff",
                 "Invalid mob/wait_kickoff response",
+            )
+            preview_unavailable = self._parse_member_preview_unavailable(
+                entry, "Invalid mob/wait_kickoff response"
             )
             normalized.append(
                 {
@@ -3486,6 +3498,11 @@ class MeerkatClient:
                         else {}
                     ),
                     **({"kickoff": kickoff} if kickoff is not None else {}),
+                    **(
+                        {"preview_unavailable": preview_unavailable}
+                        if preview_unavailable is not None
+                        else {}
+                    ),
                 }
             )
         return normalized
@@ -3522,6 +3539,9 @@ class MeerkatClient:
                 "kickoff",
                 "Invalid mob/wait_ready response",
             )
+            preview_unavailable = self._parse_member_preview_unavailable(
+                entry, "Invalid mob/wait_ready response"
+            )
             normalized.append(
                 {
                     "agent_identity": self._require_string_field(
@@ -3560,6 +3580,11 @@ class MeerkatClient:
                         else {}
                     ),
                     **({"kickoff": kickoff} if kickoff is not None else {}),
+                    **(
+                        {"preview_unavailable": preview_unavailable}
+                        if preview_unavailable is not None
+                        else {}
+                    ),
                 }
             )
         return normalized
@@ -7065,6 +7090,29 @@ class MeerkatClient:
                 f"{context}: unknown progress field {sorted(unknown)[0]}",
             )
         return cast(WireMemberProgressSnapshot, progress)
+
+    @staticmethod
+    def _parse_member_preview_unavailable(
+        raw: dict[str, Any], context: str
+    ) -> WireMemberPreviewUnavailable | None:
+        """Return the typed reason a status read carries no observed preview.
+
+        Absent or ``null`` means ``output_preview``/``tokens_used`` are
+        observations; a value outside the closed vocabulary fails closed.
+        """
+        value = raw.get("preview_unavailable")
+        if value is None:
+            return None
+        if not isinstance(value, str) or value not in {
+            "observation_deadline",
+            "read_failed",
+            "session_absent",
+            "not_observed_while_retiring",
+        }:
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid preview_unavailable"
+            )
+        return cast(WireMemberPreviewUnavailable, value)
 
     @staticmethod
     def _optional_string_field(

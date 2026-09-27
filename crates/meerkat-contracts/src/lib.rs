@@ -487,6 +487,7 @@ pub use wire::{
     WireMemberHealthClass,
     WireMemberHistoryPageBody,
     WireMemberLifecycleCapabilities,
+    WireMemberPreviewUnavailable,
     WireMemberProgressEvent,
     WireMemberProgressSnapshot,
     WireMemberRef,

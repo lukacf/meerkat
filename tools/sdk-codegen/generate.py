@@ -516,6 +516,9 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "WireProjectionProvenance",
     "WireReachability",
     "WireNonPortableResourceKind",
+    # Typed reason a member-status read carries no observed preview; kept a
+    # named alias so the handwritten SDK status parsers can type it.
+    "WireMemberPreviewUnavailable",
     "WireMobRunStatus",
     # Closed usage-attribution vocabulary on the run-result accounting block.
     # An alias, not a contract type: the object emitter would turn a
@@ -6662,6 +6665,7 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     append_interface("Usage", root=helper_result_context)
     append_interface("MobHelperResult")
     append_interface("WireResolvedModelCapabilities")
+    append_alias("WireMemberPreviewUnavailable")
     append_interface("MobMemberStatusResult")
     append_interface("MobAppendSystemContextResult")
     append_interface("MobLifecycleResult")

@@ -991,9 +991,12 @@ async fn a_respawned_fork_child_carries_no_fork_job() {
 }
 
 /// Several children of one mob are still running when the re-link reaches
-/// them. Each settles on its own task and the mob has one member status
-/// observation lane, so their status reads collide. A read that loses the
-/// lane observes nothing and is read again, never taken for an idle child
+/// them. Each settles on its own task, and their status reads run
+/// concurrently against the mob-wide observation capacity while each child's
+/// session is busy with its turn. A read that does not observe a child (it
+/// is refused after the bounded capacity wait, or neither the status nor the
+/// runtime says whether the child's run is open) is read again, never taken
+/// for an idle child
 /// (lifecycle review: all but one were reported `restart_interrupted` while
 /// still running, and their real replies were lost).
 #[tokio::test(flavor = "multi_thread")]

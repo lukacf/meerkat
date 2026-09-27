@@ -601,7 +601,7 @@ async fn relink_owned_child(
             }
             return limit_elapsed(delivery, &owner, mob_id, handle, child, job).await;
         }
-        let observe = observe_child(runtime, handle, child);
+        let observe = observe_child(&service, runtime, handle, child);
         let observed = match remaining_ms {
             None => Some(observe.await),
             Some(remaining_ms) => {
@@ -682,9 +682,39 @@ impl ProgressVerdict {
     }
 }
 
-/// Read a fork child's status: its member status, and when that leaves the
-/// run state unknown, its runtime state.
+/// Read a fork child's status (see [`observe_child_run`]), where "settled"
+/// also requires its turn to be committed. Member status reads the live
+/// agent, which is terminal before the service commits the turn, while the
+/// outcome is read from the durable transcript: a child whose live
+/// transcript is still ahead of its store has a turn that ended but is not
+/// readable yet, so it is still running here. Its commit landing is what
+/// settles it, never a delay. A failed read says nothing about the child.
 async fn observe_child(
+    service: &Arc<dyn meerkat_mob::MobSessionService>,
+    runtime: Option<&meerkat_runtime::MeerkatMachine>,
+    handle: &MobHandle,
+    child: &AgentIdentity,
+) -> ChildObservation {
+    match observe_child_run(runtime, handle, child).await {
+        ChildObservation::Settled => {
+            let Some(session_id) = handle.resolve_bridge_session_id(child).await else {
+                return ChildObservation::Settled;
+            };
+            match service.live_transcript_awaits_commit(&session_id).await {
+                Ok(true) => ChildObservation::Running,
+                Ok(false) => ChildObservation::Settled,
+                Err(error) => ChildObservation::Unobserved(format!(
+                    "could not tell whether the child's turn is committed: {error}"
+                )),
+            }
+        }
+        observed => observed,
+    }
+}
+
+/// Read a fork child's run state: its member status, and when that leaves
+/// the run state unknown, its runtime state.
+async fn observe_child_run(
     runtime: Option<&meerkat_runtime::MeerkatMachine>,
     handle: &MobHandle,
     child: &AgentIdentity,

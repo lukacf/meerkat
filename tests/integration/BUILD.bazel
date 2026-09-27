@@ -575,6 +575,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
     ] + [
+        "//crates/meerkat-mob-mcp:tests/support/commit_gate.rs",
         "//crates/meerkat-mob-mcp:tests/support/mod.rs",
         "//crates/meerkat-mob:tests/support/live_plane.rs",
         "//crates/meerkat-mob:tests/support/mod.rs",

@@ -14386,6 +14386,17 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    async fn live_transcript_awaits_commit(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::live_transcript_awaits_commit(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn tool_scope_snapshot(
         &self,
         session_id: &SessionId,

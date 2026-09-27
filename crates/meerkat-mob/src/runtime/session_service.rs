@@ -1116,6 +1116,20 @@ pub trait MobSessionService:
         <Self as SessionService>::has_live_session(self, session_id).await
     }
 
+    /// Whether the session's live transcript is ahead of its durable store:
+    /// a turn already terminal in the agent loop whose boundary commit has
+    /// not landed. A caller that reads "terminal" from the live agent and
+    /// the turn's outcome from the durable store must wait while this holds.
+    ///
+    /// Default: `Ok(false)`. A service without a separate durable store has
+    /// nothing to await.
+    async fn live_transcript_awaits_commit(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        Ok(false)
+    }
+
     /// Standalone turn execution with an owner-issued admission notification,
     /// separate from the returned terminal result. Send only after generated
     /// admission and command handoff, never merely after spawning a task.
@@ -2699,6 +2713,16 @@ where
             )
             .await,
         )
+    }
+
+    async fn live_transcript_awaits_commit(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::live_transcript_awaits_commit(
+            self, session_id,
+        )
+        .await
     }
 
     #[cfg(feature = "runtime-adapter")]

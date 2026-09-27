@@ -37,6 +37,15 @@ them.
 
 ### Fixed
 
+- After a host restart, re-linking a `fork_off` child that was still running
+  no longer reports `restart_interrupted` for a child that answered. Member
+  status reads the live agent, which is terminal before the session service
+  commits the turn, while the re-link reads the outcome from the durable
+  transcript. In that window it found no reply. `MobSessionService` gains
+  `live_transcript_awaits_commit` (default `false`; `PersistentSessionService`
+  answers from the session document machine's uncommitted-transcript verdict),
+  and the re-link keeps such a child running until its commit lands.
+
 - Full-fresh BuildBuddy validation no longer runs out of its 50-minute SLO
   on integration-fast. The Native submitter waited for the `//...` prebuild
   (18 minutes on the v0.8.44 tag run) and then ran clippy, unit and

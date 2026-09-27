@@ -808,6 +808,97 @@ async fn relink_of_several_running_children_delivers_each_real_reply() {
     fixture.teardown().await;
 }
 
+/// Member status reads a child's live agent, which is terminal before the
+/// service commits the turn, while the re-link reads the outcome from the
+/// durable transcript. Holding the child's boundary commit opens that window
+/// deterministically: the child reads idle while its reply exists only in the
+/// live transcript. The re-link waits for the commit and delivers the real
+/// reply; reading the store in the window delivered `restart_interrupted` for
+/// a child that had answered (nightly 36275543570, ~10% on a 4-vCPU runner).
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_waits_for_a_finished_child_turn_to_commit() {
+    let gate = TurnGate::new();
+    let turn_gate = Arc::clone(&gate);
+    let store = Arc::new(support::commit_gate::CommitGateRuntimeStore::new());
+    let fixture = CouncilFixture::new_with_runtime_store(
+        move |request| {
+            if support::last_user_text(request).contains(CHILD_TASK) {
+                ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+            } else {
+                ScriptedTurn::Text("noted".to_string())
+            }
+        },
+        store.clone(),
+    );
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let child = "commit-window-child";
+    let job_id = "job-commit-window".to_string();
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec(child),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    // The custodian dies with the "old process".
+    drop(run);
+    gate.wait_entered(1).await;
+    let child_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from(child))
+        .await
+        .expect("child session");
+    store.arm(meerkat_runtime::LogicalRuntimeId::for_session(
+        &child_session,
+    ));
+
+    let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new(
+        fixture.service.clone(),
+        meerkat_mob::MobControlPrincipal::Owner,
+    ));
+    restarted
+        .mob_insert_handle(fixture.source_mob_id(), handle.clone())
+        .await;
+    // The turn ends; its commit is held at the store.
+    gate.open();
+    store.entered().await;
+    // Terminal in its live agent, reply not durable: many re-link
+    // observations of exactly the state that used to be read as idle.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let premature = if completion_records(&fixture, &owner, &job_id).await > 0 {
+        Some(completion_record_text(&fixture, &owner, &job_id).await)
+    } else {
+        None
+    };
+    store.release();
+    assert_eq!(
+        premature, None,
+        "the re-link reported the child before its finished turn was committed"
+    );
+    await_completion_record(&fixture, &owner, &job_id).await;
+    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
+    let record = completion_record_text(&fixture, &owner, &job_id).await;
+    assert!(
+        record.contains(CHILD_REPLY) && !record.contains("restart_interrupted"),
+        "the child is delivered its real reply once its turn is committed: {record}"
+    );
+    fixture.teardown().await;
+}
+
 /// A host that restores a stopped mob inserts its handle before activating
 /// it (MobKit's identity-first gateway after a clean shutdown). The forker is
 /// not live and cannot be revived while its mob is stopped: the re-link

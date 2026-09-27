@@ -4782,6 +4782,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(true)
     }
 
+    /// Whether `id`'s live transcript holds rows its durable store has not
+    /// committed: a turn that is already terminal in the agent loop while its
+    /// boundary commit is still landing. The session document machine owns
+    /// this verdict (`LiveUncommittedTranscript`). No live session, or a live
+    /// session the store agrees with, has nothing awaiting commit.
+    ///
+    /// An observer that reads "terminal" from the live agent and the outcome
+    /// from the durable store must wait while this holds, or it reads the
+    /// store before the turn's own rows reach it.
+    pub async fn live_transcript_awaits_commit(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        Ok(matches!(
+            self.live_session_authority_for_observation(id).await?,
+            LiveSessionAuthority::DurableAuthoritative {
+                reason: LiveSessionAuthorityReason::LiveUncommittedTranscript,
+                ..
+            }
+        ))
+    }
+
     pub async fn synchronize_live_session_from_durable_authority_if_needed(
         &self,
         id: &SessionId,

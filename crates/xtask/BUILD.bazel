@@ -509,6 +509,7 @@ rust_test(
     tags = [
         "required-feature",
     ],
+    size = "large",
     data = [
         ":package_runfiles",
         "//crates/meerkat-contracts:package_runfiles",

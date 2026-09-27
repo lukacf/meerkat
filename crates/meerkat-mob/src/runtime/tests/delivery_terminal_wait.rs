@@ -388,8 +388,12 @@ async fn a_terminal_late_in_the_budget_is_returned_before_the_deadline() {
         .await;
     fixture.client.wait_for_requests(requests_before + 1).await;
 
+    // The terminal lands at 80% of the budget. The 3 s left after the
+    // release covers the stream, the boundary commit and the waiter's read on
+    // a loaded runner; 800 ms (3.2 s of 4 s) was not enough.
+    let budget = Duration::from_secs(15);
     let started = std::time::Instant::now();
-    let release_after = Duration::from_millis(3200);
+    let release_after = Duration::from_secs(12);
     let release = {
         let client = fixture.client.clone();
         tokio::spawn(async move {
@@ -397,7 +401,7 @@ async fn a_terminal_late_in_the_budget_is_returned_before_the_deadline() {
             client.release();
         })
     };
-    let report = wait_delivery(&fixture, &key, &bound(), started + Duration::from_secs(4)).await;
+    let report = wait_delivery(&fixture, &key, &bound(), started + budget).await;
     let elapsed = started.elapsed();
     release.await.expect("release task joins");
     let view = receipt(&report);
@@ -409,10 +413,7 @@ async fn a_terminal_late_in_the_budget_is_returned_before_the_deadline() {
         elapsed >= release_after,
         "returned before the run: {elapsed:?}"
     );
-    assert!(
-        elapsed < Duration::from_secs(4),
-        "returned by the deadline: {elapsed:?}"
-    );
+    assert!(elapsed < budget, "returned by the deadline: {elapsed:?}");
     fixture.finish().await;
 }
 

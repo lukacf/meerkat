@@ -444,14 +444,21 @@ admitted under) on its spawn event and roster entry. When a host restores its
 mobs, or inserts a restored mob handle as MobKit does, a one-time re-link pass
 settles every child whose job began in a previous process:
 
-- a child whose reply to the job is already durable has that reply delivered,
-  however late the restart landed, and stays seated. The reply is read from
-  the runtime's terminal receipt for the job turn's input, so a
-  child whose transcript was compacted during the job is still delivered its
-  real reply, with the turn's `usage`, `turns` and `tool_calls`. A record
-  without a delivery identity (written by an earlier release, or on a host
-  without a runtime) reads the reply from the child's transcript after the
-  fork prefix instead;
+- a child whose reply to the job is already in its durable transcript has
+  that reply delivered, however late the restart landed, and stays seated.
+  For a job with a delivery identity (every job on a runtime-backed host) the
+  outcome comes from the runtime's terminal receipt for the job turn's input
+  instead, so a child whose transcript was compacted during the job is still
+  delivered its real reply, with the turn's `usage`, `turns` and
+  `tool_calls`. That receipt also settles the other outcomes: the turn's own
+  failure is `failed` with its error, and the child is retired as the live
+  custodian retires it; an end imposed from outside (the runtime stopped or
+  destroyed, the turn cancelled), an input no run answered, or one never
+  admitted is `restart_interrupted`. An input still owed a terminal is
+  watched until it has one, even while the child reads idle (a requeued
+  input waiting for the recovered run). A record without a delivery identity
+  (written by an earlier release, or on a host without a runtime) reads the
+  reply from the child's transcript after the fork prefix;
 - a child still running is observed until its turn ends, with `max_run_secs`
   measured from the original start. A turn that is terminal in the child's
   live agent counts as running until its boundary commit lands: the re-link
@@ -470,7 +477,10 @@ boundary commit), or while the runtime's read is inconclusive (it timed out
 behind a busy session driver, or failed). At the ceiling, unless a durable
 reply has appeared, `restart_interrupted` is delivered. It carries
 `restart_reason: commit_never_landed` only when the reading at the ceiling
-was machine evidence; an inconclusive reading names no cause.
+was machine evidence; an inconclusive reading names no cause. For a job with
+a delivery identity the same ceiling bounds an input still owed its terminal
+while the child is not seen running; there `commit_never_landed` means a run
+had taken the input up (staged or applied) and it never reached a terminal.
 
 A limit that has already elapsed is decided at once, so an idle child past its
 limit always gets `max_run_elapsed`. When the limit wins, the child's run is

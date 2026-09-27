@@ -1251,6 +1251,155 @@ async fn relink_settles_a_running_child_whose_turn_fails() {
         record.contains("finished (failed)") && !record.contains(CHILD_REPLY),
         "a child whose turn failed settles as failed: {record}"
     );
+    // Read from the job turn's receipt: the turn's own failure is `failed`
+    // with its typed error, not `restart_interrupted`, and the child is
+    // retired as the live custodian retires it.
+    let outcome = completion_record_outcome(&fixture, &owner, &job_id).await;
+    assert_eq!(outcome["status"], "failed", "{outcome}");
+    assert!(
+        outcome["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
+        "{outcome}"
+    );
+    let child = AgentIdentity::from("failing-child");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while handle.get_member(&child).await.unwrap().is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the failed child is retired"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    fixture.teardown().await;
+}
+
+/// A job turn ended from outside (here cancelled while it ran, as stopping
+/// or destroying the runtime in a restart ends it) is not the turn's own
+/// failure: its receipt settles as `restart_interrupted`, not `failed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_delivers_a_cancelled_job_turn_as_restart_interrupted() {
+    let gate = TurnGate::new();
+    let fixture = held_child_fixture(&gate);
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-cancelled-turn";
+    let (child, _child_session) =
+        fork_held_child(&fixture, &handle, &gate, "cancelled-child", job_id, &owner).await;
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    assert!(job.turn_delivery.is_some());
+    let relink = tokio::spawn({
+        let service = fixture.state.session_service();
+        let delivery = relink_delivery(&fixture);
+        let mob_id = fixture.source_mob_id();
+        let handle = handle.clone();
+        let child = child.clone();
+        async move {
+            meerkat_mob_mcp::fork_relink::relink_child(
+                service, &delivery, &mob_id, &handle, &child, &job,
+            )
+            .await
+        }
+    });
+    handle
+        .force_cancel_member(child.clone())
+        .await
+        .expect("cancel the child's running turn");
+    gate.open();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(30), relink)
+            .await
+            .expect("the cancelled turn's receipt settles the job")
+            .unwrap(),
+        ForkRelinkAction::Delivered
+    );
+    await_completion_record(&fixture, &owner, job_id).await;
+    let outcome = completion_record_outcome(&fixture, &owner, job_id).await;
+    assert_eq!(outcome["status"], "restart_interrupted", "{outcome}");
+    fixture.teardown().await;
+}
+
+/// A job whose turn is terminal in its live agent but not yet committed has
+/// no receipt: the child reads idle while its input is still owed a
+/// terminal. The receipt watch keeps watching (it never settles an input
+/// still in flight, which is also the state a requeued input is in after a
+/// restart) and delivers the receipt's result once it exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_keeps_watching_a_job_input_still_owed_its_receipt() {
+    let gate = TurnGate::new();
+    let fixture = held_child_fixture(&gate);
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-receipt-in-flight";
+    let (child, child_session) = fork_held_child(
+        &fixture,
+        &handle,
+        &gate,
+        "receipt-in-flight-child",
+        job_id,
+        &owner,
+    )
+    .await;
+    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
+        .expect("the service derives its runtime");
+    let (entered, release) =
+        runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
+    gate.open();
+    entered.await.expect("the finished turn reaches its commit");
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    assert!(job.turn_delivery.is_some());
+    let relink = tokio::spawn({
+        let service = fixture.state.session_service();
+        let delivery = relink_delivery(&fixture);
+        let mob_id = fixture.source_mob_id();
+        let handle = handle.clone();
+        let child = child.clone();
+        async move {
+            meerkat_mob_mcp::fork_relink::relink_child(
+                service, &delivery, &mob_id, &handle, &child, &job,
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        completion_records(&fixture, &owner, job_id).await,
+        0,
+        "the re-link settled a job whose input was still owed its receipt"
+    );
+    assert!(!relink.is_finished());
+    let _ = release.send(());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(30), relink)
+            .await
+            .expect("the receipt settles the job")
+            .unwrap(),
+        ForkRelinkAction::Delivered
+    );
+    await_completion_record(&fixture, &owner, job_id).await;
+    let outcome = completion_record_outcome(&fixture, &owner, job_id).await;
+    assert_eq!(outcome["status"], "completed", "{outcome}");
+    assert_eq!(outcome["bounded_result"]["text"], CHILD_REPLY, "{outcome}");
     fixture.teardown().await;
 }
 

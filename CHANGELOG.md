@@ -201,12 +201,26 @@ them.
   prefix length recorded in its `ForkJobRecord`, and compaction rewrites the
   transcript that index points into. On a runtime-backed host the job turn is
   now admitted under a stable delivery identity recorded in the job record
-  (`ForkJobRecord::turn_delivery`), and the re-link reads the turn's result
-  from the runtime's terminal receipt for that input through
-  `MobHandle::wait_bounded_work_for_identity_with_delivery_identity`. The
-  delivered outcome also carries the turn's `usage`, `turns` and
-  `tool_calls`, as the live custodian reports them. Records without the field
-  (earlier releases, or hosts without a runtime) keep the transcript read.
+  (`ForkJobRecord::turn_delivery`), and the re-link settles such a job from
+  the runtime's terminal receipt for that input alone, through
+  `MobHandle::wait_bounded_work_for_identity_with_delivery_identity`:
+  - a completed turn delivers `completed` with the turn's `usage`, `turns`
+    and `tool_calls`, as the live custodian reports them;
+  - the turn's own failure (abandoned with an error, extraction failed,
+    completed without a result or with a finalization failure, a pending
+    callback, stage attempts exhausted) delivers `failed` with the typed
+    error and retires the child, as the live custodian does;
+  - an end imposed from outside (runtime stopped or destroyed, cancelled,
+    retired or reset), an input no run answered, or an input never admitted
+    delivers `restart_interrupted` and leaves the child seated;
+  - an input still owed a terminal is watched, not settled from member
+    status. After a restart the runtime requeues it and the child can read
+    idle before the recovered run opens; before, the re-link delivered
+    `restart_interrupted` there and dropped the later real reply. The watch
+    is bounded by the commit ceiling only while the child is not seen
+    running.
+  Records without the field (earlier releases, or hosts without a runtime)
+  keep the transcript read.
 
 - After a host restart, re-linking a `fork_off` child that was still running
   no longer reports `restart_interrupted` for a child that answered. Member

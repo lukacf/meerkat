@@ -5744,6 +5744,34 @@ impl MeerkatMachine {
                     ),
                 });
             }
+            if let Some(dispatcher) = entry.composition_signal_dispatcher.as_ref() {
+                let recovered_authority = recovered_entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let recovered = recovered_authority.state();
+                if recovered.session_id.as_ref()
+                    != Some(&super::dsl::SessionId::from_domain(witness.session_id()))
+                    || recovered.active_runtime_id.is_some()
+                    || recovered.active_fence_token.is_some()
+                    || recovered.active_runtime_generation.is_some()
+                {
+                    return Err(RuntimeDriverError::RecoveryRepairBlocked {
+                        evidence_digest: None,
+                        reason: format!(
+                            "durability-reload composition custody for session {} requires an exact unbound cold successor",
+                            witness.session_id()
+                        ),
+                    });
+                }
+                // Cold recovery deliberately removes placement authority. At
+                // this exact predecessor-to-successor publication, preserve
+                // only its delivery endpoint so the existing composition can
+                // complete cleanup or prepare its next binding. Receipt-time
+                // registration witnesses still fence pre-reload inputs.
+                recovered_entry.composition_signal_dispatcher = Some(Arc::clone(dispatcher));
+                recovered_entry.composition_materialization_claim_id = None;
+            }
             // The prepared candidate owns only the unstarted receiver until
             // every T/L/M witness has been revalidated. Starting the worker
             // earlier lets a stale-return or cancelled waiter detach its

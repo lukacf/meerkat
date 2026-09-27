@@ -1495,6 +1495,136 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn reload_successor_preserves_delivery_custody_without_inheriting_old_receipts() {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let machine = Arc::new(MeerkatMachine::persistent_without_blobs(store));
+        let session = SessionId::new();
+        let signals = Arc::new(RecordingSignalSurface::default());
+        let dispatcher = recording_dispatcher(signals.clone());
+        let mut prepared = prepare_composed_session(&machine, &session, &dispatcher).await;
+        bind_composed_session(&machine, &session, &dispatcher, "reload-member").await;
+        crate::begin_session_runtime_actor_materialization(prepared.bindings())
+            .expect("claim composed actor construction")
+            .commit()
+            .expect("record composed actor construction");
+        let EnsureRuntimeExecutorAttachment::Pending(attachment) = prepared
+            .ensure_executor_attachment(|_| Box::new(NoopExecutor))
+            .await
+            .expect("attach exact composed runtime")
+        else {
+            panic!("fresh prepared runtime must create its attachment");
+        };
+        attachment.commit().await.expect("commit composed runtime");
+        let predecessor = machine
+            .current_session_registration_witness(&session)
+            .await
+            .expect("exact predecessor");
+        assert!(
+            machine
+                .force_session_durability_reload_required_for_test(&session)
+                .await
+        );
+        crate::SessionServiceRuntimeExt::accept_input(
+            machine.as_ref(),
+            &session,
+            crate::Input::Prompt(crate::PromptInput::new("start degraded teardown", None)),
+        )
+        .await
+        .expect_err("degraded admission starts exact runtime teardown");
+        let (published, release) = machine
+            .arm_reload_required_discard_after_successor_publication_test_hook(session.clone());
+        let waiter = tokio::spawn({
+            let machine = machine.clone();
+            let predecessor = predecessor.clone();
+            async move {
+                machine
+                    .recover_or_discard_reload_required_registration_if_current(&predecessor)
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), published)
+            .await
+            .expect("reload reaches exact successor publication")
+            .expect("publication owner remains alive");
+        let successor = machine
+            .current_session_registration_witness(&session)
+            .await
+            .expect("exact cold successor");
+        assert_ne!(successor, predecessor);
+        {
+            let sessions = machine.sessions.read().await;
+            let entry = sessions.get(&session).expect("successor entry");
+            assert!(
+                entry
+                    .composition_signal_dispatcher
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &dispatcher)),
+                "atomic reload must retain the exact composition receiver"
+            );
+            assert_eq!(entry.composition_materialization_claim_id, None);
+            let authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(authority.state().active_runtime_id.is_none());
+            assert!(authority.state().active_fence_token.is_none());
+            assert!(authority.state().active_runtime_generation.is_none());
+        }
+        waiter.abort();
+        let _ = waiter.await;
+        release
+            .send(())
+            .expect("release owned reload after cancellation");
+        let retire = mm_dsl::MeerkatMachineInput::Retire {
+            session_id: mm_dsl::SessionId::from_domain(&session),
+        };
+        let stale = {
+            let _gate = machine
+                .lock_current_durability_ready_session_mutation_gate(&session)
+                .await
+                .expect("successor mutation boundary");
+            machine
+                .apply_routed_session_dsl_input(
+                    &session,
+                    retire.clone(),
+                    &predecessor,
+                    Some(&dispatcher),
+                    "pre-reload receipt",
+                )
+                .await
+                .expect_err("same endpoint does not authorize a predecessor receipt")
+        };
+        assert_eq!(stale.error_code, "composition_registration_replaced");
+        let foreign = recording_dispatcher(Arc::new(RecordingSignalSurface::default()));
+        let refusal = machine
+            .apply_routed_meerkat_input_with_signal_dispatcher(
+                &session,
+                retire.clone(),
+                Some(&foreign),
+            )
+            .await
+            .expect_err("another composition cannot capture the cold successor");
+        assert_eq!(refusal.error_code, "composition_endpoint_conflict");
+        machine
+            .apply_routed_meerkat_input_with_signal_dispatcher(&session, retire, Some(&dispatcher))
+            .await
+            .expect("current composition can retire its exact cold successor");
+        assert_eq!(
+            machine
+                .recover_or_discard_reload_required_registration_if_current(&predecessor)
+                .await
+                .expect("stale reload retry is inert"),
+            crate::ReloadRequiredRegistrationDisposition::NotCurrent
+        );
+        assert_eq!(
+            machine.current_session_registration_witness(&session).await,
+            Some(successor),
+            "stale cleanup cannot replace the retired successor"
+        );
+    }
+
     #[tokio::test]
     async fn unbound_composition_recovery_keeps_exclusive_prepared_custody() {
         use std::sync::atomic::Ordering;

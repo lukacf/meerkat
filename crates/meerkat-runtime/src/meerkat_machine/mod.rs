@@ -1503,7 +1503,8 @@ struct RuntimeSessionEntry {
     drain_slot: CommsDrainSlot,
     /// Reverse composition endpoint installed by the exact materialization
     /// claim on this registration. Direct sessions have no mob consumer.
-    /// Registration removal drops the endpoint; effect batches retain their
+    /// Exact degraded reload preserves delivery custody on its unbound cold
+    /// successor. Ordinary removal drops it; effect batches retain their
     /// captured endpoint across awaits instead of looking up a successor.
     composition_signal_dispatcher: Option<composition::MeerkatCompositionSignalDispatcher>,
     /// Exact installer custody for failed materialization compensation.

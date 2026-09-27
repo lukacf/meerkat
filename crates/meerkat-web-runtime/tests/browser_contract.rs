@@ -17,6 +17,24 @@ use wasm_bindgen_test::wasm_bindgen_test;
 // browser lane must actually execute these assertions.
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
+#[wasm_bindgen_test(async)]
+async fn member_status_deadline_includes_preliminary_execution_snapshot_wait() {
+    let observed = meerkat_mob::member_status_deadline_after_snapshot_wait_for_test().await;
+    assert_eq!(
+        observed.preview_unavailable,
+        Some(meerkat_mob::MemberPreviewUnavailable::ObservationDeadline),
+        "the snapshot wait must consume the same deadline as the view read: {observed:?}"
+    );
+    assert_eq!(observed.output_preview, None);
+    assert_eq!(observed.tokens_used, 0);
+    assert_eq!(observed.snapshot_calls, 1);
+    assert_eq!(observed.status_view_calls, 1);
+    assert_eq!(observed.reads_before_drain, 1);
+    assert!(observed.retained_drain);
+    assert!(observed.drain_published);
+    assert_eq!(observed.reads_after_drain, 0);
+}
+
 fn parse_js_error(value: JsValue) -> Value {
     let raw = value.as_string().expect("error string");
     serde_json::from_str(&raw).expect("error json")

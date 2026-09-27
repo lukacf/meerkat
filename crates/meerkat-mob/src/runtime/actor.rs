@@ -12519,9 +12519,13 @@ impl MobActor {
         super::state::MemberStatusSessionObservation,
         Option<MemberStatusViewReadDrain>,
     ) {
-        // One deadline bounds the whole observation, so its callers are
-        // answered even when a session read would not finish.
-        let mut deadline = std::pin::pin!(tokio::time::sleep(MEMBER_STATUS_OBSERVATION_DEADLINE));
+        // Capture the deadline before preliminary reads. WASM sleeps start
+        // on first poll, so a relative sleep polled only at the view select
+        // would grant those reads extra time outside the observation budget.
+        let mut deadline = std::pin::pin!(tokio::time::timeout_at(
+            tokio::time::Instant::now() + MEMBER_STATUS_OBSERVATION_DEADLINE,
+            std::future::pending::<()>(),
+        ));
         let mut observation = super::state::MemberStatusSessionObservation {
             output_preview: None,
             tokens_used: 0,
@@ -12582,7 +12586,7 @@ impl MobActor {
                         owner.publish(view.clone());
                         (view, None)
                     }
-                    () = deadline.as_mut() => (
+                    _ = deadline.as_mut() => (
                         deadline_reached(),
                         Some(MemberStatusViewReadDrain::new(owner, agent_identity, read)),
                     ),
@@ -12591,7 +12595,7 @@ impl MobActor {
             MemberStatusViewReadClaim::Joined(result) => tokio::select! {
                 biased;
                 view = member_status_lane::joined_member_status_view(result) => (view, None),
-                () = deadline.as_mut() => (deadline_reached(), None),
+                _ = deadline.as_mut() => (deadline_reached(), None),
             },
         };
         match view {

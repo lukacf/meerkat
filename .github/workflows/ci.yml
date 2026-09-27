@@ -949,11 +949,11 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
-      - name: Browser and Node timer ownership regressions
+      - name: Browser status deadline and timer ownership regressions
         shell: bash
         run: |
           export CARGO="$PWD/scripts/repo-cargo"
-          wasm-pack test --headless --chrome --release crates/meerkat-web-runtime --test wasm_timers
+          wasm-pack test --headless --chrome --release crates/meerkat-web-runtime --test browser_contract --test wasm_timers
           wasm-pack test --node --release crates/meerkat-web-runtime --test wasm_timers_node
 
   bazel-graph:

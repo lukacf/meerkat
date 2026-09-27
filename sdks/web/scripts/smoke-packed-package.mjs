@@ -149,7 +149,7 @@ async function main(argv) {
       model: "claude-sonnet-4-5",
     });
     try {
-      const session = runtime.createSession({
+      const session = await runtime.createSession({
         model: "claude-sonnet-4-5",
         apiKey: "sk-test",
         anthropicBaseUrl: "https://example.test/anthropic",
@@ -178,7 +178,7 @@ async function main(argv) {
         );
       }
     } finally {
-      runtime.destroy();
+      await runtime.destroy();
     }
     console.log(`packed @rkat/web ran one turn end to end (${requests.length} provider request(s))`);
   } finally {

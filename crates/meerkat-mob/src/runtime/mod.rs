@@ -227,12 +227,19 @@ mod identity_local_services;
 mod identity_recovery_test_support;
 #[cfg(feature = "openai-live")]
 mod live_bridge_operation;
+#[cfg(any(test, feature = "test-support"))]
+mod member_status_test_support;
 pub(crate) use handle::MemberTurnLlmIdentityAppliedSender;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use identity_recovery_test_support::trigger_identity_recovery_fail_stop;
 #[cfg(any(test, feature = "test-support"))]
 pub use identity_recovery_test_support::{
     IdentityRecoveryFailStopPoint, arm_identity_recovery_fail_stop_for_test,
+};
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use member_status_test_support::{
+    MemberStatusDeadlineTestObservation, member_status_deadline_after_snapshot_wait_for_test,
 };
 
 /// Test-support seam: the operator tool definitions a mob member receives

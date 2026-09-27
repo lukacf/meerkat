@@ -312,8 +312,9 @@ pub use runtime::{
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use runtime::{
-    IdentityRecoveryFailStopPoint, arm_identity_recovery_fail_stop_for_test,
-    member_operator_tool_defs_for_test,
+    IdentityRecoveryFailStopPoint, MemberStatusDeadlineTestObservation,
+    arm_identity_recovery_fail_stop_for_test, member_operator_tool_defs_for_test,
+    member_status_deadline_after_snapshot_wait_for_test,
 };
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};

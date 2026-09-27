@@ -95,7 +95,10 @@ the gate measures against the workspace version's own tag instead
 checks. Such a tree is not evidence for the released version: Release semver
 readiness measures it without uploading an attestation, and the release
 workflow's own measurement (`MEERKAT_SEMVER_REQUIRE_RELEASE_TREE=1`) refuses
-it outright, so main's tip can never publish as the tagged version.
+it outright. Separately, every publishing dispatch must name `release_tag` or
+run on the matching `v<version>` tag: `require_ci_green` refuses a branch ref,
+whose name never matches the version, so a branch tip cannot publish under
+whatever version its `Cargo.toml` carries.
 
 1. **Measured.** Every crate the release publishes was either rebuilt and
    compared, or proven identical to the baseline release. Only crates whose

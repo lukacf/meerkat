@@ -34,6 +34,8 @@ READINESS_WORKFLOW = Path(".github/workflows/release-semver-readiness.yml")
 TAG_SLO_SECONDS = 1800
 
 SEMVER_GATE_JOB = "release_semver_gate"
+CI_GREEN_JOB = "require_ci_green"
+RELEASE_VERSION_STEP_ID = "release_version"
 REGISTRY_JOB = "publish_registries"
 # The evidence step is the one that resolves the exact-tree readiness artifact.
 EVIDENCE_ARTIFACT_PREFIX = "meerkat-semver-attestation-main-"
@@ -224,8 +226,8 @@ class EventContext:
     ref: str = "refs/tags/v0.0.0"
     inputs: dict[str, str] = field(default_factory=dict)
     needs_result: str = "success"
-    # `<step id>.<output>` -> value; an output a step never wrote reads as an
-    # empty string, exactly as GitHub evaluates it.
+    # `<step id>.<output>` -> value, for the outputs this context models. Any
+    # other `steps.*.outputs.*` reference raises UnsupportedExpression.
     step_outputs: dict[str, str] = field(default_factory=dict)
 
     def resolve(self, path: str) -> str:
@@ -245,9 +247,12 @@ class EventContext:
         # same assumption `needs_result` makes for upstream jobs.
         if re.fullmatch(r"steps\.[A-Za-z0-9_-]+\.(?:outcome|conclusion)", path):
             return self.needs_result
+        # Only the step outputs a context models resolve; anything else stays
+        # unsupported, so a gate added on an unmodelled output fails the check
+        # closed instead of reading as an empty string.
         output = re.fullmatch(r"steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)", path)
-        if output:
-            return self.step_outputs.get(f"{output.group(1)}.{output.group(2)}", "")
+        if output and f"{output.group(1)}.{output.group(2)}" in self.step_outputs:
+            return self.step_outputs[f"{output.group(1)}.{output.group(2)}"]
         raise UnsupportedExpression(
             f"context `{path}` is not modelled by the release doctor"
         )
@@ -446,6 +451,22 @@ HISTORICAL_EVIDENCE = EventContext(
 )
 
 
+BRANCH_DISPATCHES = [
+    EventContext(
+        label=f"a {mode} dispatch from main without release_tag",
+        event_name="workflow_dispatch",
+        ref="refs/heads/main",
+        inputs=inputs,
+    )
+    for mode, inputs in (
+        ("package", {"publish_release_packages": "true"}),
+        ("alpha crate", {"publish_release_packages": "true", "alpha_crates_only": "true"}),
+        ("Web-SDK-only", {"publish_web_sdk_only": "true"}),
+        ("asset-only", {"publish_release_assets_only": "true"}),
+    )
+]
+
+
 # --------------------------------------------------------------------------
 # Checks
 # --------------------------------------------------------------------------
@@ -498,6 +519,46 @@ def check_semver_evidence(text: str) -> list[str]:
                 violations.append(
                     f"step `{step.name}` reruns `{MEASUREMENT_COMMAND}` on "
                     f"{context.label}; the long measurement belongs before the tag"
+                )
+    return violations
+
+
+def check_dispatch_binding(text: str) -> list[str]:
+    """Every publishing run is bound to its version's tag.
+
+    `require_ci_green` gates everything that publishes. Its version check must
+    run on a tag push, on a dispatch that names release_tag, and on any
+    publishing dispatch that names none: there the release ref is the branch,
+    which never matches `v<version>`, so the run refuses instead of publishing
+    the branch tip as whatever version its Cargo.toml carries.
+    """
+    block = job_block(text, CI_GREEN_JOB)
+    steps = [
+        step for step in job_steps(block) if step.fields.get("id") == RELEASE_VERSION_STEP_ID
+    ]
+    if len(steps) != 1:
+        return [
+            f"job `{CI_GREEN_JOB}` has {len(steps)} steps with `id: {RELEASE_VERSION_STEP_ID}`; "
+            "exactly one must bind the release ref to the workspace version"
+        ]
+    step = steps[0]
+    violations: list[str] = []
+    for context in (TAG_PUSH, PACKAGE_RECOVERY, *BRANCH_DISPATCHES):
+        if not step_runs(step, context):
+            violations.append(
+                f"step `{step.name}` does not run on {context.label}, so nothing binds "
+                "that publication to its version's tag"
+            )
+    ref_name = step.env.get("RELEASE_REF_NAME")
+    if ref_name is None:
+        violations.append(f"step `{step.name}` sets no RELEASE_REF_NAME to compare")
+    else:
+        for context in BRANCH_DISPATCHES:
+            compared = render(ref_name, context)
+            if compared.startswith("v"):
+                violations.append(
+                    f"step `{step.name}` compares `{compared}` on {context.label}, "
+                    "not the branch it runs on"
                 )
     return violations
 
@@ -643,6 +704,7 @@ def check_readiness_attestation(text: str) -> list[str]:
 CHECKS: dict[str, Callable[[str], list[str]]] = {
     "semver-evidence": check_semver_evidence,
     "registry-slo": check_registry_slo,
+    "dispatch-binding": check_dispatch_binding,
 }
 
 # Checks of release-semver-readiness.yml; run them by name with

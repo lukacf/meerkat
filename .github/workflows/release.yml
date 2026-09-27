@@ -102,11 +102,20 @@ jobs:
           echo "sha=${release_sha}" >> "${GITHUB_OUTPUT}"
           echo "tree=${release_tree}" >> "${GITHUB_OUTPUT}"
 
+      # Every publishing dispatch is bound to a version: it names release_tag,
+      # or runs on the matching v<version> tag. A dispatch from a branch with
+      # no release_tag reaches this step with the branch as its ref and is
+      # refused, so a branch tip can never publish as whatever version its
+      # Cargo.toml happens to carry.
       - name: Verify selected release ref matches version
+        id: release_version
         if: >-
           startsWith(github.ref, 'refs/tags/v') ||
           (github.event_name == 'workflow_dispatch' &&
-           github.event.inputs.release_tag != '')
+           (github.event.inputs.release_tag != '' ||
+            github.event.inputs.publish_release_packages == 'true' ||
+            github.event.inputs.publish_web_sdk_only == 'true' ||
+            github.event.inputs.publish_release_assets_only == 'true'))
         shell: bash
         env:
           RELEASE_REF_NAME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
@@ -125,6 +134,7 @@ jobs:
           tag="${tag#v}"
           if [[ "${version}" != "${tag}" ]]; then
             echo "Version mismatch: Cargo.toml has ${version} but release ref is ${RELEASE_REF_NAME}" >&2
+            echo "A publishing dispatch must set release_tag or run on the v${version} tag." >&2
             exit 1
           fi
           echo "Version ${version} matches release ref ${RELEASE_REF_NAME}"

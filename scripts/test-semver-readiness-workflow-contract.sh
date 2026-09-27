@@ -103,7 +103,7 @@ expect_violation "upload without the notes guard" \
 fixture="$TEST_ROOT/condition-misspelled.yml"
 mutate "$READINESS" "$fixture" 2 "steps.notes.outputs.baseline ==" "steps.notes.outputs.baselin =="
 expect_violation "condition keyed on a misspelled output" \
-  "does not run on a main push with needed='true' and notes baseline 'published'" \
+  "context \`steps.notes.outputs.baselin\` is not modelled" \
   "$(check "$fixture" readiness-attestation)"
 
 fixture="$TEST_ROOT/writer-misspelled.yml"
@@ -129,6 +129,15 @@ fixture="$TEST_ROOT/release-no-requirement.yml"
 mutate "$RELEASE" "$fixture" 1 "          ${REQUIRE}"$'\n' ""
 expect_violation "release measurement without the release-tree requirement" \
   "without \`MEERKAT_SEMVER_REQUIRE_RELEASE_TREE: \"1\"\`" "$(check "$fixture" semver-evidence)"
+
+# An evidence step gated on a step output no context models must fail the
+# check closed, not read the output as an empty string and pass.
+fixture="$TEST_ROOT/release-unmodelled-output.yml"
+mutate "$RELEASE" "$fixture" 1 \
+  $'      - name: Verify exact-tree pre-tag semver evidence\n        if: >-\n          ${{\n' \
+  $'      - name: Verify exact-tree pre-tag semver evidence\n        if: >-\n          ${{\n            steps.mode.outputs.skip_evidence != \'true\' &&\n'
+expect_violation "evidence gated on an unmodelled step output" \
+  "context \`steps.mode.outputs.skip_evidence\` is not modelled" "$(check "$fixture" semver-evidence)"
 
 fixture="$TEST_ROOT/release-requirement-off.yml"
 mutate "$RELEASE" "$fixture" 1 "$REQUIRE" 'MEERKAT_SEMVER_REQUIRE_RELEASE_TREE: "0"'

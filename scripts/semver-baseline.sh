@@ -44,9 +44,10 @@ semver_published_version() {
         | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["crate"]["max_version"])'
 }
 
-# Make origin's tag $1 local. Returns 0 when fetched, 2 when origin has no such
-# tag, and 1 (after saying why) when origin could not be asked: an offline
-# machine or a fork without the tag is not evidence the tag does not exist.
+# Make origin's tag $1 local. Returns 0 when fetched, 2 when origin answers
+# that it has no such tag (including a fork whose origin lacks it), and 1
+# (after saying why) when origin could not be asked at all (offline, no
+# `origin` remote, unreachable), which is not evidence the tag is missing.
 semver_fetch_release_tag() {
     local tag="$1" output status
     if output="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" 2>&1)"; then

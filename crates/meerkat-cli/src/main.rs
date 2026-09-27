@@ -12018,6 +12018,8 @@ async fn run_agent(
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             app_context: parsed_app_context,
+            // A CLI-created session is never a mob fork seating.
+            fork_source: None,
             additional_instructions: if instructions.is_empty() {
                 None
             } else {

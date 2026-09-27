@@ -7522,6 +7522,7 @@ impl MobBuilder {
                 command_tx: command_tx.clone(),
                 command_rx,
             };
+            let per_spawn_external_tools: super::handle::PerSpawnExternalTools = Arc::default();
             let preview_handle = MobHandle {
                 // Explicit launch-site mint (A16): the building process IS the
                 // owning operator; surfaces rebind clones per console principal.
@@ -7546,6 +7547,10 @@ impl MobBuilder {
                 flow_target_provisioner: Arc::clone(&flow_target_provisioner),
                 explicit_resume_operations: Arc::clone(&explicit_resume_operations),
                 member_admission_backlog: Arc::clone(&member_admission_backlog),
+                // One overlay map for the preview, the actor and the launched
+                // handle: restored members' tools keep this handle, and a
+                // durable fork through any of them reads the same overlays.
+                per_spawn_external_tools: Arc::clone(&per_spawn_external_tools),
             };
             // session_service is still live here (not consumed until start_runtime_with_components)
 
@@ -7553,7 +7558,7 @@ impl MobBuilder {
                 wiring.dsl_authority.state().topology_epoch,
             ));
 
-            let mut per_spawn_external_tools_seed = BTreeMap::new();
+            let mut per_spawn_external_tools_seed = super::fork_build::RetainedOverlays::default();
             let mut recovered_direct_member_adoption_pending = false;
             if resumed_state == MobState::Running
                 && recovered_completion_lifecycle_intent.is_none()
@@ -7720,6 +7725,9 @@ impl MobBuilder {
                 }
             }
 
+            // The overlays restored members were rebuilt with, retained in the
+            // map the preview handle (and so their tools) already share.
+            *per_spawn_external_tools.write().await = per_spawn_external_tools_seed;
             Self::start_runtime_with_components(
                 definition,
                 wiring,
@@ -7740,7 +7748,7 @@ impl MobBuilder {
                 storage.forked_participants.clone(),
                 notify_orchestrator_on_resume,
                 recovered_direct_member_adoption_pending,
-                per_spawn_external_tools_seed,
+                per_spawn_external_tools,
                 retired_event_index,
                 retirement_started_event_index,
                 // Respawn is a live helper composition, not a durable replacement
@@ -8267,7 +8275,7 @@ impl MobBuilder {
         spawn_member_customizer: &Option<Arc<dyn super::SpawnMemberCustomizer>>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
         runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
-        per_spawn_external_tools_seed: &mut BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>,
+        per_spawn_external_tools_seed: &mut super::fork_build::RetainedOverlays,
     ) -> Result<bool, MobError> {
         let recovered_direct_member_adoption_pending = runtime_metadata
             .list_external_binding_overlays(&definition.id)
@@ -8295,7 +8303,17 @@ impl MobBuilder {
             }
         }
 
-        let roster_entries = roster.list().cloned().collect::<Vec<_>>();
+        let mut roster_entries = roster.list().cloned().collect::<Vec<_>>();
+        // A fork-derived member seated with its source's overlay is restored
+        // with the overlay its source is restored with, so every source is
+        // restored before its forks (and a fork before the forks of it).
+        super::fork_build::order_fork_sources_first(&mut roster_entries, &definition.id, |entry| {
+            entry
+        });
+        // The per-spawn overlay each member was restored with in this pass,
+        // keyed by member: what a fork of that member is restored with.
+        let mut restored_overlays: BTreeMap<AgentIdentity, Option<Arc<dyn AgentToolDispatcher>>> =
+            BTreeMap::new();
         let machine_state = dsl_authority.state();
         let host_owned_runtime_ids = machine_state
             .member_placement
@@ -8409,28 +8427,15 @@ impl MobBuilder {
                 );
             };
 
-            let mut restore_spec =
-                super::SpawnMemberSpec::new(entry.role.clone(), entry.agent_identity.clone());
-            restore_spec.launch_mode = crate::launch::MemberLaunchMode::Resume {
-                bridge_session_id: bridge_session_id.clone(),
-                resume_from_role: None,
-            };
-            restore_spec.runtime_mode = Some(entry.runtime_mode);
-            restore_spec.labels = Some(entry.labels.clone());
-            restore_spec.override_profile = entry.effective_profile_override.clone();
-            restore_spec.model_override = entry.effective_model_override.clone();
-            restore_spec.spawned_by = entry.spawned_by.clone();
-            restore_spec.fork_job = entry.fork_job.clone();
-            if let Some(customizer) = spawn_member_customizer.as_ref() {
-                let ctx = super::SpawnCustomizationContext {
-                    mob_id: definition.id.clone(),
-                    spawn_source: super::SpawnSource::Resume,
-                    spawner_identity: None,
-                    spawner_runtime_id: None,
-                    requested_profile: restore_spec.role_name.clone(),
-                };
-                customizer.customize_spawn(&ctx, &mut restore_spec)?;
-            }
+            // The host's spawn customizer makes an ordinary member's restore
+            // request; a fork-derived member's is its own durable records,
+            // like its first build (see `fork_build`).
+            let restore_spec = super::fork_build::rebuild_resume_spec(
+                &definition.id,
+                spawn_member_customizer.as_ref(),
+                entry,
+                &bridge_session_id,
+            )?;
             if restore_spec.identity != entry.agent_identity {
                 return Err(MobError::Internal(format!(
                     "spawn customizer cannot change resume restore identity from '{}' to '{}'",
@@ -8460,11 +8465,80 @@ impl MobBuilder {
                 )));
             }
             let restore_resume_from_role = restore_resume_from_role.clone();
-            // Seed the actor's retention map so a later machine-authorized
-            // revival recomposes the customizer-supplied per-spawn overlay.
-            if let Some(tools) = restore_spec.external_tools.clone() {
-                per_spawn_external_tools_seed.insert(entry.agent_identity.clone(), tools);
-            }
+            // The overlay this member is restored with: the customizer's
+            // overlay for its own identity, except for a fork-derived member
+            // seated with its source's overlay whose source (and every in-mob
+            // ancestor that overlay came through) is still the build it was
+            // forked from, which gets the overlay its source was restored
+            // with in this pass (see `fork_build`).
+            let fork_rule = super::fork_build::fork_overlay_rule(
+                entry,
+                &definition.id,
+                |identity| roster.get(identity),
+                dsl_authority.state(),
+            );
+            let own_overlay = || {
+                super::fork_build::rebuild_own_overlay(
+                    &definition.id,
+                    spawn_member_customizer.as_ref(),
+                    entry,
+                    &bridge_session_id,
+                    &restore_spec,
+                )
+            };
+            let mut restore_overlay_origin = super::fork_build::RetainedOverlayOrigin::Own;
+            let restore_overlay = match fork_rule {
+                super::fork_build::ForkOverlayRule::Own => own_overlay()?,
+                super::fork_build::ForkOverlayRule::Caller => {
+                    let own = own_overlay()?;
+                    if own.is_none() {
+                        super::fork_build::warn_caller_overlay_not_resupplied(
+                            &definition.id,
+                            entry,
+                        );
+                    }
+                    own
+                }
+                super::fork_build::ForkOverlayRule::FollowSource(source) => {
+                    match restored_overlays.get(&source).cloned() {
+                        Some(source_overlay) => {
+                            restore_overlay_origin =
+                                super::fork_build::RetainedOverlayOrigin::Inherited;
+                            source_overlay
+                        }
+                        None => {
+                            let own = own_overlay()?;
+                            super::fork_build::warn_fork_source_unavailable(
+                                &definition.id,
+                                entry,
+                                &super::fork_build::ForkSourceUnavailable::NotRebuilt,
+                                own.is_some(),
+                            );
+                            own
+                        }
+                    }
+                }
+                super::fork_build::ForkOverlayRule::SourceUnavailable(reason) => {
+                    let own = own_overlay()?;
+                    super::fork_build::warn_fork_source_unavailable(
+                        &definition.id,
+                        entry,
+                        &reason,
+                        own.is_some(),
+                    );
+                    own
+                }
+            };
+            // Seed the actor's retention map with the overlay the member is
+            // actually restored with: a later machine-authorized revival
+            // recomposes it, and a fork of the member inherits it (and
+            // persists whether it was the member's own).
+            per_spawn_external_tools_seed.retain(
+                &entry.agent_identity,
+                restore_overlay.clone(),
+                restore_overlay_origin,
+            );
+            restored_overlays.insert(entry.agent_identity.clone(), restore_overlay.clone());
             let restore_profile_override = restore_spec.override_profile.clone();
             let restore_model_override = restore_spec.model_override.clone();
             let restore_labels = restore_spec
@@ -8622,7 +8696,7 @@ impl MobBuilder {
                                 tool_bundles,
                                 tool_handle.clone(),
                                 default_ext,
-                                restore_spec.external_tools.clone(),
+                                restore_overlay.clone(),
                                 None,
                             )?,
                             compaction_curator_override: None,
@@ -8649,6 +8723,8 @@ impl MobBuilder {
                 };
                 resumed_config.keep_alive =
                     entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+                // A fork-derived member is rebuilt with its persisted lineage.
+                resumed_config.fork_source = entry.fork_source.clone();
                 if let Some(ref auth_binding) = restore_spec.auth_binding {
                     resumed_config.auth_binding = Some(auth_binding.clone());
                 }
@@ -8856,7 +8932,7 @@ impl MobBuilder {
                     tool_bundles,
                     tool_handle.clone(),
                     default_ext_fresh,
-                    restore_spec.external_tools.clone(),
+                    restore_overlay.clone(),
                     None,
                 )?,
                 compaction_curator_override: None,
@@ -8871,6 +8947,7 @@ impl MobBuilder {
             })
             .await?;
             config.keep_alive = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+            config.fork_source = entry.fork_source.clone();
             if let Some(ref auth_binding) = restore_spec.auth_binding {
                 config.auth_binding = Some(auth_binding.clone());
             }
@@ -9283,7 +9360,7 @@ impl MobBuilder {
                 forked_participant_store,
                 notify_orchestrator_on_resume,
                 false,
-                BTreeMap::new(),
+                Arc::default(),
                 HashSet::new(),
                 HashSet::new(),
                 HashSet::new(),
@@ -9328,7 +9405,7 @@ impl MobBuilder {
         forked_participant_store: Option<Arc<dyn crate::store::ForkedParticipantStore>>,
         notify_orchestrator_on_resume: bool,
         recovered_direct_member_adoption_pending: bool,
-        per_spawn_external_tools: BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>,
+        per_spawn_external_tools: super::handle::PerSpawnExternalTools,
         retired_event_index: HashSet<String>,
         retirement_started_event_index: HashSet<String>,
         preserved_respawn_topology_event_index: HashSet<String>,
@@ -9408,6 +9485,7 @@ impl MobBuilder {
                 flow_target_provisioner: Arc::clone(&flow_target_provisioner),
                 explicit_resume_operations: Arc::clone(&explicit_resume_operations),
                 member_admission_backlog: Arc::clone(&member_admission_backlog),
+                per_spawn_external_tools: Arc::clone(&per_spawn_external_tools),
             };
             // Row #320: the orphan budget is MobMachine state (seeded once in
             // `start_runtime` from `definition.limits.max_orphaned_turns`); the
@@ -9695,7 +9773,7 @@ impl MobBuilder {
                 phase_watch_tx: phase_watch_tx_actor,
                 default_external_tools_provider,
                 identity_local_external_tools_provider,
-                per_spawn_external_tools: tokio::sync::RwLock::new(per_spawn_external_tools),
+                per_spawn_external_tools,
                 spawn_base_prompt_source,
                 spawn_member_customizer,
                 realm_profile_store,

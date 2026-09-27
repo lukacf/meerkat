@@ -401,5 +401,27 @@ pub(super) fn validate_attached_spawn_spec(
     if spec.shell_env.is_some() {
         return reject("the branch inherits the source's shell environment".to_string());
     }
+    // The source's build inputs reach the branch only as an inheritance minted
+    // by the source's own mob for exactly this capability's source member and
+    // source session. It carries an in-process tool overlay, so it cannot
+    // travel to a member host.
+    if let Some(inheritance) = spec.fork_build_inheritance.as_ref() {
+        if owner_host.is_some() {
+            return reject(
+                "a host-owned capability's branch cannot carry its source's in-process build \
+                 inheritance"
+                    .to_string(),
+            );
+        }
+        if !inheritance.names_fork_of(
+            capability.source_identity(),
+            &capability.provenance().source_session_id,
+        ) {
+            return reject(
+                "the build inheritance names a different source than this capability's fork"
+                    .to_string(),
+            );
+        }
+    }
     Ok(())
 }

@@ -901,6 +901,16 @@ pub(crate) async fn retire_runtime_session_for_archive(
 // MobSessionService trait extension
 // ---------------------------------------------------------------------------
 
+/// The refusal of a session service without durable transcript fork
+/// authority: the default [`MobSessionService::fork_persisted_session`]
+/// answer, and what a mob answers for such a service before it reads anything
+/// of the fork source.
+pub(crate) fn durable_fork_unsupported() -> SessionError {
+    SessionError::Unsupported(
+        "session service does not expose durable transcript fork authority".into(),
+    )
+}
+
 /// Extension trait for session services used by the mob runtime.
 ///
 /// Builds on `SessionServiceCommsExt` from core so mob orchestration can use
@@ -1306,9 +1316,7 @@ pub trait MobSessionService:
         _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
         _target: meerkat_core::DurableSessionForkTarget,
     ) -> Result<meerkat_core::SessionForkResult, SessionError> {
-        Err(SessionError::Unsupported(
-            "session service does not expose durable transcript fork authority".into(),
-        ))
+        Err(durable_fork_unsupported())
     }
 
     /// Wait, bounded, for the source's turn-finalization boundary and cut a

@@ -323,6 +323,33 @@ input, and admits the child's one turn. The child runs turn-driven whatever
 its role's default runtime mode, like a `delegate` helper. What happens next
 depends on whether the host can deliver a completion after the call returns.
 
+The child, like a local `council` participant, is built with its source
+member's build inputs: the source's application context and labels and the
+source's per-spawn tool overlay. The labels that name a member (`mob_id`,
+`role`, `profile_name`, `meerkat_id`, `agent_identity`) are not inherited. The
+child's roster entry carries none of them, and its build stamps the child's
+own. Its `SessionBuildOptions::fork_source` names the source member and the
+session the child was forked from, so a host build callback can grant the
+child exactly the source's tools and instructions. With the same tools, the
+child's first request repeats the source's cached prompt prefix. The host's
+spawn customizer does not run on the child's seating.
+
+A child that is rebuilt later (revived after its session was dropped, resumed,
+or restored after a restart) keeps its `fork_source`, labels and application
+context. The host's spawn customizer does not run on those rebuilds either, so
+it cannot change them. It is revived with the tool overlay it was built with.
+After a restart or explicit resume it gets the overlay its source is restored
+with, as long as the source is still seated on the session the child was forked
+from. Once the source has been retired or respawned, the child is rebuilt with
+the overlay the host's spawn customizer gives its own identity, and a warning
+names the missing source. A fork of the child inherits the overlay the child
+was built with, so grandchildren get the same tools. A grandchild follows its
+source only while every ancestor its tools came through is still seated on the
+session its fork was taken from, so it drops a retired ancestor's tools too.
+Its tools came through only the ancestors they passed when it was forked: if
+its forker had already been rebuilt with its own identity's tools by then, the
+grandchild keeps following its forker, whatever happened above it.
+
 **Detached.** A call runs detached when three things hold: the host declares
 it can deliver later, it has a runtime to admit the completion, and the caller
 can be made live again to receive it. A host built with a runtime adapter

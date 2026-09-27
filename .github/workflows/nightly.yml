@@ -525,8 +525,9 @@ jobs:
       # Link the 8 MiB wasm stack sdks/web/scripts/build-wasm.mjs asks for.
       # At the 1 MiB default this unoptimized test build overflows the stack
       # in its first turn ("RuntimeError: memory access out of bounds").
-      # Published @rkat/web up to 0.8.44 shipped 1 MiB (an ambient RUSTFLAGS
-      # dropped the flag; #1211), so this does not yet match every release.
+      # No published @rkat/web has ever shipped this stack: every release
+      # through 0.8.44 lost the flag to an ambient RUSTFLAGS and shipped 1 MiB
+      # (#1211 fixes the release build).
       RUSTFLAGS: '--cfg getrandom_backend="wasm_js" -C link-arg=-zstack-size=8388608'
     steps:
       - name: Checkout

@@ -223,6 +223,17 @@ them.
 
 ### Added
 
+- The `@rkat/web` packed-package smoke (`npm run test:packed`, which the
+  release package job and `make test-sdk-web` run) now measures the one
+  stubbed turn's wasm shadow-stack high-water and fails when it exceeds 2 MiB
+  (`sdks/web/scripts/wasm-stack-highwater.mjs`). It paints the idle stack
+  below the resting stack pointer before the turn and finds the deepest
+  overwritten byte after it, and logs the measurement on every run
+  (1,450,664 bytes on the current tree, against the 8 MiB stack the runtime
+  links). This is the web counterpart of the native worker-stack canaries: a
+  turn grew from 880 KB (0.8.36) to 1.3 MB (0.8.37) with nothing to catch
+  it.
+
 - `MobSessionService::observe_member_status_view` (required, see Breaking)
   returns a `MemberStatusSessionView { last_assistant_text, total_tokens,
   source }` with `MemberStatusViewSource::{LiveWatch, DurableHead, Absent}`:

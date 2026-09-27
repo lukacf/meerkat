@@ -1403,7 +1403,7 @@
             "type": "object"
           },
           {
-            "description": "New turn started (calling LLM).\n\n`assistant_message_id` is minted here, before any delta, and names the\nassistant message this provider turn will commit. A repeated\n`turn_started` for an id that is still open (a re-poll after\ncompaction) restarts that message's live buffer. The message is\ncommitted exactly when a history row carries the id. The matching\n`turn_completed` is the live signal that the turn finished; it is\nabsent when the run fails after the row was committed (for example a\nturn-boundary or run-completed hook denial), so an id still open when\nthe run ends is reconciled against history.",
+            "description": "New turn started (calling LLM).\n\n`assistant_message_id` is minted here, before any delta, and names the\nassistant message this provider turn commits if it commits one. A\nrepeated `turn_started` for an id that is still open (a re-poll after\ncompaction) restarts that message's live buffer.\n\nCommit is a history fact: the message is committed exactly when a\nhistory row carries the id. The matching `turn_completed` is only the\nlive signal that the provider turn finished; it proves neither commit\nnor durability. It can precede the turn's boundary work (turn-boundary\nhooks and the comms drain after a tool-use turn), the run-completed\nhooks of a structured-output run, and the session save, any of which\ncan still fail the run. It is absent when the run fails after the row\nwas pushed but before it was published (for example a terminal-turn\nboundary or run-completed hook denial). Reconcile every id against\nhistory read after the run ends.",
             "properties": {
               "assistant_message_id": {
                 "anyOf": [
@@ -1660,7 +1660,7 @@
             "type": "object"
           },
           {
-            "description": "Turn completed.\n\nPublished once per committed agent-loop provider request: each\ntool-loop call (`stop_reason: tool_use`) and the call that closes the\nrun, each after its assistant message is committed, so it pairs with\nthe [`AgentEvent::TurnStarted`] of the same request. Structured-output\nextraction requests publish their accounting on the extraction outcome\nevent instead (`request_usage`).\n\n# Why `usage` is optional\n\nThis event states one semantic fact - a model turn reached its terminal\nand its assistant message is committed - and carries one accounting\nfact beside it. The two have different owners and different failure\nmodes: a provider stream that ends without ever sending a usage event\nhas said nothing about tokens while having said everything about the\nanswer. Absence is therefore representable here, because the only\nalternatives are to fabricate counters no provider issued or to\nsuppress the completion of a turn the caller has already read.\n\n`usage: None` means exactly \"no accounting exists for this turn\": no\ncounter advanced, and no per-call row should be reconciled for it. The\npaired [`AgentEvent::TurnUsageAccountingUnmeasured`] carries the\nexplanation (which provider and model went unaccounted); this field\nowns only the number's presence or absence. Consumers must skip an\nabsent row, never treat it as zero.",
+            "description": "Turn completed.\n\nPublished once per agent-loop provider request that pushed its\nassistant message row: each tool-loop call (`stop_reason: tool_use`)\nand the call that closes the run, each after the row is pushed, so it\npairs with the [`AgentEvent::TurnStarted`] of the same request. It is\na live \"turn finished\" signal, not the commit: see\n[`AgentEvent::TurnStarted`] for why history is the only commit fact. Structured-output\nextraction requests publish their accounting on the extraction outcome\nevent instead (`request_usage`).\n\n# Why `usage` is optional\n\nThis event states one semantic fact - a model turn reached its\nterminal - and carries one accounting\nfact beside it. The two have different owners and different failure\nmodes: a provider stream that ends without ever sending a usage event\nhas said nothing about tokens while having said everything about the\nanswer. Absence is therefore representable here, because the only\nalternatives are to fabricate counters no provider issued or to\nsuppress the completion of a turn the caller has already read.\n\n`usage: None` means exactly \"no accounting exists for this turn\": no\ncounter advanced, and no per-call row should be reconciled for it. The\npaired [`AgentEvent::TurnUsageAccountingUnmeasured`] carries the\nexplanation (which provider and model went unaccounted); this field\nowns only the number's presence or absence. Consumers must skip an\nabsent row, never treat it as zero.",
             "properties": {
               "assistant_message_id": {
                 "anyOf": [
@@ -1671,7 +1671,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "The committed assistant message this turn closes: the id its\n[`AgentEvent::TurnStarted`] opened, or, for a row a live\ndisplay-text drain committed (no `turn_started`), the id core\nminted for that row. Absent when the turn committed no row."
+                "description": "The assistant message this turn closes: the id its\n[`AgentEvent::TurnStarted`] opened, or, for a row a live\ndisplay-text drain committed (no `turn_started`), the id core\nminted for that row. Absent when the turn pushed no row, and also\non turns the realtime transcript materializer committed: those\nrows carry no assistant message id and pair with the live\ntransport's realtime observations through their\n`realtime_origin.provider_item_ids`. Presence proves neither\ncommit nor durability; history does."
               },
               "stop_reason": {
                 "$ref": "#/$defs/StopReason"
@@ -2726,7 +2726,7 @@
         "type": "string"
       },
       "AssistantMessageId": {
-        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Rows a live display-text drain\ncommits get their own id when committed. Messages written before this\nfield existed, rows the realtime transcript materializer commits, and\ncompaction summaries carry none.",
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Rows a live display-text drain\ncommits get their own id when committed. Messages written before this\nfield existed, rows the realtime transcript materializer commits (they\npair with the live transport's realtime observations through\n[`RealtimeMessageOrigin::provider_item_ids`]), and compaction summaries\ncarry none.",
         "type": "string"
       },
       "AuthBindingRef": {
@@ -15711,7 +15711,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on rows the realtime\ntranscript materializer commits, and on rows a rewrite or fork\nedit replaced."
+                "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on rows the realtime\ntranscript materializer commits (those pair through\n`realtime_origin`), and on rows a rewrite or fork edit replaced."
               },
               "blocks": {
                 "items": {
@@ -15731,6 +15731,17 @@
                     "type": "null"
                   }
                 ]
+              },
+              "realtime_origin": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RealtimeMessageOrigin"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Realtime provenance of a row the realtime transcript materializer\ncommitted, copied verbatim from the canonical row (the same\n`RealtimeMessageOrigin` shape run events carry in `identity`).\nIts `provider_item_ids`\nare the provider item ids the live transport's realtime\nobservations carry (`provider_item_id` on\n`assistant_text_delta`, `assistant_transcript_delta`,\n`assistant_transcript_final` and `assistant_transcript_truncated`;\n`item_id` on `assistant_audio_chunk` and on `realtime_transcript`\nevents), so a console pairs a realtime row with its live rendering\nby provider item id. Absent on every other row, including rows a\nrewrite replaced."
               },
               "role": {
                 "const": "block_assistant",

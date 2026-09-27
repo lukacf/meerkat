@@ -544,7 +544,12 @@ to history by that id, never by text or position.
 `RunCompletedEvent.assistantMessageId` names the message whose text `result`
 repeats. The raw payloads of `reasoning_delta`, `reasoning_complete`,
 `server_tool_content` and `assistant_image_appended` carry the same
-`assistant_message_id` key. See
+`assistant_message_id` key. Only a history row carrying the id is the commit:
+`TurnCompletedEvent` is a live signal that can arrive before work that still
+fails the run, and can be missing for a committed row, so reconcile against
+history when the run ends. Rows the realtime transcript materializer commits
+have no id; their `SessionMessage.realtimeOrigin.provider_item_ids` match the
+provider item ids on the live transport's realtime observations. See
 [assistant message identity](/reference/session-contracts#assistant-message-identity)
 for retry, compaction and rewrite semantics.
 

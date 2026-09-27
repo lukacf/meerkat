@@ -3701,6 +3701,57 @@ def test_parse_session_history_carries_assistant_message_id():
     assert history.messages[1].assistant_message_id is None
 
 
+REALTIME_ORIGIN = {
+    "session_id": "0190f5c2-4a1e-7c3d-8e2f-00000000b001",
+    "channel_id": "channel-7",
+    "canonical_row_sequence": 3,
+    "provider_item_ids": ["item_a", "item_b"],
+}
+
+
+def test_parse_session_history_carries_realtime_origin_verbatim():
+    row = {
+        "role": "block_assistant",
+        "blocks": [
+            {"block_type": "transcript", "data": {"text": "spoken", "source": {"kind": "spoken"}}}
+        ],
+        "stop_reason": "end_turn",
+        "created_at": "2026-05-26T10:00:01Z",
+    }
+    raw = {
+        "session_id": "s1",
+        "message_count": 2,
+        "offset": 0,
+        "has_more": False,
+        "messages": [{**row, "realtime_origin": REALTIME_ORIGIN}, row],
+    }
+    history = MeerkatClient._parse_session_history(raw)
+    realtime = history.messages[0]
+    assert realtime.realtime_origin == REALTIME_ORIGIN
+    assert realtime.realtime_origin["provider_item_ids"] == ["item_a", "item_b"]
+    assert realtime.assistant_message_id is None
+    assert history.messages[1].realtime_origin is None
+
+
+def test_parse_session_history_rejects_malformed_realtime_origin():
+    row = {
+        "role": "block_assistant",
+        "blocks": [],
+        "stop_reason": "end_turn",
+        "created_at": "2026-05-26T10:00:01Z",
+        "realtime_origin": {**REALTIME_ORIGIN, "provider_item_ids": [7]},
+    }
+    raw = {
+        "session_id": "s1",
+        "message_count": 1,
+        "offset": 0,
+        "has_more": False,
+        "messages": [row],
+    }
+    with pytest.raises(MeerkatError, match="provider_item_ids"):
+        MeerkatClient._parse_session_history(raw)
+
+
 def test_parse_skills_resolved_with_typed_skill_identities():
     source_uuid = "00000000-0000-4b11-8111-000000000001"
     raw = {

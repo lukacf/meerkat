@@ -322,6 +322,7 @@ fn wire_session_history_roundtrip() {
                 run_id: None,
                 created_at: "2026-04-27T00:00:02Z".to_string(),
                 assistant_message_id: None,
+                realtime_origin: None,
             },
             WireSessionMessage::ToolResults {
                 results: vec![meerkat_contracts::WireToolResult {

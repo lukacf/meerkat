@@ -63,6 +63,11 @@ them.
 - `meerkat_contracts::WireSessionMessage::BlockAssistant` gains
   `assistant_message_id: Option<AssistantMessageId>`; variant literals and
   exhaustive patterns must account for it.
+- `meerkat_contracts::WireSessionMessage::BlockAssistant` gains
+  `realtime_origin: Option<meerkat_core::types::RealtimeMessageOrigin>`;
+  variant literals and exhaustive patterns must account for it. The JSON key
+  is serde-defaulted and omitted when absent, so every row that is not a
+  realtime materializer row keeps its exact wire bytes.
 - `meerkat_core::AgentLlmRequestAttempt::stream_response` gains the parameter
   `assistant_message_id: AssistantMessageId`
   (`stream_response(&self, assistant_message_id)`). Implementations that
@@ -115,10 +120,12 @@ them.
   fallback, and a re-poll after compaction) reuse its id, a failed provider
   turn never leaves a committed id, messages appended by tool effects get
   their own id, and `run_completed` names the committed message whose text
-  `result` repeats. The history row carrying an id is the commit fact;
-  `turn_completed` is the live signal that the turn finished and is absent
-  when a run fails after the row was committed (for example a turn-boundary or
-  run-completed hook denial).
+  `result` repeats. The history row carrying an id is the only commit fact.
+  `turn_completed` is a live "turn finished" signal that proves neither commit
+  nor durability: it can precede tool-turn boundary work, the run-completed
+  hooks of an output-schema run and the session save, any of which can still
+  fail the run, and it is absent when a run fails after the row was pushed
+  (for example a terminal-turn boundary or run-completed hook denial).
   See `docs/reference/session-contracts.mdx#assistant-message-identity`.
 - `meerkat_core::Session::retained_transcript_revision_rows` and
   `meerkat_core::Session::commit_transcript_revision_restore`, with the
@@ -134,6 +141,19 @@ them.
   `run_completed` events and on `block_assistant` history rows (the Web SDK
   types cover all ten events and export `AssistantMessageId`); raw-preserved
   events keep the key in their payload.
+- Realtime row pairing: `block_assistant` history and transcript-revision rows
+  the realtime transcript materializer committed now carry `realtime_origin`
+  on the wire, copied verbatim from the canonical row (the
+  `RealtimeMessageOrigin` shape run events already carry in `identity`). Its
+  `provider_item_ids` match the provider item ids on the live transport's
+  realtime observations (`provider_item_id` on `assistant_text_delta`,
+  `assistant_transcript_delta`, `assistant_transcript_final` and
+  `assistant_transcript_truncated`; `item_id` on `assistant_audio_chunk` and
+  item-scoped `realtime_transcript` events), so a console pairs a realtime row
+  with its live rendering by provider item id. These rows still carry no
+  `assistant_message_id`, and the `text_complete` / `turn_completed` published
+  for their commit carry none either. The Python and TypeScript SDKs expose it
+  as `SessionMessage.realtime_origin` / `realtimeOrigin`.
 
 ### Fixed
 

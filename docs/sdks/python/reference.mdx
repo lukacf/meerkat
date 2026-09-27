@@ -437,7 +437,12 @@ message, so join live rows to history by that id, never by text or position.
 repeats. The raw-preserving `UnknownEvent` payloads of `reasoning_delta`,
 `reasoning_complete`, `server_tool_content` and `assistant_image_appended`
 carry the same key in `event.data`. The value is `None` on data written before
-0.8.45. See
+0.8.45. Only a history row carrying the id is the commit: `TurnCompleted` is a
+live signal that can arrive before work that still fails the run, and can be
+missing for a committed row, so reconcile against history when the run ends.
+Rows the realtime transcript materializer commits have no id; their
+`SessionMessage.realtime_origin["provider_item_ids"]` match the provider item
+ids on the live transport's realtime observations. See
 [assistant message identity](/reference/session-contracts#assistant-message-identity)
 for retry, compaction and rewrite semantics.
 

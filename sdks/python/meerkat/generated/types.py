@@ -8273,6 +8273,34 @@ PeerSendability = Literal['peer_message', 'peer_request', 'peer_response']
 # two-state override would collapse them.
 SendTaintOverride = dict[str, SenderContentTaint] | Literal['undeclared']
 
+# Unique identifier for a session (UUID v7 for time-ordering)
+SessionId = str
+
+# Opaque identity of one live channel binding.
+#
+# A replacement channel receives a new value. Semantic observations retain
+# this identity so a delayed callback from the old binding fails its fence.
+LiveChannelId = str
+
+@dataclass
+class LiveContextObservationId:
+    """Opaque provenance identifier. Its namespace is data, not admission or
+temporal authority; only the runtime's generated registry grants a claim."""
+    channel_id: LiveChannelId
+    namespace: str
+    nonce: str
+
+
+@dataclass
+class RealtimeMessageOrigin:
+    """Realtime provenance of a transcript row the realtime materializer committed."""
+    canonical_row_sequence: int
+    channel_id: LiveChannelId
+    session_id: SessionId
+    context_observation_id: Optional[LiveContextObservationId] = None
+    provider_item_ids: Optional[list[str]] = None
+
+
 # Canonical transcript message for public wire surfaces.
 #
 # Not `PartialEq`: the `BlockAssistant.blocks` variant carries
@@ -8307,6 +8335,7 @@ class WireSessionMessageBlockAssistant(TypedDict, total=False):
     blocks: Required[list[WireAssistantBlock]]
     created_at: Required[str]
     interaction_id: NotRequired[Optional[str]]
+    realtime_origin: NotRequired[Optional[RealtimeMessageOrigin]]
     role: Required[Literal['block_assistant']]
     run_id: NotRequired[Optional[RunId]]
     stop_reason: NotRequired[Optional[WireStopReason]]

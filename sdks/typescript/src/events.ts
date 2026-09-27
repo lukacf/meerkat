@@ -43,12 +43,16 @@ import type {
 // Owner lineage keeps the generated wire shape, including optional/null facts.
 export type {
   TranscriptMessageIdentity,
-  RealtimeMessageOrigin,
-  LiveContextObservationId,
   ObjectiveId,
-  LiveChannelId,
   RunInput,
 } from "./generated/event_types.js";
+// Shared with the transcript-row contract (`WireSessionMessage`), so the
+// generator emits them once in the wire types module.
+export type {
+  RealtimeMessageOrigin,
+  LiveContextObservationId,
+  LiveChannelId,
+} from "./generated/types.js";
 
 // ---------------------------------------------------------------------------
 // Shared value types
@@ -288,8 +292,13 @@ export interface RunFailedEvent {
 /**
  * A provider turn started. `assistantMessageId` is assigned here, before any
  * delta. A repeated `turn_started` for an id that is still open (a re-poll
- * after compaction) restarts that message's live buffer; the message is
- * committed when the matching `turn_completed` arrives.
+ * after compaction) restarts that message's live buffer.
+ *
+ * The message is committed exactly when a history row carries the id. The
+ * matching `turn_completed` is only a live "turn finished" signal: it can
+ * arrive before boundary work, run-completed hooks and persistence that can
+ * still fail the run, and it is absent when a run fails after the row was
+ * pushed. When the run ends, reconcile every id against history.
  */
 export interface TurnStartedEvent {
   readonly type: "turn_started";
@@ -346,7 +355,12 @@ export interface ToolResultReceivedEvent {
 }
 
 /**
- * One model turn reached its terminal and its assistant message was committed.
+ * One model turn reached its terminal. A live "turn finished" signal, not the
+ * commit: only a history row that carries `assistantMessageId` is the commit
+ * (see `TurnStartedEvent`). `assistantMessageId` is absent when the turn
+ * pushed no row, and on realtime materializer turns, which DO commit a row:
+ * that row carries no `assistantMessageId` and pairs with the live transport's
+ * realtime observations through `SessionMessage.realtimeOrigin.providerItemIds`.
  *
  * `usage` is ABSENT when the provider stream carried no normalized token
  * accounting for the turn. That is an honest absence rather than a zero: the

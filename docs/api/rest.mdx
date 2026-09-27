@@ -494,7 +494,9 @@ Query parameters:
 History is returned oldest-to-newest and reflects the last committed session snapshot only.
 `block_assistant` rows committed by 0.8.45 or later carry `assistant_message_id`,
 the same id the message's live SSE events carried; join live output to history
-by that id. See
+by that id. Rows the realtime transcript materializer commits carry
+`realtime_origin` instead, whose `provider_item_ids` match the provider item ids
+on the live transport's realtime observations. See
 [assistant message identity](/reference/session-contracts#assistant-message-identity).
 
 ### POST /sessions/\{id\}/system_context
@@ -838,7 +840,7 @@ Event types:
 | `text_complete` | Full text for this turn |
 | `tool_call_requested` | LLM wants to call a tool |
 | `tool_result_received` | Tool result processed |
-| `turn_completed` | LLM call finished; `assistant_message_id` names the committed message (the history row carrying it is the commit; a run that fails after the commit publishes no `turn_completed`) |
+| `turn_completed` | LLM call finished; `assistant_message_id` names the message the turn closes. It is a live signal, not the commit: only a history row carrying the id is the commit. It can precede boundary work, run-completed hooks and persistence that still fail the run, and it is absent when a run fails after the row was pushed. It is also absent on realtime materializer turns, whose rows pair by `realtime_origin.provider_item_ids` |
 | `tool_execution_started` | Tool dispatch began |
 | `tool_execution_completed` | Tool returned a result |
 | `tool_execution_timed_out` | Tool exceeded timeout |

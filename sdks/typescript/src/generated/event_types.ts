@@ -20,6 +20,8 @@ import type {
   DeferredCatalogDelta,
   ExternalToolDeltaPhase,
   GeminiImageMetadata,
+  LiveChannelId,
+  LiveContextObservationId,
   MeerkatSchema,
   OpenAiImageMetadata,
   OutputSchema,
@@ -29,12 +31,14 @@ import type {
   Provider,
   ProviderImageMetadata,
   RealmId,
+  RealtimeMessageOrigin,
   RevisedPromptDisposition,
   RevisedPromptSource,
   RunId,
   SchemaCompat,
   SchemaFormat,
   SenderContentTaint,
+  SessionId,
   SkillKey,
   SkillName,
   SourceUuid,
@@ -192,8 +196,10 @@ export interface AssistantImageEvent {
  * timeout, model fallback, and a re-poll after compaction) reuse the id, so
  * an id is on at most one committed message. Rows a live display-text drain
  * commits get their own id when committed. Messages written before this
- * field existed, rows the realtime transcript materializer commits, and
- * compaction summaries carry none.
+ * field existed, rows the realtime transcript materializer commits (they
+ * pair with the live transport's realtime observations through
+ * [`RealtimeMessageOrigin::provider_item_ids`]), and compaction summaries
+ * carry none.
  */
 export type AssistantMessageId = string;
 
@@ -204,11 +210,6 @@ export type AssistantMessageId = string;
  * but NEVER interprets it. The runtime layer creates and manages these.
  */
 export type InputId = string;
-
-/**
- * Unique identifier for a session (UUID v7 for time-ordering)
- */
-export type SessionId = string;
 
 /**
  * Exact negative application fact projected from durable boundary join resolution.
@@ -1059,32 +1060,6 @@ export type ToolCallArguments = Record<string, unknown>;
  * Durable correlation identity for one delegated objective.
  */
 export type ObjectiveId = string;
-
-/**
- * Opaque identity of one live channel binding.
- *
- * A replacement channel receives a new value. Semantic observations retain
- * this identity so a delayed callback from the old binding fails its fence.
- */
-export type LiveChannelId = string;
-
-/**
- * Opaque provenance identifier. Its namespace is data, not admission or
- * temporal authority; only the runtime's generated registry grants a claim.
- */
-export interface LiveContextObservationId {
-  channel_id: LiveChannelId;
-  namespace: string;
-  nonce: string;
-}
-
-export type RealtimeMessageOrigin = {
-  canonical_row_sequence: number;
-  channel_id: LiveChannelId;
-  context_observation_id?: LiveContextObservationId | null;
-  provider_item_ids?: string[];
-  session_id: SessionId;
-};
 
 /**
  * Stable runtime identity for a transcript message.

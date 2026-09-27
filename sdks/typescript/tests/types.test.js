@@ -876,6 +876,37 @@ describe("Typed Events", () => {
     assert.equal(legacy.assistantMessageId, undefined);
   });
 
+  it("carries realtimeOrigin verbatim on realtime block_assistant history rows", () => {
+    const origin = {
+      session_id: "0190f5c2-4a1e-7c3d-8e2f-00000000b001",
+      channel_id: "channel-7",
+      canonical_row_sequence: 3,
+      provider_item_ids: ["item_a", "item_b"],
+    };
+    const row = {
+      role: "block_assistant",
+      blocks: [{ block_type: "transcript", data: { text: "spoken", source: { kind: "spoken" } } }],
+      stop_reason: "end_turn",
+      created_at: "2026-05-26T10:00:01Z",
+    };
+    const realtime = MeerkatClient.parseSessionMessage({ ...row, realtime_origin: origin });
+    assert.deepEqual(realtime.realtimeOrigin, origin);
+    assert.equal(realtime.assistantMessageId, undefined);
+    assert.equal(MeerkatClient.parseSessionMessage(row).realtimeOrigin, undefined);
+    assert.equal(
+      MeerkatClient.parseSessionMessage({ ...row, realtime_origin: null }).realtimeOrigin,
+      undefined,
+    );
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionMessage({
+          ...row,
+          realtime_origin: { ...origin, provider_item_ids: [7] },
+        }),
+      /provider_item_ids/,
+    );
+  });
+
   it("should parse skills_resolved with typed skill identities", () => {
     const sourceUuid = "00000000-0000-4b11-8111-000000000001";
     const event = parseEvent({

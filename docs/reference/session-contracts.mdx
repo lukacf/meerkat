@@ -256,16 +256,23 @@ Rust consumers can read any of these through `AgentEvent::assistant_message_id()
 
 - Commit is a history fact: a message is committed exactly when a
   `block_assistant` history row carries its id.
-- `turn_completed` with the id is the live signal that the provider turn
-  finished. It is published only after the row is committed and the turn's
-  boundary work accepted it (turn-boundary hooks, the comms drain, and for the
-  run's last turn the run-completed hooks).
-- A run can end after the row was committed but before `turn_completed`, for
-  example when a turn-boundary hook or a run-completed hook fails or denies.
-  The row keeps its id and no `turn_completed` follows. So when a run ends
-  (`run_failed`, or a `run_completed` that names another message) while an id
-  is still open, read history: a row with that id means the message was
-  committed, no such row means it was discarded.
+- `turn_completed` with the id is only the live signal that the provider turn
+  finished. It proves neither commit nor durability, and its absence proves
+  nothing either:
+  - It can come BEFORE work that can still fail the run: the boundary work
+    after a tool-use turn (turn-boundary hooks, the comms drain), the
+    run-completed hooks of a run with an output schema, and the session save.
+    A live display-text drain on a persistent session publishes its
+    `turn_completed` before the session is persisted; if persisting fails,
+    the id never reaches history.
+  - It can be ABSENT for a committed row: a run that fails after the row was
+    pushed but before `turn_completed` was published (for example a
+    terminal-turn boundary hook or a run-completed hook denies) keeps the row
+    and its id, and no `turn_completed` follows.
+- So when a run ends (`run_completed`, `run_failed`, a truncated stream or a
+  reconnect), read history for every id you saw: a row with that id means the
+  message was committed, no such row means it was discarded. History read
+  after the run ends is the only authority.
 - An id is on at most one committed row. A failed provider turn (the request
   fails, retries are exhausted, `max_tokens` is hit while thinking, or a
   pre-request hook denies the call) never appends a row, so its id is never
@@ -297,9 +304,29 @@ Rust consumers can read any of these through `AgentEvent::assistant_message_id()
   deltas, which carry no `assistant_message_id`. A drain that commits no row
   (no display text) publishes `turn_completed` without an id.
 - No id: compaction summaries (user rows), rows the realtime transcript
-  materializer commits for a provider-managed realtime turn (they pair through
-  `realtime_origin.provider_item_ids`), and any row written before 0.8.45. Old
-  rows and events are never backfilled.
+  materializer commits for a provider-managed realtime turn, and any row
+  written before 0.8.45. Old rows and events are never backfilled.
+- Realtime rows pair by provider item id instead. The `text_complete` and
+  `turn_completed` published when the materializer commits a realtime turn
+  carry no `assistant_message_id`, so a `turn_completed` without an id does
+  NOT mean no row was committed. The history row carries `realtime_origin`
+  (on the wire since 0.8.45, the same `RealtimeMessageOrigin` shape run events
+  carry in `identity`), and the live transport's realtime observations
+  carry the same provider item ids: `provider_item_id` on
+  `assistant_text_delta`, `assistant_transcript_delta`,
+  `assistant_transcript_final` and `assistant_transcript_truncated`, and
+  `item_id` on `assistant_audio_chunk` and inside `realtime_transcript`
+  events. A console that rendered live text for a provider item replaces it
+  with the row whose `realtime_origin.provider_item_ids` contains that item
+  id. One row can cover several items (a barge-in that re-keys speech into a
+  second item). The id-less `text_complete` and `turn_completed` carry no
+  provider item id either, so pair realtime rows with the live transport's
+  observations, not with session events.
+  Core does not mint an `assistant_message_id` for these rows: their live
+  output reaches the client straight from the live transport, never through
+  the agent loop, so no core-minted id could be stamped on it before the row
+  exists, and the provider item id already is the stable key both sides
+  share.
 - Deltas with no id are output that is not a transcript assistant message,
   such as the compaction summary call. They also come from a legacy custom
   client, or a client decorator that does not forward

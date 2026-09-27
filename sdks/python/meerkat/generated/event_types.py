@@ -21,6 +21,7 @@ from .types import (  # noqa: F401
     ContentBlock,
     ContentInput,
     ExternalToolDeltaPhase,
+    LiveChannelId,
     MeerkatSchema,
     PeerId,
     ProfileId,
@@ -33,6 +34,7 @@ from .types import (  # noqa: F401
     SchemaCompat,
     SchemaFormat,
     SenderContentTaint,
+    SessionId,
     SkillName,
     SourceUuid,
     SystemNoticeBlock,
@@ -242,8 +244,10 @@ class AssistantImageEvent(TypedDict, total=False):
 # timeout, model fallback, and a re-poll after compaction) reuse the id, so
 # an id is on at most one committed message. Rows a live display-text drain
 # commits get their own id when committed. Messages written before this
-# field existed, rows the realtime transcript materializer commits, and
-# compaction summaries carry none.
+# field existed, rows the realtime transcript materializer commits (they
+# pair with the live transport's realtime observations through
+# [`RealtimeMessageOrigin::provider_item_ids`]), and compaction summaries
+# carry none.
 AssistantMessageId = str
 
 
@@ -252,10 +256,6 @@ AssistantMessageId = str
 # Core passes this through in `contributing_input_ids` on receipts and events
 # but NEVER interprets it. The runtime layer creates and manages these.
 InputId = str
-
-
-# Unique identifier for a session (UUID v7 for time-ordering)
-SessionId = str
 
 
 class BoundaryAppendsDiscarded(TypedDict, total=False):
@@ -1373,13 +1373,6 @@ ToolCallArguments = dict[str, Any]
 ObjectiveId = str
 
 
-# Opaque identity of one live channel binding.
-#
-# A replacement channel receives a new value. Semantic observations retain
-# this identity so a delayed callback from the old binding fails its fence.
-LiveChannelId = str
-
-
 class LiveContextObservationId(TypedDict, total=False):
     """Opaque provenance identifier. Its namespace is data, not admission or
     temporal authority; only the runtime's generated registry grants a claim.
@@ -1655,14 +1648,20 @@ class AgentEventTurnStarted(TypedDict, total=False):
     """New turn started (calling LLM).
 
     `assistant_message_id` is minted here, before any delta, and names the
-    assistant message this provider turn will commit. A repeated
-    `turn_started` for an id that is still open (a re-poll after
-    compaction) restarts that message's live buffer. The message is
-    committed exactly when a history row carries the id. The matching
-    `turn_completed` is the live signal that the turn finished; it is
-    absent when the run fails after the row was committed (for example a
-    turn-boundary or run-completed hook denial), so an id still open when
-    the run ends is reconciled against history.
+    assistant message this provider turn commits if it commits one. A
+    repeated `turn_started` for an id that is still open (a re-poll after
+    compaction) restarts that message's live buffer.
+
+    Commit is a history fact: the message is committed exactly when a
+    history row carries the id. The matching `turn_completed` is only the
+    live signal that the provider turn finished; it proves neither commit
+    nor durability. It can precede the turn's boundary work (turn-boundary
+    hooks and the comms drain after a tool-use turn), the run-completed
+    hooks of a structured-output run, and the session save, any of which
+    can still fail the run. It is absent when the run fails after the row
+    was pushed but before it was published (for example a terminal-turn
+    boundary or run-completed hook denial). Reconcile every id against
+    history read after the run ends.
     """
     assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     turn_number: Required[int]
@@ -1759,17 +1758,19 @@ class AgentEventToolResultReceived(TypedDict, total=False):
 class AgentEventTurnCompleted(TypedDict, total=False):
     """Turn completed.
 
-    Published once per committed agent-loop provider request: each
-    tool-loop call (`stop_reason: tool_use`) and the call that closes the
-    run, each after its assistant message is committed, so it pairs with
-    the [`AgentEvent::TurnStarted`] of the same request. Structured-output
+    Published once per agent-loop provider request that pushed its
+    assistant message row: each tool-loop call (`stop_reason: tool_use`)
+    and the call that closes the run, each after the row is pushed, so it
+    pairs with the [`AgentEvent::TurnStarted`] of the same request. It is
+    a live "turn finished" signal, not the commit: see
+    [`AgentEvent::TurnStarted`] for why history is the only commit fact. Structured-output
     extraction requests publish their accounting on the extraction outcome
     event instead (`request_usage`).
 
     # Why `usage` is optional
 
-    This event states one semantic fact - a model turn reached its terminal
-    and its assistant message is committed - and carries one accounting
+    This event states one semantic fact - a model turn reached its
+    terminal - and carries one accounting
     fact beside it. The two have different owners and different failure
     modes: a provider stream that ends without ever sending a usage event
     has said nothing about tokens while having said everything about the

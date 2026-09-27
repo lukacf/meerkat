@@ -290,11 +290,16 @@ class TurnStarted(Event):
 
     ``assistant_message_id`` is assigned here, before any delta, and equals the
     ``assistant_message_id`` of the ``block_assistant`` history row this turn
-    commits. Join live rows to history by this id, never by text or rank. A
-    repeated ``turn_started`` for an id that is still open (a re-poll after
-    compaction) restarts that message's live buffer; the message is committed
-    when the matching ``turn_completed`` arrives. ``None`` on events written
-    before 0.8.45.
+    commits, if it commits one. Join live rows to history by this id, never by
+    text or rank. A repeated ``turn_started`` for an id that is still open (a
+    re-poll after compaction) restarts that message's live buffer. ``None`` on
+    events written before 0.8.45.
+
+    The message is committed exactly when a history row carries the id. The
+    matching ``turn_completed`` is only a live "turn finished" signal: it can
+    arrive before boundary work, run-completed hooks and persistence that can
+    still fail the run, and it is absent when a run fails after the row was
+    pushed. When the run ends, reconcile every id against history.
     """
 
     turn_number: int = 0
@@ -344,10 +349,16 @@ class ToolResultReceived(Event):
 class TurnCompleted(Event):
     """An LLM turn finished.
 
+    A live "turn finished" signal, not the commit: only a history row that
+    carries ``assistant_message_id`` is the commit (see ``TurnStarted``).
+    ``assistant_message_id`` is ``None`` when the turn pushed no row, and on
+    realtime materializer turns, which DO commit a row: that row carries no
+    ``assistant_message_id`` and pairs with the live transport's realtime
+    observations through ``SessionMessage.realtime_origin.provider_item_ids``.
+
     ``usage`` is ``None`` when the provider stream carried no normalized token
     accounting for the turn. That is an honest absence, not a zero: the turn
-    completed and its assistant message was committed, and no token counter
-    advanced for it. The paired ``turn_usage_accounting_unmeasured`` event
+    completed, and no token counter advanced for it. The paired ``turn_usage_accounting_unmeasured`` event
     names which provider and model went unaccounted. Skip an absent row when
     aggregating; never fold it in as zero.
     """

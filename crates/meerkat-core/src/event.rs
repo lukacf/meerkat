@@ -2206,14 +2206,20 @@ pub enum AgentEvent {
     /// New turn started (calling LLM).
     ///
     /// `assistant_message_id` is minted here, before any delta, and names the
-    /// assistant message this provider turn will commit. A repeated
-    /// `turn_started` for an id that is still open (a re-poll after
-    /// compaction) restarts that message's live buffer. The message is
-    /// committed exactly when a history row carries the id. The matching
-    /// `turn_completed` is the live signal that the turn finished; it is
-    /// absent when the run fails after the row was committed (for example a
-    /// turn-boundary or run-completed hook denial), so an id still open when
-    /// the run ends is reconciled against history.
+    /// assistant message this provider turn commits if it commits one. A
+    /// repeated `turn_started` for an id that is still open (a re-poll after
+    /// compaction) restarts that message's live buffer.
+    ///
+    /// Commit is a history fact: the message is committed exactly when a
+    /// history row carries the id. The matching `turn_completed` is only the
+    /// live signal that the provider turn finished; it proves neither commit
+    /// nor durability. It can precede the turn's boundary work (turn-boundary
+    /// hooks and the comms drain after a tool-use turn), the run-completed
+    /// hooks of a structured-output run, and the session save, any of which
+    /// can still fail the run. It is absent when the run fails after the row
+    /// was pushed but before it was published (for example a terminal-turn
+    /// boundary or run-completed hook denial). Reconcile every id against
+    /// history read after the run ends.
     TurnStarted {
         turn_number: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2304,17 +2310,19 @@ pub enum AgentEvent {
 
     /// Turn completed.
     ///
-    /// Published once per committed agent-loop provider request: each
-    /// tool-loop call (`stop_reason: tool_use`) and the call that closes the
-    /// run, each after its assistant message is committed, so it pairs with
-    /// the [`AgentEvent::TurnStarted`] of the same request. Structured-output
+    /// Published once per agent-loop provider request that pushed its
+    /// assistant message row: each tool-loop call (`stop_reason: tool_use`)
+    /// and the call that closes the run, each after the row is pushed, so it
+    /// pairs with the [`AgentEvent::TurnStarted`] of the same request. It is
+    /// a live "turn finished" signal, not the commit: see
+    /// [`AgentEvent::TurnStarted`] for why history is the only commit fact. Structured-output
     /// extraction requests publish their accounting on the extraction outcome
     /// event instead (`request_usage`).
     ///
     /// # Why `usage` is optional
     ///
-    /// This event states one semantic fact - a model turn reached its terminal
-    /// and its assistant message is committed - and carries one accounting
+    /// This event states one semantic fact - a model turn reached its
+    /// terminal - and carries one accounting
     /// fact beside it. The two have different owners and different failure
     /// modes: a provider stream that ends without ever sending a usage event
     /// has said nothing about tokens while having said everything about the
@@ -2332,10 +2340,15 @@ pub enum AgentEvent {
         stop_reason: StopReason,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<crate::types::TurnUsage>,
-        /// The committed assistant message this turn closes: the id its
+        /// The assistant message this turn closes: the id its
         /// [`AgentEvent::TurnStarted`] opened, or, for a row a live
         /// display-text drain committed (no `turn_started`), the id core
-        /// minted for that row. Absent when the turn committed no row.
+        /// minted for that row. Absent when the turn pushed no row, and also
+        /// on turns the realtime transcript materializer committed: those
+        /// rows carry no assistant message id and pair with the live
+        /// transport's realtime observations through their
+        /// `realtime_origin.provider_item_ids`. Presence proves neither
+        /// commit nor durability; history does.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assistant_message_id: Option<crate::types::AssistantMessageId>,
     },

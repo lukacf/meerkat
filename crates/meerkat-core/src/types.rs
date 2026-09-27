@@ -64,8 +64,10 @@ pub struct TranscriptMessageIdentity {
 /// timeout, model fallback, and a re-poll after compaction) reuse the id, so
 /// an id is on at most one committed message. Rows a live display-text drain
 /// commits get their own id when committed. Messages written before this
-/// field existed, rows the realtime transcript materializer commits, and
-/// compaction summaries carry none.
+/// field existed, rows the realtime transcript materializer commits (they
+/// pair with the live transport's realtime observations through
+/// [`RealtimeMessageOrigin::provider_item_ids`]), and compaction summaries
+/// carry none.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]

@@ -190,8 +190,10 @@ export interface AssistantImageEvent {
  *
  * Retries of the same provider turn (same-model, empty-output, stall,
  * timeout, model fallback, and a re-poll after compaction) reuse the id, so
- * an id is on at most one committed message. Messages written before this
- * field existed, realtime/live rows, and compaction summaries carry none.
+ * an id is on at most one committed message. Rows a live display-text drain
+ * commits get their own id when committed. Messages written before this
+ * field existed, rows the realtime transcript materializer commits, and
+ * compaction summaries carry none.
  */
 export type AssistantMessageId = string;
 

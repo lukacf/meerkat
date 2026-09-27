@@ -912,6 +912,9 @@ the session identity. Restore is represented as another rewrite commit so the gr
 remains append-only even though the source transcript projection is updated in place.
 `revision` accepts the same selector as `session/transcript_revision`: `"current"`
 resolves to the head revision, so restoring it surfaces the typed no-op rewrite error.
+The restored rows are the session's own retained rows, so every restored
+`block_assistant` row keeps its `assistant_message_id` (a `session/rewrite_transcript`
+replacement never carries one).
 
 ```json
 {
@@ -2735,7 +2738,7 @@ id of the message whose text `result` repeats. See
 | `assistant_image_appended` | Canonical assistant image block appended to transcript history; `assistant_message_id` names the message that carries it |
 | `tool_call_requested` | LLM wants to call a tool |
 | `tool_result_received` | Tool result processed |
-| `turn_completed` | LLM call finished (every agent-loop call, including tool-loop calls with `stop_reason: tool_use`); absent `usage` means no accounting row, not zero tokens; commits `assistant_message_id` |
+| `turn_completed` | LLM call finished (every agent-loop call, including tool-loop calls with `stop_reason: tool_use`); absent `usage` means no accounting row, not zero tokens; `assistant_message_id` names the committed message (the history row carrying it is the commit; a run that fails after the commit publishes no `turn_completed`) |
 | `turn_usage_accounting_unmeasured` | Provider accounting was absent; no zero row may be fabricated, and this observation alone does not assert turn completion |
 | `turn_usage_accounting_identity_disputed` | Reported counters exist but provider/model attribution differs; preserve the reported identity and counters |
 | `tool_execution_started` | Tool dispatch began |

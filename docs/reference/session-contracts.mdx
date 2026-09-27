@@ -254,12 +254,22 @@ Rust consumers can read any of these through `AgentEvent::assistant_message_id()
 
 **Commit and failure.**
 
-- `turn_completed` with the id is the commit signal. An id opened by
-  `turn_started` with no matching `turn_completed` before the run's terminal
-  event (`run_failed`, or a `run_completed` that references another message)
-  was never committed, and no history row carries it.
-- An id is on at most one committed row, and a failed provider turn never
-  leaves a committed id.
+- Commit is a history fact: a message is committed exactly when a
+  `block_assistant` history row carries its id.
+- `turn_completed` with the id is the live signal that the provider turn
+  finished. It is published only after the row is committed and the turn's
+  boundary work accepted it (turn-boundary hooks, the comms drain, and for the
+  run's last turn the run-completed hooks).
+- A run can end after the row was committed but before `turn_completed`, for
+  example when a turn-boundary hook or a run-completed hook fails or denies.
+  The row keeps its id and no `turn_completed` follows. So when a run ends
+  (`run_failed`, or a `run_completed` that names another message) while an id
+  is still open, read history: a row with that id means the message was
+  committed, no such row means it was discarded.
+- An id is on at most one committed row. A failed provider turn (the request
+  fails, retries are exhausted, `max_tokens` is hit while thinking, or a
+  pre-request hook denies the call) never appends a row, so its id is never
+  committed.
 - Retries of the same provider turn reuse its id: same-model, empty-output,
   stall and timeout retries, and model fallback. `retrying` carries the id;
   discard the live buffer held for it and render the retry's deltas in its
@@ -279,13 +289,24 @@ Rust consumers can read any of these through `AgentEvent::assistant_message_id()
   under that id. The id of a message appended after a callback tool result is
   fixed when the batch is applied, so replays and redeliveries return the same
   id.
-- No id: compaction summaries (user rows), realtime/live rows (they pair
-  through `realtime_origin.provider_item_ids`), and any row written before
-  0.8.45. Old rows and events are never backfilled.
+- A row committed by a live channel's display-text drain (host-produced
+  assistant output appended through `append_external_assistant_output`) gets
+  a fresh id that core mints when it commits the row. The `text_complete` and
+  `turn_completed` published for that commit carry it. There is no
+  `turn_started` for it, and its streamed text arrives as realtime transcript
+  deltas, which carry no `assistant_message_id`. A drain that commits no row
+  (no display text) publishes `turn_completed` without an id.
+- No id: compaction summaries (user rows), rows the realtime transcript
+  materializer commits for a provider-managed realtime turn (they pair through
+  `realtime_origin.provider_item_ids`), and any row written before 0.8.45. Old
+  rows and events are never backfilled.
 - Deltas with no id are output that is not a transcript assistant message,
   such as the compaction summary call. They also come from a legacy custom
   client, or a client decorator that does not forward
-  `AgentLlmClient::prepare_request_attempt`. The loop still stamps
+  `AgentLlmClient::prepare_request_attempt`. A decorator MUST forward
+  `prepare_request_attempt` to the client it wraps (passing its transformed
+  messages); otherwise the loop falls back to the legacy streaming path and
+  the live deltas behind it carry no id. The loop still stamps
   `turn_started`, `text_complete`, `turn_completed`, `retrying` and
   `assistant_image_appended` in those cases.
 
@@ -308,6 +329,11 @@ Rust consumers can read any of these through `AgentEvent::assistant_message_id()
   history key is ignored). Rows outside the selection keep their ids. A
   replaced or removed id is gone from the active transcript but stays readable
   in the parent revision.
+- Restore: `session/restore_transcript_revision` re-installs rows core reads
+  from the session's own retained revision, not caller-authored rows, so every
+  restored assistant row keeps its id verbatim. Restoring the revision a
+  rewrite or compaction replaced brings its ids back into the active
+  transcript.
 - Forks: `fork`, `fork_at` and `fork_at_complete_boundary` keep row ids (they
   are the same occurrences; the child session never re-emits them).
   `fork_replacing` keeps the inherited prefix's ids and clears the id of the

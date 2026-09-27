@@ -838,7 +838,7 @@ Event types:
 | `text_complete` | Full text for this turn |
 | `tool_call_requested` | LLM wants to call a tool |
 | `tool_result_received` | Tool result processed |
-| `turn_completed` | LLM call finished; commits `assistant_message_id` |
+| `turn_completed` | LLM call finished; `assistant_message_id` names the committed message (the history row carrying it is the commit; a run that fails after the commit publishes no `turn_completed`) |
 | `tool_execution_started` | Tool dispatch began |
 | `tool_execution_completed` | Tool returned a result |
 | `tool_execution_timed_out` | Tool exceeded timeout |

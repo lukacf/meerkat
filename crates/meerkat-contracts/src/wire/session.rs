@@ -1507,8 +1507,9 @@ pub enum WireSessionMessage {
         /// Session-scoped occurrence id of this assistant message, equal to
         /// the `assistant_message_id` its live events carried. Join live rows
         /// to history by this id; it implies nothing about position. Absent
-        /// on messages committed before 0.8.45, on realtime rows, and on rows
-        /// a rewrite or fork edit replaced.
+        /// on messages committed before 0.8.45, on rows the realtime
+        /// transcript materializer commits, and on rows a rewrite or fork
+        /// edit replaced.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assistant_message_id: Option<meerkat_core::AssistantMessageId>,
         created_at: String,

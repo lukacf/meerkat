@@ -409,6 +409,54 @@ pub enum TranscriptEditError {
     InvalidTranscriptShape(String),
 }
 
+/// Where the rows of a same-session rewrite replacement come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RewriteReplacementProvenance {
+    /// Caller-authored rows: new content, so a supplied assistant occurrence
+    /// id is dropped.
+    CallerAuthored,
+    /// Rows core read from this session's own retained revision: each is the
+    /// committed occurrence, so its assistant occurrence id stays.
+    RetainedRevision,
+}
+
+/// The rows of a transcript revision a session retains, read by core for a
+/// restore.
+///
+/// Only [`Session::retained_transcript_revision_rows`] constructs it, so its
+/// rows are the session's own committed rows rather than caller-authored
+/// content. [`Session::commit_transcript_revision_restore`] therefore keeps
+/// each restored assistant row's `assistant_message_id`, which a generic
+/// [`Session::commit_transcript_rewrite`] clears.
+#[derive(Debug, Clone)]
+pub struct RetainedTranscriptRevisionRows {
+    session_id: SessionId,
+    revision: String,
+    messages: Vec<Message>,
+}
+
+impl RetainedTranscriptRevisionRows {
+    /// The revision these rows were read from.
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    /// The retained rows, in transcript order.
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// Move inline media in the rows into `blob_store`, as persistence does
+    /// for every rewrite replacement. Only the media representation changes;
+    /// row content and occurrence ids are untouched.
+    pub async fn externalize_media(
+        &mut self,
+        blob_store: &dyn crate::BlobStore,
+    ) -> Result<(), crate::blob::BlobStoreError> {
+        crate::image_content::externalize_messages_from(blob_store, &mut self.messages, 0).await
+    }
+}
+
 fn canonicalize_digest_image_blocks(blocks: &mut [crate::types::ContentBlock]) {
     for block in blocks.iter_mut() {
         if let crate::types::ContentBlock::Image {
@@ -5007,19 +5055,27 @@ impl Session {
     }
 
     /// Append externally-produced assistant output to the canonical transcript.
+    ///
+    /// A non-empty `blocks` commits one assistant row with a fresh
+    /// `assistant_message_id` minted here, and the id is returned so the
+    /// caller stamps the live events it publishes for this commit
+    /// (`text_complete`, `turn_completed`) with the same value. Empty `blocks`
+    /// commit no row, so there is no id; usage is recorded either way.
     pub fn append_external_assistant_blocks(
         &mut self,
         blocks: Vec<AssistantBlock>,
         stop_reason: StopReason,
         usage: TurnUsage,
-    ) {
-        if !blocks.is_empty() {
-            self.push(Message::BlockAssistant(BlockAssistantMessage::new(
-                blocks,
-                stop_reason,
-            )));
-        }
+    ) -> Option<crate::types::AssistantMessageId> {
+        let committed = (!blocks.is_empty()).then(|| {
+            let assistant_message_id = crate::types::AssistantMessageId::mint();
+            let mut message = BlockAssistantMessage::new(blocks, stop_reason);
+            message.assistant_message_id = Some(assistant_message_id);
+            self.push(Message::BlockAssistant(message));
+            assistant_message_id
+        });
         self.record_turn_usage(&usage);
+        committed
     }
 
     /// Apply an identity-bearing provider realtime transcript event.
@@ -5565,12 +5621,6 @@ impl Session {
         }
     }
 
-    /// Get the last assistant message text content.
-    ///
-    /// Concatenates both `Text` (display) and `Transcript` (spoken) blocks
-    /// in document order, since both lanes project to the same human-readable
-    /// stream. Lane provenance is preserved on the underlying `AssistantBlock`
-    /// for callers that need it.
     /// The text [`Session::last_assistant_text`] returns, paired with the
     /// occurrence id of the exact assistant message it was read from.
     pub(crate) fn last_assistant_text_occurrence(
@@ -5585,6 +5635,12 @@ impl Session {
         })
     }
 
+    /// Get the last assistant message text content.
+    ///
+    /// Concatenates both `Text` (display) and `Transcript` (spoken) blocks
+    /// in document order, since both lanes project to the same human-readable
+    /// stream. Lane provenance is preserved on the underlying `AssistantBlock`
+    /// for callers that need it.
     pub fn last_assistant_text(&self) -> Option<String> {
         self.last_assistant_text_occurrence().map(|(text, _)| text)
     }
@@ -7045,13 +7101,110 @@ impl Session {
     }
 
     /// Commit a same-session transcript rewrite and advance the transcript head.
+    ///
+    /// The replacement rows are caller-authored content, so every
+    /// `assistant_message_id` they carry is cleared. To put a revision this
+    /// session retains back in place with its occurrence ids, use
+    /// [`Self::retained_transcript_revision_rows`] and
+    /// [`Self::commit_transcript_revision_restore`].
     pub fn commit_transcript_rewrite(
+        &mut self,
+        selection: TranscriptRewriteSelection,
+        replacement: Vec<Message>,
+        reason: TranscriptRewriteReason,
+        actor: Option<String>,
+        expected_parent_revision: Option<String>,
+    ) -> Result<TranscriptRewriteCommit, TranscriptEditError> {
+        self.commit_transcript_rewrite_with_provenance(
+            selection,
+            replacement,
+            reason,
+            actor,
+            expected_parent_revision,
+            RewriteReplacementProvenance::CallerAuthored,
+        )
+    }
+
+    /// Read the rows of a transcript revision this session retains, to
+    /// restore it with [`Self::commit_transcript_revision_restore`].
+    ///
+    /// The current revision resolves to the live transcript (restoring it
+    /// surfaces [`TranscriptEditError::NoOpRewrite`]); any other revision must
+    /// be retained by this session's revision graph. Returns `None` when the
+    /// session retains no body for `revision`.
+    pub fn retained_transcript_revision_rows(
+        &self,
+        revision: &str,
+    ) -> Result<Option<RetainedTranscriptRevisionRows>, TranscriptEditError> {
+        let head = self
+            .transcript_revision()
+            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+        let messages = if revision == head {
+            self.messages.to_vec()
+        } else {
+            let Some(history) = self.validated_transcript_history_state()? else {
+                return Ok(None);
+            };
+            if !history.state().contains_revision(revision) {
+                return Ok(None);
+            }
+            history.materialize_revision(revision)?.messages
+        };
+        Ok(Some(RetainedTranscriptRevisionRows {
+            session_id: self.id.clone(),
+            revision: revision.to_string(),
+            messages,
+        }))
+    }
+
+    /// Restore a revision this session retains as its whole live transcript.
+    ///
+    /// This is a full-range rewrite with the same validation, audit commit and
+    /// realtime handling as [`Self::commit_transcript_rewrite`], except that
+    /// the rows are not caller-authored: core read them from this session's
+    /// own retained history, so each restored assistant row is the occurrence
+    /// that was committed and keeps its `assistant_message_id` verbatim. Rows
+    /// read from another session are refused.
+    pub fn commit_transcript_revision_restore(
+        &mut self,
+        rows: RetainedTranscriptRevisionRows,
+        reason: TranscriptRewriteReason,
+        actor: Option<String>,
+        expected_parent_revision: Option<String>,
+    ) -> Result<TranscriptRewriteCommit, TranscriptEditError> {
+        let RetainedTranscriptRevisionRows {
+            session_id,
+            revision,
+            messages,
+        } = rows;
+        if session_id != self.id {
+            return Err(TranscriptEditError::InvalidTranscriptShape(format!(
+                "transcript revision {revision} was read from session {session_id}, not {}",
+                self.id
+            )));
+        }
+        let selection = TranscriptRewriteSelection::MessageRange {
+            start: 0,
+            end: self.messages.len(),
+        };
+        self.commit_transcript_rewrite_with_provenance(
+            selection,
+            messages,
+            reason,
+            actor,
+            expected_parent_revision,
+            RewriteReplacementProvenance::RetainedRevision,
+        )
+    }
+
+    fn commit_transcript_rewrite_with_provenance(
         &mut self,
         selection: TranscriptRewriteSelection,
         mut replacement: Vec<Message>,
         reason: TranscriptRewriteReason,
         actor: Option<String>,
         expected_parent_revision: Option<String>,
+        provenance: RewriteReplacementProvenance,
     ) -> Result<TranscriptRewriteCommit, TranscriptEditError> {
         let selection = selection.into_current_edit_semantic();
         if selection.semantic() == TranscriptRewriteSemantic::Compaction {
@@ -7064,10 +7217,18 @@ impl Session {
                 Message::User(user) => user.identity.realtime_origin = None,
                 Message::BlockAssistant(assistant) => {
                     assistant.identity.realtime_origin = None;
-                    // A replacement row is new content, not the occurrence
-                    // that streamed: the replaced id stays readable only in
-                    // the parent revision and is never re-attached here.
-                    assistant.assistant_message_id = None;
+                    match provenance {
+                        // A caller-authored row is new content, not the
+                        // occurrence that streamed: the replaced id stays
+                        // readable only in the parent revision and is never
+                        // re-attached here.
+                        RewriteReplacementProvenance::CallerAuthored => {
+                            assistant.assistant_message_id = None;
+                        }
+                        // A row core read from this session's retained
+                        // history is the committed occurrence itself.
+                        RewriteReplacementProvenance::RetainedRevision => {}
+                    }
                 }
                 Message::SystemNotice(notice) => notice.runtime_origin = None,
                 _ => {}

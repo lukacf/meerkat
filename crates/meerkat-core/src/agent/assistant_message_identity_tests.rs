@@ -373,6 +373,49 @@ impl HookEngine for PreLlmDenyingHooks {
     }
 }
 
+/// Denies one hook point on every invocation.
+struct PointDenyingHooks {
+    point: HookPoint,
+}
+
+#[async_trait]
+impl HookEngine for PointDenyingHooks {
+    async fn execute(
+        &self,
+        invocation: HookInvocation,
+        _overrides: Option<&meerkat_core::HookRunOverrides>,
+    ) -> Result<HookExecutionReport, meerkat_core::HookEngineError> {
+        let decision = (invocation.point == self.point).then(|| {
+            HookDecision::deny(
+                HookId::new("deny-point"),
+                HookReasonCode::PolicyViolation,
+                "result blocked",
+                None,
+            )
+        });
+        let outcomes = decision
+            .iter()
+            .map(|decision| HookOutcome {
+                hook_id: HookId::new("deny-point"),
+                point: invocation.point,
+                priority: 1,
+                registration_index: 0,
+                decision: Some(decision.clone()),
+                failure_reason: None,
+                duration_ms: Some(0),
+            })
+            .collect::<Vec<_>>();
+        Ok(HookExecutionReport {
+            started: outcomes
+                .iter()
+                .map(|outcome| outcome.hook_id.clone())
+                .collect(),
+            outcomes,
+            decision,
+        })
+    }
+}
+
 fn fast_retries(max_retries: u32) -> crate::retry::RetryPolicy {
     crate::retry::RetryPolicy {
         max_retries,
@@ -880,6 +923,59 @@ async fn pre_llm_denial_after_turn_started_commits_nothing() {
     let rows = committed_rows(agent.session());
     assert_eq!(rows.len(), 1);
     assert_ne!(rows[0].0, Some(denied), "the next run mints a fresh id");
+}
+
+/// The commit fact is the history row, not `turn_completed`. A run can fail
+/// after its terminal row was appended (here a RunCompleted hook denies the
+/// result, after the boundary drain): the row stays committed with the id
+/// `turn_started` announced, while no `turn_completed` is published for it
+/// and `run_failed` ends the run.
+#[tokio::test]
+async fn a_run_failing_after_the_terminal_push_keeps_the_committed_row_without_turn_completed() {
+    let (tx, mut rx) = mpsc::channel(1024);
+    let client = IdentityClient::new(tx.clone(), vec![Call::text("final answer")]);
+    let mut agent = builder()
+        .with_hook_engine(Arc::new(PointDenyingHooks {
+            point: HookPoint::RunCompleted,
+        }))
+        .build_standalone(
+            client.clone(),
+            Arc::new(LookupTool {
+                append_image: false,
+            }),
+            Arc::new(NoopStore),
+        )
+        .await;
+
+    agent
+        .run_with_events("answer".to_string().into(), tx)
+        .await
+        .expect_err("the RunCompleted hook denies the result");
+    let events = drain(&mut rx);
+
+    let opened = turn_started_ids(&events);
+    assert_eq!(opened.len(), 1);
+    let opened = opened[0].expect("turn_started carries the id");
+    assert!(
+        turn_completed_ids(&events).is_empty(),
+        "the turn never completed on the live stream"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::RunFailed { .. })),
+        "run_failed ends the run"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TextComplete { assistant_message_id, .. }
+            if *assistant_message_id == Some(opened)
+    )));
+    assert_eq!(
+        committed_rows(agent.session()),
+        vec![(Some(opened), "final answer".to_string())],
+        "the row was committed before the failure and a history read finds it by id"
+    );
 }
 
 #[tokio::test]

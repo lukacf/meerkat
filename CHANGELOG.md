@@ -67,11 +67,31 @@ them.
   `assistant_message_id: AssistantMessageId`
   (`stream_response(&self, assistant_message_id)`). Implementations that
   publish live events stamp them with it; decorators that wrap an attempt must
-  pass it through. It never enters the provider request.
+  pass it through. It never enters the provider request. Client decorators
+  MUST also forward `AgentLlmClient::prepare_request_attempt` to the client
+  they wrap (with their transformed messages): a decorator that does not falls
+  back to the legacy `stream_response` path, and every live delta behind it
+  carries no id. MobKit's `TaintObservingLlmClient` and
+  `ReplaySanitizingAgentLlmClient` do not forward it yet; that fix is tracked
+  in MobKit.
+- `meerkat_core::Session::append_external_assistant_blocks` returns
+  `Option<AssistantMessageId>` instead of `()`: the id core minted for the
+  committed row, or `None` when `blocks` is empty and no row was committed.
+- `meerkat_session::SessionAgent::append_external_assistant_output` returns
+  `Result<Option<AssistantMessageId>, AgentError>` instead of
+  `Result<(), AgentError>`. Implementations return the id
+  `Session::append_external_assistant_blocks` minted; the session task stamps
+  the `text_complete` and `turn_completed` it publishes for the commit with it.
 - Behaviour-only (not measured by the semver gate):
   `Session::commit_transcript_rewrite` clears `assistant_message_id` on every
   replacement row (a supplied id is dropped, like `realtime_origin`), and
-  `Session::fork_replacing` clears it on the edited row. Live deltas published
+  `Session::fork_replacing` clears it on the edited row, while
+  `session/restore_transcript_revision` (through the new
+  `Session::commit_transcript_revision_restore`) keeps the id of every
+  restored row, since core read those rows from the session's own retained
+  revision. Rows the live display-text drain commits carry a core-minted id,
+  also on the `text_complete` and `turn_completed` published for them. Live
+  deltas published
   through the legacy `AgentLlmClient::stream_response` path (the compaction
   summary call, custom split clients, and client decorators that do not
   forward `prepare_request_attempt`) carry no id. Assistant message ids never
@@ -92,10 +112,20 @@ them.
   the committed `block_assistant` row and on every live event of that message,
   so consoles join live rows to history by id instead of text or rank.
   Retries of a provider turn (same-model, empty-output, stall, timeout, model
-  fallback, and a re-poll after compaction) reuse its id, a failed turn never
-  leaves a committed id, messages appended by tool effects get their own id,
-  and `run_completed` names the committed message whose text `result` repeats.
+  fallback, and a re-poll after compaction) reuse its id, a failed provider
+  turn never leaves a committed id, messages appended by tool effects get
+  their own id, and `run_completed` names the committed message whose text
+  `result` repeats. The history row carrying an id is the commit fact;
+  `turn_completed` is the live signal that the turn finished and is absent
+  when a run fails after the row was committed (for example a turn-boundary or
+  run-completed hook denial).
   See `docs/reference/session-contracts.mdx#assistant-message-identity`.
+- `meerkat_core::Session::retained_transcript_revision_rows` and
+  `meerkat_core::Session::commit_transcript_revision_restore`, with the
+  core-constructed `meerkat_core::RetainedTranscriptRevisionRows` (re-exported
+  as `meerkat::RetainedTranscriptRevisionRows`): restore a
+  revision the session retains while keeping each restored row's
+  `assistant_message_id`, which a generic `commit_transcript_rewrite` clears.
 - `meerkat_core::AgentEvent::assistant_message_id(&self) -> Option<AssistantMessageId>`
   reads the id from any event that carries one.
 - The Python, TypeScript and Web SDKs expose the optional

@@ -216,12 +216,13 @@ pub trait AgentLlmClient: Send + Sync {
     /// Stable custom clients receive one direct attempt by default. Dynamic
     /// adapters override this and report [`RequestAttemptAuthority::Unified`].
     ///
-    /// A decorator that wraps another client should forward this method to
-    /// the inner client (transforming the request as it would in
-    /// [`AgentLlmClient::stream_response`]). The default direct attempt
-    /// streams through `stream_response`, which carries no assistant message
-    /// identity, so live deltas published below an unforwarded decorator have
-    /// no `assistant_message_id`.
+    /// A decorator that wraps another client MUST forward this method to the
+    /// inner client's `prepare_request_attempt`, passing the messages it
+    /// transforms (as it would in [`AgentLlmClient::stream_response`]).
+    /// Otherwise the loop uses the default direct attempt, which streams
+    /// through `stream_response` and carries no assistant message identity:
+    /// every live delta published below an unforwarded decorator has no
+    /// `assistant_message_id`.
     fn prepare_request_attempt(
         self: Arc<Self>,
         messages: Arc<Vec<Message>>,

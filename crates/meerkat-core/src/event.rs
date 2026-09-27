@@ -2209,8 +2209,11 @@ pub enum AgentEvent {
     /// assistant message this provider turn will commit. A repeated
     /// `turn_started` for an id that is still open (a re-poll after
     /// compaction) restarts that message's live buffer. The message is
-    /// committed when the matching `turn_completed` arrives; an id opened here
-    /// with no `turn_completed` before the run ends was never committed.
+    /// committed exactly when a history row carries the id. The matching
+    /// `turn_completed` is the live signal that the turn finished; it is
+    /// absent when the run fails after the row was committed (for example a
+    /// turn-boundary or run-completed hook denial), so an id still open when
+    /// the run ends is reconciled against history.
     TurnStarted {
         turn_number: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2329,8 +2332,10 @@ pub enum AgentEvent {
         stop_reason: StopReason,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<crate::types::TurnUsage>,
-        /// The committed assistant message of this provider turn, equal to
-        /// the id its [`AgentEvent::TurnStarted`] opened.
+        /// The committed assistant message this turn closes: the id its
+        /// [`AgentEvent::TurnStarted`] opened, or, for a row a live
+        /// display-text drain committed (no `turn_started`), the id core
+        /// minted for that row. Absent when the turn committed no row.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assistant_message_id: Option<crate::types::AssistantMessageId>,
     },

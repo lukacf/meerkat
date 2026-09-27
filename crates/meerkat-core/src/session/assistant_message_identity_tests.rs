@@ -252,3 +252,116 @@ fn last_assistant_text_occurrence_names_the_exact_row() {
         "a pre-0.8.45 row is referenced as absent, never guessed"
     );
 }
+
+#[test]
+fn restoring_a_retained_revision_keeps_every_restored_id() {
+    let (mut session, first, second) = session_with_two_identical_answers();
+    let original = session.transcript_revision().unwrap();
+    let compacted = session
+        .commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 4 },
+            vec![assistant("summary", None)],
+            TranscriptRewriteReason::new("unit-test"),
+            Some("unit-test".to_string()),
+            Some(original.clone()),
+        )
+        .expect("rewrite commits");
+    assert!(
+        session
+            .messages()
+            .iter()
+            .all(|message| id_of(message).is_none())
+    );
+
+    let rows = session
+        .retained_transcript_revision_rows(&original)
+        .unwrap()
+        .expect("the parent revision is retained");
+    assert_eq!(rows.revision(), original);
+    let restore = session
+        .commit_transcript_revision_restore(
+            rows,
+            TranscriptRewriteReason::new("restore"),
+            Some("unit-test".to_string()),
+            Some(compacted.revision),
+        )
+        .expect("restore commits");
+    assert_eq!(restore.revision, original);
+    assert_eq!(
+        session.messages().iter().map(id_of).collect::<Vec<_>>(),
+        vec![None, Some(first), None, Some(second)],
+        "every restored assistant row keeps the id it was committed with"
+    );
+
+    // The same rows supplied by a caller are a generic rewrite: new content,
+    // so their ids are cleared.
+    let restored_head = session.transcript_revision().unwrap();
+    let again = session
+        .commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 4 },
+            vec![assistant("summary", None)],
+            TranscriptRewriteReason::new("unit-test"),
+            Some("unit-test".to_string()),
+            Some(restored_head),
+        )
+        .expect("rewrite commits");
+    let caller_rows = session
+        .transcript_revision_messages(&original)
+        .unwrap()
+        .expect("the original revision stays readable");
+    assert_eq!(id_of(&caller_rows[1]), Some(first));
+    let len = session.messages().len();
+    session
+        .commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: len },
+            caller_rows,
+            TranscriptRewriteReason::new("unit-test"),
+            Some("unit-test".to_string()),
+            Some(again.revision),
+        )
+        .expect("generic full-range rewrite commits");
+    assert!(
+        session
+            .messages()
+            .iter()
+            .all(|message| id_of(message).is_none()),
+        "a caller-authored replacement never carries an id"
+    );
+}
+
+#[test]
+fn retained_revision_rows_are_bound_to_their_session() {
+    let (session, _, _) = session_with_two_identical_answers();
+    assert!(
+        session
+            .retained_transcript_revision_rows("sha256:absent")
+            .unwrap()
+            .is_none(),
+        "an unretained revision has no rows"
+    );
+    let head = session.transcript_revision().unwrap();
+    let foreign = session
+        .retained_transcript_revision_rows(&head)
+        .unwrap()
+        .expect("the live head resolves to the live rows");
+
+    let mut other = Session::new();
+    other.push(Message::User(UserMessage::text("elsewhere")));
+    let error = other
+        .commit_transcript_revision_restore(
+            foreign,
+            TranscriptRewriteReason::new("restore"),
+            None,
+            None,
+        )
+        .expect_err("rows read from another session are refused");
+    assert!(
+        matches!(error, TranscriptEditError::InvalidTranscriptShape(_)),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        other.messages().len(),
+        1,
+        "a refused restore changes nothing"
+    );
+}

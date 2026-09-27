@@ -240,8 +240,10 @@ class AssistantImageEvent(TypedDict, total=False):
 #
 # Retries of the same provider turn (same-model, empty-output, stall,
 # timeout, model fallback, and a re-poll after compaction) reuse the id, so
-# an id is on at most one committed message. Messages written before this
-# field existed, realtime/live rows, and compaction summaries carry none.
+# an id is on at most one committed message. Rows a live display-text drain
+# commits get their own id when committed. Messages written before this
+# field existed, rows the realtime transcript materializer commits, and
+# compaction summaries carry none.
 AssistantMessageId = str
 
 
@@ -1656,8 +1658,11 @@ class AgentEventTurnStarted(TypedDict, total=False):
     assistant message this provider turn will commit. A repeated
     `turn_started` for an id that is still open (a re-poll after
     compaction) restarts that message's live buffer. The message is
-    committed when the matching `turn_completed` arrives; an id opened here
-    with no `turn_completed` before the run ends was never committed.
+    committed exactly when a history row carries the id. The matching
+    `turn_completed` is the live signal that the turn finished; it is
+    absent when the run fails after the row was committed (for example a
+    turn-boundary or run-completed hook denial), so an id still open when
+    the run ends is reconciled against history.
     """
     assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     turn_number: Required[int]

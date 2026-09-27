@@ -62,8 +62,10 @@ pub struct TranscriptMessageIdentity {
 ///
 /// Retries of the same provider turn (same-model, empty-output, stall,
 /// timeout, model fallback, and a re-poll after compaction) reuse the id, so
-/// an id is on at most one committed message. Messages written before this
-/// field existed, realtime/live rows, and compaction summaries carry none.
+/// an id is on at most one committed message. Rows a live display-text drain
+/// commits get their own id when committed. Messages written before this
+/// field existed, rows the realtime transcript materializer commits, and
+/// compaction summaries carry none.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -3063,9 +3065,10 @@ pub struct BlockAssistantMessage {
     pub identity: TranscriptMessageIdentity,
     /// Session-scoped occurrence id of this assistant message, identical to
     /// the `assistant_message_id` on every live event the message streamed.
-    /// Absent on messages committed before 0.8.45, on realtime/live rows, and
-    /// on rows a transcript rewrite or fork edit replaced; it is never
-    /// backfilled or derived from content.
+    /// Absent on messages committed before 0.8.45, on rows the realtime
+    /// transcript materializer commits, and on rows a transcript rewrite or
+    /// fork edit replaced; it is never backfilled or derived from content. A
+    /// revision restore keeps the ids of the rows it restores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_message_id: Option<AssistantMessageId>,
     /// When this assistant message was committed to the transcript.

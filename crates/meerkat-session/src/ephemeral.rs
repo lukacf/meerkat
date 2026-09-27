@@ -2280,12 +2280,18 @@ pub trait SessionAgent: Send {
     }
 
     /// Append externally-produced assistant output into the canonical transcript.
+    ///
+    /// Returns the `assistant_message_id` core minted for the committed row
+    /// (see `Session::append_external_assistant_blocks`), or `None` when no
+    /// row was committed. The session task stamps the `text_complete` and
+    /// `turn_completed` it publishes for this commit with that id.
     fn append_external_assistant_output(
         &mut self,
         _blocks: Vec<meerkat_core::types::AssistantBlock>,
         _stop_reason: meerkat_core::types::StopReason,
         _usage: Usage,
-    ) -> Result<(), meerkat_core::error::AgentError> {
+    ) -> Result<Option<meerkat_core::types::AssistantMessageId>, meerkat_core::error::AgentError>
+    {
         Err(meerkat_core::error::AgentError::ConfigError(
             "external assistant output append is not supported by this session agent".to_string(),
         ))
@@ -7751,7 +7757,10 @@ async fn session_task<A: SessionAgent>(
                     .collect::<String>();
                 let usage_for_event = meerkat_core::TurnUsage::try_from_usage(usage.clone()).ok();
                 let result = agent.append_external_assistant_output(blocks, stop_reason, usage);
-                if result.is_ok() {
+                if let Ok(assistant_message_id) = &result {
+                    // The id core minted for the committed row; `None` when
+                    // the drain committed no row.
+                    let assistant_message_id = *assistant_message_id;
                     let snap = agent.snapshot();
                     control.publish_summary(SessionSummaryCache {
                         updated_at: snap.updated_at,
@@ -7766,6 +7775,7 @@ async fn session_task<A: SessionAgent>(
                             &source,
                             AgentEvent::TextComplete {
                                 content: text_content,
+                                assistant_message_id,
                             },
                         );
                         control.publish_session_event(envelope).await;
@@ -7780,11 +7790,12 @@ async fn session_task<A: SessionAgent>(
                         AgentEvent::TurnCompleted {
                             stop_reason,
                             usage: usage_for_event,
+                            assistant_message_id,
                         },
                     );
                     control.publish_session_event(envelope).await;
                 }
-                let _ = reply_tx.send(result);
+                let _ = reply_tx.send(result.map(|_| ()));
             }
             SessionCommand::AppendRealtimeTranscriptEvent {
                 event,
@@ -7820,6 +7831,7 @@ async fn session_task<A: SessionAgent>(
                                     &source,
                                     AgentEvent::TextComplete {
                                         content: text.clone(),
+                                        assistant_message_id: None,
                                     },
                                 );
                                 control.publish_session_event(envelope).await;
@@ -7830,6 +7842,7 @@ async fn session_task<A: SessionAgent>(
                                 AgentEvent::TurnCompleted {
                                     stop_reason: *stop_reason,
                                     usage: usage.clone(),
+                                    assistant_message_id: None,
                                 },
                             );
                             control.publish_session_event(envelope).await;

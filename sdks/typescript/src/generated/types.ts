@@ -6421,6 +6421,24 @@ export interface WireImageOperationPhaseTerminal {
 
 export type WireImageOperationPhase = WireImageOperationPhaseRequested | WireImageOperationPhaseValidating | WireImageOperationPhaseAwaitingApproval | WireImageOperationPhasePlanResolved | WireImageOperationPhaseProjectionSnapshotted | WireImageOperationPhaseScopedOverrideActive | WireImageOperationPhaseProviderCallInFlight | WireImageOperationPhaseProviderResultCaptured | WireImageOperationPhaseBlobCommitPending | WireImageOperationPhaseResultCommitted | WireImageOperationPhaseRestoringScopedOverride | WireImageOperationPhaseTerminal;
 
+export type SessionId = string;
+
+export type LiveChannelId = string;
+
+export interface LiveContextObservationId {
+  channel_id: LiveChannelId;
+  namespace: string;
+  nonce: string;
+}
+
+export interface RealtimeMessageOrigin {
+  canonical_row_sequence: number;
+  channel_id: LiveChannelId;
+  context_observation_id?: LiveContextObservationId | null;
+  provider_item_ids?: string[];
+  session_id: SessionId;
+}
+
 export interface WireSessionMessageSystem {
   content: string;
   created_at: string;
@@ -6449,9 +6467,11 @@ export interface WireSessionMessageUser {
 }
 
 export interface WireSessionMessageBlockAssistant {
+  assistant_message_id?: string | null;
   blocks: WireAssistantBlock[];
   created_at: string;
   interaction_id?: string | null;
+  realtime_origin?: RealtimeMessageOrigin | null;
   role: "block_assistant";
   run_id?: RunId | null;
   stop_reason?: WireStopReason | null;

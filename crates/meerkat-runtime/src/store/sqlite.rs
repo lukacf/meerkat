@@ -16913,6 +16913,7 @@ ORDER BY runtime_id";
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             }));
             session
         }
@@ -19825,6 +19826,7 @@ ORDER BY runtime_id";
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             }));
             let current_snapshot = serde_json::to_vec(&current).unwrap();
             let receipt = RunBoundaryReceipt {
@@ -19967,6 +19969,7 @@ ORDER BY runtime_id";
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             }));
 
             let mut incoming = Session::with_id(previous.id().clone());
@@ -19985,6 +19988,7 @@ ORDER BY runtime_id";
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             }));
             let parent_revision = incoming.transcript_revision().unwrap();
             incoming
@@ -20073,6 +20077,7 @@ ORDER BY runtime_id";
                         stop_reason: Some(StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
+                        assistant_message_id: None,
                     })],
                     TranscriptRewriteReason::new("compaction"),
                     Some("sqlite-test".to_string()),
@@ -20092,6 +20097,7 @@ ORDER BY runtime_id";
                         stop_reason: Some(StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
+                        assistant_message_id: None,
                     })],
                     TranscriptRewriteReason::new("compaction"),
                     Some("sqlite-test".to_string()),

@@ -97,6 +97,116 @@ them.
   says the retiring member's session was not read. While `progress.run_state`
   is `run_open` the note keeps saying the turn is still running.
 
+- `meerkat_core::types::BlockAssistantMessage` (re-exported as
+  `meerkat_core::BlockAssistantMessage` and `meerkat::BlockAssistantMessage`)
+  gains the public field
+  `assistant_message_id: Option<AssistantMessageId>`. Struct literals must
+  supply it (`None` outside the agent loop); `BlockAssistantMessage::new` and
+  `BlockAssistantMessage::snapshot` default it to `None`. The JSON key is
+  serde-defaulted and omitted when absent, so pre-0.8.45 transcripts load
+  unchanged and rows without an id keep their exact 0.8.44 bytes.
+- `meerkat_core::AgentEvent::TurnStarted` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::TextDelta` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::TextComplete` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::ReasoningDelta` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::ReasoningComplete` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::ServerToolContent` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::AssistantImageAppended` gains
+  `assistant_message_id`.
+- `meerkat_core::AgentEvent::TurnCompleted` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::Retrying` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::RunCompleted` gains `assistant_message_id`.
+  Every new `AgentEvent` field is `Option<AssistantMessageId>`: Rust
+  constructors must supply it and exhaustive patterns must bind it or use
+  `..`. The JSON key is optional and omitted when absent, so older event
+  records remain readable.
+- `meerkat_contracts::WireSessionMessage::BlockAssistant` gains
+  `assistant_message_id: Option<AssistantMessageId>`; variant literals and
+  exhaustive patterns must account for it.
+- `meerkat_contracts::WireSessionMessage::BlockAssistant` gains
+  `realtime_origin: Option<meerkat_core::types::RealtimeMessageOrigin>`;
+  variant literals and exhaustive patterns must account for it. The JSON key
+  is serde-defaulted and omitted when absent, so every row that is not a
+  realtime materializer row keeps its exact wire bytes.
+- `meerkat_core::AgentLlmRequestAttempt::stream_response` gains the parameter
+  `assistant_message_id: AssistantMessageId`
+  (`stream_response(&self, assistant_message_id)`). Implementations that
+  publish live events stamp them with it; decorators that wrap an attempt must
+  pass it through. It never enters the provider request. Client decorators
+  MUST also forward `AgentLlmClient::prepare_request_attempt` to the client
+  they wrap (with their transformed messages): a decorator that does not falls
+  back to the legacy `stream_response` path, and every live delta behind it
+  carries no id. MobKit's `TaintObservingLlmClient` and
+  `ReplaySanitizingAgentLlmClient` do not forward it yet; that fix is tracked
+  in MobKit.
+- `meerkat_core::Session::append_external_assistant_blocks` returns
+  `Option<AssistantMessageId>` instead of `()`: the id core minted for the
+  committed row, or `None` when `blocks` is empty and no row was committed.
+- `meerkat_session::SessionAgent::append_external_assistant_output` returns
+  `Result<Option<AssistantMessageId>, AgentError>` instead of
+  `Result<(), AgentError>`. Implementations return the id
+  `Session::append_external_assistant_blocks` minted; the session task stamps
+  the `text_complete` and `turn_completed` it publishes for the commit with it.
+- Behaviour-only (not measured by the semver gate):
+  `Session::commit_transcript_rewrite` clears `assistant_message_id` on every
+  replacement row (a supplied id is dropped, like `realtime_origin`), and
+  `Session::fork_replacing` clears it on the edited row, while
+  `session/restore_transcript_revision` (through the new
+  `Session::commit_transcript_revision_restore`) keeps the id of every
+  restored row, since core read those rows from the session's own retained
+  revision. Rows the live display-text drain commits carry a core-minted id,
+  also on the `text_complete` and `turn_completed` published for them. Live
+  deltas published
+  through the legacy `AgentLlmClient::stream_response` path (the compaction
+  summary call, custom split clients, and client decorators that do not
+  forward `prepare_request_attempt`) carry no id. Assistant message ids never
+  affect transcript revisions, rewrite span digests or the provider-cache
+  prefix identity. The retained-history byte budget of `DefaultCompactor`
+  now counts the id (about 60 bytes per row that carries one).
+- Behaviour-only: `LlmClientAdapter` now also delivers `ServerToolContent`
+  events to the interaction event tap, not only to the run's event channel,
+  so interaction-scoped streams see provider server-tool content.
+
+- `meerkat_core::SessionBuildOptions` and `meerkat::AgentBuildConfig` gain the
+  public field `fork_source: Option<ForkBuildSource>`. Struct literals must
+  supply it (`None` outside the mob runtime, or use `..Default::default()` for
+  `SessionBuildOptions`). `AgentBuildConfig::apply_session_build_options` and
+  `to_session_build_options` carry it both ways, so a Rust
+  `SessionAgentBuilder` that wraps `FactoryAgentBuilder` receives it on
+  `CreateSessionRequest.build`. A JSON host build callback (MobKit's
+  `callback/build_agent`) sees it only once its host forwards the field; MobKit
+  does not forward it yet.
+- Behavior-only: a host's `SpawnMemberCustomizer` no longer runs on the
+  seating of a local temporary-council participant. The council now seats every
+  local participant with its source member's build inheritance (see Fixed), and
+  a `SpawnSource::AttachedForkedParticipant` spawn that carries one is a fork
+  seating, skipped like `SpawnSource::PersistedForkResume` already is. A
+  customizer can no longer replace or wrap such a participant's overlay, labels
+  or application context (MobKit's memory customizer bound the participant's
+  `memory` recorder to the participant's own identity; the participant now has
+  its source's).
+  Host-owned council participants, and attached spawns that carry no
+  inheritance, are customized as before.
+- Behavior-only: a host's `SpawnMemberCustomizer` no longer runs on the
+  process-restart restore or explicit resume of a fork-derived member (one
+  that carries `fork_source`: a `fork_off` child, a child of the
+  `MobHandle::fork_member*` forks, or a local temporary-council participant).
+  Such a rebuild repeats the member's first build, at which no customizer ran
+  either: its request is the member's own durable records (roster labels,
+  profile and model overrides, the application context and auth binding its
+  session persisted). The customizer used to be asked a `SpawnSource::Resume`
+  request for the member, and the rebuild applied the labels, application
+  context (restart restore only), auth binding, tool access policy,
+  inherited tool filter and profile and model overrides it returned, so a
+  customizer that rewrites those by identity changed the member's build at
+  every restart (for a host that resolves tools from labels and context:
+  other tools and a lost cached prefix). Instructions and the system prompt
+  it returned were never applied (no resume rebuild re-authors them), and its
+  overlay was already governed by the overlay rule (see Fixed). Where
+  the member's per-spawn overlay has to come from its own identity (see
+  Fixed), the customizer is still asked and only its `external_tools` is
+  used. Ordinary members are customized on resume as before.
+
 - Behaviour-only: `SessionServiceRuntimeExt::input_terminal_completion` now
   shares one classification of receipt-less rows with `input_terminal_receipt`. A
   terminal the machine reaches without staging a receipt - superseded or
@@ -147,6 +257,86 @@ them.
   typed as the generated `WireMemberPreviewUnavailable` (now exported from
   each package root) and absent when unset. A value outside the closed
   vocabulary fails closed with `INVALID_RESPONSE`.
+
+- Assistant message identity: every assistant message the agent loop commits
+  carries a session-scoped `meerkat_core::types::AssistantMessageId`
+  (re-exported as `meerkat_core::AssistantMessageId` and
+  `meerkat::AssistantMessageId`), minted in the provider-neutral loop at
+  provider turn start, before any delta, for every provider. The same id is on
+  the committed `block_assistant` row and on every live event of that message,
+  so consoles join live rows to history by id instead of text or rank.
+  Retries of a provider turn (same-model, empty-output, stall, timeout, model
+  fallback, and a re-poll after compaction) reuse its id, a failed provider
+  turn never leaves a committed id, messages appended by tool effects get
+  their own id, and `run_completed` names the committed message whose text
+  `result` repeats. The history row carrying an id is the only commit fact.
+  `turn_completed` is a live "turn finished" signal that proves neither commit
+  nor durability: it can precede tool-turn boundary work, the run-completed
+  hooks of an output-schema run and the session save, any of which can still
+  fail the run, and it is absent when a run fails after the row was pushed
+  (for example a terminal-turn boundary or run-completed hook denial).
+  See `docs/reference/session-contracts.mdx#assistant-message-identity`.
+- `meerkat_core::Session::retained_transcript_revision_rows` and
+  `meerkat_core::Session::commit_transcript_revision_restore`, with the
+  core-constructed `meerkat_core::RetainedTranscriptRevisionRows` (re-exported
+  as `meerkat::RetainedTranscriptRevisionRows`): restore a
+  revision the session retains while keeping each restored row's
+  `assistant_message_id`, which a generic `commit_transcript_rewrite` clears.
+- `meerkat_core::AgentEvent::assistant_message_id(&self) -> Option<AssistantMessageId>`
+  reads the id from any event that carries one.
+- The Python, TypeScript and Web SDKs expose the optional
+  `assistant_message_id` / `assistantMessageId` on `turn_started`,
+  `text_delta`, `text_complete`, `turn_completed`, `retrying` and
+  `run_completed` events and on `block_assistant` history rows (the Web SDK
+  types cover all ten events and export `AssistantMessageId`); raw-preserved
+  events keep the key in their payload.
+- Realtime row pairing: `block_assistant` history and transcript-revision rows
+  the realtime transcript materializer committed now carry `realtime_origin`
+  on the wire, copied verbatim from the canonical row (the
+  `RealtimeMessageOrigin` shape run events already carry in `identity`). Its
+  `provider_item_ids` match the provider item ids on the live transport's
+  realtime observations (`provider_item_id` on `assistant_text_delta`,
+  `assistant_transcript_delta`, `assistant_transcript_final` and
+  `assistant_transcript_truncated`; `item_id` on `assistant_audio_chunk` and
+  item-scoped `realtime_transcript` events), so a console pairs a realtime row
+  with its live rendering by provider item id. These rows still carry no
+  `assistant_message_id`, and the `text_complete` / `turn_completed` published
+  for their commit carry none either. The Python and TypeScript SDKs expose it
+  as `SessionMessage.realtime_origin` / `realtimeOrigin`.
+
+- `meerkat_core::ForkBuildSource` (re-exported as `meerkat::ForkBuildSource`)
+  names the source of a fork-derived member build: `source_member`, the
+  source's durable `MobMemberBinding`, and `source_session_id`, the session its
+  transcript was forked from. It is `#[non_exhaustive]` and serializable (serde
+  and, with the `schema` feature, JSON Schema) so a host can forward it; build
+  it with `ForkBuildSource::new`. Serialized it is
+  `{"source_member": {"mob_id", "role", "member"}, "source_session_id": "<uuid>"}`
+  (see its rustdoc). The mob runtime sets it on the seating build, and on
+  every later rebuild, of a `fork_off` child, of a child of
+  `MobHandle::fork_member`, `fork_member_then_run_bounded` or
+  `fork_member_then_run_detached`, and of a local temporary-council
+  participant. It does not set it for live-delegation workers
+  (`MobHandle::fork_member_at_turn_boundary`), host-owned council
+  participants, respawn successors of a fork child, delegate helpers or
+  ordinary spawns.
+- `meerkat_mob::MemberSpawnedEvent` and `meerkat_mob::RosterEntry` gain
+  `fork_source` (`Option<ForkBuildSource>`) and `fork_overlay`
+  (the new `meerkat_mob::ForkOverlayOrigin`: `source`, `source_own` or
+  `caller`), which persist a fork-derived member's lineage and where its
+  seated per-spawn overlay came from: its source's overlay, which the source
+  had itself inherited from its own source (`source`) or which was the
+  source's own (`source_own`), or the fork caller's own (`caller`). Both are
+  omitted when absent or default, so non-fork members keep their wire shape,
+  and journals written before decode them as absent (`source`).
+- `meerkat_mob::ForkBuildInheritance`, the opaque build inputs a fork-derived
+  member inherits from its source (application context, application labels,
+  retained per-spawn tool overlay and the typed source), minted by the source's
+  own mob with `MobHandle::fork_build_inheritance(&source, &source_session_id)`.
+  `SpawnMemberSpec::with_fork_build_inheritance` attaches one to a
+  capability-attached participant spawn
+  (`MobHandle::spawn_attached_forked_participant`), which checks that it names
+  the capability's own source member and source session; every other spawn
+  refuses a spec that carries one.
 
 - `meerkat_mob::MobHandle::wait_bounded_work_for_identity_with_delivery_identity(&self, &AgentIdentity, &MobDeliveryIdentity, &BoundedResultSpec, meerkat_core::time_compat::Instant) -> Result<DeliveryTerminalWaitReport, DeliveryTerminalWaitError>`
   (feature `runtime-adapter`) waits for the terminal of one delivery that was
@@ -259,6 +449,118 @@ them.
   to forget it, and registering an observation prunes any closed entry, so
   unique `fork_off` child identities read once do not accumulate in a
   long-lived mob.
+
+- After a host restart, re-linking a `fork_off` child that was still running
+  no longer reports `restart_interrupted` for a child that answered. Member
+  status reads the live agent, which is terminal before the turn's boundary
+  commit lands, while the re-link reads the outcome from the durable
+  transcript, and in that window it found no reply. The re-link now asks the
+  child's runtime, through the new public
+  `MeerkatMachine::session_has_uncommitted_run_input`, whether a run input
+  still awaits its boundary commit: a machine phase (`Staged`, `Applied` or
+  `AppliedPendingConsumption`), so a turn that compacted reads the same.
+  `Ok(false)` means durability is ready, every input of the session's
+  current driver was read, and none awaits a boundary. Everything else is an
+  error: no runtime holding the session, a driver replaced during the read,
+  degraded durability after a failed boundary commit (which consumes the
+  inputs in memory before persistence fails), or an input without its
+  generated phase. `Queued` input does not count. The re-link takes a
+  pending input or degraded durability as machine evidence, a timed-out or
+  failed read as inconclusive, and a session the runtime no longer holds as
+  settled. It waits on an unconfirmed commit for at most
+  `COMMIT_PENDING_CEILING` (5 minutes), restarted only when the child is seen
+  running again, then delivers `restart_interrupted`, with the typed
+  `restart_reason` `commit_never_landed` only when the reading at the ceiling
+  was machine evidence. `fork_relink::relink_child_within` takes the ceiling
+  explicitly.
+
+- Live host: assistant realtime events (display-text deltas, spoken-transcript
+  deltas and spoken-transcript finals) now reach the session with the channel
+  they streamed on, through both the RPC `SessionServiceProjectionSink` and the
+  facade `ServiceLiveProjection`, as user transcripts already did. Core stamps
+  that channel on the staged assistant item, but `LiveAdapterHost` never
+  passed it for assistant events, so outside a context observation an ordinary
+  spoken turn committed with no `realtime_origin`: no console pairing key, and
+  the live context mirror classified the row as `ParentSessionServiceTurn`
+  instead of the `LiveRealtimeTranscript` disposition the 0.8.41 entries
+  describe. Behaviour-only, no signature change: assistant projections on a
+  channel whose close has released its turn-boundary waiters now return
+  `SessionBusy` instead of waiting behind the boundary, the same as user
+  projections.
+- Live close: an explicit close of an ordinary (non-experimental) channel no
+  longer releases the channel's live projections from the member's turn
+  boundary when the embedder installs an experimental live open authority
+  (MobKit does, so every `live/close` runs the experimental close first). The
+  release is keyed on the generated close custody only experimental channels
+  hold, so ordinary channels close the same way with or without that
+  authority: their projections wait for the boundary and the ordinary close
+  defers its playback settlement to it. Before, a projection parked behind a
+  running member turn returned `SessionBusy`, the ordinary WebSocket/WebRTC
+  pump treated that as fatal, and its disconnect cleanup raced the RPC close;
+  when the cleanup committed first, `live/close` answered with an
+  unbound-channel error for a channel that did close. Behaviour-only, no
+  signature change.
+- The Python and TypeScript SDK `retrying` parsers accept the canonical wire
+  shape, which carries one typed `retry` schedule; `attempt`, `max_attempts` /
+  `maxAttempts`, `error` and `delay_ms` / `delayMs` are derived from it and the
+  schedule is kept in `retry`. Current `retrying` events previously parsed as
+  `malformed_event`.
+
+- A fork-derived member is built with its source member's build inputs. A
+  `fork_off` child, a child of the `MobHandle::fork_member`,
+  `fork_member_then_run_bounded` and `fork_member_then_run_detached` forks, and
+  a local temporary-council participant used to reach the host build callback
+  with bare mob labels, no application context, no source reference and no
+  per-spawn tool overlay, so a host that resolves tools and instructions by
+  identity built a generic member (HomeCore: a calendar fork with 92 of
+  calendar's 150 tools, without its calendar, display, picture-schedule or
+  `memory` tools). Its tools block also differed from the forker's, so the
+  child could not reuse the forker's cached prompt prefix. The child's build
+  now carries the source's application context (read from the source session's
+  durable build state), the source's application labels, the source's retained
+  per-spawn overlay (unless the fork caller put its own on the child's spawn
+  request), and `fork_source`. The source's standard mob member labels
+  (`mob_id`, `role`, `profile_name`, `meerkat_id`, `agent_identity`) are never
+  inherited: they name the source (MobKit keeps its durable identity in
+  `agent_identity`), so the child's roster entry, `MemberSpawned` event and
+  `list_members` labels carry none of them unless the child's own spawn request
+  states them, and its build stamps the child's own. The child keeps its own
+  roster, comms and runtime identity. Live-delegation workers
+  (`fork_member_at_turn_boundary`), host-owned council participants, delegate
+  helpers and ordinary spawns are unchanged.
+
+  Every rebuild of such a child (warm revival, explicit resume,
+  process-restart restore) keeps its `fork_source`, labels and application
+  context, and the host's spawn customizer cannot change them (see Breaking).
+  Its per-spawn overlay, which is process-local and not persisted, is chosen
+  as follows. A warm revival uses the overlay the child was built
+  with. An explicit resume or restart restore gives a child seated with its
+  source's overlay the overlay its source is restored with (sources are
+  restored before their forks), and a child seated with the fork caller's
+  overlay the overlay the host's spawn customizer supplies for the child's
+  own identity. A child whose source has been retired, respawned, repointed to
+  another session, or replaced by another member under the same identity no
+  longer follows it: every rebuild, in process or after a restart, uses the
+  customizer's overlay for the child's own identity (none without a
+  customizer), and a warning names the missing source. The rule is
+  transitive: a grandchild follows its source only while every in-mob
+  ancestor its overlay came through is still the build its fork was taken
+  from, so a grandchild of a retired source no longer keeps that source's
+  dispatcher across in-process revivals, and its warning also names the
+  ancestor whose source is missing. The ancestors counted are the ones the
+  overlay passed through when the grandchild was forked: a grandchild forked
+  from a child already rebuilt onto its own-identity overlay (`source_own`)
+  follows that child, whatever became of the child's source. A fork of a
+  child inherits the overlay the child was built with, so grandchildren (a
+  `fork_off` from a fork, or a council forking one) get the same tools, also
+  after a restart. A temporary-council participant's source is in another mob:
+  a revived participant keeps the overlay it was seated with, and a restored
+  one gets the customizer's overlay for its own identity.
+- A mob member rebuilt without an explicit application context (warm revival,
+  explicit resume, process-restart restore) keeps the context its session's
+  last build persisted. It was rebuilt with none, and the rebuild persisted
+  that `None` over the stored context, so a revived member lost its context
+  for good. An explicit context still replaces it.
 
 - The semver-breaks gate measures notes pending under `## [Unreleased]` after
   a release against that release's tag. With the workspace version still at

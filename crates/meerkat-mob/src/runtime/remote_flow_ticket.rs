@@ -1671,6 +1671,7 @@ mod tests {
             extraction_required: false,
             usage: meerkat_core::Usage::default().into(),
             terminal_cause_kind: None,
+            assistant_message_id: None,
         }
     }
 
@@ -1910,7 +1911,10 @@ mod tests {
             &target,
             1,
             4,
-            &AgentEvent::TurnStarted { turn_number: 1 },
+            &AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
         );
         registry.observe_member_event_row(&target, 1, 5, &run_completed("payload"));
         registry
@@ -2830,7 +2834,10 @@ mod tests {
             &target,
             1,
             6,
-            &AgentEvent::TurnStarted { turn_number: 1 },
+            &AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
         );
         let disposition = registry
             .consume_turn_outcome_record_for_test(&target, &record("input-1", 1, 5))

@@ -20,6 +20,8 @@ import type {
   DeferredCatalogDelta,
   ExternalToolDeltaPhase,
   GeminiImageMetadata,
+  LiveChannelId,
+  LiveContextObservationId,
   MeerkatSchema,
   OpenAiImageMetadata,
   OutputSchema,
@@ -29,12 +31,14 @@ import type {
   Provider,
   ProviderImageMetadata,
   RealmId,
+  RealtimeMessageOrigin,
   RevisedPromptDisposition,
   RevisedPromptSource,
   RunId,
   SchemaCompat,
   SchemaFormat,
   SenderContentTaint,
+  SessionId,
   SkillKey,
   SkillName,
   SourceUuid,
@@ -172,17 +176,40 @@ export interface AssistantImageEvent {
 }
 
 /**
+ * Session-scoped identity of one committed assistant message occurrence.
+ *
+ * The agent loop mints this id when a provider turn starts, before any
+ * streamed delta, and stamps the same value on every live event for that
+ * message (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,
+ * `server_tool_content`, `assistant_image_appended`, `turn_completed`) and on
+ * the canonical [`BlockAssistantMessage`] it commits. A consumer joins live
+ * rows to history by this id alone; it never has to compare text or rank.
+ *
+ * The value is opaque. It is never derived from content, so two
+ * byte-identical answers always carry different ids, and it is not a
+ * timestamp: native builds happen to mint UUIDv7 while browser builds mint
+ * UUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints
+ * ids; other crates copy and compare them. Persisted and wire values
+ * round-trip verbatim through serde.
+ *
+ * Retries of the same provider turn (same-model, empty-output, stall,
+ * timeout, model fallback, and a re-poll after compaction) reuse the id, so
+ * an id is on at most one committed message. Rows a live display-text drain
+ * commits get their own id when committed. Messages written before this
+ * field existed, rows the realtime transcript materializer commits (they
+ * pair with the live transport's realtime observations through
+ * [`RealtimeMessageOrigin::provider_item_ids`]), and compaction summaries
+ * carry none.
+ */
+export type AssistantMessageId = string;
+
+/**
  * Opaque identifier for an input accepted by the runtime layer.
  *
  * Core passes this through in `contributing_input_ids` on receipts and events
  * but NEVER interprets it. The runtime layer creates and manages these.
  */
 export type InputId = string;
-
-/**
- * Unique identifier for a session (UUID v7 for time-ordering)
- */
-export type SessionId = string;
 
 /**
  * Exact negative application fact projected from durable boundary join resolution.
@@ -332,11 +359,13 @@ export interface ProviderTokenAccounting {
  *   [`TurnUsage::presented_tokens`]) instead, which is exactly what
  *   [`CumulativeUsage::add_turn`] does.
  * - Do not expect the per-call rows to reconcile with the cumulative account
- *   unconditionally. Every committed agent-loop call publishes a
- *   `turn_completed` row and every extraction request a `request_usage` row
- *   on the extraction outcome event, but the compaction summary call and a
- *   call whose turn fails after the provider answered are charged to the
- *   cumulative account without a row.
+ *   unconditionally. An agent-loop call publishes a `turn_completed` row
+ *   when its turn completes and every extraction request a `request_usage`
+ *   row on the extraction outcome event, but the compaction summary call and
+ *   a call whose turn fails after the provider answered are charged to the
+ *   cumulative account without a row. That includes a call whose assistant
+ *   row was already committed when a later hook failed the run, so a
+ *   committed row does not imply a `turn_completed`.
  *
  * The worked example lives in `docs/reference/usage-accounting.mdx`. Its
  * numbers are pinned against the agent loop by
@@ -1035,32 +1064,6 @@ export type ToolCallArguments = Record<string, unknown>;
 export type ObjectiveId = string;
 
 /**
- * Opaque identity of one live channel binding.
- *
- * A replacement channel receives a new value. Semantic observations retain
- * this identity so a delayed callback from the old binding fails its fence.
- */
-export type LiveChannelId = string;
-
-/**
- * Opaque provenance identifier. Its namespace is data, not admission or
- * temporal authority; only the runtime's generated registry grants a claim.
- */
-export interface LiveContextObservationId {
-  channel_id: LiveChannelId;
-  namespace: string;
-  nonce: string;
-}
-
-export type RealtimeMessageOrigin = {
-  canonical_row_sequence: number;
-  channel_id: LiveChannelId;
-  context_observation_id?: LiveContextObservationId | null;
-  provider_item_ids?: string[];
-  session_id: SessionId;
-};
-
-/**
  * Stable runtime identity for a transcript message.
  *
  * These fields are optional so older persisted sessions deserialize without a
@@ -1216,6 +1219,7 @@ export type AgentEvent = {
   session_id: SessionId;
   type: "run_started";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   extraction_required?: boolean;
   identity?: TranscriptMessageIdentity;
   result: string;
@@ -1266,26 +1270,33 @@ export type AgentEvent = {
   reason_code: HookReasonCode;
   type: "hook_denied";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   turn_number: number;
   type: "turn_started";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   delta: string;
   type: "reasoning_delta";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   content: string;
   type: "reasoning_complete";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   delta: string;
   type: "text_delta";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   content: string;
   type: "text_complete";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   content: unknown;
   id?: string | null;
   kind: ServerToolKind;
   type: "server_tool_content";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   image: AssistantImageEvent;
   type: "assistant_image_appended";
 } | {
@@ -1300,6 +1311,7 @@ export type AgentEvent = {
   name: string;
   type: "tool_result_received";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   stop_reason: StopReason;
   type: "turn_completed";
   usage?: TurnUsage | null;
@@ -1339,6 +1351,7 @@ export type AgentEvent = {
   type: "budget_warning";
   used: number;
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   retry: LlmRetrySchedule;
   type: "retrying";
 } | {

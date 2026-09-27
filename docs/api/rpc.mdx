@@ -912,6 +912,9 @@ the session identity. Restore is represented as another rewrite commit so the gr
 remains append-only even though the source transcript projection is updated in place.
 `revision` accepts the same selector as `session/transcript_revision`: `"current"`
 resolves to the head revision, so restoring it surfaces the typed no-op rewrite error.
+The restored rows are the session's own retained rows, so every restored
+`block_assistant` row keeps its `assistant_message_id` (a `session/rewrite_transcript`
+replacement never carries one).
 
 ```json
 {
@@ -2710,6 +2713,20 @@ projection in `artifacts/schemas/events.json`. New variants must appear in
 both that enum and this table. The decodable vocabulary includes the
 explicitly marked legacy row; not every variant is emitted by current writers.
 
+Message-scoped events (`turn_started`, `reasoning_delta`,
+`reasoning_complete`, `text_delta`, `text_complete`, `server_tool_content`,
+`assistant_image_appended`, `turn_completed`, `retrying`) carry an optional
+`assistant_message_id`. It equals `assistant_message_id` on the committed
+`block_assistant` row returned by `session/history`, so clients join live rows
+to history by id rather than by text or position. `run_completed` carries the
+id of the message whose text `result` repeats. Only a history row carrying the
+id is the commit: `turn_completed` is a live signal that can precede work that
+still fails the run, and can be absent for a committed row. Rows the realtime
+transcript materializer commits carry no `assistant_message_id`; they carry
+`realtime_origin.provider_item_ids`, which match the provider item ids on the
+live transport's realtime observations. See
+[assistant message identity](/reference/session-contracts#assistant-message-identity).
+
 | Event | Description |
 |-------|-------------|
 | `run_started` | Agent execution began |
@@ -2717,16 +2734,16 @@ explicitly marked legacy row; not every variant is emitted by current writers.
 | `extraction_succeeded` | Structured-output extraction succeeded after a completed run; `request_usage` has one usage row per extraction request |
 | `extraction_failed` | Structured-output extraction failed after a completed run; `request_usage` has one usage row per answered extraction request |
 | `run_failed` | Agent run failed |
-| `turn_started` | New LLM call within the turn |
+| `turn_started` | New LLM call within the turn; `assistant_message_id` names the assistant message it will commit |
 | `reasoning_delta` | Streaming reasoning/thinking chunk from the model |
 | `reasoning_complete` | Reasoning/thinking complete for this block |
 | `text_delta` | Streaming text chunk from LLM |
 | `text_complete` | Full text for this turn |
 | `server_tool_content` | Provider-executed tool content surfaced during a model turn |
-| `assistant_image_appended` | Canonical assistant image block appended to transcript history |
+| `assistant_image_appended` | Canonical assistant image block appended to transcript history; `assistant_message_id` names the message that carries it |
 | `tool_call_requested` | LLM wants to call a tool |
 | `tool_result_received` | Tool result processed |
-| `turn_completed` | LLM call finished (every agent-loop call, including tool-loop calls with `stop_reason: tool_use`); absent `usage` means no accounting row, not zero tokens |
+| `turn_completed` | LLM call finished (every agent-loop call, including tool-loop calls with `stop_reason: tool_use`); absent `usage` means no accounting row, not zero tokens; `assistant_message_id` names the message the turn closes. It is a live signal, not the commit: only a history row carrying the id is the commit. It can precede boundary work, run-completed hooks and persistence that still fail the run, and it is absent when a run fails after the row was pushed. It is also absent on realtime materializer turns, whose rows pair by `realtime_origin.provider_item_ids` |
 | `turn_usage_accounting_unmeasured` | Provider accounting was absent; no zero row may be fabricated, and this observation alone does not assert turn completion |
 | `turn_usage_accounting_identity_disputed` | Reported counters exist but provider/model attribution differs; preserve the reported identity and counters |
 | `tool_execution_started` | Tool dispatch began |
@@ -2736,7 +2753,7 @@ explicitly marked legacy row; not every variant is emitted by current writers.
 | `compaction_completed` | Compaction finished |
 | `compaction_failed` | Compaction failed |
 | `budget_warning` | Approaching resource limits |
-| `retrying` | Retrying after transient error |
+| `retrying` | Retrying after transient error; the retry reuses `assistant_message_id`, so discard that id's live buffer |
 | `model_fallback_skipped` | A fallback candidate was skipped with its typed target/reason |
 | `model_fallback_staged` | A retry staged a fallback target identity before commit |
 | `model_fallback_committed` | A retry committed the fallback identity change |

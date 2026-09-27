@@ -18,6 +18,9 @@ mod council_support;
 mod live_support;
 
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "e2e_fast/assistant_message_identity.rs"]
+mod assistant_message_identity;
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "e2e_fast/cross_host_live_member.rs"]
 mod cross_host_live_member;
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,6 +29,9 @@ mod durable_in_turn_steer;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "e2e_fast/mixed_temporary_council.rs"]
 mod mixed_temporary_council;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "e2e_fast/mob_fork_off_build_parity.rs"]
+mod mob_fork_off_build_parity;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "e2e_fast/mob_fork_off_detached.rs"]
 mod mob_fork_off_detached;

@@ -9170,6 +9170,7 @@ mod tests {
                 None,
                 meerkat_core::AgentEvent::TextDelta {
                     delta: "live".to_string(),
+                    assistant_message_id: None,
                 },
             ))
             .await
@@ -9187,6 +9188,7 @@ mod tests {
                     extraction_required: false,
                     usage: Default::default(),
                     terminal_cause_kind: None,
+                    assistant_message_id: None,
                 },
             ))
             .await
@@ -9239,6 +9241,7 @@ mod tests {
                     extraction_required: true,
                     usage: Default::default(),
                     terminal_cause_kind: None,
+                    assistant_message_id: None,
                 },
             ))
             .await
@@ -9311,6 +9314,7 @@ mod tests {
                     extraction_required: true,
                     usage: Default::default(),
                     terminal_cause_kind: None,
+                    assistant_message_id: None,
                 },
             ))
             .await
@@ -9508,6 +9512,7 @@ mod tests {
                         None,
                         meerkat_core::AgentEvent::TextDelta {
                             delta: format!("delta-{seq}"),
+                            assistant_message_id: None,
                         },
                     ))
                     .await
@@ -9540,8 +9545,8 @@ mod tests {
             assert_eq!(event_a.source.session_id(), Some(&session_id));
             match (&event_a.payload, &event_b.payload) {
                 (
-                    meerkat_core::AgentEvent::TextDelta { delta: delta_a },
-                    meerkat_core::AgentEvent::TextDelta { delta: delta_b },
+                    meerkat_core::AgentEvent::TextDelta { delta: delta_a, .. },
+                    meerkat_core::AgentEvent::TextDelta { delta: delta_b, .. },
                 ) => assert_eq!(delta_a, delta_b),
                 events => panic!("both destinations should receive matching deltas: {events:?}"),
             }

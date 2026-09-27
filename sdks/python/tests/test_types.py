@@ -228,6 +228,7 @@ from meerkat.events import (
     SkillResolutionFailureReason,
     StreamTruncated,
     ToolConfigChanged,
+    TextComplete,
     TextDelta,
     TranscriptRewriteCommitted,
     ToolCallRequested,
@@ -3596,6 +3597,159 @@ def test_parse_retrying():
     assert isinstance(event, Retrying)
     assert event.attempt == 2
     assert event.delay_ms == 2000
+
+
+def test_parse_retrying_canonical_schedule_projects_flat_fields():
+    raw = {
+        "type": "retrying",
+        "retry": {
+            "failure": {"provider": "anthropic", "kind": "rate_limited", "message": "slow down"},
+            "plan": {
+                "attempt": 2,
+                "max_retries": 3,
+                "computed_delay_ms": 1500,
+                "selected_delay_ms": 2000,
+                "rate_limit_floor_applied": False,
+                "budget_capped": False,
+            },
+        },
+        "assistant_message_id": "0190f5c2-4a1e-7c3d-8e2f-000000000001",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, Retrying)
+    assert (event.attempt, event.max_attempts, event.error, event.delay_ms) == (
+        2,
+        3,
+        "slow down",
+        2000,
+    )
+    assert event.retry == raw["retry"]
+    assert event.assistant_message_id == "0190f5c2-4a1e-7c3d-8e2f-000000000001"
+
+
+ASSISTANT_MESSAGE_ID = "0190f5c2-4a1e-7c3d-8e2f-00000000a001"
+
+
+@pytest.mark.parametrize(
+    ("raw", "cls"),
+    [
+        ({"type": "turn_started", "turn_number": 0}, TurnStarted),
+        ({"type": "text_delta", "delta": "he"}, TextDelta),
+        ({"type": "text_complete", "content": "hello"}, TextComplete),
+        ({"type": "turn_completed", "stop_reason": "end_turn"}, TurnCompleted),
+    ],
+)
+def test_message_scoped_events_carry_optional_assistant_message_id(raw, cls):
+    legacy = parse_event(dict(raw))
+    assert isinstance(legacy, cls)
+    assert legacy.assistant_message_id is None
+
+    stamped = parse_event({**raw, "assistant_message_id": ASSISTANT_MESSAGE_ID})
+    assert isinstance(stamped, cls)
+    assert stamped.assistant_message_id == ASSISTANT_MESSAGE_ID
+
+    malformed = parse_event({**raw, "assistant_message_id": 7})
+    assert isinstance(malformed, UnknownEvent)
+    assert malformed.type == "malformed_event"
+
+
+def test_run_completed_references_the_repeated_assistant_message():
+    event = parse_event(
+        {
+            "type": "run_completed",
+            "session_id": "s1",
+            "result": "hello",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+            "assistant_message_id": ASSISTANT_MESSAGE_ID,
+        }
+    )
+    assert isinstance(event, RunCompleted)
+    assert event.assistant_message_id == ASSISTANT_MESSAGE_ID
+
+
+def test_raw_preserved_events_keep_assistant_message_id():
+    event = parse_event(
+        {
+            "type": "reasoning_delta",
+            "delta": "hm",
+            "assistant_message_id": ASSISTANT_MESSAGE_ID,
+        }
+    )
+    assert isinstance(event, UnknownEvent)
+    assert event.data["assistant_message_id"] == ASSISTANT_MESSAGE_ID
+
+
+def test_parse_session_history_carries_assistant_message_id():
+    row = {
+        "role": "block_assistant",
+        "blocks": [{"block_type": "text", "data": {"text": "same"}}],
+        "stop_reason": "end_turn",
+        "created_at": "2026-05-26T10:00:01Z",
+    }
+    raw = {
+        "session_id": "s1",
+        "message_count": 2,
+        "offset": 0,
+        "has_more": False,
+        "messages": [
+            {**row, "assistant_message_id": ASSISTANT_MESSAGE_ID},
+            row,
+        ],
+    }
+    history = MeerkatClient._parse_session_history(raw)
+    assert history.messages[0].assistant_message_id == ASSISTANT_MESSAGE_ID
+    assert history.messages[1].assistant_message_id is None
+
+
+REALTIME_ORIGIN = {
+    "session_id": "0190f5c2-4a1e-7c3d-8e2f-00000000b001",
+    "channel_id": "channel-7",
+    "canonical_row_sequence": 3,
+    "provider_item_ids": ["item_a", "item_b"],
+}
+
+
+def test_parse_session_history_carries_realtime_origin_verbatim():
+    row = {
+        "role": "block_assistant",
+        "blocks": [
+            {"block_type": "transcript", "data": {"text": "spoken", "source": {"kind": "spoken"}}}
+        ],
+        "stop_reason": "end_turn",
+        "created_at": "2026-05-26T10:00:01Z",
+    }
+    raw = {
+        "session_id": "s1",
+        "message_count": 2,
+        "offset": 0,
+        "has_more": False,
+        "messages": [{**row, "realtime_origin": REALTIME_ORIGIN}, row],
+    }
+    history = MeerkatClient._parse_session_history(raw)
+    realtime = history.messages[0]
+    assert realtime.realtime_origin == REALTIME_ORIGIN
+    assert realtime.realtime_origin["provider_item_ids"] == ["item_a", "item_b"]
+    assert realtime.assistant_message_id is None
+    assert history.messages[1].realtime_origin is None
+
+
+def test_parse_session_history_rejects_malformed_realtime_origin():
+    row = {
+        "role": "block_assistant",
+        "blocks": [],
+        "stop_reason": "end_turn",
+        "created_at": "2026-05-26T10:00:01Z",
+        "realtime_origin": {**REALTIME_ORIGIN, "provider_item_ids": [7]},
+    }
+    raw = {
+        "session_id": "s1",
+        "message_count": 1,
+        "offset": 0,
+        "has_more": False,
+        "messages": [row],
+    }
+    with pytest.raises(MeerkatError, match="provider_item_ids"):
+        MeerkatClient._parse_session_history(raw)
 
 
 def test_parse_skills_resolved_with_typed_skill_identities():

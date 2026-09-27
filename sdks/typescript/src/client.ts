@@ -368,6 +368,7 @@ import {
 import { parseAgentEventEnvelope } from "./event-envelope.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
 import { parseUsage } from "./events.js";
+import type { RealtimeMessageOrigin } from "./events.js";
 import { EventSubscription } from "./subscription.js";
 import type {
   AgentEventEnvelope,
@@ -4528,6 +4529,43 @@ export class MeerkatClient {
     return raw as Record<string, unknown>;
   }
 
+  /**
+   * Validate an optional `realtime_origin` without changing its generated
+   * wire shape. Absent or `null` yields `undefined`.
+   */
+  private static parseRealtimeMessageOrigin(
+    raw: unknown,
+    context: string,
+  ): RealtimeMessageOrigin | undefined {
+    if (raw === undefined || raw === null) {
+      return undefined;
+    }
+    const origin = MeerkatClient.requireRecord(raw, "realtime_origin", context);
+    MeerkatClient.requireNonNegativeIntegerField(origin, "canonical_row_sequence", context);
+    MeerkatClient.requireStringField(origin, "channel_id", context);
+    MeerkatClient.requireStringField(origin, "session_id", context);
+    if (Object.prototype.hasOwnProperty.call(origin, "provider_item_ids")) {
+      const items = origin.provider_item_ids;
+      if (!Array.isArray(items) || items.some((item) => typeof item !== "string")) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: provider_item_ids must be an array of strings`,
+        );
+      }
+    }
+    if (origin.context_observation_id !== undefined && origin.context_observation_id !== null) {
+      const observation = MeerkatClient.requireRecord(
+        origin.context_observation_id,
+        "context_observation_id",
+        context,
+      );
+      for (const field of ["channel_id", "namespace", "nonce"]) {
+        MeerkatClient.requireStringField(observation, field, `${context}: context_observation_id`);
+      }
+    }
+    return origin as unknown as RealtimeMessageOrigin;
+  }
+
   private static optionalRecord(raw: unknown): Record<string, unknown> | undefined {
     if (raw === undefined || raw === null) {
       return undefined;
@@ -5082,6 +5120,8 @@ export class MeerkatClient {
       return;
     }
     if (role === "block_assistant") {
+      MeerkatClient.validateOptionalStringField(raw, "assistant_message_id", context);
+      MeerkatClient.parseRealtimeMessageOrigin(raw.realtime_origin, `${context}: realtime_origin`);
       MeerkatClient.requireRecordArray(raw.blocks, `${context}: blocks`).forEach(
         (block, index) =>
           MeerkatClient.validateWireAssistantBlock(
@@ -7358,6 +7398,17 @@ export class MeerkatClient {
       stopReason: data.stop_reason != null ? String(data.stop_reason) : undefined,
       interactionId: data.interaction_id != null ? String(data.interaction_id) : undefined,
       runId: data.run_id != null ? String(data.run_id) : undefined,
+      assistantMessageId:
+        role === "block_assistant" && data.assistant_message_id != null
+          ? String(data.assistant_message_id)
+          : undefined,
+      realtimeOrigin:
+        role === "block_assistant"
+          ? MeerkatClient.parseRealtimeMessageOrigin(
+              data.realtime_origin,
+              `${context}: realtime_origin`,
+            )
+          : undefined,
       promptVersion,
       instructionActivation,
       // System-notice blocks have their own generated union and remain

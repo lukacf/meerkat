@@ -7584,7 +7584,10 @@ mod tests {
             "worker",
             1,
             Some("mob-exhausted".to_string()),
-            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
         );
         let error = bounded_member_events_reply(MemberEventsWindow {
             runtime_incarnation: BridgeHostRuntimeIncarnation::new(),

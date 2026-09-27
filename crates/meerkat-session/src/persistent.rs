@@ -13020,46 +13020,35 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
             meerkat_contracts::RevisionSelector::Current => head_revision.clone(),
             meerkat_contracts::RevisionSelector::Specific(id) => id.into_string(),
         };
-        let history = source.validated_transcript_history_state().map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to read transcript revision graph: {err}"
-            )))
-        })?;
-        let replacement = if revision == head_revision {
-            // Mirror the read path: both pre-revision sessions and
-            // graph-bearing ordinary appends omit a retained live-head body.
-            // The live messages ARE the current revision body (the
-            // subsequent commit surfaces NoOpRewrite).
-            source.messages().to_vec()
-        } else if let Some(history) = history.as_ref()
-            && history.contains_revision(&revision)
-        {
-            history
-                .materialize_revision(&revision)
-                .map_err(|error| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to materialize explicit restore revision {revision}: {error}"
-                    )))
-                })?
-                .messages
-        } else {
+        // Core reads the rows from this session's own retained history (the
+        // live messages ARE the current revision body, whose commit surfaces
+        // NoOpRewrite, mirroring the read path). Because core vouches for
+        // them, the restore keeps every restored assistant row's occurrence
+        // id; a generic rewrite would clear them as caller-authored content.
+        let Some(mut rows) = source
+            .retained_transcript_revision_rows(&revision)
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to materialize explicit restore revision {revision}: {error}"
+                )))
+            })?
+        else {
             return Err(SessionError::Agent(
                 meerkat_core::error::AgentError::ConfigError(format!(
                     "transcript revision {revision} not found for session {id}",
                 )),
             ));
         };
-        let replacement = self
-            .normalized_transcript_rewrite_replacement(replacement)
-            .await?;
-        let message_count = source.messages().len();
+        rows.externalize_media(self.blob_store.as_ref())
+            .await
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to externalize transcript rewrite replacement media: {err}"
+                )))
+            })?;
         let commit = source
-            .commit_transcript_rewrite(
-                meerkat_core::TranscriptRewriteSelection::MessageRange {
-                    start: 0,
-                    end: message_count,
-                },
-                replacement,
+            .commit_transcript_revision_restore(
+                rows,
                 req.reason,
                 req.actor,
                 req.expected_parent_revision,
@@ -18134,6 +18123,7 @@ mod tests {
                         stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
+                        assistant_message_id: None,
                     },
                 ));
                 RunResult {
@@ -18591,6 +18581,7 @@ mod tests {
                 let _ = event_tx
                     .send(AgentEvent::TextDelta {
                         delta: format!("dense event {index}"),
+                        assistant_message_id: None,
                     })
                     .await;
             }
@@ -18604,6 +18595,7 @@ mod tests {
                     extraction_required: false,
                     usage: result.usage.clone().into(),
                     terminal_cause_kind: result.terminal_cause_kind,
+                    assistant_message_id: None,
                 })
                 .await;
             Ok(result)
@@ -19839,6 +19831,7 @@ mod tests {
                     stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 },
             ));
             Ok(RunResult {
@@ -20050,6 +20043,7 @@ mod tests {
                     stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 },
             ));
             Ok(RunResult {
@@ -22712,6 +22706,128 @@ mod tests {
         );
     }
 
+    /// Restoring a revision re-installs rows the session itself retained, so
+    /// every restored assistant row keeps the occurrence id it streamed with.
+    /// Only caller-authored rewrite rows lose their ids.
+    #[tokio::test]
+    async fn test_persistent_restore_transcript_revision_keeps_assistant_message_ids() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        let occurrence = |uuid: &str| -> meerkat_core::AssistantMessageId {
+            serde_json::from_value(serde_json::json!(uuid)).expect("assistant message id")
+        };
+        let first = occurrence("01920000-0000-7000-8000-000000000001");
+        let second = occurrence("01920000-0000-7000-8000-000000000002");
+        let answer = |text: &str, id| {
+            let mut message = meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::Text {
+                    text: text.to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            );
+            message.assistant_message_id = Some(id);
+            Message::BlockAssistant(message)
+        };
+        let mut seed = recoverable_store_row();
+        seed.push(user_message("question"));
+        seed.push(answer("first answer", first));
+        seed.push(user_message("follow up"));
+        seed.push(answer("second answer", second));
+        let seed = service.save_normalized_session(seed).await.unwrap();
+        let session_id = seed.id().clone();
+        service.create_session(resume_request(seed)).await.unwrap();
+        let assistant_ids = |messages: &[Message]| {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::BlockAssistant(assistant) => Some(assistant.assistant_message_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let before = service
+            .read_history(&session_id, SessionHistoryQuery::default())
+            .await
+            .expect("history before rewrite");
+        assert_eq!(
+            assistant_ids(&before.messages),
+            vec![Some(first), Some(second)]
+        );
+
+        let rewritten = service
+            .rewrite_session_transcript(
+                &session_id,
+                meerkat_core::SessionTranscriptRewriteRequest {
+                    selection: TranscriptRewriteSelection::MessageRange { start: 1, end: 4 },
+                    replacement: vec![answer("compacted", second)],
+                    reason: TranscriptRewriteReason::new("compaction"),
+                    actor: None,
+                    expected_parent_revision: None,
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("rewrite should commit");
+        let after_rewrite = service
+            .read_history(&session_id, SessionHistoryQuery::default())
+            .await
+            .expect("history after rewrite");
+        assert_eq!(
+            assistant_ids(&after_rewrite.messages),
+            vec![None],
+            "a caller-authored replacement row never keeps a supplied id"
+        );
+
+        let restored = service
+            .restore_session_transcript_revision(
+                &session_id,
+                SessionTranscriptRestoreRevisionRequest {
+                    revision: rewritten.parent_revision.clone(),
+                    reason: TranscriptRewriteReason::new("restore"),
+                    actor: None,
+                    expected_parent_revision: Some(rewritten.revision.clone()),
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("restore should commit");
+        assert_eq!(restored.revision, rewritten.parent_revision);
+
+        let after_restore = service
+            .read_history(&session_id, SessionHistoryQuery::default())
+            .await
+            .expect("history after restore");
+        assert_eq!(
+            assistant_ids(&after_restore.messages),
+            vec![Some(first), Some(second)],
+            "restored rows keep the ids they were committed with"
+        );
+        assert_eq!(
+            serde_json::to_value(&after_restore.messages).expect("restored history serializes"),
+            serde_json::to_value(&before.messages).expect("original history serializes"),
+            "a restore re-installs the retained rows verbatim"
+        );
+        let reloaded = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load authority after restore")
+            .expect("session exists");
+        assert_eq!(
+            assistant_ids(reloaded.messages()),
+            vec![Some(first), Some(second)],
+            "the persisted authority keeps the restored ids"
+        );
+    }
+
     #[tokio::test]
     async fn test_persistent_rewrite_transcript_rejects_stale_parent_revision() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -23321,6 +23437,7 @@ mod tests {
                                 stop_reason: Some(StopReason::EndTurn),
                                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                                 created_at: meerkat_core::types::message_timestamp_now(),
+                                assistant_message_id: None,
                             },
                         )],
                         reason: TranscriptRewriteReason::new("compaction"),
@@ -23457,6 +23574,7 @@ mod tests {
                             stop_reason: Some(StopReason::EndTurn),
                             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                             created_at: meerkat_core::types::message_timestamp_now(),
+                            assistant_message_id: None,
                         },
                     )],
                     reason: TranscriptRewriteReason::new("compaction"),
@@ -23657,6 +23775,7 @@ mod tests {
                             stop_reason: Some(StopReason::EndTurn),
                             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                             created_at: meerkat_core::types::message_timestamp_now(),
+                            assistant_message_id: None,
                         },
                     )],
                     reason: TranscriptRewriteReason::new("compaction"),
@@ -23862,6 +23981,7 @@ mod tests {
                             stop_reason: Some(StopReason::EndTurn),
                             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                             created_at: meerkat_core::types::message_timestamp_now(),
+                            assistant_message_id: None,
                         },
                     )],
                     reason: TranscriptRewriteReason::new("compaction"),
@@ -25307,6 +25427,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             }),
         ]
     }
@@ -26721,6 +26842,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         let rejected_snapshot = serde_json::to_vec(&rejected)?;
@@ -26788,6 +26910,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         let rejected_snapshot = serde_json::to_vec(&rejected)?;
@@ -26894,6 +27017,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         let newer_snapshot = serde_json::to_vec(&newer)?;
@@ -27047,6 +27171,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         let stale_parent_revision = stale_parent.transcript_revision()?;
@@ -31513,6 +31638,7 @@ mod tests {
                         stop_reason: Some(StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
+                        assistant_message_id: None,
                     },
                 ));
             }
@@ -31631,6 +31757,7 @@ mod tests {
                         stop_reason: Some(StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
+                        assistant_message_id: None,
                     },
                 ));
             }
@@ -36701,9 +36828,13 @@ mod tests {
             .append(
                 &session_id,
                 &[
-                    AgentEvent::TurnStarted { turn_number: 0 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 0,
+                        assistant_message_id: None,
+                    },
                     AgentEvent::TextComplete {
                         content: "two".to_string(),
+                        assistant_message_id: None,
                     },
                 ],
             )

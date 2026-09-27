@@ -301,6 +301,7 @@ mod session_persistence {
             stop_reason: Some(StopReason::EndTurn),
             identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         session.push(Message::User(UserMessage::text("How are you?".to_string())));
 
@@ -340,6 +341,7 @@ mod session_persistence {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             }));
             let id = session.id().clone();
             store.save(&session).await.expect("Save should succeed");
@@ -377,6 +379,7 @@ mod session_persistence {
             stop_reason: Some(StopReason::EndTurn),
             identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         session.push(Message::User(UserMessage::text("Call a tool".to_string())));
         session.push(Message::tool_results(vec![ToolResult::new(
@@ -1029,6 +1032,7 @@ mod combined {
             stop_reason: Some(StopReason::ToolUse),
             identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         session.record_cumulative_usage(first_usage);
 
@@ -1054,6 +1058,7 @@ mod combined {
             stop_reason: Some(StopReason::EndTurn),
             identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         session.record_cumulative_usage(second_usage);
 

@@ -4653,7 +4653,10 @@ impl SessionService for LocalSessionService {
                 id.clone(),
                 next_seq(&mut seq),
                 None,
-                AgentEvent::TurnStarted { turn_number: 1 },
+                AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                },
             ));
             let usage = Usage::default();
             let turn_usage = usage.clone();
@@ -4668,6 +4671,7 @@ impl SessionService for LocalSessionService {
                         "mob-mcp-test-agent",
                         turn_usage,
                     )),
+                    assistant_message_id: None,
                 },
             ));
             let _ = event_tx.send(EventEnvelope::new_session(
@@ -4682,6 +4686,7 @@ impl SessionService for LocalSessionService {
                     extraction_required: false,
                     usage: usage.into(),
                     terminal_cause_kind: None,
+                    assistant_message_id: None,
                 },
             ));
         }

@@ -4211,6 +4211,7 @@ async fn handle_meerkat_run(
                 silent_comms_intents: Vec::new(),
                 max_inline_peer_notifications: None,
                 app_context: input.app_context.clone(),
+                fork_source: None,
                 additional_instructions: input.additional_instructions.clone(),
                 initial_metadata_entries: std::collections::BTreeMap::new(),
                 initial_tool_filter: None,
@@ -4647,6 +4648,7 @@ async fn handle_meerkat_resume(
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             app_context: None,
+            fork_source: None,
             additional_instructions: input.additional_instructions.clone(),
             initial_metadata_entries: std::collections::BTreeMap::new(),
             initial_tool_filter: None,
@@ -9327,6 +9329,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         session.push(meerkat_core::types::Message::User(
@@ -9341,6 +9344,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         store

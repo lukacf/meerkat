@@ -546,6 +546,10 @@ impl std::fmt::Display for LiveToolDispatchTimeout {
 ///   final is not a delta).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LiveTranscriptIdentity<'a> {
+    /// The live channel the fragment streamed on. The host sets it for user
+    /// and assistant fragments alike; a sink that applies the fragment with
+    /// it lets the session record a channel `realtime_origin` on the
+    /// committed row (the key consoles pair realtime rows by).
     pub channel_id: Option<&'a LiveChannelId>,
     pub context_observation_id: Option<&'a meerkat_core::LiveContextObservationId>,
     pub provider_item_id: Option<&'a str>,
@@ -2627,6 +2631,7 @@ impl LiveAdapterHost {
                     response_id.as_deref(),
                     delta_id.as_deref(),
                 )
+                .with_channel(channel_id)
                 .with_context_observation(context_observation_id);
                 // T6: display text routes to the text lane; flushed as
                 // AssistantBlock::Text.
@@ -2655,6 +2660,7 @@ impl LiveAdapterHost {
                     response_id.as_deref(),
                     delta_id.as_deref(),
                 )
+                .with_channel(channel_id)
                 .with_context_observation(context_observation_id);
                 // T6: spoken transcript routes to the transcript lane;
                 // flushed as AssistantBlock::Transcript { source: Spoken }.
@@ -2683,6 +2689,7 @@ impl LiveAdapterHost {
                     *content_index,
                     response_id.as_deref(),
                 )
+                .with_channel(channel_id)
                 .with_context_observation(context_observation_id);
                 // R6: forward the response_id so the sink keys its
                 // per-turn buffer on (SessionId, response_id). T6:

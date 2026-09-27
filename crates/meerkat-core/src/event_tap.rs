@@ -135,6 +135,7 @@ mod tests {
             &tap,
             &AgentEvent::TextDelta {
                 delta: "hello".to_string(),
+                assistant_message_id: None,
             },
         );
     }
@@ -155,11 +156,12 @@ mod tests {
             &tap,
             &AgentEvent::TextDelta {
                 delta: "hello".to_string(),
+                assistant_message_id: None,
             },
         );
 
         let event = rx.try_recv().unwrap();
-        let AgentEvent::TextDelta { delta } = event else {
+        let AgentEvent::TextDelta { delta, .. } = event else {
             unreachable!("Expected TextDelta, got {:?}", event);
         };
         assert_eq!(delta, "hello");
@@ -183,6 +185,7 @@ mod tests {
             &tap,
             &AgentEvent::TextDelta {
                 delta: "first".to_string(),
+                assistant_message_id: None,
             },
         );
 
@@ -191,6 +194,7 @@ mod tests {
             &tap,
             &AgentEvent::TextDelta {
                 delta: "second".to_string(),
+                assistant_message_id: None,
             },
         );
 
@@ -203,7 +207,7 @@ mod tests {
         // Drain and check: first event should be the TextDelta "first"
         let first = rx.try_recv().unwrap();
         assert!(
-            matches!(&first, AgentEvent::TextDelta { delta } if delta == "first"),
+            matches!(&first, AgentEvent::TextDelta { delta, .. } if delta == "first"),
             "Expected first TextDelta, got {first:?}"
         );
     }
@@ -230,6 +234,7 @@ mod tests {
                 extraction_required: false,
                 usage: crate::types::Usage::default().into(),
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             },
         )
         .await;
@@ -252,6 +257,7 @@ mod tests {
                 extraction_required: false,
                 usage: crate::types::Usage::default().into(),
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             },
         )
         .await;
@@ -275,6 +281,7 @@ mod tests {
             Some(&primary_tx),
             AgentEvent::TextDelta {
                 delta: "both".to_string(),
+                assistant_message_id: None,
             },
         )
         .await;
@@ -283,8 +290,8 @@ mod tests {
         // Both channels should have the event
         let tap_event = tap_rx.try_recv().unwrap();
         let primary_event = primary_rx.try_recv().unwrap();
-        assert!(matches!(tap_event, AgentEvent::TextDelta { delta } if delta == "both"));
-        assert!(matches!(primary_event, AgentEvent::TextDelta { delta } if delta == "both"));
+        assert!(matches!(tap_event, AgentEvent::TextDelta { delta, .. } if delta == "both"));
+        assert!(matches!(primary_event, AgentEvent::TextDelta { delta, .. } if delta == "both"));
     }
 
     #[tokio::test]
@@ -295,6 +302,7 @@ mod tests {
             None,
             AgentEvent::TextDelta {
                 delta: "x".to_string(),
+                assistant_message_id: None,
             },
         )
         .await;

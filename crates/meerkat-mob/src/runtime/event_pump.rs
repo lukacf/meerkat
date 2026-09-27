@@ -3295,7 +3295,10 @@ mod tests {
                     "worker-gap",
                     10,
                     Some("mob-gap".to_string()),
-                    AgentEvent::TurnStarted { turn_number: 1 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 1,
+                        assistant_message_id: None,
+                    },
                 ),
             },
             WireEventRow {
@@ -3304,7 +3307,10 @@ mod tests {
                     "worker-gap",
                     11,
                     Some("mob-gap".to_string()),
-                    AgentEvent::TurnStarted { turn_number: 2 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 2,
+                        assistant_message_id: None,
+                    },
                 ),
             },
         ];
@@ -3333,7 +3339,10 @@ mod tests {
                 "page-validation-worker",
                 seq,
                 Some("page-validation-mob".to_string()),
-                AgentEvent::TurnStarted { turn_number },
+                AgentEvent::TurnStarted {
+                    turn_number,
+                    assistant_message_id: None,
+                },
             ),
         }
     }
@@ -3419,7 +3428,10 @@ mod tests {
                     identity.to_string(),
                     1,
                     Some(mob_id.to_string()),
-                    AgentEvent::TurnStarted { turn_number: 1 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 1,
+                        assistant_message_id: None,
+                    },
                 ),
             }],
             from_seq: 1,
@@ -3516,7 +3528,7 @@ mod tests {
             .expect("event tap remains live");
         assert!(matches!(
             event.envelope.payload,
-            AgentEvent::TurnStarted { turn_number: 1 }
+            AgentEvent::TurnStarted { turn_number: 1, .. }
         ));
         let cursor = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -5249,6 +5261,7 @@ mod tests {
             extraction_required: false,
             usage: meerkat_core::Usage::default().into(),
             terminal_cause_kind: None,
+            assistant_message_id: None,
         };
         registry.observe_member_event_row_exact(&old_member, 5, &stale_event);
         let stale_record = BridgeTurnOutcomeRecord {
@@ -5522,7 +5535,10 @@ mod tests {
                         identity.to_string(),
                         1,
                         Some(mob_id.to_string()),
-                        AgentEvent::TurnStarted { turn_number: 1 },
+                        AgentEvent::TurnStarted {
+                            turn_number: 1,
+                            assistant_message_id: None,
+                        },
                     ),
                 }],
                 from_seq: 1,
@@ -5605,7 +5621,7 @@ mod tests {
             .expect("new tap attached to the successor");
         assert!(matches!(
             attached.envelope.payload,
-            AgentEvent::TurnStarted { turn_number: 1 }
+            AgentEvent::TurnStarted { turn_number: 1, .. }
         ));
         assert!(!replacement.is_finished(), "adoption is still blocked");
         assert_eq!(
@@ -5623,7 +5639,7 @@ mod tests {
             .expect("old tap must be inherited by the successor, not closed");
         assert!(matches!(
             inherited.envelope.payload,
-            AgentEvent::TurnStarted { turn_number: 1 }
+            AgentEvent::TurnStarted { turn_number: 1, .. }
         ));
         drop(transition);
         let mut initiating_tap = tokio::time::timeout(Duration::from_secs(3), replacement)
@@ -5636,7 +5652,7 @@ mod tests {
                 .expect("the initiating tap also receives before adoption");
             assert!(matches!(
                 event.envelope.payload,
-                AgentEvent::TurnStarted { turn_number: 1 }
+                AgentEvent::TurnStarted { turn_number: 1, .. }
             ));
             assert!(matches!(
                 tap.try_recv(),
@@ -5736,7 +5752,10 @@ mod tests {
                     identity.to_string(),
                     1,
                     None,
-                    AgentEvent::TurnStarted { turn_number: 1 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 1,
+                        assistant_message_id: None,
+                    },
                 ),
             },
         );

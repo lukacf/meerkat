@@ -795,6 +795,7 @@ mod tests {
                 extraction_required: false,
                 usage: meerkat_core::Usage::default().into(),
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             })
             .await
             .expect("send event");
@@ -864,6 +865,7 @@ mod tests {
                 extraction_required: true,
                 usage: meerkat_core::Usage::default().into(),
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             })
             .await
             .expect("send run completed event");
@@ -908,6 +910,7 @@ mod tests {
                 extraction_required: true,
                 usage: meerkat_core::Usage::default().into(),
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             })
             .await
             .expect("send run completed event");

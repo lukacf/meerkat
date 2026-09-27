@@ -1045,6 +1045,35 @@ impl EphemeralRuntimeDriver {
         .map_err(RuntimeDriverError::Internal)
     }
 
+    /// Whether a run has taken up an input of this driver that its boundary
+    /// commit has not consumed yet: a generated input phase `Staged`,
+    /// `Applied` or `AppliedPendingConsumption`.
+    ///
+    /// One complete, fallible observation of the phase authority. Every
+    /// generated phase is read, and every ledger row must carry its
+    /// generated phase: a row without one is an error, never "not pending".
+    /// `Queued` input (and the compatibility `Accepted`) is not taken up by a
+    /// run and does not count.
+    pub(crate) fn run_input_awaits_boundary(&self) -> Result<bool, RuntimeDriverError> {
+        let taken_up = self.with_dsl_state(|state| {
+            state.input_phases.values().any(|phase| {
+                matches!(
+                    phase,
+                    mm_dsl::InputPhase::Staged
+                        | mm_dsl::InputPhase::Applied
+                        | mm_dsl::InputPhase::AppliedPendingConsumption
+                )
+            })
+        });
+        if taken_up {
+            return Ok(true);
+        }
+        for (input_id, _) in self.ledger.iter() {
+            self.input_phase_required(input_id, "while reading run inputs awaiting a boundary")?;
+        }
+        Ok(false)
+    }
+
     fn input_is_non_terminal_by_authority(&self, input_id: &InputId) -> bool {
         match self.input_is_terminal_by_authority(input_id) {
             Ok(terminal) => !terminal,
@@ -5763,6 +5792,91 @@ mod tests {
             Some(InputLifecycleState::AppliedPendingConsumption)
         );
         driver.validate_queue_payloads("test recovery").unwrap();
+    }
+
+    /// A run input awaits its boundary from staging until the boundary
+    /// consumes it, read from the generated phase: queued input does not
+    /// count, a staged or applied one does, and a consumed one no longer does.
+    #[tokio::test]
+    async fn run_input_awaits_boundary_follows_the_generated_phase() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("awaits-boundary"));
+        assert!(
+            !driver.run_input_awaits_boundary().unwrap(),
+            "no input at all"
+        );
+
+        let input = prompt_input("the turn");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+        let queued = prompt_input("queued behind it");
+        driver.accept_input(queued).await.unwrap();
+        assert_eq!(
+            driver.input_phase(&input_id),
+            Some(InputLifecycleState::Queued)
+        );
+        assert!(
+            !driver.run_input_awaits_boundary().unwrap(),
+            "queued input has not been taken up by a run"
+        );
+
+        let run_id = RunId::new();
+        driver
+            .contract_begin_run_authority(run_id.clone())
+            .expect("runtime run authority should begin through generated DSL");
+        driver
+            .machine_realize_stage_batch(std::slice::from_ref(&input_id), &run_id)
+            .unwrap();
+        assert_eq!(
+            driver.input_phase(&input_id),
+            Some(InputLifecycleState::Staged)
+        );
+        assert!(driver.run_input_awaits_boundary().unwrap(), "staged");
+
+        driver.apply_input(&input_id, &run_id).unwrap();
+        assert_eq!(
+            driver.input_phase(&input_id),
+            Some(InputLifecycleState::AppliedPendingConsumption)
+        );
+        assert!(
+            driver.run_input_awaits_boundary().unwrap(),
+            "applied, not consumed"
+        );
+
+        driver
+            .consume_inputs(std::slice::from_ref(&input_id), &run_id)
+            .unwrap();
+        assert_eq!(
+            driver.input_phase(&input_id),
+            Some(InputLifecycleState::Consumed)
+        );
+        assert!(
+            !driver.run_input_awaits_boundary().unwrap(),
+            "consumed by its boundary; the other input is only queued"
+        );
+    }
+
+    /// A ledger row without its generated phase is an error, never "no run
+    /// input awaits a boundary".
+    #[tokio::test]
+    async fn run_input_awaits_boundary_refuses_a_missing_generated_phase() {
+        let mut driver =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("awaits-boundary-missing"));
+        let input = prompt_input("phase lost");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+        {
+            let mut authority = driver.dsl.lock();
+            let mut state = authority.state().clone();
+            state.input_phases.remove(&input_id.to_string());
+            *authority = super::recover_ingress_dsl_authority(state);
+        }
+        let error = driver
+            .run_input_awaits_boundary()
+            .expect_err("a missing generated phase is not an answer");
+        assert!(
+            matches!(error, RuntimeDriverError::Internal(ref reason) if reason.contains(&input_id.to_string())),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]

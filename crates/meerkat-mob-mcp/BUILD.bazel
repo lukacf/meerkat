@@ -47,6 +47,7 @@ filegroup(
 exports_files(
 
     [
+        "tests/support/commit_gate.rs",
         "tests/support/mod.rs",
     ],
 
@@ -270,6 +271,7 @@ rust_test(
     ],
     srcs = [
         "tests/council_relink.rs",
+        "tests/support/commit_gate.rs",
         "tests/support/mod.rs",
     ],
     visibility = ["//visibility:public"],
@@ -333,6 +335,7 @@ rust_test(
     ],
     srcs = [
         "tests/fork_off_surface.rs",
+        "tests/support/commit_gate.rs",
         "tests/support/mod.rs",
     ],
     visibility = ["//visibility:public"],
@@ -396,6 +399,7 @@ rust_test(
     ],
     srcs = [
         "tests/fork_relink.rs",
+        "tests/support/commit_gate.rs",
         "tests/support/mod.rs",
     ],
     visibility = ["//visibility:public"],
@@ -458,6 +462,7 @@ rust_test(
         "src/public_mcp.rs",
     ],
     srcs = [
+        "tests/support/commit_gate.rs",
         "tests/support/mod.rs",
         "tests/temporary_council.rs",
     ],

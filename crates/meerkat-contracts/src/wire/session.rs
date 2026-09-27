@@ -1301,6 +1301,10 @@ impl TranscriptRewriteMessage {
                     blocks,
                     stop_reason: stop_reason.map(Into::into),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+                    // Occurrence identity is minted only by the agent loop;
+                    // rewrite ingress never accepts one (an echoed history
+                    // key is ignored by serde).
+                    assistant_message_id: None,
                     created_at: transcript_message_timestamp(created_at)?,
                 }))
             }
@@ -1500,6 +1504,28 @@ pub enum WireSessionMessage {
         interaction_id: Option<InteractionId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<RunId>,
+        /// Session-scoped occurrence id of this assistant message, equal to
+        /// the `assistant_message_id` its live events carried. Join live rows
+        /// to history by this id; it implies nothing about position. Absent
+        /// on messages committed before 0.8.45, on rows the realtime
+        /// transcript materializer commits (those pair through
+        /// `realtime_origin`), and on rows a rewrite or fork edit replaced.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<meerkat_core::AssistantMessageId>,
+        /// Realtime provenance of a row the realtime transcript materializer
+        /// committed, copied verbatim from the canonical row (the same
+        /// `RealtimeMessageOrigin` shape run events carry in `identity`).
+        /// Its `provider_item_ids`
+        /// are the provider item ids the live transport's realtime
+        /// observations carry (`provider_item_id` on
+        /// `assistant_text_delta`, `assistant_transcript_delta`,
+        /// `assistant_transcript_final` and `assistant_transcript_truncated`;
+        /// `item_id` on `assistant_audio_chunk` and on `realtime_transcript`
+        /// events), so a console pairs a realtime row with its live rendering
+        /// by provider item id. Absent on every other row, including rows a
+        /// rewrite replaced.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        realtime_origin: Option<meerkat_core::types::RealtimeMessageOrigin>,
         created_at: String,
     },
     #[serde(rename = "tool_results")]
@@ -1568,6 +1594,8 @@ impl From<Message> for WireSessionMessage {
                 stop_reason: message.stop_reason.map(Into::into),
                 interaction_id: message.identity.interaction_id,
                 run_id: message.identity.run_id,
+                assistant_message_id: message.assistant_message_id,
+                realtime_origin: message.identity.realtime_origin,
                 created_at: message.created_at.to_rfc3339(),
             },
             Message::ToolResults {
@@ -1719,6 +1747,164 @@ mod tests {
     use super::*;
     use meerkat_core::time_compat::SystemTime;
     use meerkat_core::{BlockAssistantMessage, Message, SystemMessage, UserMessage};
+
+    #[test]
+    fn history_projection_carries_assistant_message_id_and_rewrite_ignores_it() {
+        let id: meerkat_core::AssistantMessageId =
+            serde_json::from_value(serde_json::json!("0190f5c2-4a1e-7c3d-8e2f-00000000ee01"))
+                .unwrap();
+        let mut assistant = BlockAssistantMessage::new(
+            vec![meerkat_core::AssistantBlock::Text {
+                text: "answer".to_string(),
+                meta: None,
+            }],
+            meerkat_core::StopReason::EndTurn,
+        );
+        assistant.assistant_message_id = Some(id);
+        let wire = WireSessionMessage::from(Message::BlockAssistant(assistant.clone()));
+        let encoded = serde_json::to_value(&wire).unwrap();
+        assert_eq!(encoded["assistant_message_id"], id.to_string());
+        let decoded: WireSessionMessage = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(matches!(
+            decoded,
+            WireSessionMessage::BlockAssistant {
+                assistant_message_id: Some(decoded_id),
+                ..
+            } if decoded_id == id
+        ));
+
+        // A row without an id keeps the 0.8.44 wire shape exactly.
+        assistant.assistant_message_id = None;
+        let legacy =
+            serde_json::to_value(WireSessionMessage::from(Message::BlockAssistant(assistant)))
+                .unwrap();
+        assert!(legacy.get("assistant_message_id").is_none());
+
+        // A client that echoes a history row back into a rewrite cannot
+        // author occurrence identity: the key is ignored.
+        let echoed: TranscriptRewriteMessage = serde_json::from_value(encoded).unwrap();
+        let Message::BlockAssistant(rewritten) = echoed.into_core().unwrap() else {
+            panic!("block assistant rewrite row");
+        };
+        assert_eq!(rewritten.assistant_message_id, None);
+    }
+
+    #[test]
+    fn history_projection_carries_realtime_origin_for_realtime_rows_only() {
+        let session_id = SessionId::new();
+        // A canonical realtime materializer row as the session store holds
+        // it: realtime provenance and no assistant message id.
+        let core_origin = serde_json::json!({
+            "session_id": session_id.to_string(),
+            "channel_id": "channel-7",
+            "canonical_row_sequence": 3,
+            "context_observation_id": {
+                "namespace": "runtime",
+                "channel_id": "channel-7",
+                "nonce": "0190f5c2-4a1e-7c3d-8e2f-00000000ee02"
+            },
+            "provider_item_ids": ["item_a", "item_b"]
+        });
+        let core_row = serde_json::json!({
+            "role": "block_assistant",
+            "blocks": [{"block_type": "transcript", "data": {"text": "spoken", "source": "spoken"}}],
+            "stop_reason": "end_turn",
+            "identity": {"realtime_origin": core_origin},
+            "created_at": "2026-09-27T00:00:00Z"
+        });
+        let message: Message = serde_json::from_value(core_row).unwrap();
+        let Message::BlockAssistant(assistant) = &message else {
+            panic!("block assistant row");
+        };
+        let origin = assistant.identity.realtime_origin.clone().unwrap();
+
+        let wire = WireSessionMessage::from(message);
+        let encoded = serde_json::to_value(&wire).unwrap();
+        assert_eq!(
+            encoded["realtime_origin"], core_origin,
+            "the wire copies the canonical row's realtime provenance verbatim"
+        );
+        assert!(encoded.get("assistant_message_id").is_none());
+
+        let decoded: WireSessionMessage = serde_json::from_value(encoded.clone()).unwrap();
+        let WireSessionMessage::BlockAssistant {
+            realtime_origin: Some(decoded_origin),
+            assistant_message_id: None,
+            ..
+        } = &decoded
+        else {
+            panic!("realtime origin survives the wire round-trip: {decoded:?}");
+        };
+        assert_eq!(decoded_origin, &origin);
+        assert_eq!(decoded_origin.provider_item_ids(), ["item_a", "item_b"]);
+        assert!(decoded_origin.matches(
+            &session_id,
+            &meerkat_core::LiveChannelId::new("channel-7"),
+            3
+        ));
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded);
+
+        // A row without realtime provenance keeps the 0.8.44 wire shape.
+        let ordinary = BlockAssistantMessage::new(
+            vec![meerkat_core::AssistantBlock::Text {
+                text: "answer".to_string(),
+                meta: None,
+            }],
+            meerkat_core::StopReason::EndTurn,
+        );
+        let legacy =
+            serde_json::to_value(WireSessionMessage::from(Message::BlockAssistant(ordinary)))
+                .unwrap();
+        assert!(legacy.get("realtime_origin").is_none());
+
+        // A pre-0.8.45 page without the key, or with an explicit null,
+        // still decodes, with no provenance.
+        for legacy_row in [
+            serde_json::json!({
+                "role": "block_assistant",
+                "blocks": [{"block_type": "text", "data": {"text": "old"}}],
+                "stop_reason": "end_turn",
+                "created_at": "2026-04-27T00:00:00Z"
+            }),
+            serde_json::json!({
+                "role": "block_assistant",
+                "blocks": [],
+                "realtime_origin": null,
+                "created_at": "2026-04-27T00:00:00Z"
+            }),
+        ] {
+            let decoded: WireSessionMessage = serde_json::from_value(legacy_row).unwrap();
+            assert!(matches!(
+                decoded,
+                WireSessionMessage::BlockAssistant {
+                    realtime_origin: None,
+                    assistant_message_id: None,
+                    ..
+                }
+            ));
+        }
+
+        // A realtime origin recorded before provider item ids existed omits
+        // the empty list.
+        let early_row = serde_json::json!({
+            "role": "block_assistant",
+            "blocks": [],
+            "identity": {"realtime_origin": {
+                "session_id": session_id.to_string(),
+                "channel_id": "channel-7",
+                "canonical_row_sequence": 1
+            }},
+            "created_at": "2026-04-27T00:00:00Z"
+        });
+        let early: Message = serde_json::from_value(early_row).unwrap();
+        let encoded = serde_json::to_value(WireSessionMessage::from(early)).unwrap();
+        assert!(
+            encoded["realtime_origin"]
+                .get("provider_item_ids")
+                .is_none()
+        );
+        assert_eq!(encoded["realtime_origin"]["canonical_row_sequence"], 1);
+    }
 
     #[test]
     fn test_fork_session_params_roundtrip_typed_replacement() {
@@ -2379,6 +2565,8 @@ mod tests {
                     interaction_id: None,
                     run_id: None,
                     created_at: "2026-04-27T00:00:03Z".to_string(),
+                    assistant_message_id: None,
+                    realtime_origin: None,
                 },
                 WireSessionMessage::ToolResults {
                     results: vec![WireToolResult {

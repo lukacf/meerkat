@@ -807,6 +807,106 @@ describe("Typed Events", () => {
     }
   });
 
+  it("should parse the canonical retrying schedule and project flat fields", () => {
+    const retry = {
+      failure: { provider: "anthropic", kind: "rate_limited", message: "slow down" },
+      plan: {
+        attempt: 2,
+        max_retries: 3,
+        computed_delay_ms: 1500,
+        selected_delay_ms: 2000,
+        rate_limit_floor_applied: false,
+        budget_capped: false,
+      },
+    };
+    const event = parseEvent({
+      type: "retrying",
+      retry,
+      assistant_message_id: "0190f5c2-4a1e-7c3d-8e2f-000000000001",
+    });
+    assert.equal(event.type, "retrying");
+    if (event.type === "retrying") {
+      assert.equal(event.attempt, 2);
+      assert.equal(event.maxAttempts, 3);
+      assert.equal(event.error, "slow down");
+      assert.equal(event.delayMs, 2000);
+      assert.deepEqual(event.retry, retry);
+      assert.equal(event.assistantMessageId, "0190f5c2-4a1e-7c3d-8e2f-000000000001");
+    }
+  });
+
+  it("carries the optional assistantMessageId on message-scoped events", () => {
+    const id = "0190f5c2-4a1e-7c3d-8e2f-00000000a001";
+    for (const raw of [
+      { type: "turn_started", turn_number: 0 },
+      { type: "text_delta", delta: "he" },
+      { type: "text_complete", content: "hello" },
+      { type: "turn_completed", stop_reason: "end_turn" },
+      {
+        type: "run_completed",
+        session_id: "s1",
+        result: "hello",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    ]) {
+      const legacy = parseEvent({ ...raw });
+      assert.equal(legacy.type, raw.type);
+      assert.equal(legacy.assistantMessageId, undefined, raw.type);
+      const stamped = parseEvent({ ...raw, assistant_message_id: id });
+      assert.equal(stamped.type, raw.type);
+      assert.equal(stamped.assistantMessageId, id, raw.type);
+      const malformed = parseEvent({ ...raw, assistant_message_id: 7 });
+      assert.equal(malformed.type, "malformed_event", raw.type);
+    }
+  });
+
+  it("carries assistantMessageId on block_assistant history rows", () => {
+    const row = {
+      role: "block_assistant",
+      blocks: [{ block_type: "text", data: { text: "same" } }],
+      stop_reason: "end_turn",
+      created_at: "2026-05-26T10:00:01Z",
+    };
+    const stamped = MeerkatClient.parseSessionMessage({
+      ...row,
+      assistant_message_id: "0190f5c2-4a1e-7c3d-8e2f-00000000a001",
+    });
+    assert.equal(stamped.assistantMessageId, "0190f5c2-4a1e-7c3d-8e2f-00000000a001");
+    const legacy = MeerkatClient.parseSessionMessage(row);
+    assert.equal(legacy.assistantMessageId, undefined);
+  });
+
+  it("carries realtimeOrigin verbatim on realtime block_assistant history rows", () => {
+    const origin = {
+      session_id: "0190f5c2-4a1e-7c3d-8e2f-00000000b001",
+      channel_id: "channel-7",
+      canonical_row_sequence: 3,
+      provider_item_ids: ["item_a", "item_b"],
+    };
+    const row = {
+      role: "block_assistant",
+      blocks: [{ block_type: "transcript", data: { text: "spoken", source: { kind: "spoken" } } }],
+      stop_reason: "end_turn",
+      created_at: "2026-05-26T10:00:01Z",
+    };
+    const realtime = MeerkatClient.parseSessionMessage({ ...row, realtime_origin: origin });
+    assert.deepEqual(realtime.realtimeOrigin, origin);
+    assert.equal(realtime.assistantMessageId, undefined);
+    assert.equal(MeerkatClient.parseSessionMessage(row).realtimeOrigin, undefined);
+    assert.equal(
+      MeerkatClient.parseSessionMessage({ ...row, realtime_origin: null }).realtimeOrigin,
+      undefined,
+    );
+    assert.throws(
+      () =>
+        MeerkatClient.parseSessionMessage({
+          ...row,
+          realtime_origin: { ...origin, provider_item_ids: [7] },
+        }),
+      /provider_item_ids/,
+    );
+  });
+
   it("should parse skills_resolved with typed skill identities", () => {
     const sourceUuid = "00000000-0000-4b11-8111-000000000001";
     const event = parseEvent({

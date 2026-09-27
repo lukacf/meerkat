@@ -109,6 +109,9 @@ them.
 
 ### Fixed
 
+- Compiled component-owned skill and capability registrations survive optimized
+  WASM archive linking, preserving canonical skill resolution across repeated
+  runtime initialization.
 - Mob Stop and Shutdown observe ephemeral session visibility without waiting
   for a busy agent to export its transcript. Cancellation requests no longer
   queue behind those exports; terminal stop still waits for acknowledged drain.

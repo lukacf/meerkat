@@ -298,6 +298,81 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       JSON.stringify(result.events));
     });
 
+    await scenario("embedded owner registrations survive optimized WASM and repeated bootstraps", async ({ page, requests }) => {
+      const names = [
+        "task-workflow", "builtin-utilities-workflow", "skill-discovery-workflow", "multi-agent-comms", "mob-communication",
+        "meerkat-platform", "meerkat-cli-reference", "hook-authoring",
+      ];
+      const result = await page.evaluate(async (names) => {
+        const runs = [];
+        for (let iteration = 0; iteration < 2; iteration += 1) {
+          if (iteration > 0) {
+            await window.runtime.destroy();
+            window.runtime = await window.sdk.MeerkatRuntime.init(window.wasm, {
+              anthropicApiKey: "synthetic-not-a-key", anthropicBaseUrl: `${location.origin}/anthropic`, model: window.model,
+              mobpackTrust: { policy: "permissive" },
+            });
+          }
+          const session = await window.runtime.createSession({ model: window.model, commsName: `embedded-owner-${iteration}` });
+          const turn = await session.turn("Resolve every linked portable skill owner.", { skillReferences: names.map(skill_name => ({
+            source_uuid: "00000000-0000-4b11-8111-000000000001", skill_name,
+          })) });
+          const events = session.pollEvents();
+          let unknownSkill;
+          try {
+            await session.turn("Must refuse an unregistered builtin.", { skillReferences: [{
+              source_uuid: "00000000-0000-4b11-8111-000000000001", skill_name: "unregistered-browser-skill",
+            }] });
+          } catch (error) { unknownSkill = window.errorEnvelope(error); }
+          const unavailableSkills = [];
+          for (const skill_name of ["schedule-workflow", "workgraph-workflow"]) {
+            try {
+              await session.turn("Must refuse an unavailable skill capability.", { skillReferences: [{
+                source_uuid: "00000000-0000-4b11-8111-000000000001", skill_name,
+              }] });
+              unavailableSkills.push({ skill_name, accepted: true });
+            } catch (error) { unavailableSkills.push({ skill_name, error: window.errorEnvelope(error) }); }
+          }
+          runs.push({ turn, events, unknownSkill, unavailableSkills });
+        }
+        return runs;
+      }, names);
+      assert.equal(requests.length, 2);
+      for (const [index, run] of result.entries()) {
+        assert.equal(run.turn.text, `BROWSER_RUNTIME_OK_${index + 1}`);
+        assert.match(run.unknownSkill?.message ?? "", /skill not found: .*\/unregistered-browser-skill/);
+        assert.deepEqual(run.unavailableSkills.map(result => result.skill_name), ["schedule-workflow", "workgraph-workflow"]);
+        for (const [skillIndex, unavailable] of run.unavailableSkills.entries()) {
+          const capability = ["schedule", "work_graph"][skillIndex];
+          assert.match(unavailable.error?.message ?? "", new RegExp(`requires unavailable capability: ${capability}`),
+            `${unavailable.skill_name} must be registered and reach the canonical capability check`);
+        }
+        const events = run.events.filter(event => event.type === "skills_resolved");
+        assert.equal(events.length, 1, "one canonical resolution event per turn");
+        assert.deepEqual(events[0].skills.map(skill => skill.skill_name).sort(), [...names].sort());
+        assert.ok(events[0].skills.every(skill => skill.source_uuid === "00000000-0000-4b11-8111-000000000001"));
+        const content = JSON.stringify(requests[index].messages);
+        for (const body of [
+          "Use builtin task tools for lightweight project work tracking",
+          "Use builtin utility tools for local, concrete actions",
+          "Use skills when the available skill inventory contains domain guidance",
+          "Use comms for live collaboration between agents",
+          "You are an agent in a collaborative mob",
+          "Meerkat Platform Guide",
+          "Meerkat CLI Reference",
+          "Use hooks for runtime observation and policy decisions at typed lifecycle",
+        ]) assert.ok(content.includes(body), `missing canonical skill body: ${body}`);
+      }
+      console.log("EMBEDDED_REGISTRATION_OBSERVATION", JSON.stringify({
+        providerRequests: requests.length,
+        runs: result.map(run => ({
+          resolvedSkills: run.events.find(event => event.type === "skills_resolved").skills,
+          unavailableSkills: run.unavailableSkills,
+          unknownSkill: run.unknownSkill,
+        })),
+      }));
+    });
+
     await scenario("external typed turn skills refuse with profile remediation before provider admission", async ({ page, requests }) => {
       const result = await page.evaluate(async () => {
         const session = await window.runtime.createSession({ model: window.model });

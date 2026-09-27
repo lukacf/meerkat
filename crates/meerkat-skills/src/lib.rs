@@ -27,6 +27,11 @@ pub use resolve::{resolve_repositories, resolve_repositories_with_roots};
 pub use source::FilesystemSkillSource;
 pub use source::{CompositeSkillSource, EmbeddedSkillSource, InMemorySkillSource, NamedSource};
 
+/// Retain this owner's capability registration in optimized archive linking.
+#[doc(hidden)]
+#[inline(never)]
+pub fn link_embedded_registrations() {}
+
 pub const SKILLS_CAPABILITY_DISABLED_DESCRIPTION: &str = "config.skills.enabled is false";
 
 pub fn skills_capability_enabled(config: &meerkat_core::Config) -> bool {

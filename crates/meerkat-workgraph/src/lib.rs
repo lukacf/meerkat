@@ -103,6 +103,12 @@ pub const fn workgraph_capability_policy() -> meerkat_capabilities::FeatureCapab
     WORKGRAPH_CAPABILITY_POLICY
 }
 
+// Keep this anchor in the root module with the WorkGraph inventory
+// declarations so optimized linking retains their archive member.
+#[doc(hidden)]
+#[inline(never)]
+pub fn link_embedded_registrations() {}
+
 inventory::submit! {
     meerkat_capabilities::CapabilityRegistration {
         id: meerkat_capabilities::CapabilityId::WorkGraph,

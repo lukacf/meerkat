@@ -481,13 +481,30 @@ pub use meerkat_store::SqliteSessionStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_tools::{DispatchError, ToolDispatcher, ToolValidationError};
 
-// Cross-surface durable SkillKeys require every skills-enabled facade to link
-// feature-owned embedded declarations, even when the corresponding tool
-// surface is disabled. The declaration and body remain owned by
-// `meerkat-comms`; this static is only the mechanical aggregation edge.
+// Retain the canonical capability and skill declarations of compiled owners,
+// even when their tool surface is disabled. Declarations and capability policy
+// remain owned by their component crates; these are mechanical linking edges.
+// Each anchor must remain out of line so optimized WASM retains its archive
+// member and inventory constructors even when all other API uses are inlined.
+#[used]
+static MEERKAT_TOOLS_REGISTRATIONS_LINK: fn() = meerkat_tools::link_embedded_registrations;
+
+#[used]
+static MEERKAT_HOOKS_REGISTRATIONS_LINK: fn() = meerkat_hooks::link_embedded_registrations;
+
+#[used]
+static MEERKAT_SCHEDULE_REGISTRATIONS_LINK: fn() = meerkat_schedule::link_embedded_registrations;
+
+#[used]
+static MEERKAT_WORKGRAPH_REGISTRATIONS_LINK: fn() = meerkat_workgraph::link_embedded_registrations;
+
 #[cfg(feature = "skills")]
 #[used]
-static MEERKAT_COMMS_EMBEDDED_SKILL_LINK: fn() = meerkat_comms::link_embedded_skill_registrations;
+static MEERKAT_SKILLS_REGISTRATIONS_LINK: fn() = meerkat_skills::link_embedded_registrations;
+
+#[cfg(any(feature = "comms", feature = "skills"))]
+#[used]
+static MEERKAT_COMMS_REGISTRATIONS_LINK: fn() = meerkat_comms::link_embedded_skill_registrations;
 
 #[cfg(feature = "skills")]
 inventory::submit! {

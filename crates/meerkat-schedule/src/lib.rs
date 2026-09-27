@@ -94,6 +94,12 @@ pub const fn schedule_capability_policy() -> meerkat_capabilities::FeatureCapabi
     SCHEDULE_CAPABILITY_POLICY
 }
 
+// Keep this anchor in the root module with the schedule inventory
+// declarations so optimized linking retains their archive member.
+#[doc(hidden)]
+#[inline(never)]
+pub fn link_embedded_registrations() {}
+
 inventory::submit! {
     meerkat_capabilities::CapabilityRegistration {
         id: meerkat_capabilities::CapabilityId::Schedule,

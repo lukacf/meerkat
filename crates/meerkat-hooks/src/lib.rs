@@ -10,6 +10,12 @@ mod tokio {
     pub use tokio_with_wasm::alias::*;
 }
 
+// Keep this anchor in the root module with the hook inventory
+// declarations so optimized linking retains their archive member.
+#[doc(hidden)]
+#[inline(never)]
+pub fn link_embedded_registrations() {}
+
 // Skill registration
 inventory::submit! {
     meerkat_skills::SkillRegistration {

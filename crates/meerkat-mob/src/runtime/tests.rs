@@ -16665,6 +16665,91 @@ async fn test_stopped_retire_detaches_mob_owned_session_ingress() {
 }
 
 #[tokio::test]
+async fn test_stopped_cold_restart_accepts_first_member_retirement() {
+    assert_stopped_cold_restart_accepts_first_cleanup(false).await;
+}
+
+#[tokio::test]
+async fn test_stopped_cold_restart_accepts_destroy_before_member_retirement() {
+    assert_stopped_cold_restart_accepts_first_cleanup(true).await;
+}
+
+async fn assert_stopped_cold_restart_accepts_first_cleanup(destroy: bool) {
+    let definition = with_unique_mob_id(sample_definition(), "stopped-cold-first-cleanup");
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob before stopped cold cleanup");
+    let identity = AgentIdentity::from("stopped-cold-worker");
+    let mut spec = SpawnMemberSpec::new("worker", identity.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let session = handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn stopped cold worker")
+        .bridge_session_id()
+        .cloned()
+        .expect("local worker session");
+    handle.shutdown().await.expect("persist stopped lifecycle");
+    assert!(
+        events
+            .replay_all()
+            .await
+            .expect("replay before first cleanup")
+            .iter()
+            .all(|event| !matches!(event.kind, MobEventKind::MemberRetirementStarted { .. })),
+        "this fixture must not have pending retirement authority before cold recovery"
+    );
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("reconstruct stopped mob without semantic resume");
+    assert_eq!(resumed.status().await.unwrap(), MobState::Stopped);
+    if destroy {
+        resumed.destroy().await.expect("destroy cold stopped mob");
+        assert_eq!(resumed.status().await.unwrap(), MobState::Destroyed);
+    } else {
+        resumed
+            .retire(identity.clone())
+            .await
+            .expect("retire first member after stopped cold restart");
+        assert_eq!(resumed.status().await.unwrap(), MobState::Stopped);
+        assert!(resumed.get_member(&identity).await.unwrap().is_none());
+        assert_eq!(
+            events
+                .replay_all()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(
+                    &event.kind,
+                    MobEventKind::MemberRetired { agent_identity, .. } if agent_identity == &identity
+                ))
+                .count(),
+            1
+        );
+    }
+    assert!(
+        !adapter
+            .archive_runtime_residue_present(&session)
+            .await
+            .unwrap(),
+        "completed cleanup must leave no member runtime residue"
+    );
+}
+
+#[tokio::test]
 async fn test_stopped_wired_member_retire_converges_topology_and_trust() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);
@@ -40505,6 +40590,11 @@ async fn test_retire_session_owned_member_completes_disposal_on_archive_authorit
         !adapter.contains_session(&session_id).await,
         "idempotent host-owned disposal retry must leave the runtime unregistered"
     );
+    assert_eq!(
+        service.archive_call_count(&session_id).await,
+        0,
+        "host-owned disposal and its absent-runtime retry must not call the archive authority"
+    );
 
     assert_eq!(
         meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
@@ -40513,6 +40603,40 @@ async fn test_retire_session_owned_member_completes_disposal_on_archive_authorit
         Some(meerkat_runtime::RuntimeState::Retired),
         "the runtime lifecycle must be durably retired even though the archive authority had no record"
     );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_retire_absent_unowned_session_preserves_host_disposal_without_archive() {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let provisioner =
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()), None);
+    let session_id = SessionId::new();
+    let member = MemberRef::Session(session_id.clone());
+    assert!(
+        !service
+            .session_known_to_archive_authority(&session_id)
+            .await
+            .unwrap(),
+        "the fixture must have no locally owned durable session"
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            provisioner.retire_member(&member).await.unwrap(),
+            crate::machines::mob_machine::MemberSessionDisposal::RuntimeReleasedOnlyHostOwned,
+            "absence must preserve the archive authority's unowned verdict across retries"
+        );
+        assert_eq!(service.archive_call_count(&session_id).await, 0);
+        assert!(!adapter.contains_session(&session_id).await);
+        assert!(
+            !service
+                .session_known_to_archive_authority(&session_id)
+                .await
+                .unwrap(),
+            "cleanup must not create a new local archive marker for an unowned session"
+        );
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -64459,6 +64583,15 @@ async fn test_shutdown_skips_interrupt_for_host_owned_runtime_release_anchor() {
 
 #[tokio::test]
 async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
+    assert_retire_consumer_refusal_survives_cold_restart(false).await;
+}
+
+#[tokio::test]
+async fn test_retire_consumer_refusal_running_cold_restart_preserves_detached_binding() {
+    assert_retire_consumer_refusal_survives_cold_restart(true).await;
+}
+
+async fn assert_retire_consumer_refusal_survives_cold_restart(crash_restart: bool) {
     let service = Arc::new(MockSessionService::new());
     let adapter = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
@@ -64498,9 +64631,12 @@ async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
     );
     let after_refusal = events.replay_all().await.expect("replay refusal events");
     assert!(
-        after_refusal
-            .iter()
-            .any(|event| matches!(event.kind, MobEventKind::MemberRetirementStarted { .. }))
+        after_refusal.iter().any(|event| matches!(
+            &event.kind,
+            MobEventKind::MemberRetirementStarted { releasing: Some(releasing), .. }
+                if releasing == &session_id
+        )),
+        "the durable retirement must release this exact ordinary member binding"
     );
     assert!(
         after_refusal
@@ -64508,10 +64644,16 @@ async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
             .all(|event| !matches!(event.kind, MobEventKind::MemberRetired { .. }))
     );
 
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown refused actor before cold restart");
+    let expected_phase = if crash_restart {
+        crash_stop_and_release_routes(handle).await;
+        MobState::Running
+    } else {
+        handle
+            .shutdown()
+            .await
+            .expect("shutdown refused actor before cold restart");
+        MobState::Stopped
+    };
 
     // Repair the external runtime reachability that caused the first refusal.
     // Resume must derive RETIRE retry authority solely from the durable start
@@ -64542,6 +64684,20 @@ async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
             .any(|pending| pending.0 == session_id.to_string()),
         "cold replay must restore the exact pending runtime-retire correlation"
     );
+    assert!(
+        !recovered
+            .member_session_bindings
+            .contains_key(&crate::machines::mob_machine::AgentIdentity::from("w-1")),
+        "cleanup recovery must not restore the ordinary binding released by the durable retirement"
+    );
+    assert_eq!(
+        resumed
+            .status()
+            .await
+            .expect("query initial recovered lifecycle"),
+        expected_phase,
+        "cleanup delivery recovery must preserve the durable lifecycle phase"
+    );
 
     resumed
         .retire(AgentIdentity::from("w-1"))
@@ -64567,8 +64723,8 @@ async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
 
     assert_eq!(
         resumed.status().await.expect("query recovered lifecycle"),
-        MobState::Stopped,
-        "graceful pre-restart shutdown is durable; retirement retry must not implicitly resume the mob"
+        expected_phase,
+        "retirement retry must preserve the durable lifecycle phase"
     );
 }
 

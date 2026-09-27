@@ -3700,10 +3700,11 @@ impl MemberSessionDisposalArc {
             // NotFound-with-registered-runtime escalation below stays fully
             // fail-closed for sessions the authority DOES own (a mid-archive
             // record loss is a genuine split-state, never tolerated).
-            if !archive_authority_owned
-                && let Some(adapter) = &self.runtime_adapter
-                && adapter.contains_session(session_id).await
-            {
+            // Ownership is unchanged when a prior cleanup already removed
+            // the registration, or a broken member has no remaining runtime.
+            // Keep the same disposal classification without asking an
+            // authority that does not own the record to create an archive.
+            if !archive_authority_owned && self.runtime_adapter.is_some() {
                 if recovered_ops_rebind.is_some() {
                     return Err(Self::runtime_archive_error(format!(
                         "durability-reload operation handoff for {session_id} cannot be downgraded to host-owned disposal"

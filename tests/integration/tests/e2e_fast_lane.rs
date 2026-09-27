@@ -27,6 +27,9 @@ mod durable_in_turn_steer;
 #[path = "e2e_fast/mixed_temporary_council.rs"]
 mod mixed_temporary_council;
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "e2e_fast/mob_fork_off_build_parity.rs"]
+mod mob_fork_off_build_parity;
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "e2e_fast/mob_fork_off_detached.rs"]
 mod mob_fork_off_detached;
 #[path = "e2e_fast/multi_host_bind.rs"]

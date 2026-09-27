@@ -571,6 +571,95 @@ impl WorkGraphNamespaceGrant {
     }
 }
 
+/// Typed lineage of a fork-derived member build.
+///
+/// The mob runtime sets this when it seats a member whose transcript is a
+/// durable fork of another member's session together with that member's build
+/// inheritance: a `fork_off` child; a child of `MobHandle::fork_member`,
+/// `MobHandle::fork_member_then_run_bounded` or
+/// `MobHandle::fork_member_then_run_detached`; or a local temporary-council
+/// participant forked from its convener's member. It is not set for
+/// live-delegation workers (`MobHandle::fork_member_at_turn_boundary`),
+/// host-owned council participants, respawn successors of a fork child, fresh
+/// spawns, delegate helpers, or resumes of ordinary members.
+///
+/// A host build callback uses it to resolve the child exactly as its source
+/// (the same grants, tools, instructions and skills), which is also what makes
+/// the source's cached request prefix reusable by the child. The child keeps its
+/// own roster, comms and runtime identity; this names where it came from.
+///
+/// The mob runtime persists it with the child's roster entry, so every later
+/// build of the child (warm revival, explicit resume, process-restart restore)
+/// carries the same value as the child's first build.
+///
+/// # Serialized shape
+///
+/// A host that receives the build over JSON (MobKit's `callback/build_agent`,
+/// once the host forwards it) sees this object:
+///
+/// ```json
+/// {
+///   "source_member": {
+///     "mob_id": "home",
+///     "role": "domain",
+///     "member": "domain-calendar"
+///   },
+///   "source_session_id": "0192f5c4-7a3e-7d21-9b0e-4c1d2e3f4a5b"
+/// }
+/// ```
+///
+/// - `source_member` is the source's [`crate::MobMemberBinding`]: the source
+///   member's mob id, role (profile name) and member id, exactly as the mob
+///   roster names it. In a MobKit mob the member id is MobKit's encoded roster
+///   id; MobKit's own durable identity (`domain:calendar`) is not part of it.
+/// - `source_session_id` is the source session (a UUID string) the child's
+///   transcript was forked from.
+///
+/// The type is `#[non_exhaustive]`: later versions may add fields, and a
+/// reader must ignore fields it does not know (this type's own
+/// deserialization does).
+///
+/// ```
+/// # use meerkat_core::{ForkBuildSource, MobMemberBinding};
+/// # use meerkat_core::types::SessionId;
+/// let session_id = SessionId::parse("0192f5c4-7a3e-7d21-9b0e-4c1d2e3f4a5b").unwrap();
+/// let source = ForkBuildSource::new(
+///     MobMemberBinding {
+///         mob_id: "home".to_string(),
+///         role: "domain".to_string(),
+///         member: "domain-calendar".to_string(),
+///     },
+///     session_id,
+/// );
+/// assert_eq!(
+///     serde_json::to_value(&source).unwrap(),
+///     serde_json::json!({
+///         "source_member": {"mob_id": "home", "role": "domain", "member": "domain-calendar"},
+///         "source_session_id": "0192f5c4-7a3e-7d21-9b0e-4c1d2e3f4a5b"
+///     })
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub struct ForkBuildSource {
+    /// Durable mob-member identity of the member the child was forked from.
+    pub source_member: crate::MobMemberBinding,
+    /// The source member's session the child's transcript was forked from.
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub source_session_id: SessionId,
+}
+
+impl ForkBuildSource {
+    pub fn new(source_member: crate::MobMemberBinding, source_session_id: SessionId) -> Self {
+        Self {
+            source_member,
+            source_session_id,
+        }
+    }
+}
+
 /// Optional build-time options used by factory-backed session builders.
 #[derive(Clone)]
 pub struct SessionBuildOptions {
@@ -721,6 +810,25 @@ pub struct SessionBuildOptions {
     /// Uses `Value` rather than `Box<RawValue>` because `SessionBuildOptions`
     /// must be `Clone` and `Box<RawValue>` does not implement `Clone`.
     pub app_context: Option<serde_json::Value>,
+    /// Typed source of a fork-derived member build (see [`ForkBuildSource`]).
+    ///
+    /// Set only by the mob runtime, on the build that seats a durable fork
+    /// with its source's build inheritance and on every later rebuild of that
+    /// member (see [`ForkBuildSource`] for exactly which seatings); `None` for
+    /// every other build. Not consumed by the standard build pipeline: it is for
+    /// custom `SessionAgentBuilder` implementations (host build callbacks)
+    /// that resolve a member's tools and instructions by identity.
+    ///
+    /// Serialized (for a host that forwards the build as JSON) it is the
+    /// [`ForkBuildSource`] object, or absent:
+    ///
+    /// ```json
+    /// "fork_source": {
+    ///   "source_member": {"mob_id": "home", "role": "domain", "member": "domain-calendar"},
+    ///   "source_session_id": "0192f5c4-7a3e-7d21-9b0e-4c1d2e3f4a5b"
+    /// }
+    /// ```
+    pub fork_source: Option<ForkBuildSource>,
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
     pub additional_instructions: Option<Vec<String>>,
@@ -1514,6 +1622,7 @@ impl Default for SessionBuildOptions {
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             app_context: None,
+            fork_source: None,
             additional_instructions: None,
             initial_metadata_entries: BTreeMap::new(),
             initial_tool_filter: None,
@@ -1590,6 +1699,7 @@ impl std::fmt::Debug for SessionBuildOptions {
                 &self.max_inline_peer_notifications,
             )
             .field("app_context", &self.app_context.is_some())
+            .field("fork_source", &self.fork_source)
             .field("additional_instructions", &self.additional_instructions)
             .field("initial_metadata_entries", &self.initial_metadata_entries)
             .field("initial_tool_filter", &self.initial_tool_filter.is_some())

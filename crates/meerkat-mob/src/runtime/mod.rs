@@ -219,6 +219,7 @@ mod event_router;
 mod events;
 mod flow;
 pub mod flow_frame_engine;
+mod fork_build;
 pub mod forked_participant_routing;
 mod handle;
 mod identity_local_services;
@@ -386,6 +387,7 @@ pub use delivery_wait::{
 };
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};
+pub use fork_build::{ForkBuildInheritance, ForkOverlayOrigin};
 pub use forked_participant_routing::{
     AttachedForkedParticipantLease, AttachedForkedParticipantSpawn, ForkedParticipantCreateRequest,
 };

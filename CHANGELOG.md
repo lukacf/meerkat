@@ -37,6 +37,46 @@ them.
 
 ### Breaking
 
+- `meerkat_core::SessionBuildOptions` and `meerkat::AgentBuildConfig` gain the
+  public field `fork_source: Option<ForkBuildSource>`. Struct literals must
+  supply it (`None` outside the mob runtime, or use `..Default::default()` for
+  `SessionBuildOptions`). `AgentBuildConfig::apply_session_build_options` and
+  `to_session_build_options` carry it both ways, so a Rust
+  `SessionAgentBuilder` that wraps `FactoryAgentBuilder` receives it on
+  `CreateSessionRequest.build`. A JSON host build callback (MobKit's
+  `callback/build_agent`) sees it only once its host forwards the field; MobKit
+  does not forward it yet.
+- Behavior-only: a host's `SpawnMemberCustomizer` no longer runs on the
+  seating of a local temporary-council participant. The council now seats every
+  local participant with its source member's build inheritance (see Fixed), and
+  a `SpawnSource::AttachedForkedParticipant` spawn that carries one is a fork
+  seating, skipped like `SpawnSource::PersistedForkResume` already is. A
+  customizer can no longer replace or wrap such a participant's overlay, labels
+  or application context (MobKit's memory customizer bound the participant's
+  `memory` recorder to the participant's own identity; the participant now has
+  its source's).
+  Host-owned council participants, and attached spawns that carry no
+  inheritance, are customized as before.
+- Behavior-only: a host's `SpawnMemberCustomizer` no longer runs on the
+  process-restart restore or explicit resume of a fork-derived member (one
+  that carries `fork_source`: a `fork_off` child, a child of the
+  `MobHandle::fork_member*` forks, or a local temporary-council participant).
+  Such a rebuild repeats the member's first build, at which no customizer ran
+  either: its request is the member's own durable records (roster labels,
+  profile and model overrides, the application context and auth binding its
+  session persisted). The customizer used to be asked a `SpawnSource::Resume`
+  request for the member, and the rebuild applied the labels, application
+  context (restart restore only), auth binding, tool access policy,
+  inherited tool filter and profile and model overrides it returned, so a
+  customizer that rewrites those by identity changed the member's build at
+  every restart (for a host that resolves tools from labels and context:
+  other tools and a lost cached prefix). Instructions and the system prompt
+  it returned were never applied (no resume rebuild re-authors them), and its
+  overlay was already governed by the overlay rule (see Fixed). Where
+  the member's per-spawn overlay has to come from its own identity (see
+  Fixed), the customizer is still asked and only its `external_tools` is
+  used. Ordinary members are customized on resume as before.
+
 - Behaviour-only: `SessionServiceRuntimeExt::input_terminal_completion` now
   shares one classification of receipt-less rows with `input_terminal_receipt`. A
   terminal the machine reaches without staging a receipt - superseded or
@@ -52,6 +92,40 @@ them.
   need a wildcard arm and see the new variant there.
 
 ### Added
+
+- `meerkat_core::ForkBuildSource` (re-exported as `meerkat::ForkBuildSource`)
+  names the source of a fork-derived member build: `source_member`, the
+  source's durable `MobMemberBinding`, and `source_session_id`, the session its
+  transcript was forked from. It is `#[non_exhaustive]` and serializable (serde
+  and, with the `schema` feature, JSON Schema) so a host can forward it; build
+  it with `ForkBuildSource::new`. Serialized it is
+  `{"source_member": {"mob_id", "role", "member"}, "source_session_id": "<uuid>"}`
+  (see its rustdoc). The mob runtime sets it on the seating build, and on
+  every later rebuild, of a `fork_off` child, of a child of
+  `MobHandle::fork_member`, `fork_member_then_run_bounded` or
+  `fork_member_then_run_detached`, and of a local temporary-council
+  participant. It does not set it for live-delegation workers
+  (`MobHandle::fork_member_at_turn_boundary`), host-owned council
+  participants, respawn successors of a fork child, delegate helpers or
+  ordinary spawns.
+- `meerkat_mob::MemberSpawnedEvent` and `meerkat_mob::RosterEntry` gain
+  `fork_source` (`Option<ForkBuildSource>`) and `fork_overlay`
+  (the new `meerkat_mob::ForkOverlayOrigin`: `source`, `source_own` or
+  `caller`), which persist a fork-derived member's lineage and where its
+  seated per-spawn overlay came from: its source's overlay, which the source
+  had itself inherited from its own source (`source`) or which was the
+  source's own (`source_own`), or the fork caller's own (`caller`). Both are
+  omitted when absent or default, so non-fork members keep their wire shape,
+  and journals written before decode them as absent (`source`).
+- `meerkat_mob::ForkBuildInheritance`, the opaque build inputs a fork-derived
+  member inherits from its source (application context, application labels,
+  retained per-spawn tool overlay and the typed source), minted by the source's
+  own mob with `MobHandle::fork_build_inheritance(&source, &source_session_id)`.
+  `SpawnMemberSpec::with_fork_build_inheritance` attaches one to a
+  capability-attached participant spawn
+  (`MobHandle::spawn_attached_forked_participant`), which checks that it names
+  the capability's own source member and source session; every other spawn
+  refuses a spec that carries one.
 
 - `meerkat_mob::MobHandle::wait_bounded_work_for_identity_with_delivery_identity(&self, &AgentIdentity, &MobDeliveryIdentity, &BoundedResultSpec, meerkat_core::time_compat::Instant) -> Result<DeliveryTerminalWaitReport, DeliveryTerminalWaitError>`
   (feature `runtime-adapter`) waits for the terminal of one delivery that was
@@ -114,6 +188,62 @@ them.
   through a transition that stages no terminal-completion receipt.
 
 ### Fixed
+
+- A fork-derived member is built with its source member's build inputs. A
+  `fork_off` child, a child of the `MobHandle::fork_member`,
+  `fork_member_then_run_bounded` and `fork_member_then_run_detached` forks, and
+  a local temporary-council participant used to reach the host build callback
+  with bare mob labels, no application context, no source reference and no
+  per-spawn tool overlay, so a host that resolves tools and instructions by
+  identity built a generic member (HomeCore: a calendar fork with 92 of
+  calendar's 150 tools, without its calendar, display, picture-schedule or
+  `memory` tools). Its tools block also differed from the forker's, so the
+  child could not reuse the forker's cached prompt prefix. The child's build
+  now carries the source's application context (read from the source session's
+  durable build state), the source's application labels, the source's retained
+  per-spawn overlay (unless the fork caller put its own on the child's spawn
+  request), and `fork_source`. The source's standard mob member labels
+  (`mob_id`, `role`, `profile_name`, `meerkat_id`, `agent_identity`) are never
+  inherited: they name the source (MobKit keeps its durable identity in
+  `agent_identity`), so the child's roster entry, `MemberSpawned` event and
+  `list_members` labels carry none of them unless the child's own spawn request
+  states them, and its build stamps the child's own. The child keeps its own
+  roster, comms and runtime identity. Live-delegation workers
+  (`fork_member_at_turn_boundary`), host-owned council participants, delegate
+  helpers and ordinary spawns are unchanged.
+
+  Every rebuild of such a child (warm revival, explicit resume,
+  process-restart restore) keeps its `fork_source`, labels and application
+  context, and the host's spawn customizer cannot change them (see Breaking).
+  Its per-spawn overlay, which is process-local and not persisted, is chosen
+  as follows. A warm revival uses the overlay the child was built
+  with. An explicit resume or restart restore gives a child seated with its
+  source's overlay the overlay its source is restored with (sources are
+  restored before their forks), and a child seated with the fork caller's
+  overlay the overlay the host's spawn customizer supplies for the child's
+  own identity. A child whose source has been retired, respawned, repointed to
+  another session, or replaced by another member under the same identity no
+  longer follows it: every rebuild, in process or after a restart, uses the
+  customizer's overlay for the child's own identity (none without a
+  customizer), and a warning names the missing source. The rule is
+  transitive: a grandchild follows its source only while every in-mob
+  ancestor its overlay came through is still the build its fork was taken
+  from, so a grandchild of a retired source no longer keeps that source's
+  dispatcher across in-process revivals, and its warning also names the
+  ancestor whose source is missing. The ancestors counted are the ones the
+  overlay passed through when the grandchild was forked: a grandchild forked
+  from a child already rebuilt onto its own-identity overlay (`source_own`)
+  follows that child, whatever became of the child's source. A fork of a
+  child inherits the overlay the child was built with, so grandchildren (a
+  `fork_off` from a fork, or a council forking one) get the same tools, also
+  after a restart. A temporary-council participant's source is in another mob:
+  a revived participant keeps the overlay it was seated with, and a restored
+  one gets the customizer's overlay for its own identity.
+- A mob member rebuilt without an explicit application context (warm revival,
+  explicit resume, process-restart restore) keeps the context its session's
+  last build persisted. It was rebuilt with none, and the rebuild persisted
+  that `None` over the stored context, so a revived member lost its context
+  for good. An explicit context still replaces it.
 
 - The semver-breaks gate measures notes pending under `## [Unreleased]` after
   a release against that release's tag. With the workspace version still at

@@ -388,8 +388,8 @@ pub use meerkat_core::service::InitialTurnPolicy;
 pub use meerkat_core::service::StartTurnRuntimeSemantics;
 pub use meerkat_core::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus, BlobStore,
-    CreateSessionRequest, DeferredPromptPolicy, MobToolsBuildArgs, MobToolsFactory,
-    SessionBuildOptions, SessionControlError, SessionError, SessionHistoryPage,
+    CreateSessionRequest, DeferredPromptPolicy, ForkBuildSource, MobToolsBuildArgs,
+    MobToolsFactory, SessionBuildOptions, SessionControlError, SessionError, SessionHistoryPage,
     SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionSummary, SessionUsage,
     SessionView, StartTurnRequest, SystemPromptKey, SystemPromptUpdateError,
     SystemPromptUpdateRequest, SystemPromptUpdateResult, SystemPromptUpdateStatus,

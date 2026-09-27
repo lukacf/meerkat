@@ -448,7 +448,11 @@ them.
     runtime, and only a read that is evidence delivers
     `restart_interrupted`: a read that timed out behind the turn's own
     commit, or failed, keeps the watch going, for at most three such reads
-    in a row.
+    in a row. `meerkat_mob::DeliveryNotTerminalCause` gains
+    `EvidenceReadTimedOut` (the enum is `#[non_exhaustive]`): the delivery
+    waiter reports it when its final evidence read ran out and the pending
+    facts are from the read before, so they say nothing about the input now.
+    Before, that stale reading was reported as `DeadlineElapsed`.
   Records without the field (earlier releases, or hosts without a runtime)
   keep the transcript read.
 

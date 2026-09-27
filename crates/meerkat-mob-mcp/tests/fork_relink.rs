@@ -1990,6 +1990,130 @@ async fn a_last_ceiling_read_held_by_the_turns_own_commit_is_not_proof_of_absenc
     fixture.teardown().await;
 }
 
+/// The job turn's commit can take the child's session driver partway
+/// through the last receipt read at the ceiling: the read's first reading
+/// finds the input pending, then its final evidence read waits on the driver
+/// until its bound runs out. The waiter then reports that earlier pending
+/// reading as `EvidenceReadTimedOut`, which says nothing about the input now,
+/// so the re-link keeps watching and delivers the real reply once the commit
+/// lands. (Verification of the review MAJOR fix: that stale reading counted as
+/// proof of absence, with `commit_never_landed` from its stale phase.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_commit_taking_the_driver_mid_way_through_the_last_ceiling_read_is_not_proof_of_absence()
+{
+    let gate = TurnGate::new();
+    let turn_gate = Arc::clone(&gate);
+    let store = Arc::new(support::commit_gate::CommitGateRuntimeStore::new());
+    let fixture = CouncilFixture::new_with_runtime_store(
+        move |request| {
+            if support::last_user_text(request).contains(CHILD_TASK) {
+                ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+            } else {
+                ScriptedTurn::Text("noted".to_string())
+            }
+        },
+        store.clone(),
+    );
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-commit-mid-last-read";
+    let (child, child_session) = fork_held_child(
+        &fixture,
+        &handle,
+        &gate,
+        "commit-mid-last-read-child",
+        job_id,
+        &owner,
+    )
+    .await;
+    // The finished turn stops before its commit takes the driver (the child
+    // reads idle, the input pending); once released, its durable boundary
+    // write is held in the store with the driver taken.
+    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
+        .expect("the service derives its runtime");
+    let (commit_entered, release_commit) =
+        runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
+    store.arm(meerkat_runtime::LogicalRuntimeId::for_session(
+        &child_session,
+    ));
+    gate.open();
+    commit_entered
+        .await
+        .expect("the finished turn reaches its commit");
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    assert!(job.turn_delivery.is_some());
+
+    // A zero ceiling: the first idle reading decides, then the last read.
+    let (status_entered, release_status) =
+        meerkat_mob::MobHandle::arm_member_status_read_test_gate(child.clone());
+    let mut relink = tokio::spawn({
+        let service = fixture.state.session_service();
+        let delivery = relink_delivery(&fixture);
+        let mob_id = fixture.source_mob_id();
+        let handle = handle.clone();
+        let child = child.clone();
+        async move {
+            meerkat_mob_mcp::fork_relink::relink_child_within(
+                service,
+                &delivery,
+                &mob_id,
+                &handle,
+                &child,
+                &job,
+                Duration::ZERO,
+            )
+            .await
+        }
+    });
+    status_entered
+        .await
+        .expect("the re-link reads the child's status");
+    release_status
+        .send(())
+        .expect("the ceiling status read was held");
+    // The last read begins as the status read returns; its first reading
+    // finds the input pending. A few hundred milliseconds in (past the
+    // waiter's 100 ms evidence floor, well inside the read's 2 s bound) the
+    // commit takes the driver and holds it across the store write.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    release_commit
+        .send(())
+        .expect("the finished turn's commit was still held before the driver");
+    tokio::time::timeout(Duration::from_secs(30), store.entered())
+        .await
+        .expect("the commit reaches the held store write with the driver taken");
+    let settled_early = tokio::time::timeout(Duration::from_secs(4), &mut relink).await;
+    store.release();
+    assert!(
+        settled_early.is_err(),
+        "the re-link settled on a pending reading from before a final read that ran out: \
+         {settled_early:?}"
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(30), relink)
+            .await
+            .expect("the landed receipt settles the job")
+            .unwrap(),
+        ForkRelinkAction::Delivered
+    );
+    await_completion_record(&fixture, &owner, job_id).await;
+    assert_eq!(completion_records(&fixture, &owner, job_id).await, 1);
+    let outcome = completion_record_outcome(&fixture, &owner, job_id).await;
+    assert_eq!(outcome["status"], "completed", "{outcome}");
+    assert_eq!(outcome["bounded_result"]["text"], CHILD_REPLY, "{outcome}");
+    fixture.teardown().await;
+}
+
 /// A status read held past an active `max_run` does not hold the limit
 /// back: the read is bounded by the deadline, and the re-link cancels,
 /// delivers `max_run_elapsed` and retires the child at the deadline while the

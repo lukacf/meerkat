@@ -1253,6 +1253,12 @@ async fn relink_by_receipt(
                     )
                     .await;
                 }
+                // A reading from before a final read that ran out says
+                // nothing about the input now, so its phase is not used.
+                meerkat_mob::DeliveryTerminalWait::NotTerminal {
+                    cause: meerkat_mob::DeliveryNotTerminalCause::EvidenceReadTimedOut,
+                    ..
+                } => None,
                 meerkat_mob::DeliveryTerminalWait::NotTerminal { phase, .. } => Some(phase),
                 meerkat_mob::DeliveryTerminalWait::Unknown {
                     cause: meerkat_mob::DeliveryUnknownCause::NotObservedByDeadline,
@@ -1331,6 +1337,11 @@ async fn relink_by_receipt(
             )
             .await
             .map(|report| report.into_parts().1);
+        // The read can end past the limit (the waiter keeps a 100 ms evidence
+        // floor); the limit then decides, where only a completed turn wins.
+        if deadline_ms.is_some_and(|deadline| now_ms() >= deadline) {
+            continue;
+        }
         let reason = match ceiling_receipt(last_read) {
             CeilingReceipt::Terminal(record) => {
                 return deliver_receipt(
@@ -1375,16 +1386,17 @@ async fn relink_by_receipt(
 enum CeilingReceipt {
     /// The receipt exists: it is the job's outcome.
     Terminal(Box<meerkat_mob::DeliveryTerminalRecord>),
-    /// Evidence that no receipt exists: the runtime still owed the input a
-    /// terminal when the read ended (the waiter's reading, which it takes
-    /// armed on the runtime's own terminal signal), or holds no input for it
-    /// that can arrive (never admitted, the member has no session, or it is
-    /// retired).
+    /// Evidence that no receipt exists: the waiter's final read found the
+    /// input still owed a terminal when the read ended (a reading it takes
+    /// armed on the runtime's own terminal signal), or the runtime holds no
+    /// input for it that can arrive (never admitted, the member has no
+    /// session, or it is retired).
     Absent,
-    /// The read says nothing: it observed neither the member nor its runtime
-    /// within its bound (for example while the receipt's own commit held the
-    /// session driver), answered in a way this build does not know, or
-    /// failed.
+    /// The read says nothing: its final evidence read ran out (for example
+    /// while the receipt's own commit held the session driver) and only an
+    /// earlier pending reading remains, it observed neither the member nor
+    /// its runtime within its bound, it answered in a way this build does
+    /// not know, or it failed.
     Inconclusive(String),
 }
 
@@ -1392,9 +1404,15 @@ enum CeilingReceipt {
 fn ceiling_receipt(
     read: Result<meerkat_mob::DeliveryTerminalWait, meerkat_mob::DeliveryTerminalWaitError>,
 ) -> CeilingReceipt {
-    use meerkat_mob::{DeliveryTerminalWait, DeliveryUnknownCause};
+    use meerkat_mob::{DeliveryNotTerminalCause, DeliveryTerminalWait, DeliveryUnknownCause};
     match read {
         Ok(DeliveryTerminalWait::Terminal(record)) => CeilingReceipt::Terminal(record),
+        Ok(DeliveryTerminalWait::NotTerminal {
+            cause: DeliveryNotTerminalCause::EvidenceReadTimedOut,
+            ..
+        }) => CeilingReceipt::Inconclusive(
+            "the final evidence read ran out; the pending reading is from before it".to_string(),
+        ),
         Ok(
             DeliveryTerminalWait::NotTerminal { .. }
             | DeliveryTerminalWait::Unknown {
@@ -2363,6 +2381,20 @@ mod tests {
         ));
         assert!(matches!(
             ceiling_receipt(Err(DeliveryTerminalWaitError::RuntimeAdapterUnavailable)),
+            CeilingReceipt::Inconclusive(_)
+        ));
+        // A pending reading from before a final read that ran out is not
+        // evidence (review: a commit taking the driver mid-read left a stale
+        // pending reading that counted as absence).
+        assert!(matches!(
+            ceiling_receipt(Ok(DeliveryTerminalWait::NotTerminal {
+                input_id: meerkat_core::lifecycle::InputId::new(),
+                phase: meerkat_runtime::InputLifecycleState::Applied,
+                terminal: None,
+                last_run_id: None,
+                attempt_count: 1,
+                cause: DeliveryNotTerminalCause::EvidenceReadTimedOut,
+            })),
             CeilingReceipt::Inconclusive(_)
         ));
     }

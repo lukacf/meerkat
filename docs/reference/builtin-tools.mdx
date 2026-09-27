@@ -492,7 +492,8 @@ to two seconds (never past `max_run_secs`), and a receipt found then is
 delivered. Only a read that is evidence (the input still owed a terminal,
 never admitted, or the child without a session or retired) delivers
 `restart_interrupted`; a read that says nothing (it timed out behind a busy
-session driver, such as the turn's own commit, or failed) keeps the watch
+session driver, such as the turn's own commit, even after an earlier reading
+found the input pending, or it failed) keeps the watch
 going, and only three such reads in a row deliver `restart_interrupted`,
 naming no cause.
 

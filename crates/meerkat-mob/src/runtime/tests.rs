@@ -16689,12 +16689,13 @@ async fn assert_stopped_cold_restart_accepts_first_cleanup(destroy: bool) {
     let identity = AgentIdentity::from("stopped-cold-worker");
     let mut spec = SpawnMemberSpec::new("worker", identity.clone());
     spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
-    let session = handle
+    handle
         .spawn_spec(spec)
         .await
-        .expect("spawn stopped cold worker")
-        .bridge_session_id()
-        .cloned()
+        .expect("spawn stopped cold worker");
+    let session = handle
+        .resolve_bridge_session_id(&identity)
+        .await
         .expect("local worker session");
     handle.shutdown().await.expect("persist stopped lifecycle");
     assert!(
@@ -40613,7 +40614,7 @@ async fn test_retire_absent_unowned_session_preserves_host_disposal_without_arch
     let provisioner =
         super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()), None);
     let session_id = SessionId::new();
-    let member = MemberRef::Session(session_id.clone());
+    let member = MemberRef::from_bridge_session_id(session_id.clone());
     assert!(
         !service
             .session_known_to_archive_authority(&session_id)

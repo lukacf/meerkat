@@ -2328,6 +2328,7 @@ impl MobActor {
                 spawned_by: state.spawned_by.clone(),
                 fork_job: state.fork_job.clone(),
                 fork_source: state.fork_source.clone(),
+                fork_overlay: state.fork_overlay,
             });
         }
         {

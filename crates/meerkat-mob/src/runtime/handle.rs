@@ -5190,6 +5190,10 @@ pub struct SpawnMemberSpec {
     /// a [`super::ForkBuildInheritance`] while seating a durable fork; never
     /// taken from caller-supplied arguments, and refused on any other spawn.
     pub(crate) fork_source: Option<meerkat_core::ForkBuildSource>,
+    /// Where the fork-derived member's seated overlay came from, set with
+    /// `fork_source` when the inheritance is applied (see
+    /// [`super::ForkOverlayOrigin`]).
+    pub(crate) fork_overlay: super::ForkOverlayOrigin,
     /// Source build inheritance attached through
     /// [`SpawnMemberSpec::with_fork_build_inheritance`], applied (and consumed)
     /// by the capability-attached spawn after it proves the inheritance names
@@ -5241,6 +5245,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
                     .map(|association| association.association_key()),
             )
             .field("fork_source", &self.fork_source)
+            .field("fork_overlay", &self.fork_overlay)
             .field("fork_build_inheritance", &self.fork_build_inheritance)
             .finish()
     }
@@ -5280,6 +5285,7 @@ impl SpawnMemberSpec {
             spawned_by: None,
             fork_job: None,
             fork_source: None,
+            fork_overlay: super::ForkOverlayOrigin::default(),
             fork_build_inheritance: None,
         }
     }
@@ -16420,6 +16426,7 @@ mod tests {
             spawned_by: None,
             fork_job: None,
             fork_source: None,
+            fork_overlay: Default::default(),
             direct_member_fence: None,
         }
     }

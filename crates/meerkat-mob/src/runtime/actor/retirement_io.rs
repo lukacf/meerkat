@@ -5041,6 +5041,7 @@ mod tests {
                 spawned_by: None,
                 fork_job: None,
                 fork_source: None,
+                fork_overlay: Default::default(),
             };
             let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(
                 crate::roster::Roster::from_projected_entries([entry]),

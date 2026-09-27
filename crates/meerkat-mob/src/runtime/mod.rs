@@ -381,7 +381,7 @@ pub use delegation::{
 };
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};
-pub use fork_build::ForkBuildInheritance;
+pub use fork_build::{ForkBuildInheritance, ForkOverlayOrigin};
 pub use forked_participant_routing::{
     AttachedForkedParticipantLease, AttachedForkedParticipantSpawn, ForkedParticipantCreateRequest,
 };

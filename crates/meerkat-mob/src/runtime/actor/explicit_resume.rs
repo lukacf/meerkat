@@ -241,17 +241,10 @@ impl MobActor {
                     );
                     return;
                 };
-                // A fork-derived member is rebuilt with its source's current
-                // overlay, not the customizer's output for its own identity.
-                let overlay = self
-                    .fork_rebuild_overlay(
-                        &work.rebuild.entry,
-                        work.rebuild.restore_spec.external_tools.clone(),
-                    )
-                    .await;
-                let recipe = profile.and_then(|profile| {
-                    self.explicit_resume_provision_recipe(&work, *profile, overlay)
-                });
+                // The rebuild request carries the overlay the member is rebuilt
+                // with (see `recustomized_rebuild_overlay`).
+                let recipe = profile
+                    .and_then(|profile| self.explicit_resume_provision_recipe(&work, *profile));
                 match recipe {
                     Ok(recipe) => self.spawn_explicit_resume_provision(work, Some(recipe)),
                     Err(error) => {
@@ -270,13 +263,10 @@ impl MobActor {
         }
     }
 
-    /// `overlay` is the per-spawn overlay the member is rebuilt with (see
-    /// `MobActor::fork_rebuild_overlay`).
     fn explicit_resume_provision_recipe(
         &mut self,
         work: &ExplicitResumeMemberWork,
         profile: crate::profile::Profile,
-        overlay: Option<Arc<dyn AgentToolDispatcher>>,
     ) -> Result<Box<DeferredResumeProvision>, MobError> {
         let entry = &work.rebuild.entry;
         self.authorize_spawn_profile_material(
@@ -285,7 +275,10 @@ impl MobActor {
             &profile,
             "explicit_resume_profile",
         )?;
-        let external_tools = self.external_tools_for_profile(&profile, overlay)?;
+        let external_tools = self.external_tools_for_profile(
+            &profile,
+            work.rebuild.restore_spec.external_tools.clone(),
+        )?;
         let identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
         let session_id = mob_dsl::SessionId::from_domain(&work.rebuild.bridge_session_id);
         let transition = self.apply_dsl_signal_collect_transition(

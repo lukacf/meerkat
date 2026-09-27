@@ -24027,6 +24027,35 @@ async fn seat_fork_child_then_crash(
     CreateSessionRecord,
     meerkat_core::ForkBuildSource,
 ) {
+    seat_fork_child_then_crash_with(stop_first, None, SourceBeforeCrash::Seated).await
+}
+
+/// What happens to the fork source before the simulated process restart.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceBeforeCrash {
+    /// The source stays seated with the session the child was forked from.
+    Seated,
+    /// The source is retired.
+    Retired,
+    /// The source is respawned: its identity is seated with a new session.
+    Respawned,
+}
+
+/// [`seat_fork_child_then_crash`], with `child_overlay` as the fork caller's
+/// own overlay on the child's spawn request and `source` deciding what
+/// happens to the source before the restart.
+async fn seat_fork_child_then_crash_with(
+    stop_first: bool,
+    child_overlay: Option<Arc<dyn AgentToolDispatcher>>,
+    source: SourceBeforeCrash,
+) -> (
+    Arc<MockSessionService>,
+    MobStorage,
+    AgentIdentity,
+    AgentIdentity,
+    CreateSessionRecord,
+    meerkat_core::ForkBuildSource,
+) {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
@@ -24044,6 +24073,7 @@ async fn seat_fork_child_then_crash(
     let child_identity = AgentIdentity::from("aa-restart-child");
     let mut child = SpawnMemberSpec::new(ProfileName::from("worker"), child_identity.clone());
     child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    child.external_tools = child_overlay;
     let fork = handle
         .fork_member(&source_identity, child, None)
         .await
@@ -24057,10 +24087,32 @@ async fn seat_fork_child_then_crash(
         },
         source_session.clone(),
     );
+    let mut live_sessions = vec![fork.session_id.clone()];
+    match source {
+        SourceBeforeCrash::Seated => live_sessions.push(source_session.clone()),
+        SourceBeforeCrash::Retired => {
+            handle
+                .retire(source_identity.clone())
+                .await
+                .expect("retire the source");
+        }
+        SourceBeforeCrash::Respawned => {
+            handle
+                .respawn(source_identity.clone(), None)
+                .await
+                .expect("respawn the source");
+            let respawned = handle
+                .resolve_bridge_session_id(&source_identity)
+                .await
+                .expect("the respawned source's session");
+            assert_ne!(respawned, source_session, "a respawn binds a new session");
+            live_sessions.push(respawned);
+        }
+    }
     if stop_first {
         handle.stop().await.expect("stop");
     }
-    for session in [&source_session, &fork.session_id] {
+    for session in &live_sessions {
         MobSessionService::discard_live_session(service.as_ref(), session)
             .await
             .expect("discard live session");
@@ -24256,6 +24308,499 @@ async fn fork_child_restored_after_a_crash_is_built_as_its_source() {
         &expected_source,
     )
     .await;
+}
+
+/// Resume the crashed mob over `storage` with the per-identity customizer, and
+/// hand back a storage over the same durable truth for the next restart.
+async fn restart_with_identity_overlays(
+    service: &Arc<MockSessionService>,
+    storage: MobStorage,
+    source_identity: &AgentIdentity,
+) -> (MobHandle, MobStorage) {
+    let next_restart = MobStorage::with_events_and_runtime_metadata(
+        storage.events.clone(),
+        storage.runtime_metadata.clone(),
+    );
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(Arc::new(IdentityOverlayCustomizer {
+            source: source_identity.clone(),
+        }))
+        .resume()
+        .await
+        .expect("resume");
+    (resumed, next_restart)
+}
+
+/// Drop every listed member's live session and the mob actor: a process
+/// restart.
+async fn crash_after_dropping_live_sessions(
+    service: &MockSessionService,
+    handle: MobHandle,
+    members: &[&AgentIdentity],
+) {
+    for member in members {
+        let session = handle
+            .resolve_bridge_session_id(member)
+            .await
+            .unwrap_or_else(|| panic!("'{member}' has a session"));
+        MobSessionService::discard_live_session(service, &session)
+            .await
+            .expect("discard live session");
+    }
+    crash_stop_and_release_routes(handle).await;
+}
+
+/// The per-spawn tool names `member`'s retained overlay offers: what a later
+/// warm revival of the member composes and what a fork of it inherits.
+async fn retained_overlay_tool_names(handle: &MobHandle, member: &AgentIdentity) -> Vec<String> {
+    handle
+        .per_spawn_external_tools
+        .read()
+        .await
+        .get(member)
+        .map(|overlay| {
+            overlay
+                .tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn member_build_count(service: &MockSessionService, member: &AgentIdentity) -> usize {
+    service
+        .recorded_create_requests()
+        .await
+        .iter()
+        .filter(|record| {
+            record
+                .mob_member_binding
+                .as_ref()
+                .is_some_and(|binding| binding.member == member.as_str())
+        })
+        .count()
+}
+
+fn names(tools: &[&str]) -> Vec<String> {
+    tools.iter().map(|tool| (*tool).to_string()).collect()
+}
+
+/// Regression (grandchildren lose the tools after restart): a fork child C
+/// restored after a restart or an explicit resume was rebuilt with its
+/// source's overlay, but the overlay retained for it was the customizer's
+/// overlay for C's own identity. A grandchild G forked from C was then seated
+/// with generic tools (the original HomeCore bug one level down), and every
+/// later rebuild of G repeated that. C's retained overlay is the one it was
+/// rebuilt with, so G is built with its root source's tools, byte for byte,
+/// and survives a second restart with them.
+async fn assert_grandchild_of_a_restored_child_is_built_as_its_root_source(explicit_resume: bool) {
+    let (service, storage, source_identity, child_identity, _first, _expected_source) =
+        seat_fork_child_then_crash(explicit_resume).await;
+    let (resumed, second_restart) =
+        restart_with_identity_overlays(&service, storage, &source_identity).await;
+    if explicit_resume {
+        resumed
+            .resume()
+            .await
+            .expect("explicit resume rebuilds the stopped members");
+    }
+    let source_build = last_member_build(&service, &source_identity).await;
+    for tool in FORK_SOURCE_OVERLAY_TOOLS {
+        assert!(
+            source_build
+                .external_tool_names
+                .iter()
+                .any(|name| name == tool),
+            "the restored source carries its re-supplied overlay tool '{tool}'"
+        );
+    }
+    assert_eq!(
+        last_member_build(&service, &child_identity)
+            .await
+            .external_tool_names,
+        source_build.external_tool_names,
+        "the restored child is rebuilt with its source's tools"
+    );
+    let child_session = resumed
+        .resolve_bridge_session_id(&child_identity)
+        .await
+        .expect("the restored child's session");
+    wait_for_fork_source_settled(&resumed, &child_session).await;
+    // Sorts before both its source and its root source.
+    let grandchild_identity = AgentIdentity::from("a0-restart-grandchild");
+    let mut grandchild =
+        SpawnMemberSpec::new(ProfileName::from("worker"), grandchild_identity.clone());
+    grandchild.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    resumed
+        .fork_member(&child_identity, grandchild, None)
+        .await
+        .expect("fork the grandchild from the restored child");
+    let grandchild_build = last_member_build(&service, &grandchild_identity).await;
+    assert_eq!(
+        grandchild_build
+            .fork_source
+            .as_ref()
+            .map(|source| source.source_member.member.as_str()),
+        Some(child_identity.as_str()),
+        "the grandchild names its forker"
+    );
+    assert!(
+        !grandchild_build
+            .external_tool_names
+            .iter()
+            .any(|name| name == GENERIC_RESUME_OVERLAY_TOOL),
+        "the grandchild is not seated with generic tools: {:?}",
+        grandchild_build.external_tool_names
+    );
+    assert_eq!(
+        grandchild_build.external_tool_names, source_build.external_tool_names,
+        "the grandchild's tools are its root source's, in order"
+    );
+    assert_eq!(
+        retained_overlay_tool_names(&resumed, &child_identity).await,
+        names(&FORK_SOURCE_OVERLAY_TOOLS),
+        "the restored child retains the overlay it was rebuilt with, not the \
+         customizer's overlay for its own identity"
+    );
+
+    let grandchild_builds = member_build_count(&service, &grandchild_identity).await;
+    crash_after_dropping_live_sessions(
+        &service,
+        resumed,
+        &[&source_identity, &child_identity, &grandchild_identity],
+    )
+    .await;
+    let (restarted, _) =
+        restart_with_identity_overlays(&service, second_restart, &source_identity).await;
+    assert_eq!(
+        member_build_count(&service, &grandchild_identity).await,
+        grandchild_builds + 1,
+        "the second restart rebuilds the grandchild"
+    );
+    let source_rebuilt = last_member_build(&service, &source_identity).await;
+    let grandchild_rebuilt = last_member_build(&service, &grandchild_identity).await;
+    assert_eq!(
+        last_member_build(&service, &child_identity)
+            .await
+            .external_tool_names,
+        source_rebuilt.external_tool_names,
+        "the child keeps its source's tools across the second restart"
+    );
+    assert_eq!(
+        grandchild_rebuilt.external_tool_names, grandchild_build.external_tool_names,
+        "the grandchild's rebuild after a second restart repeats its first build's tools"
+    );
+    assert_eq!(
+        grandchild_rebuilt.fork_source, grandchild_build.fork_source,
+        "the grandchild keeps its lineage"
+    );
+    assert_eq!(
+        retained_overlay_tool_names(&restarted, &grandchild_identity).await,
+        names(&FORK_SOURCE_OVERLAY_TOOLS)
+    );
+}
+
+#[tokio::test]
+async fn grandchild_of_a_fork_child_restored_after_a_crash_is_built_as_its_root_source() {
+    assert_grandchild_of_a_restored_child_is_built_as_its_root_source(false).await;
+}
+
+#[tokio::test]
+async fn grandchild_of_a_fork_child_restored_by_explicit_resume_is_built_as_its_root_source() {
+    assert_grandchild_of_a_restored_child_is_built_as_its_root_source(true).await;
+}
+
+/// A fork caller's own per-spawn overlay, put on the child's spawn request.
+const CALLER_OVERLAY_TOOL: &str = "caller_overlay_probe";
+
+fn caller_overlay() -> Arc<dyn AgentToolDispatcher> {
+    Arc::new(FixedOverlayTools(vec![CALLER_OVERLAY_TOOL]))
+}
+
+/// Regression (explicit overlays replaced on revival): a `fork_member*`
+/// caller's explicit `external_tools` on the child spec was honored at
+/// seating, then silently replaced with the source's overlay on the first
+/// warm revival. In process a rebuild uses the overlay the child was built
+/// with, and the child's lineage records that it was the caller's.
+#[tokio::test]
+async fn fork_child_seated_with_the_callers_overlay_keeps_it_on_revival() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_identity = AgentIdentity::from("fork-caller-overlay-source");
+    spawn_fork_source_with_build_inputs(&handle, &source_identity).await;
+
+    let child_identity = AgentIdentity::from("fork-caller-overlay-child");
+    let mut child = SpawnMemberSpec::new(ProfileName::from("worker"), child_identity.clone());
+    child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    child.external_tools = Some(caller_overlay());
+    let fork = handle
+        .fork_member(&source_identity, child, None)
+        .await
+        .expect("fork the child with the caller's overlay");
+    let first = last_member_build(&service, &child_identity).await;
+    assert!(
+        first
+            .external_tool_names
+            .iter()
+            .any(|name| name == CALLER_OVERLAY_TOOL),
+        "the caller's overlay is honored at seating: {:?}",
+        first.external_tool_names
+    );
+    assert_eq!(
+        handle
+            .get_member(&child_identity)
+            .await
+            .expect("read the child")
+            .expect("the child is seated")
+            .fork_overlay,
+        crate::runtime::ForkOverlayOrigin::Caller,
+        "the child's lineage records that its overlay was the caller's"
+    );
+
+    MobSessionService::discard_live_session(service.as_ref(), &fork.session_id)
+        .await
+        .expect("discard the child's live session");
+    handle
+        .member(&child_identity)
+        .await
+        .expect("child handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect("warm revival rebuilds the child");
+    let rebuilt = last_member_build(&service, &child_identity).await;
+    assert_eq!(
+        rebuilt.external_tool_names, first.external_tool_names,
+        "the revived child keeps the overlay it was seated with"
+    );
+}
+
+/// After a restart the caller's overlay is gone (it is process-local), and
+/// the child was never built with its source's: it gets the customizer's
+/// overlay for its own identity, never the source's.
+#[tokio::test]
+async fn fork_child_seated_with_the_callers_overlay_is_restored_with_its_own_identity_overlay() {
+    let (service, storage, source_identity, child_identity, first, _expected_source) =
+        seat_fork_child_then_crash_with(false, Some(caller_overlay()), SourceBeforeCrash::Seated)
+            .await;
+    assert!(
+        first
+            .external_tool_names
+            .iter()
+            .any(|name| name == CALLER_OVERLAY_TOOL)
+    );
+    let (resumed, _) = restart_with_identity_overlays(&service, storage, &source_identity).await;
+    assert_eq!(
+        resumed
+            .get_member(&child_identity)
+            .await
+            .expect("read the child")
+            .expect("the child is restored")
+            .fork_overlay,
+        crate::runtime::ForkOverlayOrigin::Caller,
+        "roster replay restores where the child's overlay came from"
+    );
+    let rebuilt = last_member_build(&service, &child_identity).await;
+    assert!(
+        rebuilt
+            .external_tool_names
+            .iter()
+            .any(|name| name == GENERIC_RESUME_OVERLAY_TOOL),
+        "the restored child gets the customizer's overlay for its own identity: {:?}",
+        rebuilt.external_tool_names
+    );
+    for tool in FORK_SOURCE_OVERLAY_TOOLS {
+        assert!(
+            !rebuilt.external_tool_names.iter().any(|name| name == tool),
+            "the restored child is never given its source's overlay tool '{tool}': {:?}",
+            rebuilt.external_tool_names
+        );
+    }
+}
+
+/// A mob whose customizer re-supplies per-identity overlays on resume, with a
+/// fork source and a fork child of it seated in process. Returns the child's
+/// first build and its fork session.
+async fn seat_fork_child_with_identity_overlays(
+    source_identity: &AgentIdentity,
+    child_identity: &AgentIdentity,
+) -> (
+    MobHandle,
+    Arc<MockSessionService>,
+    CreateSessionRecord,
+    SessionId,
+) {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(Arc::new(IdentityOverlayCustomizer {
+            source: source_identity.clone(),
+        }))
+        .create()
+        .await
+        .expect("create mob");
+    spawn_fork_source_with_build_inputs(&handle, source_identity).await;
+    let mut child = SpawnMemberSpec::new(ProfileName::from("worker"), child_identity.clone());
+    child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let fork = handle
+        .fork_member(source_identity, child, None)
+        .await
+        .expect("fork the child");
+    let first = last_member_build(&service, child_identity).await;
+    for tool in FORK_SOURCE_OVERLAY_TOOLS {
+        assert!(
+            first.external_tool_names.iter().any(|name| name == tool),
+            "the child is seated with its source's overlay tool '{tool}'"
+        );
+    }
+    (handle, service, first, fork.session_id)
+}
+
+/// A rebuild of a child seated with its source's overlay, after its source
+/// is gone or is another build, is built with the customizer's overlay for
+/// its own identity, and retains that instead of the source's.
+fn assert_rebuilt_with_own_identity_overlay(rebuilt: &CreateSessionRecord) {
+    assert!(
+        rebuilt
+            .external_tool_names
+            .iter()
+            .any(|name| name == GENERIC_RESUME_OVERLAY_TOOL),
+        "the child is rebuilt with the customizer's overlay for its own identity: {:?}",
+        rebuilt.external_tool_names
+    );
+    for tool in FORK_SOURCE_OVERLAY_TOOLS {
+        assert!(
+            !rebuilt.external_tool_names.iter().any(|name| name == tool),
+            "the child no longer holds its former source's overlay tool '{tool}': {:?}",
+            rebuilt.external_tool_names
+        );
+    }
+}
+
+async fn revive(
+    handle: &MobHandle,
+    service: &MockSessionService,
+    member: &AgentIdentity,
+    session: &SessionId,
+) -> CreateSessionRecord {
+    MobSessionService::discard_live_session(service, session)
+        .await
+        .expect("discard the live session");
+    handle
+        .member(member)
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect("warm revival rebuilds the member");
+    last_member_build(service, member).await
+}
+
+/// Regression (source gone, in process): a child whose source was retired
+/// kept the source's own host dispatcher (retirement is meant to release it)
+/// and was rebuilt with it on every revival, while the same child restored
+/// after a restart got the customizer's overlay for its own identity. Both
+/// now get the latter, and the retired source's dispatcher is released.
+#[tokio::test]
+async fn fork_child_of_a_retired_source_is_revived_with_its_own_identity_overlay() {
+    let source_identity = AgentIdentity::from("fork-retired-source");
+    let child_identity = AgentIdentity::from("fork-retired-child");
+    let (handle, service, first, child_session) =
+        seat_fork_child_with_identity_overlays(&source_identity, &child_identity).await;
+    handle
+        .retire(source_identity.clone())
+        .await
+        .expect("retire the source");
+    assert!(
+        handle
+            .get_member(&child_identity)
+            .await
+            .expect("read the child")
+            .is_some(),
+        "the child outlives its source"
+    );
+
+    let rebuilt = revive(&handle, &service, &child_identity, &child_session).await;
+    assert_rebuilt_with_own_identity_overlay(&rebuilt);
+    assert_eq!(
+        rebuilt.fork_source, first.fork_source,
+        "the child keeps its lineage"
+    );
+    assert_eq!(
+        retained_overlay_tool_names(&handle, &child_identity).await,
+        names(&[GENERIC_RESUME_OVERLAY_TOOL]),
+        "the retired source's dispatcher is no longer retained for the child"
+    );
+}
+
+/// Regression (incarnation): a rebuild followed whichever member was seated
+/// under the source's identity. A respawned source is another build (a new
+/// session), so the child no longer follows it.
+#[tokio::test]
+async fn fork_child_of_a_respawned_source_is_revived_with_its_own_identity_overlay() {
+    let source_identity = AgentIdentity::from("fork-respawned-source");
+    let child_identity = AgentIdentity::from("fork-respawned-child");
+    let (handle, service, _first, child_session) =
+        seat_fork_child_with_identity_overlays(&source_identity, &child_identity).await;
+    handle
+        .respawn(source_identity.clone(), None)
+        .await
+        .expect("respawn the source");
+
+    let rebuilt = revive(&handle, &service, &child_identity, &child_session).await;
+    assert_rebuilt_with_own_identity_overlay(&rebuilt);
+    assert_eq!(
+        retained_overlay_tool_names(&handle, &child_identity).await,
+        names(&[GENERIC_RESUME_OVERLAY_TOOL])
+    );
+}
+
+/// The restart side of the source-gone rule: a child whose source was
+/// retired before the restart is restored with the customizer's overlay for
+/// its own identity, the same as in process.
+#[tokio::test]
+async fn fork_child_of_a_retired_source_is_restored_with_its_own_identity_overlay() {
+    let (service, storage, source_identity, child_identity, _first, expected_source) =
+        seat_fork_child_then_crash_with(false, None, SourceBeforeCrash::Retired).await;
+    let (resumed, _) = restart_with_identity_overlays(&service, storage, &source_identity).await;
+    assert!(
+        resumed
+            .get_member(&source_identity)
+            .await
+            .expect("read the source")
+            .is_none()
+    );
+    let rebuilt = last_member_build(&service, &child_identity).await;
+    assert_rebuilt_with_own_identity_overlay(&rebuilt);
+    assert_eq!(rebuilt.fork_source, Some(expected_source));
+    assert_eq!(
+        retained_overlay_tool_names(&resumed, &child_identity).await,
+        names(&[GENERIC_RESUME_OVERLAY_TOOL])
+    );
+}
+
+/// The restart side of the incarnation rule: the customizer re-supplies the
+/// respawned source's calendar tools by identity, but the respawned source is
+/// not the build the child was forked from, so the child does not follow it.
+#[tokio::test]
+async fn fork_child_of_a_respawned_source_is_restored_with_its_own_identity_overlay() {
+    let (service, storage, source_identity, child_identity, _first, _expected_source) =
+        seat_fork_child_then_crash_with(false, None, SourceBeforeCrash::Respawned).await;
+    let (resumed, _) = restart_with_identity_overlays(&service, storage, &source_identity).await;
+    let source = last_member_build(&service, &source_identity).await;
+    for tool in FORK_SOURCE_OVERLAY_TOOLS {
+        assert!(
+            source.external_tool_names.iter().any(|name| name == tool),
+            "the respawned source is restored with its re-supplied overlay tool '{tool}'"
+        );
+    }
+    let rebuilt = last_member_build(&service, &child_identity).await;
+    assert_rebuilt_with_own_identity_overlay(&rebuilt);
+    assert_eq!(
+        retained_overlay_tool_names(&resumed, &child_identity).await,
+        names(&[GENERIC_RESUME_OVERLAY_TOOL])
+    );
 }
 
 /// Same deadline hazard for `delegate`: a helper whose caller stops waiting

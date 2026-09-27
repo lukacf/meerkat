@@ -630,7 +630,9 @@ pub struct AgentBuildConfig {
     /// Not consumed by the standard build pipeline.
     pub app_context: Option<serde_json::Value>,
     /// Typed source of a fork-derived member build, set only by the mob
-    /// runtime when it seats a durable fork as a member. Like `app_context`,
+    /// runtime when it seats a durable fork with its source's build
+    /// inheritance, and on every rebuild of that member (see
+    /// `meerkat_core::ForkBuildSource` for which seatings). Like `app_context`,
     /// it is for custom `SessionAgentBuilder` implementations (host build
     /// callbacks) and not consumed by the standard build pipeline.
     pub fork_source: Option<meerkat_core::ForkBuildSource>,

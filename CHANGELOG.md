@@ -46,6 +46,17 @@ them.
   `CreateSessionRequest.build`. A JSON host build callback (MobKit's
   `callback/build_agent`) sees it only once its host forwards the field; MobKit
   does not forward it yet.
+- Behavior-only: a host's `SpawnMemberCustomizer` no longer runs on the
+  seating of a local temporary-council participant. The council now seats every
+  local participant with its source member's build inheritance (see Fixed), and
+  a `SpawnSource::AttachedForkedParticipant` spawn that carries one is a fork
+  seating, skipped like `SpawnSource::PersistedForkResume` already is. A
+  customizer can no longer replace or wrap such a participant's overlay, labels
+  or application context (MobKit's memory customizer bound the participant's
+  `memory` recorder to the participant's own identity; the participant now has
+  its source's).
+  Host-owned council participants, and attached spawns that carry no
+  inheritance, are customized as before.
 
 ### Added
 
@@ -56,13 +67,21 @@ them.
   and, with the `schema` feature, JSON Schema) so a host can forward it; build
   it with `ForkBuildSource::new`. Serialized it is
   `{"source_member": {"mob_id", "role", "member"}, "source_session_id": "<uuid>"}`
-  (see its rustdoc). The mob runtime sets it on the build that seats a durable
-  fork as a member and on every later rebuild of that member.
-- `meerkat_mob::MemberSpawnedEvent::fork_source` and
-  `meerkat_mob::RosterEntry::fork_source` (`Option<ForkBuildSource>`, absent
-  unless the member is fork-derived) persist a fork-derived member's lineage,
-  so a restarted, resumed or revived fork is rebuilt with it. Journals written
-  before decode it as absent.
+  (see its rustdoc). The mob runtime sets it on the seating build, and on
+  every later rebuild, of a `fork_off` child, of a child of
+  `MobHandle::fork_member`, `fork_member_then_run_bounded` or
+  `fork_member_then_run_detached`, and of a local temporary-council
+  participant. It does not set it for live-delegation workers
+  (`MobHandle::fork_member_at_turn_boundary`), host-owned council
+  participants, respawn successors of a fork child, delegate helpers or
+  ordinary spawns.
+- `meerkat_mob::MemberSpawnedEvent` and `meerkat_mob::RosterEntry` gain
+  `fork_source` (`Option<ForkBuildSource>`) and `fork_overlay`
+  (the new `meerkat_mob::ForkOverlayOrigin`: `source` or `caller`), which
+  persist a fork-derived member's lineage and whether its seated per-spawn
+  overlay was its source's or the fork caller's own. Both are omitted when
+  absent or default, so non-fork members keep their wire shape, and journals
+  written before decode them as absent (`source`).
 - `meerkat_mob::ForkBuildInheritance`, the opaque build inputs a fork-derived
   member inherits from its source (application context, application labels,
   retained per-spawn tool overlay and the typed source), minted by the source's
@@ -76,39 +95,51 @@ them.
 ### Fixed
 
 - A fork-derived member is built with its source member's build inputs. A
-  `fork_off` child (caller-turn and quiescent `MobHandle::fork_member*` forks)
-  and a local temporary-council participant used to reach the host build
-  callback with bare mob labels, no application context, no source reference
-  and no per-spawn tool overlay, so a host that resolves tools and instructions
-  by identity built a generic member (HomeCore: a calendar fork with 92 of
+  `fork_off` child, a child of the `MobHandle::fork_member`,
+  `fork_member_then_run_bounded` and `fork_member_then_run_detached` forks, and
+  a local temporary-council participant used to reach the host build callback
+  with bare mob labels, no application context, no source reference and no
+  per-spawn tool overlay, so a host that resolves tools and instructions by
+  identity built a generic member (HomeCore: a calendar fork with 92 of
   calendar's 150 tools, without its calendar, display, picture-schedule or
   `memory` tools). Its tools block also differed from the forker's, so the
   child could not reuse the forker's cached prompt prefix. The child's build
   now carries the source's application context (read from the source session's
   durable build state), the source's application labels, the source's retained
-  per-spawn overlay, and `fork_source`. The source's standard mob member labels
+  per-spawn overlay (unless the fork caller put its own on the child's spawn
+  request), and `fork_source`. The source's standard mob member labels
   (`mob_id`, `role`, `profile_name`, `meerkat_id`, `agent_identity`) are never
   inherited: they name the source (MobKit keeps its durable identity in
   `agent_identity`), so the child's roster entry, `MemberSpawned` event and
-  `list_members` labels carry only the child's own values for them, and its
-  build stamps its own. The child keeps its own roster, comms and runtime
-  identity. Every rebuild of the child (warm revival, explicit resume,
-  process-restart restore) repeats these inputs: `fork_source`, labels and
-  application context from the child's own durable records, and the per-spawn
-  overlay re-derived from its source while the source is seated in the child's
-  mob (a source that is gone leaves the child its own overlay, logged).
-  Delegate helpers, live-delegation workers and ordinary spawns are unchanged.
+  `list_members` labels carry none of them unless the child's own spawn request
+  states them, and its build stamps the child's own. The child keeps its own
+  roster, comms and runtime identity. Live-delegation workers
+  (`fork_member_at_turn_boundary`), host-owned council participants, delegate
+  helpers and ordinary spawns are unchanged.
+
+  Every rebuild of such a child (warm revival, explicit resume,
+  process-restart restore) keeps its `fork_source`, labels and application
+  context. Its per-spawn overlay, which is process-local and not persisted,
+  is chosen as follows. A warm revival uses the overlay the child was built
+  with. An explicit resume or restart restore gives a child seated with its
+  source's overlay the overlay its source is restored with (sources are
+  restored before their forks), and a child seated with the fork caller's
+  overlay the overlay the host's spawn customizer supplies for the child's
+  own identity. A child whose source has been retired, respawned, repointed to
+  another session, or replaced by another member under the same identity no
+  longer follows it: every rebuild, in process or after a restart, uses the
+  customizer's overlay for the child's own identity (none without a
+  customizer), and a warning names the missing source. A fork of a child
+  inherits the overlay the child was built with, so grandchildren (a
+  `fork_off` from a fork, or a council forking one) get the same tools, also
+  after a restart. A temporary-council participant's source is in another mob:
+  a revived participant keeps the overlay it was seated with, and a restored
+  one gets the customizer's overlay for its own identity.
 - A mob member rebuilt without an explicit application context (warm revival,
   explicit resume, process-restart restore) keeps the context its session's
   last build persisted. It was rebuilt with none, and the rebuild persisted
   that `None` over the stored context, so a revived member lost its context
   for good. An explicit context still replaces it.
-- A durable member fork (`fork_off`, `MobHandle::fork_member*`,
-  `MobHandle::fork_build_inheritance`) on a session service without durable
-  sessions fails at once with the service's unsupported-fork error again. It
-  had started reading the source's live session first, which on
-  `EphemeralSessionService` waits on the source's session task, so a
-  `fork_off` from the source's own turn hung.
 
 ## [0.8.44] - 2026-09-26
 

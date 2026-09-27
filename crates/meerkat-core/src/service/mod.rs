@@ -573,11 +573,15 @@ impl WorkGraphNamespaceGrant {
 
 /// Typed lineage of a fork-derived member build.
 ///
-/// The mob runtime sets this only when it seats a member whose transcript is a
-/// durable fork of another member's session: a `fork_off` child, a
-/// `MobHandle::fork_member*` child, or a temporary-council participant forked
-/// from its convener's member. Fresh spawns, delegate helpers and resumes of
-/// ordinary members never carry it.
+/// The mob runtime sets this when it seats a member whose transcript is a
+/// durable fork of another member's session together with that member's build
+/// inheritance: a `fork_off` child; a child of `MobHandle::fork_member`,
+/// `MobHandle::fork_member_then_run_bounded` or
+/// `MobHandle::fork_member_then_run_detached`; or a local temporary-council
+/// participant forked from its convener's member. It is not set for
+/// live-delegation workers (`MobHandle::fork_member_at_turn_boundary`),
+/// host-owned council participants, respawn successors of a fork child, fresh
+/// spawns, delegate helpers, or resumes of ordinary members.
 ///
 /// A host build callback uses it to resolve the child exactly as its source
 /// (the same grants, tools, instructions and skills), which is also what makes
@@ -808,9 +812,10 @@ pub struct SessionBuildOptions {
     pub app_context: Option<serde_json::Value>,
     /// Typed source of a fork-derived member build (see [`ForkBuildSource`]).
     ///
-    /// Set only by the mob runtime, on the build that seats a durable fork as
-    /// a member and on every later rebuild of that member; `None` for every
-    /// other build. Not consumed by the standard build pipeline: it is for
+    /// Set only by the mob runtime, on the build that seats a durable fork
+    /// with its source's build inheritance and on every later rebuild of that
+    /// member (see [`ForkBuildSource`] for exactly which seatings); `None` for
+    /// every other build. Not consumed by the standard build pipeline: it is for
     /// custom `SessionAgentBuilder` implementations (host build callbacks)
     /// that resolve a member's tools and instructions by identity.
     ///

@@ -670,14 +670,11 @@ impl MobActor {
             &profile,
             "warm_revival_profile",
         )?;
+        // The overlay the member was last built with, except for a fork whose
+        // source is gone or is another build (see `warm_revival_overlay`).
         let overlay = self
-            .per_spawn_external_tools
-            .read()
-            .await
-            .get(&work.entry.agent_identity)
-            .cloned();
-        // A fork-derived member is rebuilt with its source's current overlay.
-        let overlay = self.fork_rebuild_overlay(&work.entry, overlay).await;
+            .warm_revival_overlay(&work.entry, &work.session_id)
+            .await?;
         let external_tools = self.external_tools_for_profile(&profile, overlay)?;
         let session_id = mob_dsl::SessionId::from_domain(&work.session_id);
         let transition = self.apply_dsl_signal_collect_transition(

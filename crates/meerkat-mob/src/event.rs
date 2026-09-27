@@ -974,14 +974,28 @@ pub struct MemberSpawnedEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_job: Option<crate::runtime::ForkJobRecord>,
     /// The member (and its session) this member's transcript was forked
-    /// from, for a fork-derived member (a `fork_off` child, a
-    /// `MobHandle::fork_member*` child, a temporary-council participant).
+    /// from, for a member seated with its source's build inheritance: a
+    /// `fork_off` child, a child of `MobHandle::fork_member`,
+    /// `fork_member_then_run_bounded` or `fork_member_then_run_detached`, or a
+    /// local temporary-council participant. A live-delegation worker
+    /// (`MobHandle::fork_member_at_turn_boundary`), a host-owned council
+    /// participant and a respawn successor of a fork child do not carry it.
     /// Every rebuild of the member carries it as its build's `fork_source`,
     /// so a restarted, resumed or revived fork is built as its source, like
     /// its first build. Journals written before this field decode it as
     /// absent: such a member rebuilds as it did before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_source: Option<meerkat_core::ForkBuildSource>,
+    /// Where the fork-derived member's seated per-spawn overlay came from:
+    /// its source's retained overlay (`source`, the default, omitted when
+    /// serialized) or the fork caller's own (`caller`). The overlay itself is
+    /// process-local; after a restart or explicit resume this decides where it
+    /// is re-derived from. Meaningful only with `fork_source`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::runtime::ForkOverlayOrigin::is_source"
+    )]
+    pub fork_overlay: crate::runtime::ForkOverlayOrigin,
     /// Bridge-internal member reference needed for event replay.
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
@@ -1036,6 +1050,7 @@ impl MemberSpawnedEvent {
             spawned_by: None,
             fork_job: None,
             fork_source: None,
+            fork_overlay: crate::runtime::ForkOverlayOrigin::default(),
             bridge_member_ref: None,
             identity_intent_authority_digest: None,
             placed_spawn_id: None,
@@ -2487,10 +2502,14 @@ mod tests {
             panic!("expected MemberSpawned");
         };
         assert_eq!(legacy.fork_source, None);
+        assert_eq!(
+            legacy.fork_overlay,
+            crate::runtime::ForkOverlayOrigin::Source
+        );
         let plain =
             serde_json::to_string(&MobEventKind::MemberSpawned(legacy.clone())).expect("serialize");
         assert!(
-            !plain.contains("fork_source"),
+            !plain.contains("fork_source") && !plain.contains("fork_overlay"),
             "a member that is no fork keeps the pre-existing wire shape: {plain}"
         );
 
@@ -2504,7 +2523,12 @@ mod tests {
         );
         let mut forked = legacy;
         forked.fork_source = Some(source.clone());
-        let encoded = serde_json::to_value(MobEventKind::MemberSpawned(forked)).expect("serialize");
+        let encoded =
+            serde_json::to_value(MobEventKind::MemberSpawned(forked.clone())).expect("serialize");
+        assert!(
+            encoded.get("fork_overlay").is_none(),
+            "a fork seated with its source's overlay omits the default origin: {encoded}"
+        );
         assert_eq!(
             encoded["fork_source"],
             json!({
@@ -2522,6 +2546,25 @@ mod tests {
             panic!("expected MemberSpawned");
         };
         assert_eq!(decoded.fork_source, Some(source));
+        assert_eq!(
+            decoded.fork_overlay,
+            crate::runtime::ForkOverlayOrigin::Source
+        );
+
+        // A fork seated with its fork caller's overlay records that, so a
+        // restart never re-derives the source's overlay for it.
+        forked.fork_overlay = crate::runtime::ForkOverlayOrigin::Caller;
+        let encoded = serde_json::to_value(MobEventKind::MemberSpawned(forked)).expect("serialize");
+        assert_eq!(encoded["fork_overlay"], json!("caller"));
+        let MobEventKind::MemberSpawned(decoded) =
+            serde_json::from_value::<MobEventKind>(encoded).expect("roundtrip")
+        else {
+            panic!("expected MemberSpawned");
+        };
+        assert_eq!(
+            decoded.fork_overlay,
+            crate::runtime::ForkOverlayOrigin::Caller
+        );
     }
 
     #[test]

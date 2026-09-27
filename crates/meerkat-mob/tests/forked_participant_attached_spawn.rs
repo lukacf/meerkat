@@ -34,7 +34,10 @@ use meerkat_mob::{
     AgentIdentity, ForkedParticipantOwnerHostRejection, MobBackendKind, MobControlPrincipal,
     MobError, SpawnMemberSpec,
 };
-use support::{ControllingMob, REAL_COMMS_TEST_LOCK, create_controlling_mob, wait_until};
+use support::{
+    ControllingMob, REAL_COMMS_TEST_LOCK, create_controlling_mob,
+    create_controlling_mob_with_customizer, wait_until,
+};
 
 const TTL: Duration = Duration::from_secs(600);
 
@@ -376,6 +379,137 @@ async fn attached_participant_never_inherits_the_source_member_naming_labels() {
         source_labels,
         "the source keeps its own labels"
     );
+}
+
+/// A host spawn customizer that rewrites every capability-attached
+/// participant's build inputs, the way MobKit's memory customizer wraps a
+/// member's overlay in a recorder bound to the member's own identity: it drops
+/// the overlay and replaces the labels and the application context.
+struct ParticipantRewritingCustomizer;
+
+impl meerkat_mob::SpawnMemberCustomizer for ParticipantRewritingCustomizer {
+    fn customize_spawn(
+        &self,
+        ctx: &meerkat_mob::SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        if ctx.spawn_source == meerkat_mob::SpawnSource::AttachedForkedParticipant {
+            spec.external_tools = None;
+            spec.labels = Some(std::collections::BTreeMap::from([(
+                "customized".to_string(),
+                "participant".to_string(),
+            )]));
+            spec.context = Some(serde_json::json!({"customized": "participant"}));
+        }
+        Ok(())
+    }
+}
+
+/// A per-spawn overlay standing in for the source's host tools.
+struct SourceOverlay;
+
+#[async_trait::async_trait]
+impl meerkat_core::AgentToolDispatcher for SourceOverlay {
+    fn tools(&self) -> std::sync::Arc<[std::sync::Arc<meerkat_core::ToolDef>]> {
+        vec![std::sync::Arc::new(meerkat_core::ToolDef {
+            name: "calendar_create_event".into(),
+            description: "source overlay tool".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            provenance: None,
+        })]
+        .into()
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        Err(meerkat_core::ToolError::not_found(call.name))
+    }
+}
+
+/// Regression (council customizer): the temporary-council seating applied the
+/// source's inheritance before the host's spawn customizer ran, and the
+/// customizer ran on it, so a customizer could replace or wrap a council
+/// participant's inherited overlay, labels and context (rebinding a memory
+/// recorder to the participant's identity), while `fork_off`/`fork_member`
+/// seatings were protected. A participant seated with its source's
+/// inheritance is a fork seating, and the customizer does not run on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn spawn_customizer_does_not_rewrite_an_inherited_participant_build() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let controlling = create_controlling_mob_with_customizer(
+        "fp-attach-customizer",
+        Some(std::sync::Arc::new(ParticipantRewritingCustomizer)),
+    )
+    .await;
+    let app_labels = std::collections::BTreeMap::from([
+        ("domain".to_string(), "calendar".to_string()),
+        ("tier".to_string(), "gold".to_string()),
+    ]);
+    let app_context = serde_json::json!({"domain": "calendar"});
+    let mut source = SpawnMemberSpec::new("worker", "researcher")
+        .with_backend(MobBackendKind::Session)
+        .with_labels(app_labels.clone());
+    source.context = Some(app_context.clone());
+    source.external_tools = Some(std::sync::Arc::new(SourceOverlay));
+    controlling
+        .handle
+        .spawn_spec(source)
+        .await
+        .expect("spawn the source with build inputs");
+    let capability = create(&controlling, "researcher", "req-customizer")
+        .await
+        .expect("local create");
+    let inheritance = controlling
+        .handle
+        .fork_build_inheritance(
+            capability.source_identity(),
+            &capability.provenance().source_session_id,
+        )
+        .await
+        .expect("the source's own mob mints its build inheritance");
+    assert!(inheritance.has_external_tools());
+    assert_eq!(inheritance.app_context(), Some(&app_context));
+
+    controlling
+        .handle
+        .spawn_attached_forked_participant(
+            MobControlPrincipal::Owner,
+            &capability,
+            attachment("customizer-1"),
+            branch_spec("branch").with_fork_build_inheritance(inheritance),
+        )
+        .await
+        .expect("capability-aware attached spawn with the source's inheritance");
+
+    let member = controlling
+        .handle
+        .get_member(&identity("branch"))
+        .await
+        .expect("member read")
+        .expect("the branch is seated");
+    assert_eq!(
+        member.labels, app_labels,
+        "the customizer did not replace the participant's inherited labels"
+    );
+    // The participant's own build inputs, as a fork of it would inherit them:
+    // its retained overlay and the context its build persisted.
+    let built = controlling
+        .handle
+        .fork_build_inheritance(&identity("branch"), capability.fork_session_id())
+        .await
+        .expect("the participant's own build inputs");
+    assert!(
+        built.has_external_tools(),
+        "the customizer did not drop the participant's inherited overlay"
+    );
+    assert_eq!(
+        built.app_context(),
+        Some(&app_context),
+        "the customizer did not replace the participant's inherited context"
+    );
+    assert_eq!(built.labels(), &app_labels);
 }
 
 /// An exact replay is idempotent on both halves: the machine replays the

@@ -169,6 +169,7 @@ mod tests {
                 spawned_by: None,
                 fork_job: None,
                 fork_source: None,
+                fork_overlay: Default::default(),
                 direct_member_fence: None,
             },
             retiring_comms: None,

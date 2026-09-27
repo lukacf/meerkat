@@ -4962,6 +4962,9 @@ pub(super) struct PendingSpawn {
     pub(super) fork_job: Option<crate::runtime::ForkJobRecord>,
     /// Typed fork lineage for the roster entry and spawn event.
     pub(super) fork_source: Option<meerkat_core::ForkBuildSource>,
+    /// Where a fork-derived member's seated overlay came from, persisted with
+    /// its lineage.
+    pub(super) fork_overlay: super::ForkOverlayOrigin,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -5531,6 +5534,9 @@ struct SpawnFinalizeCtx {
     /// Typed fork lineage, persisted with the member's spawn event and roster
     /// entry so every rebuild carries it (see `ForkBuildInheritance`).
     fork_source: Option<meerkat_core::ForkBuildSource>,
+    /// Where a fork-derived member's seated overlay came from, persisted with
+    /// its lineage (see `ForkOverlayOrigin`).
+    fork_overlay: super::ForkOverlayOrigin,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -5590,6 +5596,9 @@ struct SpawnActivateState {
     /// Typed fork lineage, persisted with the member's spawn event and roster
     /// entry so every rebuild carries it (see `ForkBuildInheritance`).
     fork_source: Option<meerkat_core::ForkBuildSource>,
+    /// Where a fork-derived member's seated overlay came from, persisted with
+    /// its lineage (see `ForkOverlayOrigin`).
+    fork_overlay: super::ForkOverlayOrigin,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     remote: Option<Box<RemoteSpawnFinalize>>,
@@ -5634,6 +5643,7 @@ impl SpawnActivateState {
             spawned_by,
             fork_job,
             fork_source,
+            fork_overlay,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -5684,6 +5694,7 @@ impl SpawnActivateState {
             spawned_by,
             fork_job,
             fork_source,
+            fork_overlay,
             objective_id,
             per_spawn_external_tools,
             remote,
@@ -17692,20 +17703,7 @@ impl ExplicitResumePreparationContext {
             // exact-session admission or successor search. This makes a
             // one-shot resume_from_role declaration part of the actual
             // recovery request instead of an after-the-fact build tweak.
-            let mut restore_spec = super::handle::SpawnMemberSpec::new(
-                entry.role.clone(),
-                entry.agent_identity.clone(),
-            );
-            restore_spec.launch_mode = crate::launch::MemberLaunchMode::Resume {
-                bridge_session_id: session_id.clone(),
-                resume_from_role: None,
-            };
-            restore_spec.runtime_mode = Some(entry.runtime_mode);
-            restore_spec.labels = Some(entry.labels.clone());
-            restore_spec.override_profile = entry.effective_profile_override.clone();
-            restore_spec.model_override = entry.effective_model_override.clone();
-            restore_spec.spawned_by = entry.spawned_by.clone();
-            restore_spec.fork_job = entry.fork_job.clone();
+            let mut restore_spec = super::fork_build::member_resume_spec(&entry, &session_id);
             if let Some(customizer) = self.spawn_member_customizer.as_ref() {
                 customizer.customize_spawn(
                     &super::handle::SpawnCustomizationContext {
@@ -17942,14 +17940,20 @@ impl MobActor {
     /// continuation; returning here does not certify construction completion.
     async fn rebuild_explicit_resume_member_sessions(
         &mut self,
-        rebuild: Vec<ExplicitResumeMemberRebuild>,
+        mut rebuild: Vec<ExplicitResumeMemberRebuild>,
         progress: &super::state::LifecycleProgressSignal,
     ) -> Result<(), MobError> {
+        // A fork-derived member seated with its source's overlay is rebuilt
+        // with the overlay its source is rebuilt with, so every source's
+        // overlay is retained before its forks are rebuilt.
+        super::fork_build::order_fork_sources_first(&mut rebuild, &self.definition.id, |rebuild| {
+            &rebuild.entry
+        });
         let mut first_infrastructure_error = None;
         for rebuild in rebuild {
             let ExplicitResumeMemberRebuild {
                 mut entry,
-                restore_spec,
+                mut restore_spec,
                 member_ref,
                 bridge_session_id,
                 requires_materialization,
@@ -18039,14 +18043,18 @@ impl MobActor {
                 &entry.agent_identity,
                 super::state::LifecycleProgressStage::MemberLiveMaterialization,
             );
-            {
-                let mut retained = self.per_spawn_external_tools.write().await;
-                if let Some(tools) = restore_spec.external_tools.as_ref() {
-                    retained.insert(entry.agent_identity.clone(), Arc::clone(tools));
-                } else {
-                    retained.remove(&entry.agent_identity);
-                }
-            }
+            // The overlay the member is rebuilt with (the customizer's, or for
+            // a fork seated with its source's overlay the one its source is
+            // rebuilt with) rides the rebuild request and is retained: a later
+            // warm revival recomposes it and a fork of the member inherits it.
+            restore_spec.external_tools = self
+                .recustomized_rebuild_overlay(&entry, restore_spec.external_tools.take())
+                .await;
+            self.retain_rebuild_overlay(
+                &entry.agent_identity,
+                restore_spec.external_tools.as_ref(),
+            )
+            .await;
             {
                 let mut roster = self.roster.write().await;
                 let mut snapshot = roster.snapshot();
@@ -27885,6 +27893,7 @@ impl MobActor {
             spawned_by: entry.spawned_by,
             fork_job: entry.fork_job,
             fork_source: entry.fork_source,
+            fork_overlay: entry.fork_overlay,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -27924,6 +27933,22 @@ impl MobActor {
             // provisioning starts. Re-running process-local customization at
             // either seam could silently diverge the actor spec from durable
             // authority.
+            return Ok(());
+        }
+        if matches!(
+            spawn_source,
+            super::handle::SpawnSource::AttachedForkedParticipant
+        ) && spec.fork_source.is_some()
+        {
+            // A local council participant seated with its source's build
+            // inheritance (applied, and proven against the capability, before
+            // this spawn) is a fork seating like `PersistedForkResume`: its
+            // application context, labels and per-spawn overlay are its
+            // source's, and a customizer must not replace or wrap them (a
+            // memory recorder rebound to the participant's identity, say).
+            // A seating without an inheritance (a host-owned capability, or a
+            // caller that attached none) inherited nothing and is customized
+            // as before.
             return Ok(());
         }
         if let Some(customizer) = self.spawn_member_customizer.as_ref() {
@@ -28187,6 +28212,7 @@ impl MobActor {
             spawned_by,
             fork_job,
             fork_source,
+            fork_overlay,
             // Refused above: fork seating consumes its inheritance first.
             fork_build_inheritance: _,
         } = spec;
@@ -28891,6 +28917,7 @@ impl MobActor {
                 spawned_by: spawned_by.clone(),
                 fork_job: fork_job.clone(),
                 fork_source: fork_source.clone(),
+                fork_overlay,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -29085,6 +29112,7 @@ impl MobActor {
             spawned_by,
             fork_job,
             fork_source,
+            fork_overlay,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -30022,6 +30050,7 @@ impl MobActor {
             // and a host-owned capability refuses an inheritance at
             // validation.
             fork_source: _,
+            fork_overlay: _,
             fork_build_inheritance: _,
         } = spec;
         let Some(host) = placement else {
@@ -30794,6 +30823,7 @@ impl MobActor {
             // A placed spawn is never a fork seating: ingress refuses a fork
             // source on it.
             fork_source: None,
+            fork_overlay: super::ForkOverlayOrigin::default(),
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -31073,6 +31103,7 @@ impl MobActor {
                 spawned_by,
                 fork_job,
                 fork_source,
+                fork_overlay,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -31257,6 +31288,7 @@ impl MobActor {
                                 spawned_by: spawned_by.clone(),
                                 fork_job: fork_job.clone(),
                                 fork_source: fork_source.clone(),
+                                fork_overlay,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -31330,6 +31362,7 @@ impl MobActor {
                                 spawned_by: spawned_by.clone(),
                                 fork_job: fork_job.clone(),
                                 fork_source: fork_source.clone(),
+                                fork_overlay,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -31456,6 +31489,7 @@ impl MobActor {
             fork_job: _,
             // A policy auto-spawn is fresh: `SpawnMemberSpec::new` sets neither.
             fork_source: _,
+            fork_overlay: _,
             fork_build_inheritance: _,
         } = member_spec;
 
@@ -31649,6 +31683,7 @@ impl MobActor {
             fork_job: None,
             // A policy auto-spawn is fresh, never a fork seating.
             fork_source: None,
+            fork_overlay: super::ForkOverlayOrigin::default(),
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -32392,6 +32427,7 @@ impl MobActor {
             spawned.spawned_by = ctx.spawned_by.clone();
             spawned.fork_job = ctx.fork_job.clone();
             spawned.fork_source = ctx.fork_source.clone();
+            spawned.fork_overlay = ctx.fork_overlay;
             self.append_committed_placed_event_exact(MobEventKind::MemberSpawned(spawned))
                 .await?;
             self.restore_diagnostics
@@ -32550,6 +32586,7 @@ impl MobActor {
         // Durable fork lineage: every rebuild of a fork-derived member
         // carries it (see `ForkBuildInheritance`).
         spawned_event.fork_source = ctx.fork_source.clone();
+        spawned_event.fork_overlay = ctx.fork_overlay;
         spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = self
             .append_member_spawned_with_identity_fence(

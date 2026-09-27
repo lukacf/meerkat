@@ -284,7 +284,7 @@ pub use runtime::{
     DurableBoundedMemberState, DurableBoundedWorkRecovery, DurableBoundedWorkState,
     ExternalPeerBindingSpec, FlowRunHandle, FlowRunWaitError, FlowTargetProvisioner,
     ForkBuildInheritance, ForkChildRun, ForkChildRunOutcome, ForkJobBinding, ForkJobRecord,
-    ForkMemberAtTurnBoundary, ForkMemberBoundedRunOutcome, ForkMemberResult,
+    ForkMemberAtTurnBoundary, ForkMemberBoundedRunOutcome, ForkMemberResult, ForkOverlayOrigin,
     HELPER_RESULT_TRUNCATION_MARKER, HelperOptions, HelperResult, HostBindReport, HostBindRequest,
     HostCapabilityReport, HostRevokeReport, IdentityLocalExternalToolsError,
     IdentityLocalExternalToolsProvider, IdentityLocalMaterializationKey,

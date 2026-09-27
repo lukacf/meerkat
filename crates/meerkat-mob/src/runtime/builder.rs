@@ -8304,12 +8304,14 @@ impl MobBuilder {
         }
 
         let mut roster_entries = roster.list().cloned().collect::<Vec<_>>();
-        // A fork-derived member is restored with its source's per-spawn
-        // overlay, so every source is restored before its forks.
-        super::fork_build::order_fork_sources_first(&mut roster_entries, &definition.id);
-        // The per-spawn overlay each member's restore was customized with this
-        // pass, keyed by member: what a fork-derived member re-derives its own
-        // overlay from.
+        // A fork-derived member seated with its source's overlay is restored
+        // with the overlay its source is restored with, so every source is
+        // restored before its forks (and a fork before the forks of it).
+        super::fork_build::order_fork_sources_first(&mut roster_entries, &definition.id, |entry| {
+            entry
+        });
+        // The per-spawn overlay each member was restored with in this pass,
+        // keyed by member: what a fork of that member is restored with.
         let mut restored_overlays: BTreeMap<AgentIdentity, Option<Arc<dyn AgentToolDispatcher>>> =
             BTreeMap::new();
         let machine_state = dsl_authority.state();
@@ -8425,18 +8427,7 @@ impl MobBuilder {
                 );
             };
 
-            let mut restore_spec =
-                super::SpawnMemberSpec::new(entry.role.clone(), entry.agent_identity.clone());
-            restore_spec.launch_mode = crate::launch::MemberLaunchMode::Resume {
-                bridge_session_id: bridge_session_id.clone(),
-                resume_from_role: None,
-            };
-            restore_spec.runtime_mode = Some(entry.runtime_mode);
-            restore_spec.labels = Some(entry.labels.clone());
-            restore_spec.override_profile = entry.effective_profile_override.clone();
-            restore_spec.model_override = entry.effective_model_override.clone();
-            restore_spec.spawned_by = entry.spawned_by.clone();
-            restore_spec.fork_job = entry.fork_job.clone();
+            let mut restore_spec = super::fork_build::member_resume_spec(entry, &bridge_session_id);
             if let Some(customizer) = spawn_member_customizer.as_ref() {
                 let ctx = super::SpawnCustomizationContext {
                     mob_id: definition.id.clone(),
@@ -8476,44 +8467,59 @@ impl MobBuilder {
                 )));
             }
             let restore_resume_from_role = restore_resume_from_role.clone();
-            // Seed the actor's retention map so a later machine-authorized
-            // revival recomposes the customizer-supplied per-spawn overlay.
-            if let Some(tools) = restore_spec.external_tools.clone() {
+            // The overlay this member is restored with: the customizer's
+            // overlay for its own identity, except for a fork-derived member
+            // seated with its source's overlay whose source is still the
+            // build it was forked from, which gets the overlay its source was
+            // restored with in this pass (see `fork_build`).
+            let fork_rule = super::fork_build::fork_overlay_rule(
+                entry,
+                &definition.id,
+                |identity| roster.get(identity).is_some(),
+                dsl_authority.state(),
+            );
+            let restore_overlay = match fork_rule {
+                super::fork_build::ForkOverlayRule::Own => restore_spec.external_tools.clone(),
+                super::fork_build::ForkOverlayRule::Caller => {
+                    if restore_spec.external_tools.is_none() {
+                        super::fork_build::warn_caller_overlay_not_resupplied(
+                            &definition.id,
+                            entry,
+                        );
+                    }
+                    restore_spec.external_tools.clone()
+                }
+                super::fork_build::ForkOverlayRule::FollowSource(source) => {
+                    match restored_overlays.get(&source).cloned() {
+                        Some(source_overlay) => source_overlay,
+                        None => {
+                            super::fork_build::warn_fork_source_unavailable(
+                                &definition.id,
+                                entry,
+                                &super::fork_build::ForkSourceUnavailable::NotRebuilt,
+                                restore_spec.external_tools.is_some(),
+                            );
+                            restore_spec.external_tools.clone()
+                        }
+                    }
+                }
+                super::fork_build::ForkOverlayRule::SourceUnavailable(reason) => {
+                    super::fork_build::warn_fork_source_unavailable(
+                        &definition.id,
+                        entry,
+                        &reason,
+                        restore_spec.external_tools.is_some(),
+                    );
+                    restore_spec.external_tools.clone()
+                }
+            };
+            // Seed the actor's retention map with the overlay the member is
+            // actually restored with: a later machine-authorized revival
+            // recomposes it, and a fork of the member inherits it.
+            if let Some(tools) = restore_overlay.clone() {
                 per_spawn_external_tools_seed.insert(entry.agent_identity.clone(), tools);
             }
-            restored_overlays.insert(
-                entry.agent_identity.clone(),
-                restore_spec.external_tools.clone(),
-            );
-            // A fork-derived member is rebuilt with its source's inputs: its
-            // persisted lineage, and the overlay its source was restored with
-            // in this pass (`None` when the source has none). A source in
-            // another mob is not this restore's to read; a source of this mob
-            // that is gone or was not restored here left no overlay to
-            // re-derive. Either way the member keeps its own, and the second
-            // case says so.
-            let source_in_mob = entry.fork_source.as_ref().and_then(|fork_source| {
-                super::fork_build::fork_source_in_mob(fork_source, &definition.id)
-                    .map(|source| (fork_source, source))
-            });
-            let restore_overlay = match source_in_mob {
-                None => restore_spec.external_tools.clone(),
-                Some((fork_source, source)) => match restored_overlays.get(&source).cloned() {
-                    Some(source_overlay) => source_overlay,
-                    None => {
-                        tracing::warn!(
-                            mob_id = %definition.id,
-                            agent_identity = %entry.agent_identity,
-                            source_mob_id = %fork_source.source_member.mob_id,
-                            source_member = %fork_source.source_member.member,
-                            "fork-derived member's source was not restored with it; its \
-                             restore keeps its own per-spawn overlay instead of the source's \
-                             (fork_source, labels and application context are still the source's)"
-                        );
-                        restore_spec.external_tools.clone()
-                    }
-                },
-            };
+            restored_overlays.insert(entry.agent_identity.clone(), restore_overlay.clone());
             let restore_profile_override = restore_spec.override_profile.clone();
             let restore_model_override = restore_spec.model_override.clone();
             let restore_labels = restore_spec

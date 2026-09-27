@@ -4735,10 +4735,11 @@ pub struct MobHandle {
     pub(super) per_spawn_external_tools: PerSpawnExternalTools,
 }
 
-/// Per-member retained per-spawn tool overlays (`SpawnMemberSpec::external_tools`),
-/// written only by the mob actor and shared read-only with its handles.
+/// Per-member retained per-spawn tool overlays (`SpawnMemberSpec::external_tools`)
+/// and where each came from, written only by the mob actor and shared
+/// read-only with its handles.
 pub(super) type PerSpawnExternalTools =
-    Arc<tokio::sync::RwLock<BTreeMap<AgentIdentity, Arc<dyn meerkat_core::AgentToolDispatcher>>>>;
+    Arc<tokio::sync::RwLock<super::fork_build::RetainedOverlays>>;
 
 impl MobHandle {
     /// Install or replace the embedder's pre-flow target-provisioning barrier.
@@ -13160,12 +13161,13 @@ impl MobHandle {
                 .ok_or_else(|| MobError::MemberNotFound(source_identity.clone()))?;
             (entry.role.clone(), entry.labels.clone())
         };
-        let external_tools = self
-            .per_spawn_external_tools
-            .read()
-            .await
-            .get(source_identity)
-            .cloned();
+        let (external_tools, external_tools_origin) = {
+            let retained = self.per_spawn_external_tools.read().await;
+            (
+                retained.get(source_identity).cloned(),
+                retained.origin(source_identity),
+            )
+        };
         // The durable build state is the source's own record of the context
         // its current build ran with (the factory persists it at every build).
         // A source with no loadable durable session has no persisted context;
@@ -13199,6 +13201,7 @@ impl MobHandle {
             app_context,
             labels,
             external_tools,
+            external_tools_origin,
         ))
     }
 

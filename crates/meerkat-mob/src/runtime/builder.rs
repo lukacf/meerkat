@@ -7558,7 +7558,7 @@ impl MobBuilder {
                 wiring.dsl_authority.state().topology_epoch,
             ));
 
-            let mut per_spawn_external_tools_seed = BTreeMap::new();
+            let mut per_spawn_external_tools_seed = super::fork_build::RetainedOverlays::default();
             let mut recovered_direct_member_adoption_pending = false;
             if resumed_state == MobState::Running
                 && recovered_completion_lifecycle_intent.is_none()
@@ -8275,7 +8275,7 @@ impl MobBuilder {
         spawn_member_customizer: &Option<Arc<dyn super::SpawnMemberCustomizer>>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
         runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
-        per_spawn_external_tools_seed: &mut BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>,
+        per_spawn_external_tools_seed: &mut super::fork_build::RetainedOverlays,
     ) -> Result<bool, MobError> {
         let recovered_direct_member_adoption_pending = runtime_metadata
             .list_external_binding_overlays(&definition.id)
@@ -8486,6 +8486,7 @@ impl MobBuilder {
                     &restore_spec,
                 )
             };
+            let mut restore_overlay_origin = super::fork_build::RetainedOverlayOrigin::Own;
             let restore_overlay = match fork_rule {
                 super::fork_build::ForkOverlayRule::Own => own_overlay()?,
                 super::fork_build::ForkOverlayRule::Caller => {
@@ -8500,7 +8501,11 @@ impl MobBuilder {
                 }
                 super::fork_build::ForkOverlayRule::FollowSource(source) => {
                     match restored_overlays.get(&source).cloned() {
-                        Some(source_overlay) => source_overlay,
+                        Some(source_overlay) => {
+                            restore_overlay_origin =
+                                super::fork_build::RetainedOverlayOrigin::Inherited;
+                            source_overlay
+                        }
                         None => {
                             let own = own_overlay()?;
                             super::fork_build::warn_fork_source_unavailable(
@@ -8526,10 +8531,13 @@ impl MobBuilder {
             };
             // Seed the actor's retention map with the overlay the member is
             // actually restored with: a later machine-authorized revival
-            // recomposes it, and a fork of the member inherits it.
-            if let Some(tools) = restore_overlay.clone() {
-                per_spawn_external_tools_seed.insert(entry.agent_identity.clone(), tools);
-            }
+            // recomposes it, and a fork of the member inherits it (and
+            // persists whether it was the member's own).
+            per_spawn_external_tools_seed.retain(
+                &entry.agent_identity,
+                restore_overlay.clone(),
+                restore_overlay_origin,
+            );
             restored_overlays.insert(entry.agent_identity.clone(), restore_overlay.clone());
             let restore_profile_override = restore_spec.override_profile.clone();
             let restore_model_override = restore_spec.model_override.clone();

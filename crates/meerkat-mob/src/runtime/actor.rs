@@ -18043,19 +18043,23 @@ impl MobActor {
             // a fork seated with its source's overlay the one its source is
             // rebuilt with) rides the rebuild request and is retained: a later
             // warm revival recomposes it and a fork of the member inherits it.
-            match self
+            let overlay_origin = match self
                 .recustomized_rebuild_overlay(&entry, &bridge_session_id, &restore_spec)
                 .await
             {
-                Ok(overlay) => restore_spec.external_tools = overlay,
+                Ok((overlay, origin)) => {
+                    restore_spec.external_tools = overlay;
+                    origin
+                }
                 Err(error) => {
                     first_infrastructure_error.get_or_insert(error);
                     continue;
                 }
-            }
+            };
             self.retain_rebuild_overlay(
                 &entry.agent_identity,
                 restore_spec.external_tools.as_ref(),
+                overlay_origin,
             )
             .await;
             {

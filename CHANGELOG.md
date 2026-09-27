@@ -65,11 +65,14 @@ them.
   either: its request is the member's own durable records (roster labels,
   profile and model overrides, the application context and auth binding its
   session persisted). The customizer used to be asked a `SpawnSource::Resume`
-  request for the member and everything it returned but the overlay was
-  applied (labels, context, instructions, auth binding, tool policy, system
-  prompt, profile and model overrides), so every restart changed the build
-  (MobKit's memory customizer appended memory and recorder instructions for
-  the member's own identity: another prompt and a lost cached prefix). Where
+  request for the member, and the rebuild applied the labels, application
+  context (restart restore only), auth binding, tool access policy,
+  inherited tool filter and profile and model overrides it returned, so a
+  customizer that rewrites those by identity changed the member's build at
+  every restart (for a host that resolves tools from labels and context:
+  other tools and a lost cached prefix). Instructions and the system prompt
+  it returned were never applied (no resume rebuild re-authors them), and its
+  overlay was already governed by the overlay rule (see Fixed). Where
   the member's per-spawn overlay has to come from its own identity (see
   Fixed), the customizer is still asked and only its `external_tools` is
   used. Ordinary members are customized on resume as before.
@@ -93,11 +96,13 @@ them.
   ordinary spawns.
 - `meerkat_mob::MemberSpawnedEvent` and `meerkat_mob::RosterEntry` gain
   `fork_source` (`Option<ForkBuildSource>`) and `fork_overlay`
-  (the new `meerkat_mob::ForkOverlayOrigin`: `source` or `caller`), which
-  persist a fork-derived member's lineage and whether its seated per-spawn
-  overlay was its source's or the fork caller's own. Both are omitted when
-  absent or default, so non-fork members keep their wire shape, and journals
-  written before decode them as absent (`source`).
+  (the new `meerkat_mob::ForkOverlayOrigin`: `source`, `source_own` or
+  `caller`), which persist a fork-derived member's lineage and where its
+  seated per-spawn overlay came from: its source's overlay, which the source
+  had itself inherited from its own source (`source`) or which was the
+  source's own (`source_own`), or the fork caller's own (`caller`). Both are
+  omitted when absent or default, so non-fork members keep their wire shape,
+  and journals written before decode them as absent (`source`).
 - `meerkat_mob::ForkBuildInheritance`, the opaque build inputs a fork-derived
   member inherits from its source (application context, application labels,
   retained per-spawn tool overlay and the typed source), minted by the source's
@@ -151,9 +156,13 @@ them.
   ancestor its overlay came through is still the build its fork was taken
   from, so a grandchild of a retired source no longer keeps that source's
   dispatcher across in-process revivals, and its warning also names the
-  ancestor whose source is missing. A fork of a child inherits the overlay the
-  child was built with, so grandchildren (a `fork_off` from a fork, or a
-  council forking one) get the same tools, also after a restart. A temporary-council participant's source is in another mob:
+  ancestor whose source is missing. The ancestors counted are the ones the
+  overlay passed through when the grandchild was forked: a grandchild forked
+  from a child already rebuilt onto its own-identity overlay (`source_own`)
+  follows that child, whatever became of the child's source. A fork of a
+  child inherits the overlay the child was built with, so grandchildren (a
+  `fork_off` from a fork, or a council forking one) get the same tools, also
+  after a restart. A temporary-council participant's source is in another mob:
   a revived participant keeps the overlay it was seated with, and a restored
   one gets the customizer's overlay for its own identity.
 - A mob member rebuilt without an explicit application context (warm revival,

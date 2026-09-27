@@ -2552,19 +2552,24 @@ mod tests {
         );
 
         // A fork seated with its fork caller's overlay records that, so a
-        // restart never re-derives the source's overlay for it.
-        forked.fork_overlay = crate::runtime::ForkOverlayOrigin::Caller;
-        let encoded = serde_json::to_value(MobEventKind::MemberSpawned(forked)).expect("serialize");
-        assert_eq!(encoded["fork_overlay"], json!("caller"));
-        let MobEventKind::MemberSpawned(decoded) =
-            serde_json::from_value::<MobEventKind>(encoded).expect("roundtrip")
-        else {
-            panic!("expected MemberSpawned");
-        };
-        assert_eq!(
-            decoded.fork_overlay,
-            crate::runtime::ForkOverlayOrigin::Caller
-        );
+        // restart never re-derives the source's overlay for it; a fork seated
+        // with its source's own overlay records that, so a rebuild does not
+        // walk above the source.
+        for (origin, wire) in [
+            (crate::runtime::ForkOverlayOrigin::Caller, "caller"),
+            (crate::runtime::ForkOverlayOrigin::SourceOwn, "source_own"),
+        ] {
+            forked.fork_overlay = origin;
+            let encoded = serde_json::to_value(MobEventKind::MemberSpawned(forked.clone()))
+                .expect("serialize");
+            assert_eq!(encoded["fork_overlay"], json!(wire));
+            let MobEventKind::MemberSpawned(decoded) =
+                serde_json::from_value::<MobEventKind>(encoded).expect("roundtrip")
+            else {
+                panic!("expected MemberSpawned");
+            };
+            assert_eq!(decoded.fork_overlay, origin);
+        }
     }
 
     #[test]

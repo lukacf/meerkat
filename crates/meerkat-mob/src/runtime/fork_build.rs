@@ -49,9 +49,12 @@
 //!
 //! The host's spawn customizer does not run on these rebuilds either
 //! ([`rebuild_resume_spec`]): no customizer ran at the child's seating, so a
-//! customizer that rewrote the child's labels, context, instructions, auth
-//! binding, tool policy or profile on a restart would build a different agent
-//! (another prompt, a lost cache prefix) from the one that was seated. The
+//! customizer that rewrote the child's labels, application context, auth
+//! binding, tool access policy, inherited tool filter or profile and model
+//! overrides on a restart would build a different agent (for a host that
+//! resolves tools by labels and context, other tools and a lost cache prefix)
+//! from the one that was seated. Instructions and the system prompt are not
+//! among them: no resume rebuild re-authors those. The
 //! one thing a rebuild may take from the customizer is the per-spawn overlay
 //! for the child's own identity, and only where the overlay rule below asks
 //! for it ([`customizer_own_identity_overlay`]); everything else the customizer
@@ -85,20 +88,26 @@
 //!   rebuild.
 //! - **Ancestor gone or replaced**: the rule is transitive. A grandchild seated
 //!   with its source's overlay got, through that source, the overlay of every
-//!   in-mob ancestor the source itself followed. It follows its source only
-//!   while each of those ancestors is still the build its fork was taken from,
-//!   walking `fork_source` up the chain within the mob until a member whose
-//!   overlay is its own (an ordinary member, a fork seated with its caller's
-//!   overlay, or a fork whose source is in another mob). When a link up the
-//!   chain is broken the grandchild is rebuilt like a child whose own source is
-//!   gone, and the warning also names the ancestor whose source is missing.
+//!   in-mob ancestor the source itself followed when the grandchild was
+//!   forked. It follows its source only while each of those ancestors is still
+//!   the build its fork was taken from, walking `fork_source` up the chain
+//!   within the mob until a member whose overlay was its own. Each fork
+//!   persists which it got ([`ForkOverlayOrigin::Source`]: an overlay its
+//!   source had itself inherited; [`ForkOverlayOrigin::SourceOwn`]: its
+//!   source's own, which is an ordinary member's, a fork caller's, a
+//!   temporary-council participant's, or the own-identity overlay of a fork
+//!   already rebuilt because its own source was gone), so the walk stops where
+//!   the overlay entered the chain at the time of that fork, not where the
+//!   ancestor's seating-time overlay came from. When a link up the chain is
+//!   broken the grandchild is rebuilt like a child whose own source is gone,
+//!   and the warning also names the ancestor whose source is missing.
 //!
 //! A temporary-council participant's source lives in another mob, which this
 //! mob cannot observe: in process the participant keeps the overlay it was
 //! seated with (its source's); after a restart or explicit resume it gets the
 //! customizer's overlay for its own identity.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use meerkat_core::types::SessionId;
@@ -123,18 +132,125 @@ use crate::roster::RosterEntry;
 #[non_exhaustive]
 pub enum ForkOverlayOrigin {
     /// The member's spawn request stated no overlay, so it was seated with
-    /// its source's retained overlay (or with none, like its source).
+    /// its source's retained overlay (or with none, like its source), and the
+    /// source had itself inherited that overlay from its own in-mob source: a
+    /// rebuild of the member follows its source only while that source's own
+    /// link up the chain is intact too. Also the decoding of a journal that
+    /// does not say which.
     #[default]
     Source,
     /// The fork caller put an overlay on the member's spawn request, and the
     /// member was seated with that overlay instead of its source's.
     Caller,
+    /// The member's spawn request stated no overlay, so it was seated with
+    /// its source's retained overlay, and that overlay was the source's own:
+    /// the source was an ordinary member, a fork seated with its caller's
+    /// overlay, a fork whose source is in another mob, or a fork already
+    /// rebuilt onto the overlay for its own identity because its own source
+    /// was gone or replaced. A rebuild of the member follows its source while
+    /// the source is the build it was forked from, whatever became of the
+    /// source's own ancestors.
+    SourceOwn,
 }
 
 impl ForkOverlayOrigin {
     /// Whether this is the default, [`Self::Source`] (serde skips it).
     pub fn is_source(&self) -> bool {
         matches!(self, Self::Source)
+    }
+}
+
+/// Where a member's retained per-spawn overlay (the one it was last built
+/// with, which a fork of it inherits) came from. Process-local, like the
+/// overlay; a fork of the member persists it as the fork's
+/// [`ForkOverlayOrigin::Source`] or [`ForkOverlayOrigin::SourceOwn`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetainedOverlayOrigin {
+    /// The member's own overlay: an ordinary member's, a fork caller's, a
+    /// temporary-council participant's (its source is outside this mob), or
+    /// the overlay for its own identity a fork was rebuilt onto because its
+    /// source, or an ancestor its overlay came through, was gone or replaced.
+    Own,
+    /// The overlay the member's in-mob source passed down to it: it was seated
+    /// with its source's overlay, or rebuilt following its source.
+    Inherited,
+}
+
+impl RetainedOverlayOrigin {
+    /// The origin of the overlay a member is seated with.
+    pub(crate) fn at_seating(
+        fork_source: Option<&ForkBuildSource>,
+        fork_overlay: ForkOverlayOrigin,
+        mob_id: &MobId,
+    ) -> Self {
+        let from_in_mob_source = fork_source
+            .and_then(|source| fork_source_in_mob(source, mob_id))
+            .is_some();
+        if from_in_mob_source && fork_overlay != ForkOverlayOrigin::Caller {
+            Self::Inherited
+        } else {
+            Self::Own
+        }
+    }
+}
+
+/// Every member's retained per-spawn overlay and where it came from, written
+/// only by the mob actor (and the restart restore that seeds it) and shared
+/// read-only with its handles.
+#[derive(Default)]
+pub(crate) struct RetainedOverlays {
+    tools: BTreeMap<AgentIdentity, Arc<dyn AgentToolDispatcher>>,
+    /// Members whose retained overlay (or retained absence of one) is
+    /// [`RetainedOverlayOrigin::Inherited`]; every other member's is its own.
+    inherited: BTreeSet<AgentIdentity>,
+}
+
+impl RetainedOverlays {
+    /// `identity`'s retained overlay, if it has one.
+    pub(crate) fn get(&self, identity: &AgentIdentity) -> Option<&Arc<dyn AgentToolDispatcher>> {
+        self.tools.get(identity)
+    }
+
+    /// Where `identity`'s retained overlay came from.
+    pub(crate) fn origin(&self, identity: &AgentIdentity) -> RetainedOverlayOrigin {
+        if self.inherited.contains(identity) {
+            RetainedOverlayOrigin::Inherited
+        } else {
+            RetainedOverlayOrigin::Own
+        }
+    }
+
+    /// Record `overlay` (`None`: no overlay) as the one `identity` was
+    /// (re)built with, from `origin`.
+    pub(crate) fn retain(
+        &mut self,
+        identity: &AgentIdentity,
+        overlay: Option<Arc<dyn AgentToolDispatcher>>,
+        origin: RetainedOverlayOrigin,
+    ) {
+        match overlay {
+            Some(tools) => {
+                self.tools.insert(identity.clone(), tools);
+            }
+            None => {
+                self.tools.remove(identity);
+            }
+        }
+        match origin {
+            RetainedOverlayOrigin::Inherited => {
+                self.inherited.insert(identity.clone());
+            }
+            RetainedOverlayOrigin::Own => {
+                self.inherited.remove(identity);
+            }
+        }
+    }
+
+    /// Forget `identity`'s overlay (its lifetime ended), releasing the host
+    /// dispatcher.
+    pub(crate) fn remove(&mut self, identity: &AgentIdentity) {
+        self.tools.remove(identity);
+        self.inherited.remove(identity);
     }
 }
 
@@ -157,18 +273,23 @@ pub struct ForkBuildInheritance {
     app_context: Option<serde_json::Value>,
     labels: BTreeMap<String, String>,
     external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Where the source's retained overlay came from: what a child seated
+    /// with it persists as its [`ForkOverlayOrigin`].
+    external_tools_origin: RetainedOverlayOrigin,
 }
 
 impl ForkBuildInheritance {
     /// `labels` are the source's roster labels. The standard mob member
     /// labels among them are dropped here: they name the source (in MobKit,
     /// `agent_identity` is the source's durable identity), so a child that
-    /// inherited them would claim to be its source.
+    /// inherited them would claim to be its source. `external_tools` is the
+    /// source's retained overlay, from `external_tools_origin`.
     pub(crate) fn new(
         source: ForkBuildSource,
         app_context: Option<serde_json::Value>,
         mut labels: BTreeMap<String, String>,
         external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+        external_tools_origin: RetainedOverlayOrigin,
     ) -> Self {
         labels.retain(|key, _| !crate::build::is_standard_mob_member_label(key));
         Self {
@@ -176,6 +297,7 @@ impl ForkBuildInheritance {
             app_context,
             labels,
             external_tools,
+            external_tools_origin,
         }
     }
 
@@ -222,12 +344,13 @@ impl ForkBuildInheritance {
             app_context,
             labels,
             external_tools,
+            external_tools_origin,
         } = self;
         spec.fork_source = Some(source);
-        spec.fork_overlay = if spec.external_tools.is_some() {
-            ForkOverlayOrigin::Caller
-        } else {
-            ForkOverlayOrigin::Source
+        spec.fork_overlay = match (spec.external_tools.is_some(), external_tools_origin) {
+            (true, _) => ForkOverlayOrigin::Caller,
+            (false, RetainedOverlayOrigin::Inherited) => ForkOverlayOrigin::Source,
+            (false, RetainedOverlayOrigin::Own) => ForkOverlayOrigin::SourceOwn,
         };
         if spec.context.is_none() {
             spec.context = app_context;
@@ -444,6 +567,10 @@ fn followed_link<'e>(
 /// A member seated with its source's overlay follows the source only while
 /// the source, and every in-mob ancestor the source's own overlay came
 /// through, is still the build its fork was taken from (see the module docs).
+/// Each member's persisted [`ForkOverlayOrigin`] says how far up the chain
+/// its overlay came from: the walk crosses the link to a member's source, and
+/// stops above it when the member was seated with that source's own overlay
+/// ([`ForkOverlayOrigin::SourceOwn`]).
 pub(crate) fn fork_overlay_rule<'r>(
     entry: &RosterEntry,
     mob_id: &MobId,
@@ -465,16 +592,21 @@ pub(crate) fn fork_overlay_rule<'r>(
             return ForkOverlayRule::SourceUnavailable(ForkSourceUnavailable::Source(link));
         }
     };
-    // Walk the chain the source's overlay came down. `visited` bounds the walk
-    // should a malformed lineage ever loop.
-    let mut visited = std::collections::BTreeSet::from([entry.agent_identity.clone()]);
+    // Walk the chain the source's overlay came down, while the member below
+    // took an overlay its source had itself inherited. `visited` bounds the
+    // walk should a malformed lineage ever loop.
+    let mut visited = BTreeSet::from([entry.agent_identity.clone()]);
+    let mut below = entry.fork_overlay;
     let mut current = source_entry;
-    while visited.insert(current.agent_identity.clone()) {
+    while below == ForkOverlayOrigin::Source && visited.insert(current.agent_identity.clone()) {
         let Some((next, link)) = followed_link(current, mob_id) else {
             break;
         };
         match follow_fork_link(&next, link, &seated, machine_state) {
-            Ok(next_entry) => current = next_entry,
+            Ok(next_entry) => {
+                below = current.fork_overlay;
+                current = next_entry;
+            }
             Err(link) => {
                 return ForkOverlayRule::SourceUnavailable(ForkSourceUnavailable::Ancestor {
                     ancestor: current.agent_identity.clone(),
@@ -604,8 +736,12 @@ impl super::actor::MobActor {
                     session_id,
                 )?;
                 warn_fork_source_unavailable(&self.definition.id, entry, &reason, own.is_some());
-                self.retain_rebuild_overlay(&entry.agent_identity, own.as_ref())
-                    .await;
+                self.retain_rebuild_overlay(
+                    &entry.agent_identity,
+                    own.as_ref(),
+                    RetainedOverlayOrigin::Own,
+                )
+                .await;
                 Ok(own)
             }
         }
@@ -613,15 +749,15 @@ impl super::actor::MobActor {
 
     /// The per-spawn overlay an explicit-resume rebuild of `entry` on
     /// `session_id` composes, given `spec`, its rebuild request
-    /// ([`rebuild_resume_spec`]). Sources are rebuilt before their forks in the
-    /// same pass, so a source's retained overlay is the one it is rebuilt
-    /// with.
+    /// ([`rebuild_resume_spec`]), and where it comes from. Sources are rebuilt
+    /// before their forks in the same pass, so a source's retained overlay is
+    /// the one it is rebuilt with.
     pub(super) async fn recustomized_rebuild_overlay(
         &self,
         entry: &RosterEntry,
         session_id: &SessionId,
         spec: &super::handle::SpawnMemberSpec,
-    ) -> Result<Option<Arc<dyn AgentToolDispatcher>>, MobError> {
+    ) -> Result<(Option<Arc<dyn AgentToolDispatcher>>, RetainedOverlayOrigin), MobError> {
         let own = || {
             rebuild_own_overlay(
                 &self.definition.id,
@@ -631,46 +767,46 @@ impl super::actor::MobActor {
                 spec,
             )
         };
-        match self.fork_overlay_rule(entry).await {
-            ForkOverlayRule::Own => own(),
+        let overlay = match self.fork_overlay_rule(entry).await {
+            ForkOverlayRule::Own => own()?,
             ForkOverlayRule::Caller => {
                 let own = own()?;
                 if own.is_none() {
                     warn_caller_overlay_not_resupplied(&self.definition.id, entry);
                 }
-                Ok(own)
+                own
             }
-            ForkOverlayRule::FollowSource(source) => Ok(self
-                .per_spawn_external_tools
-                .read()
-                .await
-                .get(&source)
-                .cloned()),
+            ForkOverlayRule::FollowSource(source) => {
+                let inherited = self
+                    .per_spawn_external_tools
+                    .read()
+                    .await
+                    .get(&source)
+                    .cloned();
+                return Ok((inherited, RetainedOverlayOrigin::Inherited));
+            }
             ForkOverlayRule::SourceUnavailable(reason) => {
                 let own = own()?;
                 warn_fork_source_unavailable(&self.definition.id, entry, &reason, own.is_some());
-                Ok(own)
+                own
             }
-        }
+        };
+        Ok((overlay, RetainedOverlayOrigin::Own))
     }
 
-    /// Record `overlay` as the one `identity` was (re)built with: what a
-    /// later warm revival of the member composes and what a fork of it
-    /// inherits.
+    /// Record `overlay` (from `origin`) as the one `identity` was (re)built
+    /// with: what a later warm revival of the member composes and what a fork
+    /// of it inherits.
     pub(super) async fn retain_rebuild_overlay(
         &self,
         identity: &AgentIdentity,
         overlay: Option<&Arc<dyn AgentToolDispatcher>>,
+        origin: RetainedOverlayOrigin,
     ) {
-        let mut retained = self.per_spawn_external_tools.write().await;
-        match overlay {
-            Some(tools) => {
-                retained.insert(identity.clone(), Arc::clone(tools));
-            }
-            None => {
-                retained.remove(identity);
-            }
-        }
+        self.per_spawn_external_tools
+            .write()
+            .await
+            .retain(identity, overlay.cloned(), origin);
     }
 }
 
@@ -782,6 +918,7 @@ impl std::fmt::Debug for ForkBuildInheritance {
             .field("app_context", &self.app_context.is_some())
             .field("labels", &self.labels)
             .field("external_tools", &self.external_tools.is_some())
+            .field("external_tools_origin", &self.external_tools_origin)
             .finish()
     }
 }
@@ -829,7 +966,97 @@ mod tests {
                 ("tier".to_string(), "gold".to_string()),
             ]),
             tools,
+            RetainedOverlayOrigin::Own,
         )
+    }
+
+    /// A child seated with its source's overlay persists whether that overlay
+    /// was the source's own or one the source had itself inherited: the
+    /// source's current overlay, not its seating-time lineage, is what the
+    /// child got.
+    #[test]
+    fn the_child_records_where_its_sources_overlay_came_from() {
+        for (origin, expected) in [
+            (RetainedOverlayOrigin::Own, ForkOverlayOrigin::SourceOwn),
+            (RetainedOverlayOrigin::Inherited, ForkOverlayOrigin::Source),
+        ] {
+            let mut inheritance = inheritance(None);
+            inheritance.external_tools_origin = origin;
+            let mut bare = SpawnMemberSpec::new(ProfileName::from("domain"), "child");
+            inheritance.clone().apply_to(&mut bare);
+            assert_eq!(bare.fork_overlay, expected, "{origin:?}");
+
+            let mut own = SpawnMemberSpec::new(ProfileName::from("domain"), "child");
+            own.external_tools = Some(Arc::new(NoTools));
+            inheritance.apply_to(&mut own);
+            assert_eq!(own.fork_overlay, ForkOverlayOrigin::Caller, "{origin:?}");
+        }
+    }
+
+    #[test]
+    fn retained_overlays_track_origin_independently_of_the_overlay() {
+        let identity = AgentIdentity::from("fork-child");
+        let mut retained = RetainedOverlays::default();
+        assert_eq!(retained.origin(&identity), RetainedOverlayOrigin::Own);
+        retained.retain(&identity, None, RetainedOverlayOrigin::Inherited);
+        assert!(retained.get(&identity).is_none());
+        assert_eq!(retained.origin(&identity), RetainedOverlayOrigin::Inherited);
+        retained.retain(
+            &identity,
+            Some(Arc::new(NoTools)),
+            RetainedOverlayOrigin::Own,
+        );
+        assert!(retained.get(&identity).is_some());
+        assert_eq!(retained.origin(&identity), RetainedOverlayOrigin::Own);
+        retained.retain(&identity, None, RetainedOverlayOrigin::Inherited);
+        retained.remove(&identity);
+        assert!(retained.get(&identity).is_none());
+        assert_eq!(retained.origin(&identity), RetainedOverlayOrigin::Own);
+    }
+
+    #[test]
+    fn seating_origin_is_inherited_only_from_an_in_mob_source_overlay() {
+        let home = MobId::from("home");
+        let other = MobId::from("convener");
+        let source = source();
+        for (fork_source, fork_overlay, mob_id, expected) in [
+            (
+                None,
+                ForkOverlayOrigin::Source,
+                &home,
+                RetainedOverlayOrigin::Own,
+            ),
+            (
+                Some(&source),
+                ForkOverlayOrigin::Source,
+                &home,
+                RetainedOverlayOrigin::Inherited,
+            ),
+            (
+                Some(&source),
+                ForkOverlayOrigin::SourceOwn,
+                &home,
+                RetainedOverlayOrigin::Inherited,
+            ),
+            (
+                Some(&source),
+                ForkOverlayOrigin::Caller,
+                &home,
+                RetainedOverlayOrigin::Own,
+            ),
+            (
+                Some(&source),
+                ForkOverlayOrigin::Source,
+                &other,
+                RetainedOverlayOrigin::Own,
+            ),
+        ] {
+            assert_eq!(
+                RetainedOverlayOrigin::at_seating(fork_source, fork_overlay, mob_id),
+                expected,
+                "{fork_source:?} {fork_overlay:?} {mob_id}"
+            );
+        }
     }
 
     #[test]
@@ -906,7 +1133,13 @@ mod tests {
             source_labels.insert(key.to_string(), format!("source-{key}"));
         }
         source_labels.insert("agent_identity".to_string(), "domain:calendar".to_string());
-        let inheritance = ForkBuildInheritance::new(source(), None, source_labels, None);
+        let inheritance = ForkBuildInheritance::new(
+            source(),
+            None,
+            source_labels,
+            None,
+            RetainedOverlayOrigin::Own,
+        );
         let app_labels = BTreeMap::from([
             ("domain".to_string(), "calendar".to_string()),
             ("tier".to_string(), "gold".to_string()),

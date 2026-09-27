@@ -346,6 +346,9 @@ names the missing source. A fork of the child inherits the overlay the child
 was built with, so grandchildren get the same tools. A grandchild follows its
 source only while every ancestor its tools came through is still seated on the
 session its fork was taken from, so it drops a retired ancestor's tools too.
+Its tools came through only the ancestors they passed when it was forked: if
+its forker had already been rebuilt with its own identity's tools by then, the
+grandchild keeps following its forker, whatever happened above it.
 
 **Detached.** A call runs detached when three things hold: the host declares
 it can deliver later, it has a runtime to admit the completion, and the caller

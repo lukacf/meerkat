@@ -2335,12 +2335,16 @@ impl MobActor {
             // Same commit as the roster insert: retain the per-spawn overlay
             // so machine-authorized revival recomposes it. `None` clears any
             // prior incarnation's overlay (respawn replacement semantics).
-            let mut per_spawn = self.per_spawn_external_tools.write().await;
-            if let Some(dispatcher) = state.per_spawn_external_tools.take() {
-                per_spawn.insert(state.identity.clone(), dispatcher);
-            } else {
-                per_spawn.remove(&state.identity);
-            }
+            let origin = super::super::fork_build::RetainedOverlayOrigin::at_seating(
+                state.fork_source.as_ref(),
+                state.fork_overlay,
+                &self.definition.id,
+            );
+            self.per_spawn_external_tools.write().await.retain(
+                &state.identity,
+                state.per_spawn_external_tools.take(),
+                origin,
+            );
         }
 
         // Row #314: record the machine-owned external-member rebind capability

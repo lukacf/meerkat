@@ -53,7 +53,6 @@ them.
   is `alpha/v<version>`, not its last path segment. Every new scenario has a
   doctor fixture that goes red when that scenario is removed.
 
-
 ## [0.8.45] - 2026-09-27
 
 ### Breaking

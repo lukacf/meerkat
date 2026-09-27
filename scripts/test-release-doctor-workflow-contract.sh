@@ -248,6 +248,23 @@ elif name == "dispatch-branch-ref-name":
         '            release_tag="${GITHUB_REF_NAME}"\n'
         "          fi\n",
     )
+elif name == "dispatch-branch-ref-name-tag-exists":
+    # Read a non-tag ref's name as the tag once a tag of that name exists: a
+    # branch named like the version's tag then publishes its tip as that tag.
+    replace_once(
+        '          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then\n'
+        '            release_tag="${GITHUB_REF#refs/tags/}"\n'
+        "          else\n"
+        '            echo "${GITHUB_REF} is not a tag. A publishing run must run on an allowed tag (${allowed[*]}) or name release_tag." >&2\n'
+        "            exit 1\n"
+        "          fi\n",
+        "          else\n"
+        '            release_tag="${GITHUB_REF_NAME}"\n'
+        '            if ! git rev-parse -q --verify "refs/tags/${release_tag}^{commit}" >/dev/null; then\n'
+        "              exit 1\n"
+        "            fi\n"
+        "          fi\n",
+    )
 elif name == "dispatch-ref-name-expression":
     # Equivalent: a tag push's tag read from the ${{ github.ref_name }}
     # expression (the spelling release.yml uses elsewhere).
@@ -423,6 +440,9 @@ expect_fail_named dispatch-alpha-any-version "${TEST_ROOT}/dispatch-alpha-any-ve
   "accepts an alpha crate dispatch on the alpha/v9.9.9 tag (another version)" dispatch-binding
 mutate dispatch-branch-ref-name "${TEST_ROOT}/dispatch-branch-ref-name.yml"
 expect_fail_named dispatch-branch-ref-name "${TEST_ROOT}/dispatch-branch-ref-name.yml" \
+  "accepts a package dispatch from refs/heads/v0.0.0 without release_tag" dispatch-binding
+mutate dispatch-branch-ref-name-tag-exists "${TEST_ROOT}/dispatch-branch-ref-name-tag-exists.yml"
+expect_fail_named dispatch-branch-ref-name-tag-exists "${TEST_ROOT}/dispatch-branch-ref-name-tag-exists.yml" \
   "accepts a package dispatch from refs/heads/v0.0.0 without release_tag" dispatch-binding
 mutate dispatch-prefers-github-ref-other-tag "${TEST_ROOT}/dispatch-prefers-github-ref-other-tag.yml"
 expect_fail_named dispatch-prefers-github-ref-other-tag "${TEST_ROOT}/dispatch-prefers-github-ref-other-tag.yml" \

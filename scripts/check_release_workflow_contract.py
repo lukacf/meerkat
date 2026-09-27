@@ -815,7 +815,14 @@ def check_dispatch_binding(text: str) -> list[str]:
         (named_tag, (), None, " (no such tag exists)"),
         # The tag exists but the checked-out commit is a later one.
         (named_tag, (tag,), None, " (the tag is not the checked-out commit)"),
-        *((context, (), checkout_for(context), "") for context in BRANCH_DISPATCHES),
+        # Every branch dispatch runs with the allowed tags present on the
+        # release commit (the branch is on the later one), so a binding that
+        # takes a branch named like a tag for that tag, because the tag
+        # exists, is refused too.
+        *(
+            (context, (tag, alpha_tag), checkout_for(context), "")
+            for context in BRANCH_DISPATCHES
+        ),
     ]
     violations: list[str] = []
     for context in [

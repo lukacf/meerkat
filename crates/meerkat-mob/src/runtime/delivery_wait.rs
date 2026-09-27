@@ -50,10 +50,15 @@ pub enum DeliveryUnknownCause {
 pub enum DeliveryNotTerminalCause {
     /// The live runtime still owed the input a terminal when the deadline
     /// came: the wait ran until the deadline less the 100 ms evidence-read
-    /// floor, and the final read in that last slice (or, if it could not
-    /// finish in time, the last read before it) still found the input
+    /// floor, and the final read in that last slice still found the input
     /// pending. Waiting again later is safe: waiting cancels nothing.
     DeadlineElapsed,
+    /// The final evidence read did not finish before the deadline (it can
+    /// wait on the session driver, which a run's terminal commit holds), so
+    /// the facts are those of the last read before it, which found the input
+    /// pending. They say nothing about the input now: it may have reached its
+    /// terminal since. Waiting again later is safe: waiting cancels nothing.
+    EvidenceReadTimedOut,
     /// The deadline elapsed while the member's session had no live runtime
     /// registration, so the input could not advance (for example between a
     /// restart and the member's recovery).
@@ -592,16 +597,10 @@ mod observe {
                     cause: DeliveryUnknownCause::NotAdmittedByDeadline,
                 },
             },
-            // The evidence read itself ran out: report the last observation.
+            // The evidence read itself ran out: report the last observation,
+            // marked as an earlier reading rather than the state at the end.
             None => match last_pending {
-                Some(facts) => {
-                    let cause = if facts.live {
-                        DeliveryNotTerminalCause::DeadlineElapsed
-                    } else {
-                        DeliveryNotTerminalCause::RuntimeDetached
-                    };
-                    not_terminal(facts, cause)
-                }
+                Some(facts) => not_terminal(facts, DeliveryNotTerminalCause::EvidenceReadTimedOut),
                 None if observed_unadmitted => DeliveryTerminalWait::Unknown {
                     cause: DeliveryUnknownCause::NotAdmittedByDeadline,
                 },

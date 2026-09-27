@@ -10,7 +10,9 @@
 //!   later work that is not this job's; except a job that ended by its limit
 //!   (its committed record is `max_run_elapsed`), whose child is retired if a
 //!   crash or failure left it seated;
-//! - already finished (its reply to the job is in its durable transcript):
+//! - already finished (its reply to the job is durable: the runtime's
+//!   terminal receipt for the job turn's input, or, for a record without a
+//!   turn delivery identity, the child's transcript after the fork prefix):
 //!   delivers that result, however late the restart landed, and leaves the
 //!   child seated; the opt-in `max_run` limit only bounds a run still going;
 //! - still running: waits for the run to end, racing the opt-in `max_run`
@@ -18,9 +20,19 @@
 //!   the limit wins, the run is cancelled and `max_run_elapsed` delivered,
 //!   and the child (with its descendants) is retired only once that outcome
 //!   is settled, so a delivery that must wait keeps the job on record;
-//! - idle with its own reply after the fork prefix: delivers that result;
+//! - idle with its durable reply: delivers that result;
 //! - idle without one (the turn did not survive the restart): delivers a
 //!   `restart_interrupted` outcome and leaves the child seated for its forker.
+//!
+//! A job whose turn was admitted under a stable delivery identity (every job
+//! on a runtime-backed host) is settled from the runtime's terminal receipt
+//! for that input alone ([`relink_by_receipt`]): a completed turn is
+//! `completed`; the turn's own failure is `failed` with its typed error, and
+//! the child is retired as the live custodian retires it; an end imposed from
+//! outside (stop, destroy, cancel), an input no run answered, or one never
+//! admitted is `restart_interrupted`. An input still owed a terminal is
+//! watched, never settled from member status: after a restart it is requeued
+//! and the child can read idle before the recovered run opens.
 //!
 //! A status read that does not observe the child (the mob's status
 //! observation capacity stayed full past its admission wait, the actor did
@@ -241,6 +253,26 @@ pub const COMMIT_PENDING_CEILING: Duration = Duration::from_secs(300);
 /// with a commit or with other work), not evidence of a pending commit.
 const RUN_INPUT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Upper bound on one read of a child's member status in the receipt watch
+/// (it reads the mob actor, and may read the runtime); a read that does not
+/// answer in this long is inconclusive.
+const STATUS_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long one wait on a job turn's receipt lasts before the re-link looks
+/// at the child's status again (the wait returns as soon as the receipt
+/// exists). The last read of the receipt before a ceiling delivery waits
+/// this long too.
+const RECEIPT_WAIT_SLICE: Duration = Duration::from_secs(2);
+
+/// Last receipt reads at the commit ceiling in a row that may say nothing
+/// (the read did not observe the member or its runtime within its bound, or
+/// it failed) before the receipt watch stops waiting. Such a read is not
+/// evidence that no receipt exists: a read that waits for a driver the
+/// receipt's own commit holds reads the same. Once this many are spent the
+/// watch delivers `restart_interrupted` naming no cause; a reading that
+/// shows the child running starts the count again.
+const MAX_INCONCLUSIVE_CEILING_READS: u32 = 3;
+
 /// First pause before reading a child's status again after a read that did
 /// not observe it. Each further unobserved read in a row doubles the pause, up
 /// to [`UNOBSERVED_RETRY_MAX_INTERVAL`]; an observed read resets it.
@@ -285,6 +317,15 @@ fn now_ms() -> u64 {
             .as_millis(),
     )
     .unwrap_or(u64::MAX)
+}
+
+/// `bound`, cut to the time left before the job's `max_run` deadline
+/// (`deadline_ms`, unix milliseconds) when it has one, so that no pause or
+/// read in a watch outlasts the limit.
+fn within_limit(bound: Duration, deadline_ms: Option<u64>) -> Duration {
+    deadline_ms.map_or(bound, |deadline| {
+        bound.min(Duration::from_millis(deadline.saturating_sub(now_ms())))
+    })
 }
 
 /// Re-link every fork child in every managed mob whose job started before
@@ -663,9 +704,12 @@ async fn relink_owned_child(
     // A job whose completion the forker's runtime already admitted is over.
     // The child stays seated for further work that is no longer this job's,
     // so neither the job's limit nor another delivery applies to it. A job
-    // that ended by its limit is the exception: its child is retired, which
-    // a crash or failure after delivery can have left undone (retiring is
-    // idempotent).
+    // whose delivered outcome retires its child (it ended by its limit, or
+    // its own turn failed) is the exception: the child is retired, which a
+    // crash or failure after delivery can have left undone (retiring is
+    // idempotent). The delivered outcome is read typed from the committed
+    // record: `restart_interrupted` shares the record's `failed` notice
+    // status and must stay seated.
     if let Some(runtime) = runtime
         && crate::detached_delivery::detached_completion_admitted(
             runtime,
@@ -675,18 +719,32 @@ async fn relink_owned_child(
         )
         .await
     {
-        if committed_completion_status(&service, &job.owner_session_id, &job.job_id).await
-            == Some(meerkat_core::event::BackgroundJobTerminalStatus::Terminated)
+        if let Some(committed) = committed_completion(&service, mob_id, child, job).await
+            && committed.retires_child()
             && let Err(error) = handle.retire_with_descendants(child.clone()).await
         {
             tracing::warn!(
                 mob_id = %mob_id,
                 child = %child,
                 error = %error,
-                "fork_off re-link could not retire a child whose job ended by its limit"
+                "fork_off re-link could not retire a child whose delivered outcome retires it"
             );
         }
         return ForkRelinkAction::AlreadyDelivered;
+    }
+    if let Some(turn_delivery) = &job.turn_delivery {
+        return relink_by_receipt(
+            &service,
+            delivery,
+            &owner,
+            mob_id,
+            handle,
+            child,
+            job,
+            turn_delivery,
+            commit_pending_ceiling,
+        )
+        .await;
     }
     if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await {
         return deliver(delivery, &owner, mob_id, job, completion).await;
@@ -705,7 +763,7 @@ async fn relink_owned_child(
             if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await {
                 return deliver(delivery, &owner, mob_id, job, completion).await;
             }
-            return limit_elapsed(delivery, &owner, mob_id, handle, child, job).await;
+            return limit_elapsed(&service, delivery, &owner, mob_id, handle, child, job).await;
         }
         let observe = observe_child(runtime, handle, child);
         let observed = match remaining_ms {
@@ -728,7 +786,7 @@ async fn relink_owned_child(
         let (evidence, detail) = match observed {
             ChildObservation::Running => {
                 commit_watch.progressed();
-                tokio::time::sleep(WATCH_INTERVAL).await;
+                tokio::time::sleep(within_limit(WATCH_INTERVAL, deadline_ms)).await;
                 continue;
             }
             ChildObservation::Settled => {
@@ -750,16 +808,28 @@ async fn relink_owned_child(
                     detail = %detail,
                     "fork_off re-link could not observe the child; reading again"
                 );
-                tokio::time::sleep(unobserved_backoff.next_pause()).await;
+                tokio::time::sleep(within_limit(unobserved_backoff.next_pause(), deadline_ms))
+                    .await;
                 continue;
             }
-            ChildObservation::CommitPending(evidence) => (Some(evidence), None),
+            ChildObservation::CommitPending(evidence) => {
+                // Degraded durability does not say the turn's own commit
+                // failed: a reply that is durable is delivered now, not
+                // held back to the ceiling.
+                if evidence == CommitEvidence::DurabilityDegraded
+                    && let Some(completion) =
+                        durable_reply(&service, mob_id, handle, child, job).await
+                {
+                    return deliver(delivery, &owner, mob_id, job, completion).await;
+                }
+                (Some(evidence), None)
+            }
             ChildObservation::CommitUnconfirmed(detail) => (None, Some(detail)),
         };
         let CommitWatchStep::Ceiling { reason } =
             commit_watch.unconfirmed(meerkat_core::time_compat::Instant::now(), evidence)
         else {
-            tokio::time::sleep(WATCH_INTERVAL).await;
+            tokio::time::sleep(within_limit(WATCH_INTERVAL, deadline_ms)).await;
             continue;
         };
         // A reply that did land wins over the bound.
@@ -791,9 +861,11 @@ enum CommitEvidence {
     /// A run input is still `Staged`, `Applied` or
     /// `AppliedPendingConsumption`: the run's boundary has not consumed it.
     InputAwaitsBoundary,
-    /// The child's runtime reports degraded durability: a boundary commit
-    /// failed after the run consumed its inputs in memory, so the durable
-    /// history lacks the turn.
+    /// The child's runtime reports durability degraded: a durable write
+    /// failed after the runtime changed its live state (a boundary commit
+    /// that failed after the run consumed its inputs, or another operation's
+    /// durable write), so the durable history may lag the live state. The
+    /// turn's reply may still be durable, so the re-link checks for it.
     DurabilityDegraded,
 }
 
@@ -802,6 +874,9 @@ enum CommitEvidence {
 struct CommitWatch {
     ceiling: Duration,
     since: Option<meerkat_core::time_compat::Instant>,
+    /// Last receipt reads at the ceiling in a row that said nothing (see
+    /// [`MAX_INCONCLUSIVE_CEILING_READS`]).
+    inconclusive_ceiling_reads: u32,
 }
 
 /// What the commit wait decides after an unconfirmed reading.
@@ -820,12 +895,23 @@ impl CommitWatch {
         Self {
             ceiling,
             since: None,
+            inconclusive_ceiling_reads: 0,
         }
     }
 
-    /// The child was read running again: the wait restarts.
+    /// The child was read running again: the wait restarts, and so does the
+    /// count of inconclusive reads at the ceiling.
     fn progressed(&mut self) {
         self.since = None;
+        self.inconclusive_ceiling_reads = 0;
+    }
+
+    /// One more last receipt read at the ceiling said nothing. `true` once
+    /// [`MAX_INCONCLUSIVE_CEILING_READS`] such reads in a row are spent: the
+    /// watch stops waiting.
+    fn inconclusive_ceiling_read(&mut self) -> bool {
+        self.inconclusive_ceiling_reads = self.inconclusive_ceiling_reads.saturating_add(1);
+        self.inconclusive_ceiling_reads >= MAX_INCONCLUSIVE_CEILING_READS
     }
 
     /// The child reads settled with its commit unconfirmed: by machine
@@ -1042,7 +1128,14 @@ fn from_runtime(
 }
 
 /// The child's reply to the job, when its durable transcript already holds
-/// it, as a `completed` outcome. The child stays seated.
+/// it after the fork prefix, as a `completed` outcome. The child stays
+/// seated.
+///
+/// This is the read for a record without a turn delivery identity (a host
+/// without a runtime, or a record written before the field existed). A
+/// record with one is settled from the runtime's receipt for the job turn
+/// instead (see [`relink_by_receipt`]), which compacting the child's
+/// transcript cannot move.
 async fn durable_reply(
     service: &Arc<dyn meerkat_mob::MobSessionService>,
     mob_id: &MobId,
@@ -1066,11 +1159,447 @@ async fn durable_reply(
     Some(completion)
 }
 
+/// Re-link a job whose turn was admitted under a stable delivery identity:
+/// its outcome is the runtime's terminal receipt for that exact input
+/// ([`MobHandle::wait_bounded_work_for_identity_with_delivery_identity`]),
+/// whatever the child's member status says in between.
+///
+/// - A receipt with a result delivers `completed`.
+/// - A receipt of the turn's own failure (see [`receipt_failure`]) delivers
+///   `failed` with the typed error and retires the child, as the live
+///   custodian does.
+/// - A receipt of an end the restart caused, an input no run answered, or an
+///   input never admitted delivers `restart_interrupted`; the child stays
+///   seated.
+/// - An input still owed a terminal is watched, not settled: after a restart
+///   the runtime requeues it and member status can read idle before the
+///   recovered run opens. The watch waits on the receipt in slices, and is
+///   bounded by `commit_pending_ceiling` only while the child is not seen
+///   running. At the ceiling the receipt is read once more, as a real wait
+///   ([`RECEIPT_WAIT_SLICE`]): a receipt found then is delivered. Only a
+///   read that is evidence (the input still owed a terminal, never
+///   admitted, no session, the member retired) delivers
+///   `restart_interrupted`, typed `commit_never_landed` when the input's last
+///   phase was taken up by a run (`Staged`, `Applied` or
+///   `AppliedPendingConsumption`). A read that says nothing (not observed
+///   within its bound, or failed) is not evidence: the watch goes on, and
+///   delivers `restart_interrupted` naming no cause only after
+///   [`MAX_INCONCLUSIVE_CEILING_READS`] such reads in a row.
+/// - The opt-in `max_run` limit is measured from the original start, as for
+///   every job; no read or pause in the watch outlasts it.
+#[allow(clippy::too_many_arguments)]
+async fn relink_by_receipt(
+    service: &Arc<dyn meerkat_mob::MobSessionService>,
+    delivery: &RelinkDelivery,
+    owner: &JobOwner,
+    mob_id: &MobId,
+    handle: &MobHandle,
+    child: &AgentIdentity,
+    job: &ForkJobRecord,
+    turn_delivery: &meerkat_mob::store::MobDeliveryIdentity,
+    commit_pending_ceiling: Duration,
+) -> ForkRelinkAction {
+    let spec =
+        match meerkat_mob::BoundedResultSpec::new(job.result_label.clone(), job.max_text_bytes) {
+            Ok(spec) => spec,
+            Err(error) => return ForkRelinkAction::Failed(error.to_string()),
+        };
+    let runtime = delivery.runtime.as_deref();
+    let deadline_ms = job
+        .max_run_ms
+        .map(|limit| job.started_at_ms.saturating_add(limit));
+    let mut stall_watch = CommitWatch::new(commit_pending_ceiling);
+    let mut unreadable_backoff = UnobservedBackoff::default();
+    loop {
+        let remaining_ms = deadline_ms.map(|deadline| deadline.saturating_sub(now_ms()));
+        let limit_passed = remaining_ms == Some(0);
+        // With the limit passed, one read decides: a receipt that already
+        // exists is the job's outcome, anything else loses to the limit.
+        let slice = if limit_passed {
+            Duration::ZERO
+        } else {
+            remaining_ms.map_or(RECEIPT_WAIT_SLICE, |remaining_ms| {
+                RECEIPT_WAIT_SLICE.min(Duration::from_millis(remaining_ms))
+            })
+        };
+        let read = handle
+            .wait_bounded_work_for_identity_with_delivery_identity(
+                child,
+                turn_delivery,
+                &spec,
+                meerkat_core::time_compat::Instant::now() + slice,
+            )
+            .await;
+        // The input's last phase while it is still owed a terminal; `None`
+        // when the read was inconclusive.
+        if read.is_ok() {
+            unreadable_backoff.reset();
+        }
+        let phase = match read {
+            Ok(report) => match report.into_parts().1 {
+                meerkat_mob::DeliveryTerminalWait::Terminal(record) => {
+                    // Past the limit only a completed turn wins: any other
+                    // end loses to the limit, as it does for every job.
+                    let completed = matches!(
+                        record.resolution(),
+                        meerkat_mob::DeliveryTerminalResolution::Receipt { result: Ok(_), .. }
+                    );
+                    if limit_passed && !completed {
+                        return limit_elapsed(service, delivery, owner, mob_id, handle, child, job)
+                            .await;
+                    }
+                    return deliver_receipt(
+                        service, delivery, owner, mob_id, handle, child, job, *record,
+                    )
+                    .await;
+                }
+                // A reading from before a final read that ran out says
+                // nothing about the input now, so its phase is not used.
+                meerkat_mob::DeliveryTerminalWait::NotTerminal {
+                    cause: meerkat_mob::DeliveryNotTerminalCause::EvidenceReadTimedOut,
+                    ..
+                } => None,
+                meerkat_mob::DeliveryTerminalWait::NotTerminal { phase, .. } => Some(phase),
+                meerkat_mob::DeliveryTerminalWait::Unknown {
+                    cause: meerkat_mob::DeliveryUnknownCause::NotObservedByDeadline,
+                } => None,
+                // Never admitted (the host went down between seating the
+                // child and admitting its turn), no session, or retired
+                // without the input: the turn did not survive.
+                _ => {
+                    if limit_passed {
+                        return limit_elapsed(service, delivery, owner, mob_id, handle, child, job)
+                            .await;
+                    }
+                    return deliver(
+                        delivery,
+                        owner,
+                        mob_id,
+                        job,
+                        restart_interrupted(mob_id, child),
+                    )
+                    .await;
+                }
+            },
+            Err(error) => {
+                tracing::debug!(
+                    mob_id = %mob_id,
+                    child = %child,
+                    error = %error,
+                    "fork_off re-link could not read the job turn's receipt"
+                );
+                if !limit_passed {
+                    tokio::time::sleep(within_limit(unreadable_backoff.next_pause(), deadline_ms))
+                        .await;
+                }
+                None
+            }
+        };
+        if limit_passed {
+            return limit_elapsed(service, delivery, owner, mob_id, handle, child, job).await;
+        }
+        // The status read is bounded, and never outlasts the limit: a read
+        // that does not answer in time is inconclusive, and the deadline is
+        // evaluated again before anything else.
+        let status_bound = within_limit(STATUS_READ_TIMEOUT, deadline_ms);
+        let status =
+            match tokio::time::timeout(status_bound, observe_child_run(runtime, handle, child))
+                .await
+            {
+                Ok(status) => status,
+                Err(_elapsed) => ChildObservation::Unobserved(format!(
+                    "the child's status read did not answer within {status_bound:?}"
+                )),
+            };
+        if deadline_ms.is_some_and(|deadline| now_ms() >= deadline) {
+            continue;
+        }
+        let CommitWatchStep::Ceiling { reason } = in_flight_step(
+            phase,
+            &status,
+            &mut stall_watch,
+            meerkat_core::time_compat::Instant::now(),
+        ) else {
+            continue;
+        };
+        // A receipt that landed while the status was read wins over the
+        // bound, so the exact receipt is read once more. That read is a real
+        // wait on the runtime, never outlasting the limit: a read given only
+        // the waiter's evidence floor can end while the receipt's own commit
+        // still holds the session driver, and then it says nothing.
+        let last_read = handle
+            .wait_bounded_work_for_identity_with_delivery_identity(
+                child,
+                turn_delivery,
+                &spec,
+                meerkat_core::time_compat::Instant::now()
+                    + within_limit(RECEIPT_WAIT_SLICE, deadline_ms),
+            )
+            .await
+            .map(|report| report.into_parts().1);
+        // The read can end past the limit (the waiter keeps a 100 ms evidence
+        // floor); the limit then decides, where only a completed turn wins.
+        if deadline_ms.is_some_and(|deadline| now_ms() >= deadline) {
+            continue;
+        }
+        let reason = match ceiling_receipt(last_read) {
+            CeilingReceipt::Terminal(record) => {
+                return deliver_receipt(
+                    service, delivery, owner, mob_id, handle, child, job, *record,
+                )
+                .await;
+            }
+            CeilingReceipt::Absent => reason,
+            CeilingReceipt::Inconclusive(detail) => {
+                if !stall_watch.inconclusive_ceiling_read() {
+                    tracing::debug!(
+                        mob_id = %mob_id,
+                        child = %child,
+                        detail = %detail,
+                        "fork_off re-link: the last receipt read at the ceiling said nothing; \
+                         watching on"
+                    );
+                    tokio::time::sleep(within_limit(unreadable_backoff.next_pause(), deadline_ms))
+                        .await;
+                    continue;
+                }
+                // No read at the ceiling was evidence, so the outcome names
+                // no cause.
+                None
+            }
+        };
+        tracing::warn!(
+            mob_id = %mob_id,
+            child = %child,
+            phase = ?phase,
+            "fork_off re-link: the job turn's input never reached a terminal \
+             while the child sat idle; delivering restart_interrupted"
+        );
+        let mut completion = restart_interrupted(mob_id, child);
+        completion.restart_reason = reason;
+        return deliver(delivery, owner, mob_id, job, completion).await;
+    }
+}
+
+/// What the last read of a job turn's receipt at the commit ceiling says.
+#[derive(Debug)]
+enum CeilingReceipt {
+    /// The receipt exists: it is the job's outcome.
+    Terminal(Box<meerkat_mob::DeliveryTerminalRecord>),
+    /// Evidence that no receipt exists: the waiter's final read found the
+    /// input still owed a terminal when the read ended (a reading it takes
+    /// armed on the runtime's own terminal signal), or the runtime holds no
+    /// input for it that can arrive (never admitted, the member has no
+    /// session, or it is retired).
+    Absent,
+    /// The read says nothing: its final evidence read ran out (for example
+    /// while the receipt's own commit held the session driver) and only an
+    /// earlier pending reading remains, it observed neither the member nor
+    /// its runtime within its bound, it answered in a way this build does
+    /// not know, or it failed.
+    Inconclusive(String),
+}
+
+/// Classify the last receipt read at the ceiling (see [`CeilingReceipt`]).
+fn ceiling_receipt(
+    read: Result<meerkat_mob::DeliveryTerminalWait, meerkat_mob::DeliveryTerminalWaitError>,
+) -> CeilingReceipt {
+    use meerkat_mob::{DeliveryNotTerminalCause, DeliveryTerminalWait, DeliveryUnknownCause};
+    match read {
+        Ok(DeliveryTerminalWait::Terminal(record)) => CeilingReceipt::Terminal(record),
+        Ok(DeliveryTerminalWait::NotTerminal {
+            cause: DeliveryNotTerminalCause::EvidenceReadTimedOut,
+            ..
+        }) => CeilingReceipt::Inconclusive(
+            "the final evidence read ran out; the pending reading is from before it".to_string(),
+        ),
+        Ok(
+            DeliveryTerminalWait::NotTerminal { .. }
+            | DeliveryTerminalWait::Unknown {
+                cause:
+                    DeliveryUnknownCause::NotAdmittedByDeadline
+                    | DeliveryUnknownCause::MemberHasNoSession
+                    | DeliveryUnknownCause::MemberRetired,
+            },
+        ) => CeilingReceipt::Absent,
+        Ok(other) => CeilingReceipt::Inconclusive(format!("{other:?}")),
+        Err(error) => CeilingReceipt::Inconclusive(error.to_string()),
+    }
+}
+
+/// What the receipt watch does with a job input still owed a terminal
+/// (`phase` is its last phase, `None` when the receipt read was
+/// inconclusive), given the child's status: a running child is making
+/// progress and restarts the wait; a status read that did not observe the
+/// child changes nothing; a child that is not running counts toward the
+/// ceiling. It never settles the job before the ceiling, whatever the
+/// input's phase: a requeued input (`Queued`) behind an idle child is the
+/// normal state between a restart and the recovered run opening. At the
+/// ceiling the reason is `commit_never_landed` only when a run had taken the
+/// input up (`Staged`, `Applied` or `AppliedPendingConsumption`).
+fn in_flight_step(
+    phase: Option<meerkat_runtime::InputLifecycleState>,
+    status: &ChildObservation,
+    watch: &mut CommitWatch,
+    now: meerkat_core::time_compat::Instant,
+) -> CommitWatchStep {
+    match status {
+        ChildObservation::Running => {
+            watch.progressed();
+            CommitWatchStep::KeepWatching
+        }
+        ChildObservation::Unobserved(_) => CommitWatchStep::KeepWatching,
+        _ => {
+            let evidence = matches!(
+                phase,
+                Some(
+                    meerkat_runtime::InputLifecycleState::Staged
+                        | meerkat_runtime::InputLifecycleState::Applied
+                        | meerkat_runtime::InputLifecycleState::AppliedPendingConsumption
+                )
+            )
+            .then_some(CommitEvidence::InputAwaitsBoundary);
+            watch.unconfirmed(now, evidence)
+        }
+    }
+}
+
+/// Deliver the outcome a job turn's terminal receipt records.
+#[allow(clippy::too_many_arguments)]
+async fn deliver_receipt(
+    service: &Arc<dyn meerkat_mob::MobSessionService>,
+    delivery: &RelinkDelivery,
+    owner: &JobOwner,
+    mob_id: &MobId,
+    handle: &MobHandle,
+    child: &AgentIdentity,
+    job: &ForkJobRecord,
+    record: meerkat_mob::DeliveryTerminalRecord,
+) -> ForkRelinkAction {
+    let terminal = record.terminal().clone();
+    let failure = match record.into_resolution() {
+        meerkat_mob::DeliveryTerminalResolution::Receipt {
+            result: Ok(turn), ..
+        } => {
+            let mut completion = ForkOffCompletion::empty(
+                child.to_string(),
+                member_ref(mob_id, child),
+                ForkOffCompletionStatus::Completed,
+            );
+            completion.record_completed_turn(&turn);
+            return deliver(delivery, owner, mob_id, job, completion).await;
+        }
+        meerkat_mob::DeliveryTerminalResolution::Receipt {
+            result: Err(failure),
+            ..
+        } => failure,
+        // No run answered the input (superseded, coalesced, consumed on
+        // accept, cancelled when the restarted host revived the child, or
+        // abandoned before a run began), or a resolution this build does not
+        // know: the turn did not survive.
+        _ => {
+            return deliver(
+                delivery,
+                owner,
+                mob_id,
+                job,
+                restart_interrupted(mob_id, child),
+            )
+            .await;
+        }
+    };
+    if receipt_failure(&failure, &terminal) == ReceiptFailure::RestartCaused {
+        return deliver(
+            delivery,
+            owner,
+            mob_id,
+            job,
+            restart_interrupted(mob_id, child),
+        )
+        .await;
+    }
+    let mut completion = ForkOffCompletion::empty(
+        child.to_string(),
+        member_ref(mob_id, child),
+        ForkOffCompletionStatus::Failed,
+    );
+    completion.error = Some(failure.to_string());
+    let action = deliver(delivery, owner, mob_id, job, completion).await;
+    // The live custodian retires a child whose own turn failed; so does the
+    // re-link, once that outcome is settled.
+    if retires_after_delivery(&action, service, mob_id, child, job).await
+        && let Err(error) = handle.retire_with_descendants(child.clone()).await
+    {
+        tracing::warn!(
+            mob_id = %mob_id,
+            child = %child,
+            error = %error,
+            "fork_off re-link delivered a failed job but could not retire its child"
+        );
+    }
+    action
+}
+
+/// Whose end a job turn's failed receipt records.
+#[derive(Debug, PartialEq, Eq)]
+enum ReceiptFailure {
+    /// The turn itself failed: the live custodian reports it `failed` and
+    /// retires the child.
+    TurnFailed,
+    /// The turn was ended from outside (the runtime stopped, destroyed,
+    /// retired or reset it, or cancelled it), which is what a restart does:
+    /// it stays `restart_interrupted`, and the child stays seated.
+    RestartCaused,
+}
+
+/// Classify a failed receipt by its typed variant and the input's typed
+/// terminal. An integrity failure of the receipt itself (a missing or
+/// mismatched attribution, closed or broken completion plumbing) says
+/// nothing about how the turn ended and is treated as restart-caused, which
+/// keeps the child seated.
+fn receipt_failure(
+    failure: &meerkat_mob::BoundedTurnFailure,
+    terminal: &meerkat_runtime::InputTerminalOutcome,
+) -> ReceiptFailure {
+    use meerkat_mob::BoundedTurnFailure;
+    use meerkat_runtime::{InputAbandonReason, InputTerminalOutcome};
+    match failure {
+        BoundedTurnFailure::AbandonedWithError { .. }
+        | BoundedTurnFailure::ExtractionFailed { .. }
+        | BoundedTurnFailure::CompletedWithFinalizationFailure { .. }
+        | BoundedTurnFailure::CompletedWithoutResult { .. }
+        | BoundedTurnFailure::CallbackPending { .. }
+        | BoundedTurnFailure::CallbackBatchPending { .. }
+        | BoundedTurnFailure::DirectSessionFailure { .. } => ReceiptFailure::TurnFailed,
+        // Abandoned without an error of its own: its typed reason says who
+        // ended it. Running out of stage attempts is the turn's own failure;
+        // every other reason is an end imposed from outside.
+        BoundedTurnFailure::Abandoned { .. } => match terminal {
+            InputTerminalOutcome::Abandoned {
+                reason: InputAbandonReason::MaxAttemptsExhausted { .. },
+            } => ReceiptFailure::TurnFailed,
+            _ => ReceiptFailure::RestartCaused,
+        },
+        _ => ReceiptFailure::RestartCaused,
+    }
+}
+
+fn restart_interrupted(mob_id: &MobId, child: &AgentIdentity) -> ForkOffCompletion {
+    ForkOffCompletion::empty(
+        child.to_string(),
+        member_ref(mob_id, child),
+        ForkOffCompletionStatus::RestartInterrupted,
+    )
+}
+
 /// The opt-in limit won: cancel the child's run and deliver
 /// `max_run_elapsed`, then retire the child with its descendants once that
 /// outcome is settled. A delivery that must wait (or failed) keeps the child,
-/// cancelled, and its job record, so the next pass delivers it.
+/// cancelled, and its job record, so the next pass delivers it. A delivery
+/// deduplicated against a record admitted earlier retires the child only when
+/// that record's outcome retires it (see [`retires_after_delivery`]).
 async fn limit_elapsed(
+    service: &Arc<dyn meerkat_mob::MobSessionService>,
     delivery: &RelinkDelivery,
     owner: &JobOwner,
     mob_id: &MobId,
@@ -1086,12 +1615,8 @@ async fn limit_elapsed(
     );
     completion.max_run_secs = job.max_run_ms.map(|limit| limit / 1000);
     let action = deliver(delivery, owner, mob_id, job, completion).await;
-    if matches!(
-        action,
-        ForkRelinkAction::Delivered
-            | ForkRelinkAction::AlreadyDelivered
-            | ForkRelinkAction::OwnerGone
-    ) && let Err(error) = handle.retire_with_descendants(child.clone()).await
+    if retires_after_delivery(&action, service, mob_id, child, job).await
+        && let Err(error) = handle.retire_with_descendants(child.clone()).await
     {
         tracing::warn!(
             mob_id = %mob_id,
@@ -1104,7 +1629,32 @@ async fn limit_elapsed(
     action
 }
 
-/// The outcome of an idle child: its own reply after the fork prefix, or
+/// Whether the child is retired after delivering it an outcome that retires
+/// it (a failed turn, or `max_run_elapsed`), given what the delivery did
+/// (`action`). An outcome delivered now, or one whose owner is gone, is
+/// settled and retires the child. A delivery deduplicated against a record
+/// admitted earlier delivered nothing now: that record may carry another
+/// outcome (`restart_interrupted` or `completed`), so the child is retired
+/// only when the record's committed outcome retires it, read typed as the
+/// re-link's entry reads it ([`committed_completion`]). Nothing else is
+/// settled.
+async fn retires_after_delivery(
+    action: &ForkRelinkAction,
+    service: &Arc<dyn meerkat_mob::MobSessionService>,
+    mob_id: &MobId,
+    child: &AgentIdentity,
+    job: &ForkJobRecord,
+) -> bool {
+    match action {
+        ForkRelinkAction::Delivered | ForkRelinkAction::OwnerGone => true,
+        ForkRelinkAction::AlreadyDelivered => committed_completion(service, mob_id, child, job)
+            .await
+            .is_some_and(|committed| committed.retires_child()),
+        ForkRelinkAction::AwaitingOwner { .. } | ForkRelinkAction::Failed(_) => false,
+    }
+}
+
+/// The outcome of an idle child: its durable reply, or
 /// `restart_interrupted` when the turn left none.
 async fn settled_outcome(
     service: &Arc<dyn meerkat_mob::MobSessionService>,
@@ -1127,15 +1677,79 @@ fn member_ref(mob_id: &MobId, child: &AgentIdentity) -> meerkat_contracts::WireM
     meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), child.as_str())
 }
 
-/// The typed status of job `job_id`'s completion record in the owner's
-/// durable transcript, once the record is committed there.
-async fn committed_completion_status(
+/// Job `job_id`'s completion record, once committed in the owner's durable
+/// transcript: its typed notice status and the outcome it delivered.
+struct CommittedCompletion {
+    status: meerkat_core::event::BackgroundJobTerminalStatus,
+    /// The delivered outcome's typed `status`, read from the record's detail
+    /// (the completion's own serialization). `None` when the detail does not
+    /// carry one.
+    outcome: Option<ForkOffCompletionStatus>,
+}
+
+impl CommittedCompletion {
+    /// Whether the delivered outcome retires the child. A record whose detail
+    /// carries no typed outcome falls back to its notice status, where only
+    /// `terminated` (a limit autokill) is unambiguous.
+    fn retires_child(&self) -> bool {
+        match &self.outcome {
+            Some(outcome) => outcome.retires_child(),
+            None => self.status == meerkat_core::event::BackgroundJobTerminalStatus::Terminated,
+        }
+    }
+}
+
+/// The delivered outcome carried in a completion record's detail.
+#[derive(serde::Deserialize)]
+struct CommittedOutcome {
+    status: ForkOffCompletionStatus,
+}
+
+/// Whose outcome a completion record's detail carries: the child fields of
+/// the completion's own serialization ([`ForkOffCompletion`]), decoded apart
+/// from its outcome so that an outcome this build cannot read does not hide
+/// whose it is.
+#[derive(serde::Deserialize)]
+struct CommittedChild {
+    agent_identity: Option<AgentIdentity>,
+    member_ref: Option<meerkat_contracts::WireMemberRef>,
+}
+
+impl CommittedChild {
+    /// Whether the record names a child other than `child` of mob `mob_id`:
+    /// by its identity, or by its member ref (mob and identity). A field the
+    /// record lacks, or a member ref that does not decode, names no one.
+    fn names_another_child(&self, mob_id: &MobId, child: &AgentIdentity) -> bool {
+        let other_identity = self
+            .agent_identity
+            .as_ref()
+            .is_some_and(|recorded| recorded != child);
+        let other_member = self
+            .member_ref
+            .as_ref()
+            .and_then(|member_ref| member_ref.decode().ok())
+            .is_some_and(|(recorded_mob, recorded_identity)| {
+                recorded_mob != mob_id.as_str() || recorded_identity != child.as_str()
+            });
+        other_identity || other_member
+    }
+}
+
+/// `child`'s completion record for its job in the owner's durable
+/// transcript, once the record is committed there.
+///
+/// A job id is not unique across children (a host binds it), and records are
+/// keyed by owner session and job id, so a record whose detail names another
+/// child (see [`CommittedChild`]) is not this child's. A record whose detail
+/// names no child (it does not decode) is matched by its job id alone.
+async fn committed_completion(
     service: &Arc<dyn meerkat_mob::MobSessionService>,
-    owner_session_id: &meerkat_core::SessionId,
-    job_id: &str,
-) -> Option<meerkat_core::event::BackgroundJobTerminalStatus> {
+    mob_id: &MobId,
+    child: &AgentIdentity,
+    job: &ForkJobRecord,
+) -> Option<CommittedCompletion> {
     let session = service
-        .load_persisted_session(owner_session_id)
+        .load_persisted_session(&job.owner_session_id)
         .await
         .ok()
         .flatten()?;
@@ -1148,9 +1762,24 @@ async fn committed_completion_status(
                 job_id: recorded,
                 display_name: Some(tool),
                 status,
+                detail,
                 persisted: true,
                 ..
-            } if recorded == job_id && tool == TOOL_FORK_OFF => Some(*status),
+            } if recorded == &job.job_id && tool == TOOL_FORK_OFF => {
+                let detail = detail.as_deref();
+                let names_another_child = detail
+                    .and_then(|detail| serde_json::from_str::<CommittedChild>(detail).ok())
+                    .is_some_and(|recorded| recorded.names_another_child(mob_id, child));
+                if names_another_child {
+                    return None;
+                }
+                Some(CommittedCompletion {
+                    status: *status,
+                    outcome: detail
+                        .and_then(|detail| serde_json::from_str::<CommittedOutcome>(detail).ok())
+                        .map(|committed| committed.status),
+                })
+            }
             _ => None,
         })
     })
@@ -1234,10 +1863,12 @@ async fn deliver(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChildObservation, CommitEvidence, CommitWatch, CommitWatchStep, ForkRelinkAction,
-        ForkRelinkReport, MAX_OWNER_REVIVAL_WAITS, ProgressVerdict,
+        CeilingReceipt, ChildObservation, CommitEvidence, CommitWatch, CommitWatchStep,
+        CommittedChild, CommittedCompletion, ForkRelinkAction, ForkRelinkReport,
+        MAX_INCONCLUSIVE_CEILING_READS, MAX_OWNER_REVIVAL_WAITS, ProgressVerdict, ReceiptFailure,
         UNOBSERVED_RETRY_INITIAL_INTERVAL, UNOBSERVED_RETRY_MAX_INTERVAL, UnobservedBackoff,
-        commit_observation, from_runtime, redeliver_each,
+        ceiling_receipt, commit_observation, from_runtime, in_flight_step, now_ms, receipt_failure,
+        redeliver_each, within_limit,
     };
     use crate::agent_tools::RestartInterruptedReason;
     use crate::detached_delivery::OwnerRevivalDeferral;
@@ -1541,5 +2172,313 @@ mod tests {
                 reason: Some(RestartInterruptedReason::CommitNeverLanded)
             }
         );
+    }
+
+    /// A job input still owed its receipt never settles the job before the
+    /// ceiling. A requeued input behind an idle child (the state between a
+    /// restart and the recovered run opening) keeps the watch going; a
+    /// running child restarts it; at the ceiling only an input a run had
+    /// taken up names `commit_never_landed`.
+    #[test]
+    fn an_in_flight_job_input_is_watched_not_settled() {
+        use meerkat_runtime::InputLifecycleState;
+        let ceiling = Duration::from_secs(300);
+        let start = meerkat_core::time_compat::Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        let idle = ChildObservation::Settled;
+
+        let mut watch = CommitWatch::new(ceiling);
+        for secs in [0, 100, 299] {
+            assert_eq!(
+                in_flight_step(
+                    Some(InputLifecycleState::Queued),
+                    &idle,
+                    &mut watch,
+                    at(secs)
+                ),
+                CommitWatchStep::KeepWatching,
+                "a requeued input behind an idle child is watched"
+            );
+        }
+        assert_eq!(
+            in_flight_step(
+                Some(InputLifecycleState::Queued),
+                &ChildObservation::Unobserved("lane busy".to_string()),
+                &mut watch,
+                at(299)
+            ),
+            CommitWatchStep::KeepWatching
+        );
+        assert_eq!(
+            in_flight_step(None, &idle, &mut watch, at(300)),
+            CommitWatchStep::Ceiling { reason: None },
+            "an inconclusive read at the ceiling names no cause"
+        );
+
+        let mut watch = CommitWatch::new(ceiling);
+        assert_eq!(
+            in_flight_step(Some(InputLifecycleState::Queued), &idle, &mut watch, at(0)),
+            CommitWatchStep::KeepWatching
+        );
+        assert_eq!(
+            in_flight_step(
+                Some(InputLifecycleState::Staged),
+                &ChildObservation::Running,
+                &mut watch,
+                at(250)
+            ),
+            CommitWatchStep::KeepWatching,
+            "the recovered run opened"
+        );
+        assert_eq!(
+            in_flight_step(
+                Some(InputLifecycleState::AppliedPendingConsumption),
+                &idle,
+                &mut watch,
+                at(301)
+            ),
+            CommitWatchStep::KeepWatching,
+            "the running reading restarted the wait"
+        );
+        assert_eq!(
+            in_flight_step(
+                Some(InputLifecycleState::AppliedPendingConsumption),
+                &idle,
+                &mut watch,
+                at(601)
+            ),
+            CommitWatchStep::Ceiling {
+                reason: Some(RestartInterruptedReason::CommitNeverLanded)
+            }
+        );
+    }
+
+    /// A failed job-turn receipt is classified by its typed variant and the
+    /// input's typed terminal: the turn's own failures are `failed`, ends
+    /// imposed from outside (what a restart does) stay `restart_interrupted`.
+    #[test]
+    fn a_failed_receipt_is_classified_by_its_typed_variant() {
+        use meerkat_mob::BoundedTurnFailure;
+        use meerkat_runtime::{InputAbandonReason, InputTerminalOutcome};
+        let session_id = meerkat_core::SessionId::new();
+        let error = || Box::new(meerkat_core::TurnErrorMetadata::runtime_apply_failure("x"));
+        let abandoned = |reason| InputTerminalOutcome::Abandoned { reason };
+        let consumed = InputTerminalOutcome::Consumed;
+
+        for failure in [
+            BoundedTurnFailure::AbandonedWithError {
+                session_id: session_id.clone(),
+                reason: "provider failed after retries".to_string(),
+                error: error(),
+            },
+            BoundedTurnFailure::CompletedWithoutResult {
+                session_id: session_id.clone(),
+            },
+            BoundedTurnFailure::CompletedWithFinalizationFailure {
+                session_id: session_id.clone(),
+                error: error(),
+            },
+        ] {
+            assert_eq!(
+                receipt_failure(&failure, &consumed),
+                ReceiptFailure::TurnFailed,
+                "{failure:?}"
+            );
+        }
+        let abandoned_turn = || BoundedTurnFailure::Abandoned {
+            session_id: session_id.clone(),
+            reason: "abandoned".to_string(),
+            error: error(),
+        };
+        assert_eq!(
+            receipt_failure(
+                &abandoned_turn(),
+                &abandoned(InputAbandonReason::MaxAttemptsExhausted { attempts: 3 })
+            ),
+            ReceiptFailure::TurnFailed,
+            "running out of stage attempts is the turn's own failure"
+        );
+
+        for reason in [
+            InputAbandonReason::Stopped,
+            InputAbandonReason::Destroyed,
+            InputAbandonReason::Retired,
+            InputAbandonReason::Reset,
+            InputAbandonReason::Cancelled,
+        ] {
+            assert_eq!(
+                receipt_failure(&abandoned_turn(), &abandoned(reason.clone())),
+                ReceiptFailure::RestartCaused,
+                "{reason:?}"
+            );
+        }
+        for failure in [
+            BoundedTurnFailure::RuntimeTerminated {
+                session_id: session_id.clone(),
+                reason: "runtime stopped".to_string(),
+                error: error(),
+            },
+            BoundedTurnFailure::Cancelled {
+                session_id: session_id.clone(),
+            },
+            BoundedTurnFailure::CompletionAuthorityClosed {
+                admitted_session_id: session_id.clone(),
+            },
+        ] {
+            assert_eq!(
+                receipt_failure(&failure, &consumed),
+                ReceiptFailure::RestartCaused,
+                "{failure:?}"
+            );
+        }
+    }
+
+    /// The last receipt read at the ceiling: a receipt is delivered; a
+    /// pending input or a typed not-admitted, no-session or retired cause is
+    /// evidence; a read that did not observe the member or its runtime within
+    /// its bound, or a failed read, says nothing (review: at the evidence
+    /// floor a read held by the receipt's own commit counted as absence).
+    #[test]
+    fn only_evidence_at_the_ceiling_lets_restart_interrupted_through() {
+        use meerkat_mob::{
+            DeliveryNotTerminalCause, DeliveryTerminalWait, DeliveryTerminalWaitError,
+            DeliveryUnknownCause,
+        };
+        for cause in [
+            DeliveryNotTerminalCause::DeadlineElapsed,
+            DeliveryNotTerminalCause::RuntimeDetached,
+        ] {
+            assert!(matches!(
+                ceiling_receipt(Ok(DeliveryTerminalWait::NotTerminal {
+                    input_id: meerkat_core::lifecycle::InputId::new(),
+                    phase: meerkat_runtime::InputLifecycleState::Applied,
+                    terminal: None,
+                    last_run_id: None,
+                    attempt_count: 1,
+                    cause,
+                })),
+                CeilingReceipt::Absent
+            ));
+        }
+        for cause in [
+            DeliveryUnknownCause::NotAdmittedByDeadline,
+            DeliveryUnknownCause::MemberHasNoSession,
+            DeliveryUnknownCause::MemberRetired,
+        ] {
+            assert!(
+                matches!(
+                    ceiling_receipt(Ok(DeliveryTerminalWait::Unknown { cause })),
+                    CeilingReceipt::Absent
+                ),
+                "{cause:?}"
+            );
+        }
+        assert!(matches!(
+            ceiling_receipt(Ok(DeliveryTerminalWait::Unknown {
+                cause: DeliveryUnknownCause::NotObservedByDeadline,
+            })),
+            CeilingReceipt::Inconclusive(_)
+        ));
+        assert!(matches!(
+            ceiling_receipt(Err(DeliveryTerminalWaitError::RuntimeAdapterUnavailable)),
+            CeilingReceipt::Inconclusive(_)
+        ));
+        // A pending reading from before a final read that ran out is not
+        // evidence (review: a commit taking the driver mid-read left a stale
+        // pending reading that counted as absence).
+        assert!(matches!(
+            ceiling_receipt(Ok(DeliveryTerminalWait::NotTerminal {
+                input_id: meerkat_core::lifecycle::InputId::new(),
+                phase: meerkat_runtime::InputLifecycleState::Applied,
+                terminal: None,
+                last_run_id: None,
+                attempt_count: 1,
+                cause: DeliveryNotTerminalCause::EvidenceReadTimedOut,
+            })),
+            CeilingReceipt::Inconclusive(_)
+        ));
+    }
+
+    /// Inconclusive last reads at the ceiling are bounded: the watch stops on
+    /// the last of `MAX_INCONCLUSIVE_CEILING_READS` in a row, and a reading of
+    /// the child running starts the count again.
+    #[test]
+    fn inconclusive_ceiling_reads_are_bounded_and_progress_restarts_them() {
+        let mut watch = CommitWatch::new(Duration::ZERO);
+        for _ in 1..MAX_INCONCLUSIVE_CEILING_READS {
+            assert!(!watch.inconclusive_ceiling_read());
+        }
+        watch.progressed();
+        for _ in 1..MAX_INCONCLUSIVE_CEILING_READS {
+            assert!(!watch.inconclusive_ceiling_read());
+        }
+        assert!(watch.inconclusive_ceiling_read(), "the extra wait is spent");
+    }
+
+    /// Pauses and reads are cut to the time left before a job's `max_run`
+    /// deadline; a job without one keeps the full bound.
+    #[test]
+    fn a_pause_never_outlasts_the_limit() {
+        let bound = Duration::from_secs(5);
+        assert_eq!(within_limit(bound, None), bound);
+        assert_eq!(within_limit(bound, Some(0)), Duration::ZERO);
+        assert!(within_limit(bound, Some(now_ms() + 1_000)) <= Duration::from_secs(1));
+        assert_eq!(within_limit(bound, Some(now_ms() + 60_000)), bound);
+    }
+
+    /// A completion record is another child's when its detail names another
+    /// identity, or a member ref of another mob or identity; a detail that
+    /// names no child (a field missing, or a member ref that does not decode)
+    /// excludes no one (review: a job id is not unique across children).
+    #[test]
+    fn a_committed_record_is_matched_to_its_child_by_typed_fields() {
+        let (mob, child) = (MobId::from("mob-a"), AgentIdentity::from("child-a"));
+        // `None` when the child fields do not decode.
+        let names_another = |detail: &serde_json::Value| {
+            serde_json::from_value::<CommittedChild>(detail.clone())
+                .ok()
+                .map(|record| record.names_another_child(&mob, &child))
+        };
+        let member_ref =
+            |mob: &str, identity: &str| meerkat_contracts::WireMemberRef::encode(mob, identity);
+        for own in [
+            serde_json::json!({
+                "agent_identity": "child-a",
+                "member_ref": member_ref("mob-a", "child-a"),
+            }),
+            serde_json::json!({ "agent_identity": "child-a" }),
+            serde_json::json!({ "member_ref": member_ref("mob-a", "child-a") }),
+            serde_json::json!({
+                "agent_identity": "child-a",
+                "member_ref": "not-a-member-ref",
+            }),
+            serde_json::json!({ "status": "failed" }),
+        ] {
+            assert_eq!(names_another(&own), Some(false), "{own}");
+        }
+        for other in [
+            serde_json::json!({ "agent_identity": "child-b" }),
+            serde_json::json!({
+                "agent_identity": "child-a",
+                "member_ref": member_ref("mob-b", "child-a"),
+            }),
+            serde_json::json!({ "member_ref": member_ref("mob-a", "child-b") }),
+        ] {
+            assert_eq!(names_another(&other), Some(true), "{other}");
+        }
+    }
+
+    /// A record whose detail carries no typed outcome falls back to its
+    /// notice status: only `terminated` (a limit autokill) retires the child.
+    #[test]
+    fn a_record_without_a_typed_outcome_retires_only_on_terminated() {
+        use meerkat_core::event::BackgroundJobTerminalStatus;
+        let untyped = |status| CommittedCompletion {
+            status,
+            outcome: None,
+        };
+        assert!(untyped(BackgroundJobTerminalStatus::Terminated).retires_child());
+        assert!(!untyped(BackgroundJobTerminalStatus::Failed).retires_child());
+        assert!(!untyped(BackgroundJobTerminalStatus::Completed).retires_child());
     }
 }

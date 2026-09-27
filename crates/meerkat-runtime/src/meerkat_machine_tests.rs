@@ -48084,3 +48084,134 @@ fn assistant_output_handle_is_exact_channel_scoped_and_two_phase_one_use() {
         "committed terminal authority remains one-use across cloned handles",
     );
 }
+
+/// `MeerkatMachine::session_has_uncommitted_run_input` itself: a session no
+/// runtime holds is `NotReady`, an idle session and a queued-only input read
+/// `Ok(false)` (queued input is not taken up by a run), and an input whose
+/// generated phase is missing is an error, never `Ok(false)`.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn run_input_read_is_false_for_queued_only_and_refuses_a_missing_phase() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let unheld = machine.session_has_uncommitted_run_input(&session_id).await;
+    assert!(
+        matches!(unheld, Err(RuntimeDriverError::NotReady { .. })),
+        "{unheld:?}"
+    );
+
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    assert!(
+        !machine
+            .session_has_uncommitted_run_input(&session_id)
+            .await
+            .expect("an idle session answers"),
+        "no input at all"
+    );
+
+    // No executor is attached, so nothing stages the input: queued only.
+    let input = make_prompt("queued, never taken up by a run");
+    let input_id = input.id().clone();
+    machine
+        .accept_input(&session_id, input)
+        .await
+        .expect("input should be accepted");
+    let driver = {
+        let sessions = machine.sessions.read().await;
+        Arc::clone(&sessions.get(&session_id).expect("session").driver)
+    };
+    {
+        let guard = driver.lock().await;
+        assert_eq!(
+            guard.as_driver().input_phase(&input_id),
+            Some(InputLifecycleState::Queued)
+        );
+    }
+    assert!(
+        !machine
+            .session_has_uncommitted_run_input(&session_id)
+            .await
+            .expect("a queued-only session answers"),
+        "queued input does not await a boundary"
+    );
+
+    {
+        let guard = driver.lock().await;
+        match &*guard {
+            DriverEntry::Ephemeral(driver) => driver.forget_input_phase_for_test(&input_id),
+            DriverEntry::Persistent(driver) => {
+                driver.inner_ref().forget_input_phase_for_test(&input_id);
+            }
+        }
+    }
+    let missing = machine.session_has_uncommitted_run_input(&session_id).await;
+    assert!(
+        matches!(missing, Err(RuntimeDriverError::Internal(ref reason)) if reason.contains(&input_id.to_string())),
+        "a missing generated phase is not an answer: {missing:?}"
+    );
+}
+
+/// Only the session's current driver answers. A read that waited for a
+/// driver the session no longer uses is refused: `StaleAuthority` when the
+/// session was given a new driver meanwhile, `NotReady` when it was removed.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_input_read_refuses_a_driver_replaced_or_removed_while_it_waited() {
+    async fn read_behind_held_driver(
+        machine: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        change_registration: bool,
+    ) -> Result<bool, RuntimeDriverError> {
+        let old = {
+            let sessions = machine.sessions.read().await;
+            Arc::clone(&sessions.get(session_id).expect("session").driver)
+        };
+        let held = old.lock().await;
+        let captured = Arc::strong_count(&old);
+        let read = tokio::spawn({
+            let machine = Arc::clone(machine);
+            let session_id = session_id.clone();
+            async move { machine.session_has_uncommitted_run_input(&session_id).await }
+        });
+        // The read has taken the old driver from the registry once it holds
+        // a reference to it; it now waits for the lock this test holds.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&old) <= captured {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the read captures the session's driver");
+        let removed = machine.sessions.write().await.remove(session_id);
+        assert!(removed.is_some(), "the session was registered");
+        drop(removed);
+        if change_registration {
+            machine
+                .register_session(session_id.clone())
+                .await
+                .expect("register the session again, with a new driver");
+        }
+        drop(held);
+        read.await.expect("read task")
+    }
+
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    let replaced = read_behind_held_driver(&machine, &session_id, true).await;
+    assert!(
+        matches!(replaced, Err(RuntimeDriverError::StaleAuthority { .. })),
+        "a replaced driver describes nothing current: {replaced:?}"
+    );
+    let removed = read_behind_held_driver(&machine, &session_id, false).await;
+    assert!(
+        matches!(removed, Err(RuntimeDriverError::NotReady { .. })),
+        "a removed session is not held: {removed:?}"
+    );
+}

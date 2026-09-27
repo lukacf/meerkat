@@ -35,7 +35,34 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- The release doctor's dispatch-binding check covers more of the ways a
+  future edit could let a publishing run bind the wrong ref. It now refuses:
+  - a run on the version's tag that names another `release_tag` (a branch,
+    a tag on another commit, or the alpha tag on the same commit outside the
+    alpha lane), which a binding preferring `github.ref` would publish;
+  - the alpha lane on another version's alpha tag, named or as the ref;
+  - near misses of the allowed names (`v<version>1`,
+    `alpha/v<version>-rc.1`, `alpha/v<version>1`), which a prefix comparison
+    would accept;
+  - dispatches from branches named exactly like an allowed tag
+    (`refs/heads/v<version>`, `refs/heads/alpha/v<version>`).
+  It also models `github.ref_name` / `GITHUB_REF_NAME` as GitHub sets them:
+  the ref without `refs/heads/` or `refs/tags/`, so `refs/tags/alpha/v<version>`
+  is `alpha/v<version>`, not its last path segment. Every new scenario has a
+  doctor fixture that goes red when that scenario is removed.
+
+
+## [0.8.45] - 2026-09-27
+
 ### Breaking
+
+- `meerkat_mob::ForkJobRecord` gains the public field
+  `turn_delivery: Option<meerkat_mob::store::MobDeliveryIdentity>`. Struct
+  literals must supply it (`None` keeps the transcript read). It is
+  serde-defaulted and omitted when absent, so job records written by earlier
+  releases read back unchanged.
 
 - `meerkat_contracts::MobMemberStatusResult` gains the public field
   `preview_unavailable: Option<WireMemberPreviewUnavailable>`; struct
@@ -426,21 +453,40 @@ them.
 
 ### Fixed
 
-- The release doctor's dispatch-binding check covers more of the ways a
-  future edit could let a publishing run bind the wrong ref. It now refuses:
-  - a run on the version's tag that names another `release_tag` (a branch,
-    a tag on another commit, or the alpha tag on the same commit outside the
-    alpha lane), which a binding preferring `github.ref` would publish;
-  - the alpha lane on another version's alpha tag, named or as the ref;
-  - near misses of the allowed names (`v<version>1`,
-    `alpha/v<version>-rc.1`, `alpha/v<version>1`), which a prefix comparison
-    would accept;
-  - dispatches from branches named exactly like an allowed tag
-    (`refs/heads/v<version>`, `refs/heads/alpha/v<version>`).
-  It also models `github.ref_name` / `GITHUB_REF_NAME` as GitHub sets them:
-  the ref without `refs/heads/` or `refs/tags/`, so `refs/tags/alpha/v<version>`
-  is `alpha/v<version>`, not its last path segment. Every new scenario has a
-  doctor fixture that goes red when that scenario is removed.
+- A fork_off child whose transcript was compacted during its job is
+  delivered its real reply when a restarted host re-links it, not
+  `restart_interrupted`. The re-link located the child's reply at the fork
+  prefix length recorded in its `ForkJobRecord`, and compaction rewrites the
+  transcript that index points into. On a runtime-backed host the job turn is
+  now admitted under a stable delivery identity recorded in the job record
+  (`ForkJobRecord::turn_delivery`), and the re-link settles such a job from
+  the runtime's terminal receipt for that input alone, through
+  `MobHandle::wait_bounded_work_for_identity_with_delivery_identity`:
+  - a completed turn delivers `completed` with the turn's `usage`, `turns`
+    and `tool_calls`, as the live custodian reports them;
+  - the turn's own failure (abandoned with an error, extraction failed,
+    completed without a result or with a finalization failure, a pending
+    callback, stage attempts exhausted) delivers `failed` with the typed
+    error and retires the child, as the live custodian does;
+  - an end imposed from outside (runtime stopped or destroyed, cancelled,
+    retired or reset), an input no run answered, or an input never admitted
+    delivers `restart_interrupted` and leaves the child seated;
+  - an input still owed a terminal is watched, not settled from member
+    status. After a restart the runtime requeues it and the child can read
+    idle before the recovered run opens; before, the re-link delivered
+    `restart_interrupted` there and dropped the later real reply. The watch
+    is bounded by the commit ceiling only while the child is not seen
+    running. At the ceiling the receipt is read once more, waiting on the
+    runtime, and only a read that is evidence delivers
+    `restart_interrupted`: a read that timed out behind the turn's own
+    commit, or failed, keeps the watch going, for at most three such reads
+    in a row. `meerkat_mob::DeliveryNotTerminalCause` gains
+    `EvidenceReadTimedOut` (the enum is `#[non_exhaustive]`): the delivery
+    waiter reports it when its final evidence read ran out and the pending
+    facts are from the read before, so they say nothing about the input now.
+    Before, that stale reading was reported as `DeadlineElapsed`.
+  Records without the field (earlier releases, or hosts without a runtime)
+  keep the transcript read.
 
 - `mob_check_member` on an idle fork child no longer fails with
   `observation_lane_saturated` while anything else reads a member's status.
@@ -13794,7 +13840,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.44...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.45...HEAD
+[0.8.45]: https://github.com/lukacf/meerkat/compare/v0.8.44...v0.8.45
 [0.8.44]: https://github.com/lukacf/meerkat/compare/v0.8.43...v0.8.44
 [0.8.43]: https://github.com/lukacf/meerkat/compare/v0.8.42...v0.8.43
 [0.8.42]: https://github.com/lukacf/meerkat/compare/v0.8.41...v0.8.42

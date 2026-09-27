@@ -324,12 +324,16 @@ its role's default runtime mode, like a `delegate` helper. What happens next
 depends on whether the host can deliver a completion after the call returns.
 
 The child, like a `council` participant, is built with its source member's
-build inputs: the source's application context and labels (with the child's
-own member identity in the standard mob labels) and the source's per-spawn
-tool overlay. Its `SessionBuildOptions::fork_source` names the source member
-and the session the child was forked from, so a host build callback can grant
-the child exactly the source's tools and instructions. With the same tools,
-the child's first request repeats the source's cached prompt prefix.
+build inputs: the source's application context and labels and the source's
+per-spawn tool overlay. The labels that name a member (`mob_id`, `role`,
+`profile_name`, `meerkat_id`, `agent_identity`) are not inherited: the child's
+roster entry and build carry its own. Its `SessionBuildOptions::fork_source`
+names the source member and the session the child was forked from, so a host
+build callback can grant the child exactly the source's tools and
+instructions. With the same tools, the child's first request repeats the
+source's cached prompt prefix. A child that is rebuilt later (revived after
+its session was dropped, resumed, or restored after a restart) is built with
+the same inputs again.
 
 **Detached.** A call runs detached when three things hold: the host declares
 it can deliver later, it has a runtime to admit the completion, and the caller

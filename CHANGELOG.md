@@ -41,9 +41,11 @@ them.
   public field `fork_source: Option<ForkBuildSource>`. Struct literals must
   supply it (`None` outside the mob runtime, or use `..Default::default()` for
   `SessionBuildOptions`). `AgentBuildConfig::apply_session_build_options` and
-  `to_session_build_options` carry it both ways, so a host build callback that
-  wraps `FactoryAgentBuilder` (MobKit's `callback/build_agent`) receives it on
-  `CreateSessionRequest.build`.
+  `to_session_build_options` carry it both ways, so a Rust
+  `SessionAgentBuilder` that wraps `FactoryAgentBuilder` receives it on
+  `CreateSessionRequest.build`. A JSON host build callback (MobKit's
+  `callback/build_agent`) sees it only once its host forwards the field; MobKit
+  does not forward it yet.
 
 ### Added
 
@@ -52,8 +54,15 @@ them.
   source's durable `MobMemberBinding`, and `source_session_id`, the session its
   transcript was forked from. It is `#[non_exhaustive]` and serializable (serde
   and, with the `schema` feature, JSON Schema) so a host can forward it; build
-  it with `ForkBuildSource::new`. The mob runtime sets it only when it seats a
-  durable fork as a member.
+  it with `ForkBuildSource::new`. Serialized it is
+  `{"source_member": {"mob_id", "role", "member"}, "source_session_id": "<uuid>"}`
+  (see its rustdoc). The mob runtime sets it on the build that seats a durable
+  fork as a member and on every later rebuild of that member.
+- `meerkat_mob::MemberSpawnedEvent::fork_source` and
+  `meerkat_mob::RosterEntry::fork_source` (`Option<ForkBuildSource>`, absent
+  unless the member is fork-derived) persist a fork-derived member's lineage,
+  so a restarted, resumed or revived fork is rebuilt with it. Journals written
+  before decode it as absent.
 - `meerkat_mob::ForkBuildInheritance`, the opaque build inputs a fork-derived
   member inherits from its source (application context, application labels,
   retained per-spawn tool overlay and the typed source), minted by the source's
@@ -76,11 +85,30 @@ them.
   `memory` tools). Its tools block also differed from the forker's, so the
   child could not reuse the forker's cached prompt prefix. The child's build
   now carries the source's application context (read from the source session's
-  durable build state) and application labels verbatim, with the child's own
-  member identity in the standard mob labels, the source's retained per-spawn
-  overlay, and `fork_source`. The child keeps its own roster, comms and
-  runtime identity. Delegate helpers, live-delegation workers and ordinary
-  spawns are unchanged.
+  durable build state), the source's application labels, the source's retained
+  per-spawn overlay, and `fork_source`. The source's standard mob member labels
+  (`mob_id`, `role`, `profile_name`, `meerkat_id`, `agent_identity`) are never
+  inherited: they name the source (MobKit keeps its durable identity in
+  `agent_identity`), so the child's roster entry, `MemberSpawned` event and
+  `list_members` labels carry only the child's own values for them, and its
+  build stamps its own. The child keeps its own roster, comms and runtime
+  identity. Every rebuild of the child (warm revival, explicit resume,
+  process-restart restore) repeats these inputs: `fork_source`, labels and
+  application context from the child's own durable records, and the per-spawn
+  overlay re-derived from its source while the source is seated in the child's
+  mob (a source that is gone leaves the child its own overlay, logged).
+  Delegate helpers, live-delegation workers and ordinary spawns are unchanged.
+- A mob member rebuilt without an explicit application context (warm revival,
+  explicit resume, process-restart restore) keeps the context its session's
+  last build persisted. It was rebuilt with none, and the rebuild persisted
+  that `None` over the stored context, so a revived member lost its context
+  for good. An explicit context still replaces it.
+- A durable member fork (`fork_off`, `MobHandle::fork_member*`,
+  `MobHandle::fork_build_inheritance`) on a session service without durable
+  sessions fails at once with the service's unsupported-fork error again. It
+  had started reading the source's live session first, which on
+  `EphemeralSessionService` waits on the source's session task, so a
+  `fork_off` from the source's own turn hung.
 
 ## [0.8.44] - 2026-09-26
 

@@ -250,6 +250,134 @@ async fn attached_spawn_seats_a_branch_after_the_source_member_is_gone() {
     assert_eq!(target.fence_token, member.fence_token.get());
 }
 
+/// Regression (identity confusion, council participant path): a
+/// capability-attached participant seated with its source's build
+/// inheritance (the temporary-council seating) carries the source's
+/// application labels, never the labels that name the source. MobKit keeps
+/// its durable identity in the source's roster `agent_identity`; a
+/// participant that inherited it claimed to be its source in the roster, its
+/// `MemberSpawned` event and `list_members`.
+#[tokio::test(flavor = "multi_thread")]
+async fn attached_participant_never_inherits_the_source_member_naming_labels() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let controlling = create_controlling_mob("fp-attach-labels").await;
+    let app_labels = std::collections::BTreeMap::from([
+        ("domain".to_string(), "calendar".to_string()),
+        ("tier".to_string(), "gold".to_string()),
+    ]);
+    let mut source_labels = app_labels.clone();
+    for (key, value) in [
+        ("agent_identity", "domain:calendar"),
+        ("profile_name", "worker"),
+        ("meerkat_id", "researcher"),
+        ("mob_id", "some-mob"),
+        ("role", "worker"),
+    ] {
+        source_labels.insert(key.to_string(), value.to_string());
+    }
+    controlling
+        .handle
+        .spawn_spec(
+            SpawnMemberSpec::new("worker", "researcher")
+                .with_backend(MobBackendKind::Session)
+                .with_labels(source_labels.clone()),
+        )
+        .await
+        .expect("spawn the labelled source");
+    let capability = create(&controlling, "researcher", "req-labels")
+        .await
+        .expect("local create");
+    let inheritance = controlling
+        .handle
+        .fork_build_inheritance(
+            capability.source_identity(),
+            &capability.provenance().source_session_id,
+        )
+        .await
+        .expect("the source's own mob mints its build inheritance");
+    assert_eq!(inheritance.labels(), &app_labels);
+
+    controlling
+        .handle
+        .spawn_attached_forked_participant(
+            MobControlPrincipal::Owner,
+            &capability,
+            attachment("labels-1"),
+            branch_spec("branch").with_fork_build_inheritance(inheritance),
+        )
+        .await
+        .expect("capability-aware attached spawn with the source's inheritance");
+
+    let standard = [
+        "mob_id",
+        "role",
+        "profile_name",
+        "meerkat_id",
+        "agent_identity",
+    ];
+    let member = controlling
+        .handle
+        .get_member(&identity("branch"))
+        .await
+        .expect("member read")
+        .expect("the branch is seated");
+    assert_eq!(
+        member.labels, app_labels,
+        "the branch's roster entry carries only the source's application labels"
+    );
+    assert_eq!(
+        member
+            .fork_source
+            .as_ref()
+            .map(|source| source.source_member.member.as_str()),
+        Some("researcher"),
+        "the branch's roster entry records its lineage"
+    );
+    let listed = controlling
+        .handle
+        .list_members()
+        .await
+        .into_iter()
+        .find(|entry| entry.agent_identity == identity("branch"))
+        .expect("the branch is listed");
+    assert_eq!(listed.labels, app_labels);
+    let spawned = controlling
+        .storage_events
+        .replay_all()
+        .await
+        .expect("replay the journal")
+        .into_iter()
+        .find_map(|event| match event.kind {
+            meerkat_mob::event::MobEventKind::MemberSpawned(spawned)
+                if spawned.agent_identity == identity("branch") =>
+            {
+                Some(spawned)
+            }
+            _ => None,
+        })
+        .expect("the branch's MemberSpawned event");
+    for key in standard {
+        assert!(
+            !spawned.labels.contains_key(key),
+            "the branch's MemberSpawned event carries the source's '{key}': {:?}",
+            spawned.labels
+        );
+    }
+    assert_eq!(spawned.labels, app_labels);
+    assert_eq!(spawned.fork_source, member.fork_source);
+    assert_eq!(
+        controlling
+            .handle
+            .get_member(&identity("researcher"))
+            .await
+            .expect("member read")
+            .expect("the source is seated")
+            .labels,
+        source_labels,
+        "the source keeps its own labels"
+    );
+}
+
 /// An exact replay is idempotent on both halves: the machine replays the
 /// grant rather than consuming a second use, and the retried spawn does not
 /// mint a second association or a second member.

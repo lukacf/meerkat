@@ -19,7 +19,32 @@
 //! and never carry it.
 //!
 //! The child keeps its own roster, comms and runtime identity. Only the build
-//! inputs are the source's.
+//! inputs are the source's: none of the standard mob member labels, which name
+//! a member (see [`crate::build::STANDARD_MOB_MEMBER_LABEL_KEYS`]), passes from
+//! the source to the child.
+//!
+//! # Rebuilds
+//!
+//! The inputs are fixed when the child is seated and every later rebuild of
+//! the child (warm revival, explicit resume, process-restart restore) repeats
+//! them from the child's own durable records, so a rebuilt child is built as
+//! it was first built, whatever the source has become since:
+//!
+//! - `fork_source` is persisted with the child's `MemberSpawned` event and
+//!   roster entry;
+//! - the inherited labels are the child's own persisted roster labels;
+//! - the application context is in the child session's durable build state,
+//!   which a rebuild that supplies no context carries forward.
+//!
+//! The per-spawn tool overlay is a process-local dispatcher and cannot be
+//! persisted. A rebuild re-derives it from the source instead: while the
+//! source is seated in the child's mob, the child gets the source's current
+//! retained overlay (after a restart or explicit resume, the one the host's
+//! spawn customizer re-supplied for the source). A temporary-council
+//! participant's source lives in another mob, so the participant keeps the
+//! overlay it retained from its seating, which is its source's. When the
+//! source is gone there is no source overlay left, and the child keeps the
+//! overlay of its own rebuild recipe; that fallback is logged, never silent.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -27,7 +52,8 @@ use std::sync::Arc;
 use meerkat_core::types::SessionId;
 use meerkat_core::{AgentToolDispatcher, ForkBuildSource};
 
-use crate::ids::AgentIdentity;
+use crate::ids::{AgentIdentity, MobId};
+use crate::roster::RosterEntry;
 
 /// Build inputs a fork-derived member inherits from its source member.
 ///
@@ -51,12 +77,17 @@ pub struct ForkBuildInheritance {
 }
 
 impl ForkBuildInheritance {
+    /// `labels` are the source's roster labels. The standard mob member
+    /// labels among them are dropped here: they name the source (in MobKit,
+    /// `agent_identity` is the source's durable identity), so a child that
+    /// inherited them would claim to be its source.
     pub(crate) fn new(
         source: ForkBuildSource,
         app_context: Option<serde_json::Value>,
-        labels: BTreeMap<String, String>,
+        mut labels: BTreeMap<String, String>,
         external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     ) -> Self {
+        labels.retain(|key, _| !crate::build::is_standard_mob_member_label(key));
         Self {
             source,
             app_context,
@@ -75,9 +106,12 @@ impl ForkBuildInheritance {
         self.app_context.as_ref()
     }
 
-    /// The source's application labels, verbatim. Standard mob labels
-    /// (`mob_id`, `role`, `agent_identity`, ...) are not among them: the
-    /// child's build stamps its own.
+    /// The source's application labels: its roster labels without the
+    /// standard mob member labels (`mob_id`, `role`, `profile_name`,
+    /// `meerkat_id`, `agent_identity`), which name the source itself. The
+    /// child's roster entry carries only what the child's own spawn request
+    /// states for those keys, never the source's values, and the child's build
+    /// stamps them from the child's own member binding.
     pub fn labels(&self) -> &BTreeMap<String, String> {
         &self.labels
     }
@@ -120,6 +154,101 @@ impl ForkBuildInheritance {
         if spec.external_tools.is_none() {
             spec.external_tools = external_tools;
         }
+    }
+}
+
+/// The member `fork_source` names, when that source is a member of mob
+/// `mob_id`: the member a rebuild of the fork-derived member re-derives its
+/// per-spawn overlay from. A source in another mob (a temporary-council
+/// participant's convener member) is not.
+pub(crate) fn fork_source_in_mob(
+    fork_source: &ForkBuildSource,
+    mob_id: &MobId,
+) -> Option<AgentIdentity> {
+    (fork_source.source_member.mob_id == mob_id.as_str())
+        .then(|| AgentIdentity::from(fork_source.source_member.member.as_str()))
+}
+
+/// Order `entries` so that every fork-derived member comes after the member
+/// it was forked from, when that source is among `entries`, keeping the input
+/// order otherwise. A restore that rebuilds members one by one then has each
+/// source's overlay before it rebuilds the source's forks.
+pub(crate) fn order_fork_sources_first(entries: &mut [RosterEntry], mob_id: &MobId) {
+    let sources: BTreeMap<AgentIdentity, Option<AgentIdentity>> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.agent_identity.clone(),
+                entry
+                    .fork_source
+                    .as_ref()
+                    .and_then(|source| fork_source_in_mob(source, mob_id)),
+            )
+        })
+        .collect();
+    // Hops to the first ancestor outside `entries`, bounded by the entry
+    // count so a malformed cycle cannot loop.
+    let depth = |identity: &AgentIdentity| {
+        let mut depth = 0_usize;
+        let mut current = identity;
+        while let Some(Some(source)) = sources.get(current) {
+            if !sources.contains_key(source) || depth >= sources.len() {
+                break;
+            }
+            depth += 1;
+            current = source;
+        }
+        depth
+    };
+    let depths: BTreeMap<AgentIdentity, usize> = sources
+        .keys()
+        .map(|identity| (identity.clone(), depth(identity)))
+        .collect();
+    entries.sort_by_key(|entry| depths.get(&entry.agent_identity).copied().unwrap_or(0));
+}
+
+impl super::actor::MobActor {
+    /// The per-spawn tool overlay a rebuild of `entry` composes, given `own`,
+    /// the overlay the rebuild recipe carries for `entry` itself.
+    ///
+    /// An ordinary member gets `own`. A fork-derived member is rebuilt with
+    /// its source's inputs (see the module docs): while its source is seated
+    /// in this mob, the source's current retained overlay (`None` when the
+    /// source has none, exactly like the source). A source in another mob (a
+    /// temporary-council participant's convener member) is not this mob's to
+    /// read, so the member gets `own`, the overlay it retained from its
+    /// seating (its source's). A source that is gone left no overlay to
+    /// re-derive from, so the member gets `own` too, and that is logged.
+    pub(super) async fn fork_rebuild_overlay(
+        &self,
+        entry: &RosterEntry,
+        own: Option<Arc<dyn AgentToolDispatcher>>,
+    ) -> Option<Arc<dyn AgentToolDispatcher>> {
+        let Some(fork_source) = entry.fork_source.as_ref() else {
+            return own;
+        };
+        let Some(source) = fork_source_in_mob(fork_source, &self.definition.id) else {
+            return own;
+        };
+        if self.roster.read().await.get(&source).is_some() {
+            return self
+                .per_spawn_external_tools
+                .read()
+                .await
+                .get(&source)
+                .cloned();
+        }
+        tracing::warn!(
+            mob_id = %self.definition.id,
+            agent_identity = %entry.agent_identity,
+            source_mob_id = %fork_source.source_member.mob_id,
+            source_member = %fork_source.source_member.member,
+            own_overlay = own.is_some(),
+            "fork-derived member's source is no longer seated in its mob; its rebuild keeps \
+             its own per-spawn overlay instead of the source's (fork_source, labels and \
+             application context are still the source's)"
+        );
+        own
     }
 }
 
@@ -238,6 +367,53 @@ mod tests {
                 .is_some_and(|applied| Arc::ptr_eq(applied, &child_tools))
         );
         assert!(spec.fork_source.is_some());
+    }
+
+    /// Regression (identity confusion): MobKit stamps its durable identity
+    /// into a member's roster labels (`agent_identity: "domain:calendar"`,
+    /// `profile_name`), and meerkat's standard labels name a member too. A
+    /// fork child that inherited them claimed its source's identity.
+    #[test]
+    fn inherited_labels_drop_every_standard_mob_member_label() {
+        let mut source_labels = BTreeMap::from([
+            ("domain".to_string(), "calendar".to_string()),
+            ("tier".to_string(), "gold".to_string()),
+        ]);
+        for key in crate::build::STANDARD_MOB_MEMBER_LABEL_KEYS {
+            source_labels.insert(key.to_string(), format!("source-{key}"));
+        }
+        source_labels.insert("agent_identity".to_string(), "domain:calendar".to_string());
+        let inheritance = ForkBuildInheritance::new(source(), None, source_labels, None);
+        let app_labels = BTreeMap::from([
+            ("domain".to_string(), "calendar".to_string()),
+            ("tier".to_string(), "gold".to_string()),
+        ]);
+        assert_eq!(inheritance.labels(), &app_labels);
+
+        let mut bare = SpawnMemberSpec::new(ProfileName::from("domain"), "child");
+        inheritance.clone().apply_to(&mut bare);
+        assert_eq!(
+            bare.labels,
+            Some(app_labels.clone()),
+            "the child's roster labels carry none of the source's member-naming labels"
+        );
+
+        let mut own = SpawnMemberSpec::new(ProfileName::from("domain"), "child");
+        own.labels = Some(BTreeMap::from([(
+            "agent_identity".to_string(),
+            "domain:calendar-fork".to_string(),
+        )]));
+        inheritance.apply_to(&mut own);
+        let mut expected = app_labels;
+        expected.insert(
+            "agent_identity".to_string(),
+            "domain:calendar-fork".to_string(),
+        );
+        assert_eq!(
+            own.labels,
+            Some(expected),
+            "a value the child's own request states for a standard key is the child's"
+        );
     }
 
     #[test]

@@ -4960,6 +4960,8 @@ pub(super) struct PendingSpawn {
     /// Durable spawner provenance for the roster entry and spawn event.
     pub(super) spawned_by: Option<AgentIdentity>,
     pub(super) fork_job: Option<crate::runtime::ForkJobRecord>,
+    /// Typed fork lineage for the roster entry and spawn event.
+    pub(super) fork_source: Option<meerkat_core::ForkBuildSource>,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -5020,8 +5022,9 @@ struct DeferredResumeProvision {
     compaction_curator_override: Option<Arc<dyn meerkat_core::CompactionCurator>>,
     context: Option<serde_json::Value>,
     labels: Option<std::collections::BTreeMap<String, String>>,
-    /// Typed fork lineage for a durable fork's seating build; `None` for
-    /// every other resume (explicit resume, warm revival).
+    /// Typed fork lineage of a fork-derived member: set by its seating build
+    /// and by every rebuild of it (explicit resume, warm revival) from the
+    /// member's persisted roster entry; `None` for every other member.
     fork_source: Option<meerkat_core::ForkBuildSource>,
     additional_instructions: Option<Vec<String>>,
     shell_env: Option<std::collections::HashMap<String, String>>,
@@ -5525,6 +5528,9 @@ struct SpawnFinalizeCtx {
     effective_model_override: Option<String>,
     spawned_by: Option<AgentIdentity>,
     fork_job: Option<crate::runtime::ForkJobRecord>,
+    /// Typed fork lineage, persisted with the member's spawn event and roster
+    /// entry so every rebuild carries it (see `ForkBuildInheritance`).
+    fork_source: Option<meerkat_core::ForkBuildSource>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -5581,6 +5587,9 @@ struct SpawnActivateState {
     effective_model_override: Option<String>,
     spawned_by: Option<AgentIdentity>,
     fork_job: Option<crate::runtime::ForkJobRecord>,
+    /// Typed fork lineage, persisted with the member's spawn event and roster
+    /// entry so every rebuild carries it (see `ForkBuildInheritance`).
+    fork_source: Option<meerkat_core::ForkBuildSource>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     remote: Option<Box<RemoteSpawnFinalize>>,
@@ -5624,6 +5633,7 @@ impl SpawnActivateState {
             effective_model_override,
             spawned_by,
             fork_job,
+            fork_source,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -5673,6 +5683,7 @@ impl SpawnActivateState {
             effective_model_override,
             spawned_by,
             fork_job,
+            fork_source,
             objective_id,
             per_spawn_external_tools,
             remote,
@@ -27873,6 +27884,7 @@ impl MobActor {
             effective_model_override: entry.effective_model_override,
             spawned_by: entry.spawned_by,
             fork_job: entry.fork_job,
+            fork_source: entry.fork_source,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -28677,7 +28689,7 @@ impl MobActor {
             config.tool_consequence_policy_registry = self.tool_consequence_policy_registry.clone();
             // Fork lineage rides only fork seatings, which resume; a fresh
             // spawn carries `None` here.
-            config.fork_source = fork_source;
+            config.fork_source = fork_source.clone();
             if let Some(ref client) = self.default_llm_client {
                 config.llm_client_override = Some(client.clone());
             }
@@ -28878,6 +28890,7 @@ impl MobActor {
                 effective_model_override,
                 spawned_by: spawned_by.clone(),
                 fork_job: fork_job.clone(),
+                fork_source: fork_source.clone(),
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -29071,6 +29084,7 @@ impl MobActor {
             effective_model_override,
             spawned_by,
             fork_job,
+            fork_source,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -30777,6 +30791,9 @@ impl MobActor {
             effective_model_override,
             spawned_by: None,
             fork_job: None,
+            // A placed spawn is never a fork seating: ingress refuses a fork
+            // source on it.
+            fork_source: None,
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -31055,6 +31072,7 @@ impl MobActor {
                 effective_model_override,
                 spawned_by,
                 fork_job,
+                fork_source,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -31238,6 +31256,7 @@ impl MobActor {
                                 effective_model_override,
                                 spawned_by: spawned_by.clone(),
                                 fork_job: fork_job.clone(),
+                                fork_source: fork_source.clone(),
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -31310,6 +31329,7 @@ impl MobActor {
                                 effective_model_override,
                                 spawned_by: spawned_by.clone(),
                                 fork_job: fork_job.clone(),
+                                fork_source: fork_source.clone(),
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -31627,6 +31647,8 @@ impl MobActor {
             effective_model_override: model_override.clone(),
             spawned_by: None,
             fork_job: None,
+            // A policy auto-spawn is fresh, never a fork seating.
+            fork_source: None,
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -32369,6 +32391,7 @@ impl MobActor {
             spawned.effective_model_override = ctx.effective_model_override.clone();
             spawned.spawned_by = ctx.spawned_by.clone();
             spawned.fork_job = ctx.fork_job.clone();
+            spawned.fork_source = ctx.fork_source.clone();
             self.append_committed_placed_event_exact(MobEventKind::MemberSpawned(spawned))
                 .await?;
             self.restore_diagnostics
@@ -32524,6 +32547,9 @@ impl MobActor {
         spawned_event.effective_model_override = ctx.effective_model_override.clone();
         spawned_event.spawned_by = ctx.spawned_by.clone();
         spawned_event.fork_job = ctx.fork_job.clone();
+        // Durable fork lineage: every rebuild of a fork-derived member
+        // carries it (see `ForkBuildInheritance`).
+        spawned_event.fork_source = ctx.fork_source.clone();
         spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = self
             .append_member_spawned_with_identity_fence(

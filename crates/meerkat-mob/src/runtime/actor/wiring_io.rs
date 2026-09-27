@@ -1857,6 +1857,7 @@ mod wiring_incarnation_tests {
             effective_model_override: None,
             spawned_by: None,
             fork_job: None,
+            fork_source: None,
             direct_member_fence: None,
         }
     }

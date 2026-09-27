@@ -3236,18 +3236,17 @@ impl MockSessionService {
                 .expect("mock session metadata should serialize");
         }
         // Mirror the factory, which persists every build's application context
-        // in the session's durable build state (a fork reads its source's
-        // context from there).
-        if let Some(app_context) = req
-            .build
-            .as_ref()
-            .and_then(|build| build.app_context.clone())
-        {
+        // in the session's durable build state, unconditionally: a build that
+        // carries no context overwrites a persisted one with `None` (a fork
+        // reads its source's context from there).
+        if let Some(build) = req.build.as_ref() {
+            let mut build_state = session
+                .try_build_state()
+                .expect("mock session build state should restore")
+                .unwrap_or_default();
+            build_state.app_context = build.app_context.clone();
             session
-                .set_build_state(meerkat_core::SessionBuildState {
-                    app_context: Some(app_context),
-                    ..Default::default()
-                })
+                .set_build_state(build_state)
                 .expect("mock session build state should serialize");
         }
         let _authority_guard = self.resume_authority_gate.lock().await;
@@ -12144,6 +12143,17 @@ struct OverlayProbeSessionAgent {
     provider_call_sessions: Arc<Mutex<Vec<SessionId>>>,
     turn_tool_overlay: Option<TurnToolOverlay>,
     transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
+    /// Holds an armed turn open until released (see [`TurnGate`]).
+    turn_gate: Option<Arc<TurnGate>>,
+}
+
+/// Holds a probe agent's turn open once armed: the turn signals `entered` and
+/// waits for `release`, so the live session's task stays busy with it.
+#[derive(Default)]
+struct TurnGate {
+    armed: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 #[async_trait]
@@ -12153,6 +12163,12 @@ impl SessionAgent for OverlayProbeSessionAgent {
         _prompt: meerkat_core::types::ContentInput,
         event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if let Some(gate) = self.turn_gate.as_ref()
+            && gate.armed.load(Ordering::SeqCst)
+        {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         let visible_tools = overlay_probe_visible_tools(self.turn_tool_overlay.as_ref());
         self.provider_visible_tools
             .lock()
@@ -12310,7 +12326,29 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
             provider_call_sessions: Arc::clone(&self.provider_call_sessions),
             turn_tool_overlay: None,
             transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
+            turn_gate: None,
         })
+    }
+}
+
+/// [`OverlayProbeSessionAgentBuilder`] whose agents hold an armed turn open.
+struct GatedOverlayProbeSessionAgentBuilder {
+    inner: OverlayProbeSessionAgentBuilder,
+    gate: Arc<TurnGate>,
+}
+
+#[async_trait]
+impl SessionAgentBuilder for GatedOverlayProbeSessionAgentBuilder {
+    type Agent = OverlayProbeSessionAgent;
+
+    async fn build_agent(
+        &self,
+        req: &CreateSessionRequest,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Result<Self::Agent, SessionError> {
+        let mut agent = self.inner.build_agent(req, event_tx).await?;
+        agent.turn_gate = Some(Arc::clone(&self.gate));
+        Ok(agent)
     }
 }
 
@@ -23684,6 +23722,540 @@ async fn delegate_and_spawned_children_are_not_built_as_forks() {
         "a durable fork refuses a caller-attached inheritance before it forks"
     );
     assert!(handle.get_member(&forked).await.unwrap().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Fork-derived members never claim their source's identity, and every rebuild
+// repeats their first build
+// ---------------------------------------------------------------------------
+
+/// The source's roster labels as MobKit stamps them: the application labels
+/// plus every standard mob member label, carrying the source's values
+/// (`agent_identity` is MobKit's durable identity, `domain:calendar`).
+fn fork_source_identity_labels() -> BTreeMap<String, String> {
+    let mut labels = fork_source_app_labels();
+    for key in crate::build::STANDARD_MOB_MEMBER_LABEL_KEYS {
+        labels.insert(key.to_string(), format!("source-{key}"));
+    }
+    labels.insert("agent_identity".to_string(), "domain:calendar".to_string());
+    labels
+}
+
+fn assert_no_source_identity_label(labels: &BTreeMap<String, String>, surface: &str) {
+    for key in crate::build::STANDARD_MOB_MEMBER_LABEL_KEYS {
+        assert!(
+            !labels.contains_key(key),
+            "{surface} carries the source's '{key}' label: {labels:?}"
+        );
+    }
+}
+
+/// Regression (identity confusion): the source's roster labels were merged
+/// verbatim into the child's, so a MobKit fork child's roster entry claimed
+/// `agent_identity: domain:calendar`, MobKit's durable identity of its source.
+/// The child's roster entry, `MemberSpawned` event and `list_members` entry
+/// carry the source's application labels and none of its member-naming ones;
+/// the child's build stamps its own identity.
+#[tokio::test]
+async fn fork_child_never_inherits_the_source_member_naming_labels() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let source_identity = AgentIdentity::from("fork-identity-source");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), source_identity.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    spec.initial_message = Some(ContentInput::Text("source context".to_string()));
+    spec.context = Some(fork_source_app_context());
+    spec.labels = Some(fork_source_identity_labels());
+    handle.spawn_spec(spec).await.expect("spawn the source");
+    let source_session = handle
+        .resolve_bridge_session_id(&source_identity)
+        .await
+        .expect("source session");
+    wait_for_fork_source_settled(&handle, &source_session).await;
+
+    let child_identity = AgentIdentity::from("fork-identity-child");
+    let mut child = SpawnMemberSpec::new(ProfileName::from("worker"), child_identity.clone());
+    child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .fork_member(&source_identity, child, None)
+        .await
+        .expect("fork the child");
+
+    let entry = handle
+        .get_member(&child_identity)
+        .await
+        .expect("read the child")
+        .expect("the child is seated");
+    assert_no_source_identity_label(&entry.labels, "the child's roster entry");
+    assert_eq!(
+        entry.labels,
+        fork_source_app_labels(),
+        "the child's roster entry keeps the source's application labels"
+    );
+
+    let listed = handle
+        .list_members()
+        .await
+        .into_iter()
+        .find(|member| member.agent_identity == child_identity)
+        .expect("the child is listed");
+    assert_no_source_identity_label(&listed.labels, "the child's list_members entry");
+    assert_eq!(listed.labels, fork_source_app_labels());
+
+    let spawned = events
+        .replay_all()
+        .await
+        .expect("replay the journal")
+        .into_iter()
+        .find_map(|event| match event.kind {
+            MobEventKind::MemberSpawned(spawned) if spawned.agent_identity == child_identity => {
+                Some(spawned)
+            }
+            _ => None,
+        })
+        .expect("the child's MemberSpawned event");
+    assert_no_source_identity_label(&spawned.labels, "the child's MemberSpawned event");
+    assert_eq!(spawned.labels, fork_source_app_labels());
+
+    let build = last_member_build(&service, &child_identity).await;
+    for key in ["agent_identity", "meerkat_id"] {
+        assert_eq!(
+            build.peer_meta_labels.get(key).map(String::as_str),
+            Some(child_identity.as_str()),
+            "the child's build names the child in '{key}'"
+        );
+    }
+    assert_eq!(
+        build.peer_meta_labels.get("mob_id").map(String::as_str),
+        Some("test-mob")
+    );
+    assert_eq!(
+        handle
+            .get_member(&source_identity)
+            .await
+            .expect("read the source")
+            .expect("the source is seated")
+            .labels,
+        fork_source_identity_labels(),
+        "the source keeps its own labels"
+    );
+}
+
+/// Regression (pre-existing, load-bearing for forks): every warm revival
+/// rebuilt the member with no application context and the rebuild persisted
+/// that `None` over the stored one, so a revived source lost its context for
+/// good, and every later fork of it inherited none. A rebuild without an
+/// explicit context carries the persisted one forward.
+#[tokio::test]
+async fn revived_member_keeps_its_context_and_its_forks_inherit_it() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_identity = AgentIdentity::from("fork-context-source");
+    let source_session = spawn_fork_source_with_build_inputs(&handle, &source_identity).await;
+
+    MobSessionService::discard_live_session(service.as_ref(), &source_session)
+        .await
+        .expect("discard the source's live session");
+    handle
+        .member(&source_identity)
+        .await
+        .expect("source handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect("warm revival rebuilds the source");
+    wait_for_fork_source_settled(&handle, &source_session).await;
+    assert!(
+        service
+            .recorded_create_requests()
+            .await
+            .iter()
+            .filter(|record| record
+                .mob_member_binding
+                .as_ref()
+                .is_some_and(|binding| binding.member == source_identity.as_str()))
+            .count()
+            >= 2,
+        "the source was rebuilt"
+    );
+    assert_eq!(
+        last_member_build(&service, &source_identity)
+            .await
+            .app_context,
+        Some(fork_source_app_context()),
+        "the revived source's own build keeps its original context"
+    );
+
+    let child_identity = AgentIdentity::from("fork-context-child");
+    let mut child = SpawnMemberSpec::new(ProfileName::from("worker"), child_identity.clone());
+    child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .fork_member(&source_identity, child, None)
+        .await
+        .expect("fork the revived source");
+    assert_eq!(
+        last_member_build(&service, &child_identity)
+            .await
+            .app_context,
+        Some(fork_source_app_context()),
+        "a fork of the revived source inherits the source's original context"
+    );
+}
+
+/// Every input of a fork child's first build, as a later rebuild must repeat it.
+fn assert_rebuilt_as_first_build(
+    first: &CreateSessionRecord,
+    rebuilt: &CreateSessionRecord,
+    expected_source: &meerkat_core::ForkBuildSource,
+) {
+    assert_eq!(first.fork_source.as_ref(), Some(expected_source));
+    assert_eq!(
+        rebuilt.fork_source.as_ref(),
+        Some(expected_source),
+        "the rebuild carries the child's fork source"
+    );
+    assert_eq!(first.app_context, Some(fork_source_app_context()));
+    assert_eq!(
+        rebuilt.app_context, first.app_context,
+        "the rebuild carries the source's application context"
+    );
+    assert_eq!(
+        rebuilt.peer_meta_labels, first.peer_meta_labels,
+        "the rebuild carries the child's first-build labels"
+    );
+}
+
+/// Regression (inheritance lost on rebuild): nothing about the inheritance
+/// was persisted, and warm revival passed no fork source and no context, so a
+/// seated fork child whose live session was dropped came back as a generic
+/// member. It is rebuilt with its first build's inputs.
+#[tokio::test]
+async fn revived_fork_child_is_rebuilt_with_its_first_build_inputs() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_identity = AgentIdentity::from("fork-revival-source");
+    let source_session = spawn_fork_source_with_build_inputs(&handle, &source_identity).await;
+
+    let child_identity = AgentIdentity::from("fork-revival-child");
+    let mut child = SpawnMemberSpec::new(ProfileName::from("worker"), child_identity.clone());
+    child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let fork = handle
+        .fork_member(&source_identity, child, None)
+        .await
+        .expect("fork the child");
+    let first = last_member_build(&service, &child_identity).await;
+    let expected_source = meerkat_core::ForkBuildSource::new(
+        meerkat_core::MobMemberBinding {
+            mob_id: "test-mob".to_string(),
+            role: "worker".to_string(),
+            member: source_identity.to_string(),
+        },
+        source_session,
+    );
+    assert_eq!(
+        handle
+            .get_member(&child_identity)
+            .await
+            .expect("read the child")
+            .expect("the child is seated")
+            .fork_source,
+        Some(expected_source.clone()),
+        "the child's roster entry records its lineage"
+    );
+
+    MobSessionService::discard_live_session(service.as_ref(), &fork.session_id)
+        .await
+        .expect("discard the child's live session");
+    handle
+        .member(&child_identity)
+        .await
+        .expect("child handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect("warm revival rebuilds the child");
+
+    let rebuilt = last_member_build(&service, &child_identity).await;
+    assert_rebuilt_as_first_build(&first, &rebuilt, &expected_source);
+    assert_eq!(
+        rebuilt.external_tool_names, first.external_tool_names,
+        "the revived child keeps its source's per-spawn tool surface"
+    );
+}
+
+/// A host's spawn customizer that re-supplies per-spawn overlays by identity
+/// on resume, as MobKit does: the fork source gets its calendar tools back,
+/// every other member a generic overlay.
+struct IdentityOverlayCustomizer {
+    source: AgentIdentity,
+}
+
+const GENERIC_RESUME_OVERLAY_TOOL: &str = "generic_resume_probe";
+
+impl SpawnMemberCustomizer for IdentityOverlayCustomizer {
+    fn customize_spawn(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        if ctx.spawn_source == SpawnSource::Resume {
+            spec.external_tools = Some(if spec.identity == self.source {
+                Arc::new(FixedOverlayTools(FORK_SOURCE_OVERLAY_TOOLS.to_vec()))
+            } else {
+                Arc::new(FixedOverlayTools(vec![GENERIC_RESUME_OVERLAY_TOOL]))
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Seat a fork child of a source with every build input, then drop both live
+/// sessions and the mob actor (a process restart). The child's identity sorts
+/// before its source's, so a restore that walks the roster in order meets the
+/// child first. Returns what the restart tests compare against.
+async fn seat_fork_child_then_crash(
+    stop_first: bool,
+) -> (
+    Arc<MockSessionService>,
+    MobStorage,
+    AgentIdentity,
+    AgentIdentity,
+    CreateSessionRecord,
+    meerkat_core::ForkBuildSource,
+) {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let restart_storage = MobStorage::with_events_and_runtime_metadata(
+        storage.events.clone(),
+        storage.runtime_metadata.clone(),
+    );
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let source_identity = AgentIdentity::from("zz-restart-source");
+    let source_session = spawn_fork_source_with_build_inputs(&handle, &source_identity).await;
+    let child_identity = AgentIdentity::from("aa-restart-child");
+    let mut child = SpawnMemberSpec::new(ProfileName::from("worker"), child_identity.clone());
+    child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let fork = handle
+        .fork_member(&source_identity, child, None)
+        .await
+        .expect("fork the child");
+    let first = last_member_build(&service, &child_identity).await;
+    let expected_source = meerkat_core::ForkBuildSource::new(
+        meerkat_core::MobMemberBinding {
+            mob_id: "test-mob".to_string(),
+            role: "worker".to_string(),
+            member: source_identity.to_string(),
+        },
+        source_session.clone(),
+    );
+    if stop_first {
+        handle.stop().await.expect("stop");
+    }
+    for session in [&source_session, &fork.session_id] {
+        MobSessionService::discard_live_session(service.as_ref(), session)
+            .await
+            .expect("discard live session");
+    }
+    crash_stop_and_release_routes(handle).await;
+    (
+        service,
+        restart_storage,
+        source_identity,
+        child_identity,
+        first,
+        expected_source,
+    )
+}
+
+/// After a restart the child's overlay is its source's, as re-supplied by the
+/// host for the source, never the host's overlay for the child's own identity.
+async fn assert_restored_child_built_as_its_source(
+    service: &MockSessionService,
+    resumed: &MobHandle,
+    source_identity: &AgentIdentity,
+    child_identity: &AgentIdentity,
+    first: &CreateSessionRecord,
+    expected_source: &meerkat_core::ForkBuildSource,
+) {
+    assert_eq!(
+        resumed
+            .get_member(child_identity)
+            .await
+            .expect("read the child")
+            .expect("the child is restored")
+            .fork_source
+            .as_ref(),
+        Some(expected_source),
+        "roster replay restores the child's lineage"
+    );
+    let source = last_member_build(service, source_identity).await;
+    let rebuilt = last_member_build(service, child_identity).await;
+    assert_rebuilt_as_first_build(first, &rebuilt, expected_source);
+    for tool in FORK_SOURCE_OVERLAY_TOOLS {
+        assert!(
+            source.external_tool_names.iter().any(|name| name == tool),
+            "the restored source carries its re-supplied overlay tool '{tool}': {:?}",
+            source.external_tool_names
+        );
+    }
+    assert!(
+        !rebuilt
+            .external_tool_names
+            .iter()
+            .any(|name| name == GENERIC_RESUME_OVERLAY_TOOL),
+        "the restored child is not given the host's overlay for its own identity: {:?}",
+        rebuilt.external_tool_names
+    );
+    assert_eq!(
+        rebuilt.external_tool_names, source.external_tool_names,
+        "the restored child's per-spawn tool surface is its restored source's"
+    );
+}
+
+/// Regression (inheritance lost on rebuild), explicit resume: a stopped mob
+/// restored after a restart rebuilt a seated fork child with no fork source,
+/// no context and the customizer's overlay for the child's own identity.
+#[tokio::test]
+async fn fork_child_restored_by_explicit_resume_is_built_as_its_source() {
+    let (service, storage, source_identity, child_identity, first, expected_source) =
+        seat_fork_child_then_crash(true).await;
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(Arc::new(IdentityOverlayCustomizer {
+            source: source_identity.clone(),
+        }))
+        .resume()
+        .await
+        .expect("resume");
+    resumed
+        .resume()
+        .await
+        .expect("explicit resume rebuilds the stopped members");
+    assert_restored_child_built_as_its_source(
+        &service,
+        &resumed,
+        &source_identity,
+        &child_identity,
+        &first,
+        &expected_source,
+    )
+    .await;
+}
+
+/// Regression (re-entrancy hang): resolving a fork's build inheritance read
+/// the source's session through the service before the fork. On a service
+/// without durable sessions that read is a command to the live session's task,
+/// which is busy with the very turn that asked for the fork (`fork_off`), so
+/// the fork hung where it used to fail at once with the service's
+/// unsupported-fork error. It fails at once again, while the turn runs.
+#[tokio::test]
+async fn caller_turn_fork_on_a_service_without_durable_fork_fails_fast_mid_turn() {
+    let gate = Arc::new(TurnGate::default());
+    let service = Arc::new(meerkat_session::EphemeralSessionService::new(
+        GatedOverlayProbeSessionAgentBuilder {
+            inner: OverlayProbeSessionAgentBuilder {
+                provider_visible_tools: Arc::default(),
+                provider_turn_overlays: Arc::default(),
+                provider_call_sessions: Arc::default(),
+            },
+            gate: Arc::clone(&gate),
+        },
+        16,
+    ));
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service)
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create an ephemeral-backed mob");
+    let source_identity = AgentIdentity::from("ephemeral-fork-source");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), source_identity.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(spec).await.expect("spawn the source");
+
+    gate.armed.store(true, Ordering::SeqCst);
+    let member = handle
+        .member(&source_identity)
+        .await
+        .expect("source handle");
+    let turn = tokio::spawn(async move {
+        member
+            .internal_turn(ContentInput::from("hold this turn open".to_string()))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("the source's turn is running");
+
+    let child_identity = AgentIdentity::from("ephemeral-fork-child");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        handle.fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            None,
+        ),
+    )
+    .await
+    .expect("the fork answers at once; it never waits on the source's running turn");
+    assert!(
+        matches!(
+            outcome,
+            Err(BoundedMemberRunError::Admission(MobError::SessionError(
+                SessionError::Unsupported(_)
+            )))
+        ),
+        "a service without durable fork authority refuses the fork: {:?}",
+        outcome.as_ref().err()
+    );
+    assert!(
+        handle.get_member(&child_identity).await.unwrap().is_none(),
+        "nothing is seated"
+    );
+
+    gate.armed.store(false, Ordering::SeqCst);
+    gate.release.notify_one();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), turn).await;
+}
+
+/// Regression (inheritance lost on rebuild), process-restart restore: a
+/// running mob restored after a crash rebuilt a seated fork child the same
+/// generic way.
+#[tokio::test]
+async fn fork_child_restored_after_a_crash_is_built_as_its_source() {
+    let (service, storage, source_identity, child_identity, first, expected_source) =
+        seat_fork_child_then_crash(false).await;
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(Arc::new(IdentityOverlayCustomizer {
+            source: source_identity.clone(),
+        }))
+        .resume()
+        .await
+        .expect("resume");
+    assert_restored_child_built_as_its_source(
+        &service,
+        &resumed,
+        &source_identity,
+        &child_identity,
+        &first,
+        &expected_source,
+    )
+    .await;
 }
 
 /// Same deadline hazard for `delegate`: a helper whose caller stops waiting

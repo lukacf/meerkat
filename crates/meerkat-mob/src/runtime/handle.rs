@@ -13120,11 +13120,24 @@ impl MobHandle {
     /// the roster entry (role and application labels), the actor's retained
     /// per-spawn overlay, and the application context the source session's
     /// current build persisted in its durable build state.
+    ///
+    /// A service without durable sessions is refused first, with the answer
+    /// its own fork would give, before anything is read. Such a service has no
+    /// durable fork authority, and its session read goes through the live
+    /// session's task: from a fork asked for in the source's own turn
+    /// (`fork_off`), that read would wait for the very turn that is waiting on
+    /// the fork. A durable service reads the build state from its store and
+    /// never waits on the session task or the turn.
     async fn resolve_fork_build_inheritance(
         &self,
         source_identity: &AgentIdentity,
         source_session_id: &meerkat_core::SessionId,
     ) -> Result<super::ForkBuildInheritance, MobError> {
+        if !self.session_service.supports_persistent_sessions() {
+            return Err(MobError::from(
+                super::session_service::durable_fork_unsupported(),
+            ));
+        }
         let (role, labels) = {
             let roster = self.roster.read().await;
             let entry = roster
@@ -13348,13 +13361,13 @@ impl MobHandle {
                 owner_session_id: owner_session_id.clone(),
             });
         }
-        self.resolve_fork_build_inheritance(source_identity, &source_session_id)
-            .await?
-            .apply_to(member);
         if source_admission == meerkat_core::DurableForkSourceAdmission::Quiescent {
             self.refuse_fork_source_with_admitted_work(source_identity, &source_session_id)
                 .await?;
         }
+        self.resolve_fork_build_inheritance(source_identity, &source_session_id)
+            .await?
+            .apply_to(member);
         self.session_service
             .fork_persisted_session(
                 &source_session_id,
@@ -16406,6 +16419,7 @@ mod tests {
             effective_model_override: None,
             spawned_by: None,
             fork_job: None,
+            fork_source: None,
             direct_member_fence: None,
         }
     }

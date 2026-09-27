@@ -13,7 +13,9 @@
 //! `app_context`, the way HomeCore does, and runs the members on the real
 //! OpenAI Responses client against a loopback server that records every
 //! request body. A child and its source must send byte-identical `tools`
-//! arrays and the same transcript prefix up to the fork boundary.
+//! arrays and the same transcript prefix up to the fork boundary, and a child
+//! rebuilt after its live session was dropped must still send the forker's
+//! `tools` array.
 
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -55,6 +57,7 @@ const CHILD_TASK: &str = "CHILD-TASK-2P list tomorrow's events";
 const CHILD_REPLY: &str = "CHILD-REPLY-6T";
 const FORK_DONE: &str = "FORK-DONE-1K";
 const SOURCE_TURN: &str = "SOURCE-TURN-4W note the agenda";
+const CHILD_AGAIN: &str = "CHILD-AGAIN-9R check tomorrow once more";
 const SEAT: &str = "calendar-seat";
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -288,6 +291,7 @@ impl SessionAgentBuilder for HostBuildCallback {
 
 struct Stack {
     state: Arc<MobMcpState>,
+    service: Arc<meerkat_session::PersistentSessionService<HostBuildCallback>>,
     bodies: RecordedBodies,
     builds: Arc<Mutex<Vec<RecordedBuild>>>,
     server: tokio::task::JoinHandle<()>,
@@ -346,7 +350,8 @@ impl Stack {
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
             Arc::new(meerkat_store::MemoryBlobStore::default()),
         ));
-        let state = MobMcpState::new(service, MobControlPrincipal::Owner)
+        let mob_service: Arc<dyn meerkat_mob::MobSessionService> = service.clone();
+        let state = MobMcpState::new(mob_service, MobControlPrincipal::Owner)
             .with_default_llm_client(Some(client))
             .try_with_persistent_storage_root(Some(root.join("state")))
             .expect("rooted mob custody")
@@ -356,6 +361,7 @@ impl Stack {
         ));
         Self {
             state,
+            service,
             bodies,
             builds,
             server,
@@ -619,6 +625,57 @@ async fn e2e_fast_mob_fork_off_child_request_matches_the_forker_byte_for_byte() 
         CHILD,
         &mob_id,
         &expected_source,
+    );
+
+    // The child stays seated after its job. Drop its live session and give
+    // it another turn: the warm revival rebuilds it, and the rebuilt child is
+    // still built as its source, its tools array still the forker's byte for
+    // byte (the rebuild used to lose the fork source and the application
+    // context, and the host built a generic member again).
+    let builds_before = stack.builds.lock().unwrap().len();
+    let child_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from(CHILD))
+        .await
+        .expect("child session");
+    meerkat_mob::MobSessionService::discard_live_session(stack.service.as_ref(), &child_session)
+        .await
+        .expect("drop the child's live session");
+    assert_eq!(bounded_turn(&handle, CHILD, CHILD_AGAIN).await, "ACK");
+    assert!(
+        stack.builds.lock().unwrap()[builds_before..]
+            .iter()
+            .any(|build| build.member.as_deref() == Some(CHILD)),
+        "the child was rebuilt"
+    );
+    let revived_build = stack.last_build(CHILD);
+    assert_eq!(
+        revived_build.fork_source.as_ref(),
+        Some(&expected_source),
+        "the revived child's build still names its source"
+    );
+    assert_eq!(
+        revived_build.app_context,
+        Some(source_app_context()),
+        "the revived child's build still carries the source's application context"
+    );
+    assert_built_as_source(
+        &stack.last_build(SOURCE),
+        &stack.last_build(CHILD),
+        CHILD,
+        &mob_id,
+        &expected_source,
+    );
+    let revived = stack.only_body("revived child", |body| {
+        last_user_text(body).contains(CHILD_AGAIN)
+    });
+    assert_eq!(
+        body_parts(&revived)
+            .tools
+            .expect("the revived child sends tools")
+            .get(),
+        forker_tools,
+        "the revived child's tools array is still the forker's byte for byte; child tools: {:?}",
+        tool_names(&revived)
     );
 
     stack.teardown().await;

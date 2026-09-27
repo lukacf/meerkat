@@ -676,6 +676,8 @@ impl MobActor {
             .await
             .get(&work.entry.agent_identity)
             .cloned();
+        // A fork-derived member is rebuilt with its source's current overlay.
+        let overlay = self.fork_rebuild_overlay(&work.entry, overlay).await;
         let external_tools = self.external_tools_for_profile(&profile, overlay)?;
         let session_id = mob_dsl::SessionId::from_domain(&work.session_id);
         let transition = self.apply_dsl_signal_collect_transition(
@@ -713,8 +715,11 @@ impl MobActor {
             profile,
             external_tools,
             compaction_curator_override: None,
+            // No context: the rebuild carries the session's persisted one
+            // forward (`build_resumed_agent_config`).
             context: None,
-            fork_source: None,
+            // A fork-derived member is rebuilt with its persisted lineage.
+            fork_source: work.entry.fork_source.clone(),
             labels: Some(work.entry.labels.clone()),
             additional_instructions: None,
             shell_env: None,

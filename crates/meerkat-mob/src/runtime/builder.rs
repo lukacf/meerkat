@@ -8303,7 +8303,15 @@ impl MobBuilder {
             }
         }
 
-        let roster_entries = roster.list().cloned().collect::<Vec<_>>();
+        let mut roster_entries = roster.list().cloned().collect::<Vec<_>>();
+        // A fork-derived member is restored with its source's per-spawn
+        // overlay, so every source is restored before its forks.
+        super::fork_build::order_fork_sources_first(&mut roster_entries, &definition.id);
+        // The per-spawn overlay each member's restore was customized with this
+        // pass, keyed by member: what a fork-derived member re-derives its own
+        // overlay from.
+        let mut restored_overlays: BTreeMap<AgentIdentity, Option<Arc<dyn AgentToolDispatcher>>> =
+            BTreeMap::new();
         let machine_state = dsl_authority.state();
         let host_owned_runtime_ids = machine_state
             .member_placement
@@ -8473,6 +8481,39 @@ impl MobBuilder {
             if let Some(tools) = restore_spec.external_tools.clone() {
                 per_spawn_external_tools_seed.insert(entry.agent_identity.clone(), tools);
             }
+            restored_overlays.insert(
+                entry.agent_identity.clone(),
+                restore_spec.external_tools.clone(),
+            );
+            // A fork-derived member is rebuilt with its source's inputs: its
+            // persisted lineage, and the overlay its source was restored with
+            // in this pass (`None` when the source has none). A source in
+            // another mob is not this restore's to read; a source of this mob
+            // that is gone or was not restored here left no overlay to
+            // re-derive. Either way the member keeps its own, and the second
+            // case says so.
+            let source_in_mob = entry.fork_source.as_ref().and_then(|fork_source| {
+                super::fork_build::fork_source_in_mob(fork_source, &definition.id)
+                    .map(|source| (fork_source, source))
+            });
+            let restore_overlay = match source_in_mob {
+                None => restore_spec.external_tools.clone(),
+                Some((fork_source, source)) => match restored_overlays.get(&source).cloned() {
+                    Some(source_overlay) => source_overlay,
+                    None => {
+                        tracing::warn!(
+                            mob_id = %definition.id,
+                            agent_identity = %entry.agent_identity,
+                            source_mob_id = %fork_source.source_member.mob_id,
+                            source_member = %fork_source.source_member.member,
+                            "fork-derived member's source was not restored with it; its \
+                             restore keeps its own per-spawn overlay instead of the source's \
+                             (fork_source, labels and application context are still the source's)"
+                        );
+                        restore_spec.external_tools.clone()
+                    }
+                },
+            };
             let restore_profile_override = restore_spec.override_profile.clone();
             let restore_model_override = restore_spec.model_override.clone();
             let restore_labels = restore_spec
@@ -8630,7 +8671,7 @@ impl MobBuilder {
                                 tool_bundles,
                                 tool_handle.clone(),
                                 default_ext,
-                                restore_spec.external_tools.clone(),
+                                restore_overlay.clone(),
                                 None,
                             )?,
                             compaction_curator_override: None,
@@ -8657,6 +8698,8 @@ impl MobBuilder {
                 };
                 resumed_config.keep_alive =
                     entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+                // A fork-derived member is rebuilt with its persisted lineage.
+                resumed_config.fork_source = entry.fork_source.clone();
                 if let Some(ref auth_binding) = restore_spec.auth_binding {
                     resumed_config.auth_binding = Some(auth_binding.clone());
                 }
@@ -8864,7 +8907,7 @@ impl MobBuilder {
                     tool_bundles,
                     tool_handle.clone(),
                     default_ext_fresh,
-                    restore_spec.external_tools.clone(),
+                    restore_overlay.clone(),
                     None,
                 )?,
                 compaction_curator_override: None,
@@ -8879,6 +8922,7 @@ impl MobBuilder {
             })
             .await?;
             config.keep_alive = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+            config.fork_source = entry.fork_source.clone();
             if let Some(ref auth_binding) = restore_spec.auth_binding {
                 config.auth_binding = Some(auth_binding.clone());
             }

@@ -2327,6 +2327,7 @@ impl MobActor {
                 effective_model_override: state.effective_model_override.clone(),
                 spawned_by: state.spawned_by.clone(),
                 fork_job: state.fork_job.clone(),
+                fork_source: state.fork_source.clone(),
             });
         }
         {

@@ -973,6 +973,15 @@ pub struct MemberSpawnedEvent {
     /// used to re-deliver its outcome after a restart. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_job: Option<crate::runtime::ForkJobRecord>,
+    /// The member (and its session) this member's transcript was forked
+    /// from, for a fork-derived member (a `fork_off` child, a
+    /// `MobHandle::fork_member*` child, a temporary-council participant).
+    /// Every rebuild of the member carries it as its build's `fork_source`,
+    /// so a restarted, resumed or revived fork is built as its source, like
+    /// its first build. Journals written before this field decode it as
+    /// absent: such a member rebuilds as it did before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_source: Option<meerkat_core::ForkBuildSource>,
     /// Bridge-internal member reference needed for event replay.
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
@@ -1026,6 +1035,7 @@ impl MemberSpawnedEvent {
             continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
             spawned_by: None,
             fork_job: None,
+            fork_source: None,
             bridge_member_ref: None,
             identity_intent_authority_digest: None,
             placed_spawn_id: None,
@@ -2450,6 +2460,68 @@ mod tests {
             }
             other => panic!("expected MemberSpawned, got {other:?}"),
         }
+    }
+
+    /// A fork-derived member's lineage is durable. Journals written before
+    /// the field existed decode it as absent, and a non-fork keeps the old
+    /// wire shape byte for byte.
+    #[test]
+    fn test_member_spawned_fork_source_is_durable_and_backward_compatible() {
+        let legacy: MobEvent = serde_json::from_value(json!({
+            "cursor": 1,
+            "timestamp": "2026-02-19T00:00:00Z",
+            "mob_id": "test-mob",
+            "kind": {
+                "type": "member_spawned",
+                "agent_identity": "calendar-fork",
+                "generation": 0,
+                "fence_token": 1,
+                "agent_runtime_id": {"identity": "calendar-fork", "generation": 0},
+                "role": "worker",
+                "runtime_mode": "turn_driven",
+                "spawned_by": "domain-calendar"
+            },
+        }))
+        .expect("a journal written before fork_source must stay readable");
+        let MobEventKind::MemberSpawned(legacy) = legacy.kind else {
+            panic!("expected MemberSpawned");
+        };
+        assert_eq!(legacy.fork_source, None);
+        let plain =
+            serde_json::to_string(&MobEventKind::MemberSpawned(legacy.clone())).expect("serialize");
+        assert!(
+            !plain.contains("fork_source"),
+            "a member that is no fork keeps the pre-existing wire shape: {plain}"
+        );
+
+        let source = meerkat_core::ForkBuildSource::new(
+            meerkat_core::MobMemberBinding {
+                mob_id: "test-mob".to_string(),
+                role: "worker".to_string(),
+                member: "domain-calendar".to_string(),
+            },
+            SessionId::from_uuid(Uuid::nil()),
+        );
+        let mut forked = legacy;
+        forked.fork_source = Some(source.clone());
+        let encoded = serde_json::to_value(MobEventKind::MemberSpawned(forked)).expect("serialize");
+        assert_eq!(
+            encoded["fork_source"],
+            json!({
+                "source_member": {
+                    "mob_id": "test-mob",
+                    "role": "worker",
+                    "member": "domain-calendar"
+                },
+                "source_session_id": "00000000-0000-0000-0000-000000000000"
+            })
+        );
+        let MobEventKind::MemberSpawned(decoded) =
+            serde_json::from_value::<MobEventKind>(encoded).expect("roundtrip")
+        else {
+            panic!("expected MemberSpawned");
+        };
+        assert_eq!(decoded.fork_source, Some(source));
     }
 
     #[test]

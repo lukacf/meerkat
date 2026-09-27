@@ -979,6 +979,7 @@ mod member_effect_lane_contract_tests {
             effective_model_override: None,
             spawned_by: None,
             fork_job: None,
+            fork_source: None,
             direct_member_fence: None,
         }
     }

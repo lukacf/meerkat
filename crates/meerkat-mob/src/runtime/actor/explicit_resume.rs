@@ -241,8 +241,17 @@ impl MobActor {
                     );
                     return;
                 };
-                let recipe = profile
-                    .and_then(|profile| self.explicit_resume_provision_recipe(&work, *profile));
+                // A fork-derived member is rebuilt with its source's current
+                // overlay, not the customizer's output for its own identity.
+                let overlay = self
+                    .fork_rebuild_overlay(
+                        &work.rebuild.entry,
+                        work.rebuild.restore_spec.external_tools.clone(),
+                    )
+                    .await;
+                let recipe = profile.and_then(|profile| {
+                    self.explicit_resume_provision_recipe(&work, *profile, overlay)
+                });
                 match recipe {
                     Ok(recipe) => self.spawn_explicit_resume_provision(work, Some(recipe)),
                     Err(error) => {
@@ -261,10 +270,13 @@ impl MobActor {
         }
     }
 
+    /// `overlay` is the per-spawn overlay the member is rebuilt with (see
+    /// `MobActor::fork_rebuild_overlay`).
     fn explicit_resume_provision_recipe(
         &mut self,
         work: &ExplicitResumeMemberWork,
         profile: crate::profile::Profile,
+        overlay: Option<Arc<dyn AgentToolDispatcher>>,
     ) -> Result<Box<DeferredResumeProvision>, MobError> {
         let entry = &work.rebuild.entry;
         self.authorize_spawn_profile_material(
@@ -273,10 +285,7 @@ impl MobActor {
             &profile,
             "explicit_resume_profile",
         )?;
-        let external_tools = self.external_tools_for_profile(
-            &profile,
-            work.rebuild.restore_spec.external_tools.clone(),
-        )?;
+        let external_tools = self.external_tools_for_profile(&profile, overlay)?;
         let identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
         let session_id = mob_dsl::SessionId::from_domain(&work.rebuild.bridge_session_id);
         let transition = self.apply_dsl_signal_collect_transition(
@@ -320,8 +329,11 @@ impl MobActor {
                 .restore_spec
                 .compaction_curator_override
                 .clone(),
+            // No context: the rebuild carries the session's persisted one
+            // forward (`build_resumed_agent_config`).
             context: None,
-            fork_source: None,
+            // A fork-derived member is rebuilt with its persisted lineage.
+            fork_source: entry.fork_source.clone(),
             labels: Some(entry.labels.clone()),
             additional_instructions: None,
             shell_env: None,

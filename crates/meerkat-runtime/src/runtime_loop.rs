@@ -755,9 +755,12 @@ impl InteractionTerminalPublicationError {
             | crate::RuntimeDriverError::Destroyed
             | crate::RuntimeDriverError::MaterializationRegistrationNotCurrent { .. }
             | crate::RuntimeDriverError::StaleAuthority { .. } => Self::StaleAuthority(detail),
+            // A receipt-less terminal is a legitimate read verdict, but
+            // terminal publication expects the receipt its run staged.
             crate::RuntimeDriverError::ValidationFailed { .. }
             | crate::RuntimeDriverError::InputIdempotencyConflict { .. }
             | crate::RuntimeDriverError::RecoveryCorruption { .. }
+            | crate::RuntimeDriverError::InputTerminalWithoutReceipt { .. }
             | crate::RuntimeDriverError::RecoveryRepairBlocked { .. } => Self::Corrupt(detail),
             crate::RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
             | crate::RuntimeDriverError::UnregisterInProgress { .. }

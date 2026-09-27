@@ -978,7 +978,7 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       assert.equal(requests.length, 0);
     });
 
-    await scenario("busy mob Stop reaches its owner before the provider boundary and prevents tool dispatch", async ({ page, requests, provider }) => {
+    await scenario("busy mob Stop drains the current tool batch and prevents another provider turn", async ({ page, requests, provider }) => {
       let release;
       let entered;
       const started = new Promise(resolve => { entered = resolve; });
@@ -986,17 +986,21 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       provider.beforeResponse = async () => {
         if (requests.length === 1) { entered(); await gate; }
       };
-      provider.tool = { marker: "BROWSER_BUSY_MOB_STOP", name: "after_stop_probe", input: {} };
+      provider.tool = { marker: "BROWSER_BUSY_MOB_STOP", name: "current_turn_probe", input: {} };
       let beforeRelease;
       let observationError;
       try {
         const spawned = await page.evaluate(async () => {
-          window.afterStopToolCalls = 0;
-          window.runtime.registerTool("after_stop_probe", "Record an observable tool dispatch.", {
+          window.currentTurnToolCalls = 0;
+          window.toolStarted = new Promise(resolve => { window.enterTool = resolve; });
+          const toolGate = new Promise(resolve => { window.releaseTool = resolve; });
+          window.runtime.registerTool("current_turn_probe", "Hold the current turn's observable tool batch.", {
             type: "object", properties: {},
           }, async () => {
-            window.afterStopToolCalls++;
-            return { content: "BROWSER_TOOL_RAN_AFTER_STOP", is_error: false };
+            window.currentTurnToolCalls++;
+            window.enterTool();
+            await toolGate;
+            return { content: "BROWSER_CURRENT_TOOL_DRAINED", is_error: false };
           });
           window.busyMob = await window.runtime.createMob({ id: "browser-busy-stop", profiles: {
             worker: { model: window.model, tools: { comms: true }, runtime_mode: "autonomous_host" },
@@ -1018,6 +1022,7 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
         // must observe the durable Stop fence while the response is held.
         // A transcript export queued behind this busy turn blocks both Stop
         // and this read; a presence-only observation lets cancellation start.
+        // The ledger fence is not an exact cancellation-delivery receipt.
         beforeRelease = await page.evaluate(async () => {
           window.stopSettled = false;
           window.busyStop = window.busyMob.lifecycle("stop").then(
@@ -1029,33 +1034,72 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
               const events = await window.busyMob.events();
               if (events.some(event => event.kind.type === "placed_completion_lifecycle_quiesce_started")) return events;
             }
-          })(), "Stop owner acknowledgement while provider response is held");
-          return { ledger, stopSettled: window.stopSettled, calls: window.afterStopToolCalls };
+          })(), "Stop actor responsiveness while provider response is held");
+          return { ledger, stopSettled: window.stopSettled, calls: window.currentTurnToolCalls };
         }).catch(error => { observationError = error.message; });
       } finally { release(); }
+      let beforeToolRelease;
+      let toolObservationError;
+      try {
+        beforeToolRelease = await page.evaluate(async () => {
+          await window.bounded(window.toolStarted, "current tool batch admission");
+          return {
+            stopSettled: window.stopSettled, calls: window.currentTurnToolCalls,
+            events: window.busyEvents.poll(),
+          };
+        }).catch(error => { toolObservationError = error.message; });
+      } finally { await page.evaluate(() => window.releaseTool?.()); }
       const terminal = await page.evaluate(async () => {
-        const stop = await window.bounded(window.busyStop, "busy mob Stop terminal after response boundary");
+        const stop = await window.bounded(window.busyStop, "busy mob Stop terminal after current tool drain");
         const status = await window.busyMob.status();
         const events = window.busyEvents.poll();
         const ledger = await window.busyMob.events();
         window.busyEvents.close();
-        return { stop, status, events, ledger, calls: window.afterStopToolCalls };
+        return { stop, status, events, ledger, calls: window.currentTurnToolCalls };
       });
       console.log("BUSY_MOB_STOP_OBSERVATION", JSON.stringify({
-        beforeRelease, observationError, terminal, providerRequests: requests.length,
+        beforeRelease, observationError, beforeToolRelease, toolObservationError,
+        terminal, providerRequests: requests.length,
       }));
       assert.equal(observationError, undefined, "Stop must not wait for busy transcript export before cancellation");
       assert.equal(beforeRelease.stopSettled, false, "Stop cannot acknowledge terminal drain before the held boundary");
       assert.equal(beforeRelease.calls, 0);
+      assert.equal(toolObservationError, undefined);
+      assert.equal(beforeToolRelease.calls, 1);
+      assert.equal(beforeToolRelease.stopSettled, false, "Stop must await the held current-turn tool batch");
+      assert.equal(beforeToolRelease.events.some(event => [
+        "tool_execution_completed", "turn_completed", "run_completed", "run_failed",
+      ].includes(event.payload.type)), false, JSON.stringify(beforeToolRelease.events));
       assert.equal(terminal.stop.error, undefined, JSON.stringify(terminal));
       assert.equal(terminal.stop.value.ok, true);
       assert.equal(terminal.status.status, "Stopped");
-      assert.equal(terminal.calls, 0, "Stop cancellation must prevent the tool dispatch at the next provider boundary");
-      assert.equal(requests.length, 1, "cancelled tool response must not start a follow-up provider turn");
+      // CancelAfterBoundary includes the current response's tool batch. The
+      // canonical turn owner cancels after its commit, before another model call.
+      assert.equal(terminal.calls, 1, "Stop must drain exactly the already admitted current tool batch");
+      assert.equal(requests.length, 1, "boundary cancellation must prevent a follow-up provider turn");
       assert.ok(terminal.ledger.some(event => event.kind.type === "mob_stopped"));
-      assert.ok(terminal.events.some(event => event.payload.type === "run_failed"
-        && event.payload.error_report.class === "cancelled"), JSON.stringify(terminal.events));
-      assert.equal(terminal.events.some(event => event.payload.type === "run_completed"), false);
+      const events = [...beforeToolRelease.events, ...terminal.events];
+      const onlyEvent = type => {
+        const matching = events.filter(event => event.payload.type === type);
+        assert.equal(matching.length, 1, JSON.stringify(events));
+        return matching[0];
+      };
+      const requested = onlyEvent("tool_call_requested");
+      const startedTool = onlyEvent("tool_execution_started");
+      const completedTool = onlyEvent("tool_execution_completed");
+      const result = onlyEvent("tool_result_received");
+      const completedTurn = onlyEvent("turn_completed");
+      const cancelled = onlyEvent("run_failed");
+      for (const event of [requested, startedTool, completedTool, result]) {
+        assert.equal(event.payload.id, "browser_tool_1");
+        assert.equal(event.payload.name, "current_turn_probe");
+      }
+      assert.equal(completedTool.payload.is_error, false);
+      assert.deepEqual(result.payload.content, [{ type: "text", text: "BROWSER_CURRENT_TOOL_DRAINED" }]);
+      const ordered = [requested, startedTool, completedTool, result, completedTurn, cancelled];
+      assert.ok(ordered.every((event, i) => i === 0 || ordered[i - 1].seq < event.seq), JSON.stringify(events));
+      assert.equal(cancelled.payload.error_report.class, "cancelled");
+      assert.equal(events.some(event => event.payload.type === "run_completed"), false);
     });
 
     await scenario("helper callback can create a direct session without lifecycle lock reentrancy", async ({ page, requests, provider }) => {

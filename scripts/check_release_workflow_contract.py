@@ -497,7 +497,16 @@ BRANCH_DISPATCHES = [
         ref=ref,
         inputs=inputs,
     )
-    for ref in ("refs/heads/main", "refs/heads/release/v0.0.0", "refs/heads/hotfix/0.0.0")
+    # Branches named after the version, including exactly the allowed tag
+    # names (github.ref_name is then an allowed tag, so a binding that reads
+    # ref_name without checking refs/tags/ would take the branch for the tag).
+    for ref in (
+        "refs/heads/main",
+        "refs/heads/release/v0.0.0",
+        "refs/heads/hotfix/0.0.0",
+        "refs/heads/v0.0.0",
+        "refs/heads/alpha/v0.0.0",
+    )
     for mode, inputs in (
         ("package", {"publish_release_packages": "true"}),
         ("alpha crate", {"publish_release_packages": "true", "alpha_crates_only": "true"}),
@@ -738,6 +747,34 @@ def check_dispatch_binding(text: str) -> list[str]:
         release_tag="v9.9.9",
         publish_release_packages="true",
     )
+    # The same with both tags on one commit (as an alpha tag and its
+    # version's tag usually are): outside the alpha lane the named alpha tag
+    # must not bind, even though the version's tag is the checked-out commit.
+    tag_ref_naming_alpha_same_commit = dispatch(
+        f"a package dispatch on the {tag} tag naming release_tag {alpha_tag} "
+        "(both tags on one commit, no alpha lane)",
+        f"refs/tags/{tag}",
+        release_tag=alpha_tag,
+        publish_release_packages="true",
+    )
+    # Near misses of the allowed names: exact matches only.
+    near_miss_push = EventContext(
+        label=f"a tag push of {tag}1 (a near miss of {tag})",
+        event_name="push",
+        ref=f"refs/tags/{tag}1",
+    )
+    near_miss_alpha_rc = dispatch(
+        f"an alpha crate dispatch on the {alpha_tag}-rc.1 tag (a near miss of {alpha_tag})",
+        f"refs/tags/{alpha_tag}-rc.1",
+        publish_release_packages="true",
+        alpha_crates_only="true",
+    )
+    near_miss_alpha = dispatch(
+        f"an alpha crate dispatch on the {alpha_tag}1 tag (a near miss of {alpha_tag})",
+        f"refs/tags/{alpha_tag}1",
+        publish_release_packages="true",
+        alpha_crates_only="true",
+    )
     # The alpha lane binds only its own version's alpha tag.
     other_alpha_on_tag = dispatch(
         "an alpha crate dispatch on the alpha/v9.9.9 tag (another version)",
@@ -761,6 +798,15 @@ def check_dispatch_binding(text: str) -> list[str]:
     ]
     must_refuse = [
         (other_tag_push, ("v9.9.9",), checkout_for(other_tag_push), ""),
+        (
+            tag_ref_naming_alpha_same_commit,
+            (tag, alpha_tag),
+            checkout_for(tag_ref_naming_alpha_same_commit),
+            "",
+        ),
+        (near_miss_push, (f"{tag}1",), checkout_for(near_miss_push), ""),
+        (near_miss_alpha_rc, (f"{alpha_tag}-rc.1",), checkout_for(near_miss_alpha_rc), ""),
+        (near_miss_alpha, (f"{alpha_tag}1",), checkout_for(near_miss_alpha), ""),
         (other_alpha_on_tag, ("alpha/v9.9.9",), checkout_for(other_alpha_on_tag), ""),
         (other_alpha_named, ("alpha/v9.9.9",), checkout_for(other_alpha_named), ""),
         (alpha_without_lane, (alpha_tag,), checkout_for(alpha_without_lane), ""),

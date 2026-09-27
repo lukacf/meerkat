@@ -234,6 +234,80 @@ elif name == "dispatch-ref-name":
         '            release_tag="${GITHUB_REF#refs/tags/}"\n',
         '            release_tag="${GITHUB_REF_NAME}"\n',
     )
+elif name == "dispatch-branch-ref-name":
+    # Read a non-tag ref's name without requiring refs/tags/: a branch named
+    # exactly like an allowed tag (refs/heads/v<version>) then binds.
+    replace_once(
+        '          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then\n'
+        '            release_tag="${GITHUB_REF#refs/tags/}"\n'
+        "          else\n"
+        '            echo "${GITHUB_REF} is not a tag. A publishing run must run on an allowed tag (${allowed[*]}) or name release_tag." >&2\n'
+        "            exit 1\n"
+        "          fi\n",
+        "          else\n"
+        '            release_tag="${GITHUB_REF_NAME}"\n'
+        "          fi\n",
+    )
+elif name == "dispatch-ref-name-expression":
+    # Equivalent: a tag push's tag read from the ${{ github.ref_name }}
+    # expression (the spelling release.yml uses elsewhere).
+    replace_once(
+        '            release_tag="${GITHUB_REF#refs/tags/}"\n',
+        '            release_tag="${{ github.ref_name }}"\n',
+    )
+elif name == "dispatch-prefers-github-ref-other-tag":
+    # Prefer a tag github.ref over the named release_tag, with no check of
+    # the named tag at all.
+    binding = re.compile(
+        r'          if \[\[ -n "\$\{RELEASE_TAG_INPUT\}" \]\]; then\n(?:.*\n)*?'
+        r'          fi\n(?=          bound=false\n)'
+    )
+    text, count = binding.subn(
+        '          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then\n'
+        '            release_tag="${GITHUB_REF#refs/tags/}"\n'
+        "          else\n"
+        '            release_tag="${RELEASE_TAG_INPUT}"\n'
+        "          fi\n",
+        text,
+    )
+    if count != 1:
+        raise SystemExit(f"fixture `{name}` expects one release-tag selection, found {count}")
+elif name == "dispatch-prefers-github-ref-head-checked":
+    # Prefer a tag github.ref, and check that it is the checked-out commit:
+    # a named alpha tag on the same commit then publishes outside its lane.
+    replace_once(
+        '          if [[ -n "${RELEASE_TAG_INPUT}" ]]; then\n',
+        '          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then\n'
+        '            release_tag="${GITHUB_REF#refs/tags/}"\n'
+        '            if [[ "$(git rev-parse HEAD)" != "$(git rev-parse -q --verify "refs/tags/${release_tag}^{commit}")" ]]; then\n'
+        "              exit 1\n"
+        "            fi\n"
+        '          elif [[ -n "${RELEASE_TAG_INPUT}" ]]; then\n',
+    )
+elif name == "dispatch-prefix-glob":
+    # Compare the tag by prefix: v<version>1 and alpha/v<version>-rc.1 bind.
+    replace_once(
+        '            if [[ "${release_tag}" == "${tag}" ]]; then\n',
+        '            if [[ "${release_tag}" == "${tag}"* ]]; then\n',
+    )
+elif name == "dispatch-alpha-named-any-version":
+    # Accept any alpha/* tag the alpha lane names as release_tag.
+    replace_once(
+        '            release_tag="${RELEASE_TAG_INPUT}"\n',
+        '            release_tag="${RELEASE_TAG_INPUT}"\n'
+        '            if [[ "${ALPHA_CRATES_ONLY}" == "true" && "${RELEASE_TAG_INPUT}" == alpha/* ]]; then\n'
+        '              allowed+=("${RELEASE_TAG_INPUT}")\n'
+        "            fi\n",
+    )
+elif name == "dispatch-skips-named-tag-run":
+    # Skip the binding step when a dispatch on a v* tag also names a
+    # release_tag, which is then checked out and published unbound.
+    replace_once(
+        "          startsWith(github.ref, 'refs/tags/v') ||\n"
+        "          (github.event_name == 'workflow_dispatch' &&\n",
+        "          (startsWith(github.ref, 'refs/tags/v') && github.event.inputs.release_tag == '') ||\n"
+        "          (github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/v') &&\n",
+    )
 elif name == "dispatch-reflowed":
     # Equivalent: the same publishing modes, reordered onto one line.
     replace_once(
@@ -312,6 +386,8 @@ mutate dispatch-reflowed "${TEST_ROOT}/dispatch-reflowed.yml"
 expect_pass dispatch-reflowed "${TEST_ROOT}/dispatch-reflowed.yml" dispatch-binding
 mutate dispatch-ref-name "${TEST_ROOT}/dispatch-ref-name.yml"
 expect_pass dispatch-ref-name "${TEST_ROOT}/dispatch-ref-name.yml" dispatch-binding
+mutate dispatch-ref-name-expression "${TEST_ROOT}/dispatch-ref-name-expression.yml"
+expect_pass dispatch-ref-name-expression "${TEST_ROOT}/dispatch-ref-name-expression.yml" dispatch-binding
 
 # 3. Dropping the behaviour fails and names the defect.
 mutate evidence-step-removed "${TEST_ROOT}/evidence-step-removed.yml"
@@ -345,6 +421,24 @@ expect_fail_named dispatch-prefers-github-ref "${TEST_ROOT}/dispatch-prefers-git
 mutate dispatch-alpha-any-version "${TEST_ROOT}/dispatch-alpha-any-version.yml"
 expect_fail_named dispatch-alpha-any-version "${TEST_ROOT}/dispatch-alpha-any-version.yml" \
   "accepts an alpha crate dispatch on the alpha/v9.9.9 tag (another version)" dispatch-binding
+mutate dispatch-branch-ref-name "${TEST_ROOT}/dispatch-branch-ref-name.yml"
+expect_fail_named dispatch-branch-ref-name "${TEST_ROOT}/dispatch-branch-ref-name.yml" \
+  "accepts a package dispatch from refs/heads/v0.0.0 without release_tag" dispatch-binding
+mutate dispatch-prefers-github-ref-other-tag "${TEST_ROOT}/dispatch-prefers-github-ref-other-tag.yml"
+expect_fail_named dispatch-prefers-github-ref-other-tag "${TEST_ROOT}/dispatch-prefers-github-ref-other-tag.yml" \
+  "(a tag on another commit)" dispatch-binding
+mutate dispatch-prefers-github-ref-head-checked "${TEST_ROOT}/dispatch-prefers-github-ref-head-checked.yml"
+expect_fail_named dispatch-prefers-github-ref-head-checked "${TEST_ROOT}/dispatch-prefers-github-ref-head-checked.yml" \
+  "(both tags on one commit, no alpha lane)" dispatch-binding
+mutate dispatch-prefix-glob "${TEST_ROOT}/dispatch-prefix-glob.yml"
+expect_fail_named dispatch-prefix-glob "${TEST_ROOT}/dispatch-prefix-glob.yml" \
+  "(a near miss of v0.0.0)" dispatch-binding
+mutate dispatch-alpha-named-any-version "${TEST_ROOT}/dispatch-alpha-named-any-version.yml"
+expect_fail_named dispatch-alpha-named-any-version "${TEST_ROOT}/dispatch-alpha-named-any-version.yml" \
+  "accepts an alpha crate dispatch naming release_tag alpha/v9.9.9 (another version)" dispatch-binding
+mutate dispatch-skips-named-tag-run "${TEST_ROOT}/dispatch-skips-named-tag-run.yml"
+expect_fail_named dispatch-skips-named-tag-run "${TEST_ROOT}/dispatch-skips-named-tag-run.yml" \
+  "does not run on a package dispatch on the v0.0.0 tag naming release_tag main (a branch)" dispatch-binding
 mutate dispatch-checkout-github-ref "${TEST_ROOT}/dispatch-checkout-github-ref.yml"
 expect_fail_named dispatch-checkout-github-ref "${TEST_ROOT}/dispatch-checkout-github-ref.yml" \
   "refuses a package dispatch naming release_tag v0.0.0" dispatch-binding

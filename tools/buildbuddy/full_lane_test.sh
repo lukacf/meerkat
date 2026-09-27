@@ -348,9 +348,10 @@ export MEERKAT_WORKSPACE_ROOT="${work_root}"
 # The browser contract links the 8 MiB wasm stack sdks/web/scripts/build-wasm.mjs
 # asks for. At the 1 MiB default the unoptimized test build overflows the
 # stack in its first turn ("RuntimeError: memory access out of bounds").
-# No published @rkat/web has ever shipped this stack: every release through
-# 0.8.44 lost the flag to an ambient RUSTFLAGS and shipped 1 MiB (#1211 fixes
-# the release build).
+# No published @rkat/web has ever shipped this stack. Releases before 0.7.0
+# never asked for it, and every release since the flag was introduced (0.7.0)
+# through 0.8.44 lost it to an ambient RUSTFLAGS and shipped 1 MiB (#1211
+# fixes the release build).
 WASM_STACK_LINK_ARG="link-arg=-zstack-size=8388608"
 
 append_wasm_stack_size() {

@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { wasmBuildEnv } from "./wasm-rustflags.mjs";
+import { assertWasmStack } from "./wasm-stack.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SDK_DIR = path.resolve(__dirname, "..");
 const OUT_DIR = path.resolve(process.env.MEERKAT_WEB_WASM_OUT_DIR || path.join(SDK_DIR, "wasm"));
@@ -49,13 +52,10 @@ const WASM_OPT = (() => {
   }
   throw new Error(`invalid MEERKAT_WEB_WASM_OPT=${value}; expected 0 or 1`);
 })();
-const WASM_RUSTFLAGS = [
-  process.env.CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS,
-  '--cfg getrandom_backend="wasm_js"',
-  "-C link-arg=-zstack-size=8388608",
-]
-  .filter(Boolean)
-  .join(" ");
+// Ambient rustflags are folded in ahead of the runtime's own, and the result
+// is passed through the source Cargo reads first (scripts/wasm-rustflags.mjs),
+// so no environment can drop `-zstack-size` again.
+const WASM_RUSTFLAGS = wasmBuildEnv(process.env).flags;
 const RELEASE_CARGO_PROFILE_ENV =
   BUILD_PROFILE === "release"
     ? {
@@ -313,7 +313,7 @@ async function localCargoGraphInputs() {
 async function computeSourceHash() {
   const hash = createHash("sha256");
   hash.update("meerkat-web-runtime-wasm-v1\n");
-  hash.update(`rustflags=${WASM_RUSTFLAGS}\n`);
+  hash.update(`rustflags=${JSON.stringify(WASM_RUSTFLAGS)}\n`);
   hash.update(`profile=${BUILD_PROFILE}\n`);
   if (!WASM_OPT) {
     hash.update("wasm-opt=0\n");
@@ -349,11 +349,20 @@ async function cacheIsValid(sourceHash) {
   }
 }
 
+// The built module must carry the stack it was linked for; the flags are not
+// trusted to have reached the linker.
+async function verifyWasmStack() {
+  const wasmPath = path.join(OUT_DIR, "meerkat_web_runtime_bg.wasm");
+  const stack = assertWasmStack(new Uint8Array(await readFile(wasmPath)), undefined, wasmPath);
+  console.log(`meerkat web wasm stack: ${stack.stackBytes} bytes (${stack.layout})`);
+}
+
 async function run() {
   const heartbeat = await acquireLock();
   try {
     const source = await computeSourceHash();
     if (await cacheIsValid(source.hash)) {
+      await verifyWasmStack();
       console.log(
         `meerkat web wasm already current (${source.inputCount} source inputs, ${source.hash.slice(0, 12)})`,
       );
@@ -380,10 +389,7 @@ async function run() {
         {
           cwd: SDK_DIR,
           stdio: "inherit",
-          env: {
-            ...wasmPackEnv(RELEASE_CARGO_PROFILE_ENV),
-            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: WASM_RUSTFLAGS,
-          },
+          env: wasmBuildEnv(wasmPackEnv(RELEASE_CARGO_PROFILE_ENV)).env,
         },
       );
       child.on("error", (error) => {
@@ -409,6 +415,8 @@ async function run() {
     });
 
     await rm(path.join(OUT_DIR, ".gitignore"), { force: true });
+    // Before the cache manifest: a module that fails is rebuilt next time.
+    await verifyWasmStack();
     await writeFile(
       CACHE_MANIFEST,
       JSON.stringify(

@@ -37,6 +37,22 @@ them.
 
 ### Fixed
 
+- `@rkat/web` ships its runtime with the 8 MiB wasm stack it was built to
+  have. Every published package from 0.8.30 through 0.8.44 linked the 1 MiB
+  default and failed its first turn with `RuntimeError: memory access out of
+  bounds`. The release job set `RUSTFLAGS` for the getrandom cfg, and Cargo
+  reads only one rustflags source, so the target flags carrying `-zstack-size`
+  in `sdks/web/scripts/build-wasm.mjs` were silently ignored. The fix has
+  four parts:
+  - The build folds any ambient `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` into
+    its own flags, passes them through the source Cargo reads first, and
+    verifies the built module's stack.
+  - The release package script refuses a packed wasm whose stack, parsed from
+    the binary, is below 8 MiB.
+  - The same script runs one turn from the packed package in Node.
+  - `make test-sdk-web` and the BuildBuddy sdk-web lane run the same
+    packed-package smoke.
+
 - Full-fresh BuildBuddy validation no longer runs out of its 50-minute SLO
   on integration-fast. The Native submitter waited for the `//...` prebuild
   (18 minutes on the v0.8.44 tag run) and then ran clippy, unit and

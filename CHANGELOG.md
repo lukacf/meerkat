@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.45] - 2026-09-27
+
 ### Breaking
 
 - `meerkat_mob::ForkJobRecord` gains the public field
@@ -13819,7 +13821,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.44...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.45...HEAD
+[0.8.45]: https://github.com/lukacf/meerkat/compare/v0.8.44...v0.8.45
 [0.8.44]: https://github.com/lukacf/meerkat/compare/v0.8.43...v0.8.44
 [0.8.43]: https://github.com/lukacf/meerkat/compare/v0.8.42...v0.8.43
 [0.8.42]: https://github.com/lukacf/meerkat/compare/v0.8.41...v0.8.42

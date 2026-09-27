@@ -20,14 +20,14 @@ use meerkat_schedule::{
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio as schedule_host_tokio;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio as schedule_host_tokio;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::{oneshot, watch};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
-#[cfg(target_arch = "wasm32")]
-use tokio_with_wasm::alias as schedule_host_tokio;
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias::sync::{oneshot, watch};
 #[cfg(target_arch = "wasm32")]

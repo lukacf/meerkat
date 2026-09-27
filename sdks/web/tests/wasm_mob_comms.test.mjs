@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 import * as wasm from "../wasm/meerkat_web_runtime.js";
 
 // Run against a freshly built artifact:
-// node --test --test-force-exit sdks/web/tests/wasm_mob_comms.test.mjs
-// Force-exit is only for leftover WASM timer handles after all assertions/teardown.
+// node --test sdks/web/tests/wasm_mob_comms.test.mjs
+// Each isolated process must exit naturally after runtime teardown.
 const bytes = await readFile(new URL("../wasm/meerkat_web_runtime_bg.wasm", import.meta.url));
 const { version } = JSON.parse(await readFile(new URL("../package.json", import.meta.url)));
 await wasm.default({ module_or_path: bytes });
@@ -165,7 +165,7 @@ test("WASM mob comms: real idle drains, volatile topology and actionable message
         const env = { ...process.env, RKAT_WASM_COMMS_CASE: String(index) };
         delete env.NODE_TEST_CONTEXT;
         const child = spawnSync(process.execPath, [
-          "--test", "--test-force-exit", "--test-reporter=spec", fileURLToPath(import.meta.url),
+          "--test", "--test-reporter=spec", fileURLToPath(import.meta.url),
         ], {
           env,
           encoding: "utf8", timeout: 24_000, maxBuffer: 8 * 1024 * 1024,

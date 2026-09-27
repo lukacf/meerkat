@@ -39,6 +39,8 @@ pub use meerkat_atif as atif;
 // On wasm32, provide tokio alias backed by tokio_with_wasm.
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
+    pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
 

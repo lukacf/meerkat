@@ -163,14 +163,14 @@ Spawning can start model turns; the host owns credentials and teardown.
 ## Offline Regression Test
 
 ```bash
-node --test --test-force-exit examples/029-web-incident-war-room-sh/test_browser_skills.mjs
+node --test examples/029-web-incident-war-room-sh/test_browser_skills.mjs
 ```
 
 This covers both web examples using the current CLI and actual prebuilt WASM,
 with synthetic provider responses and no external requests. Roles are tested
 individually; this is not a multi-member wiring, live-provider or finished-UI test.
-The force-exit flag closes lingering WASM timers after explicit fixture teardown
-and the test verdict.
+The process must exit naturally after fixture teardown so retained WASM timer
+resources fail the check.
 
 ## Notes
 

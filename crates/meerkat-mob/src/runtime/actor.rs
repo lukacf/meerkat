@@ -26771,7 +26771,7 @@ impl MobActor {
             host_status_poll.tick().await;
             identity_reconcile_safety_scan.tick().await;
         }
-        // `tokio_with_wasm` intervals already wait one full period before
+        // The shared WASM interval waits one full period before
         // their first tick. Awaiting a startup tick on wasm would therefore
         // park the actor for the five-minute identity safety cadence.
         'actor: loop {

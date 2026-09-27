@@ -37,6 +37,10 @@ them.
 
 ### Breaking
 
+- On WASM, crate `tokio::time` re-exports now use the shared
+  `meerkat_core::time_compat::wasm` types, including `Sleep`, `Timeout`,
+  `Elapsed`, and `Interval`. Callers naming the previous dependency's concrete
+  types must use the shared adapter types. Native Tokio types are unchanged.
 - `MobMachineSignal` gains `ResolveRecreatedMemberSessionSucceeded` for exact
   runtime binding after a nonpersistent member session is recreated. Exhaustive
   signal matches must handle the new generated completion.
@@ -105,6 +109,9 @@ them.
 
 ### Fixed
 
+- Shared WASM timers release their JavaScript handles when sleeps or timeouts
+  finish or are canceled. Completed runtime work no longer retains discarded
+  deadline timers, and the packed Web SDK smoke test exits naturally.
 - Flow cancellation preserves an already committed terminal outcome. A late
   cancellation after natural failure repairs the existing terminal event and
   drains its task trackers without attempting to rewrite Failed as Canceled

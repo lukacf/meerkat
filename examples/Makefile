@@ -43,7 +43,7 @@ shell: hosts web-runtime
 	cd "$(ROOT)/examples" && git ls-files --cached --others --exclude-standard -z -- '*.sh' | xargs -0 -n 1 bash -n
 	cd "$(ROOT)" && RKAT="$(RKAT)" $(PYTHON) examples/010-mcp-tool-server-sh/test_examples.py
 	cd "$(ROOT)" && RKAT="$(RKAT)" $(PYTHON) examples/028-mobpack-release-triage-sh/test_packaging.py
-	cd "$(ROOT)" && RKAT="$(RKAT)" node --test --test-force-exit examples/029-web-incident-war-room-sh/test_browser_skills.mjs
+	cd "$(ROOT)" && RKAT="$(RKAT)" node --test examples/029-web-incident-war-room-sh/test_browser_skills.mjs
 
 # Browser suites run Playwright's bundled headless Chromium; no Google Chrome
 # install is needed. Each package installs the build its own Playwright pins.
@@ -54,7 +54,7 @@ browsers:
 	cd "$(ROOT)" && npm --prefix examples/037-live-webrtc-web exec -- playwright install chromium-headless-shell
 
 wasm-comms: web-runtime
-	cd "$(ROOT)" && node --test --test-force-exit sdks/web/tests/wasm_mob_comms.test.mjs
+	cd "$(ROOT)" && node --test sdks/web/tests/wasm_mob_comms.test.mjs
 
 web: browsers wasm-comms
 	cd "$(ROOT)" && npm --prefix examples/031-wasm-mini-diplomacy-sh/web test

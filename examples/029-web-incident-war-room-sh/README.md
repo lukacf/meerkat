@@ -162,12 +162,12 @@ Follow-up turns that make the example feel real:
 ## Offline Regression Test
 
 ```bash
-node --test --test-force-exit examples/029-web-incident-war-room-sh/test_browser_skills.mjs
+node --test examples/029-web-incident-war-room-sh/test_browser_skills.mjs
 ```
 
 This covers both 029 and 030 with the current CLI and prebuilt WASM. It compares
 every inline skill to the source markdown and spawns each role in its own runtime
 using synthetic, in-process provider responses. This proves embedded skill
 assembly, not multi-member wiring, live incident reasoning or a finished UI.
-Node's `--test-force-exit` closes WASM timer handles after the test verdict;
-each fixture explicitly destroys its mob and runtime first.
+Each fixture destroys its mob and runtime, and the process must exit naturally
+after teardown so retained timer resources fail the check.

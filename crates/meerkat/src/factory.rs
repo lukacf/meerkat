@@ -6858,7 +6858,7 @@ impl AgentFactory {
                 #[cfg(not(target_arch = "wasm32"))]
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 #[cfg(target_arch = "wasm32")]
-                tokio_with_wasm::alias::time::sleep(std::time::Duration::from_millis(500)).await;
+                crate::tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         }
 

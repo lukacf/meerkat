@@ -382,6 +382,134 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "wasm_timers_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-web-runtime",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "wasm_timers",
+    crate_root = "tests/wasm_timers.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/support/wasm_timers.rs",
+        "tests/wasm_timers.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.44",
+        "CARGO_BIN_NAME": "wasm_timers",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-web-runtime",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-web-runtime",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//crates/meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_comms_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_hooks_agent_factory_build",
+        "//crates/meerkat:meerkat_llm_core_agent_factory_build",
+        "//crates/meerkat:meerkat_models_agent_factory_build",
+        "//crates/meerkat:meerkat_providers_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-web-runtime",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "wasm_timers_node_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-web-runtime",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "wasm_timers_node",
+    crate_root = "tests/wasm_timers_node.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/support/wasm_timers.rs",
+        "tests/wasm_timers_node.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.44",
+        "CARGO_BIN_NAME": "wasm_timers_node",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-web-runtime",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "crates/meerkat-web-runtime",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//crates/meerkat-mob-pack:meerkat_mob_pack_with_runtime_test_support",
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_comms_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_hooks_agent_factory_build",
+        "//crates/meerkat:meerkat_llm_core_agent_factory_build",
+        "//crates/meerkat:meerkat_models_agent_factory_build",
+        "//crates/meerkat:meerkat_providers_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-web-runtime",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [
@@ -389,5 +517,7 @@ test_suite(
         ":meerkat_web_runtime_unit_test",
         ":release_targets_test",
         ":wasm_external_resolver_test",
+        ":wasm_timers_node_test",
+        ":wasm_timers_test",
     ],
 )

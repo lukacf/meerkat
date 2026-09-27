@@ -186,12 +186,7 @@ async function main(argv) {
   }
 }
 
-// Exit explicitly: the runtime's wasm leaves a ~120 s provider-timeout timer
-// scheduled after the turn, which would otherwise hold the process open.
-main(process.argv).then(
-  () => process.exit(0),
-  (error) => {
-    console.error(`packed @rkat/web smoke failed: ${error?.stack ?? error}`);
-    process.exit(1);
-  },
-);
+main(process.argv).catch((error) => {
+  console.error(`packed @rkat/web smoke failed: ${error?.stack ?? error}`);
+  process.exitCode = 1;
+});

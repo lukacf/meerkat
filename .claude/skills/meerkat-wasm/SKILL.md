@@ -21,10 +21,14 @@ rusqlite = { workspace = true }
 tokio_with_wasm = { workspace = true }
 ```
 
-**lib.rs** — tokio alias + module gating:
+**lib.rs** - tokio alias + module gating:
 ```rust
 #[cfg(target_arch = "wasm32")]
-pub mod tokio { pub use tokio_with_wasm::alias::*; }
+pub mod tokio {
+    pub use tokio_with_wasm::alias::*;
+    pub use meerkat_core::tokio::task;
+    pub use meerkat_core::time_compat::wasm as time;
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 mod filesystem_module;
@@ -39,6 +43,13 @@ mod filesystem_module;
 **Time types** — use `meerkat_core::time_compat::{SystemTime, Instant, Duration}`, never `std::time::*`.
 
 **Tokio imports** in wasm32-visible code — add `#[cfg(target_arch = "wasm32")] use crate::tokio;` then existing `use tokio::...` paths resolve through the alias.
+
+Use the shared core alias for WASM scheduling. Its time adapter owns the exact
+JavaScript timer handle and cancels it when the Rust future is dropped. Direct
+`tokio_with_wasm::alias::time` calls bypass that cleanup. The shared task alias
+also implements `yield_now` through the same cancellable timer. Native code continues
+to use Tokio. Lifecycle tests must exit naturally after teardown; forcing a
+successful Node exit hides retained timer resources.
 
 ## Override-First Resource Injection
 

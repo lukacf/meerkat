@@ -10,6 +10,10 @@ pub use std::time::{Instant, SystemTime};
 #[cfg(target_arch = "wasm32")]
 pub use web_time::{Instant, SystemTime};
 
+/// Cancellable host timers for the shared WASM Tokio compatibility surface.
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
 // Duration and UNIX_EPOCH are the same on both
 pub use std::time::Duration;
 

@@ -12009,6 +12009,7 @@ mod tests {
             stream_seq: 9,
             event: AgentEvent::TextDelta {
                 delta: "hello".to_string(),
+                assistant_message_id: None,
             },
         };
         let envelope = replay_envelope_from_stored(&session_id, stored);
@@ -12018,7 +12019,7 @@ mod tests {
         assert_eq!(envelope.session_id.as_ref(), Some(&session_id));
         assert!(matches!(
             envelope.event,
-            AgentEvent::TextDelta { ref delta } if delta == "hello"
+            AgentEvent::TextDelta { ref delta, .. } if delta == "hello"
         ));
     }
     use futures::{StreamExt, stream};
@@ -12762,9 +12763,10 @@ mod tests {
 
         async fn stream_response(
             &self,
+            assistant_message_id: meerkat_core::AssistantMessageId,
         ) -> Result<meerkat_core::LlmStreamResult, meerkat_core::AgentError> {
             self.stream_calls.fetch_add(1, AtomicOrdering::SeqCst);
-            self.inner.stream_response().await
+            self.inner.stream_response(assistant_message_id).await
         }
     }
 
@@ -17105,7 +17107,13 @@ mod tests {
         );
         let session_id = SessionId::new();
         event_store
-            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .append(
+                &session_id,
+                &[AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                }],
+            )
             .await
             .expect("seed replay log");
         event_store
@@ -26019,6 +26027,7 @@ mod tests {
                 None,
                 AgentEvent::TextDelta {
                     delta: format!("event-{i}"),
+                    assistant_message_id: None,
                 },
             );
             let _ = pending_streams.events.send(envelope);

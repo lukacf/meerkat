@@ -35,8 +35,83 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_core::types::BlockAssistantMessage` (re-exported as
+  `meerkat_core::BlockAssistantMessage` and `meerkat::BlockAssistantMessage`)
+  gains the public field
+  `assistant_message_id: Option<AssistantMessageId>`. Struct literals must
+  supply it (`None` outside the agent loop); `BlockAssistantMessage::new` and
+  `BlockAssistantMessage::snapshot` default it to `None`. The JSON key is
+  serde-defaulted and omitted when absent, so pre-0.8.45 transcripts load
+  unchanged and rows without an id keep their exact 0.8.44 bytes.
+- `meerkat_core::AgentEvent::TurnStarted` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::TextDelta` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::TextComplete` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::ReasoningDelta` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::ReasoningComplete` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::ServerToolContent` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::AssistantImageAppended` gains
+  `assistant_message_id`.
+- `meerkat_core::AgentEvent::TurnCompleted` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::Retrying` gains `assistant_message_id`.
+- `meerkat_core::AgentEvent::RunCompleted` gains `assistant_message_id`.
+  Every new `AgentEvent` field is `Option<AssistantMessageId>`: Rust
+  constructors must supply it and exhaustive patterns must bind it or use
+  `..`. The JSON key is optional and omitted when absent, so older event
+  records remain readable.
+- `meerkat_contracts::WireSessionMessage::BlockAssistant` gains
+  `assistant_message_id: Option<AssistantMessageId>`; variant literals and
+  exhaustive patterns must account for it.
+- `meerkat_core::AgentLlmRequestAttempt::stream_response` gains the parameter
+  `assistant_message_id: AssistantMessageId`
+  (`stream_response(&self, assistant_message_id)`). Implementations that
+  publish live events stamp them with it; decorators that wrap an attempt must
+  pass it through. It never enters the provider request.
+- Behaviour-only (not measured by the semver gate):
+  `Session::commit_transcript_rewrite` clears `assistant_message_id` on every
+  replacement row (a supplied id is dropped, like `realtime_origin`), and
+  `Session::fork_replacing` clears it on the edited row. Live deltas published
+  through the legacy `AgentLlmClient::stream_response` path (the compaction
+  summary call, custom split clients, and client decorators that do not
+  forward `prepare_request_attempt`) carry no id. Assistant message ids never
+  affect transcript revisions, rewrite span digests or the provider-cache
+  prefix identity. The retained-history byte budget of `DefaultCompactor`
+  now counts the id (about 60 bytes per row that carries one).
+- Behaviour-only: `LlmClientAdapter` now also delivers `ServerToolContent`
+  events to the interaction event tap, not only to the run's event channel,
+  so interaction-scoped streams see provider server-tool content.
+
+### Added
+
+- Assistant message identity: every assistant message the agent loop commits
+  carries a session-scoped `meerkat_core::types::AssistantMessageId`
+  (re-exported as `meerkat_core::AssistantMessageId` and
+  `meerkat::AssistantMessageId`), minted in the provider-neutral loop at
+  provider turn start, before any delta, for every provider. The same id is on
+  the committed `block_assistant` row and on every live event of that message,
+  so consoles join live rows to history by id instead of text or rank.
+  Retries of a provider turn (same-model, empty-output, stall, timeout, model
+  fallback, and a re-poll after compaction) reuse its id, a failed turn never
+  leaves a committed id, messages appended by tool effects get their own id,
+  and `run_completed` names the committed message whose text `result` repeats.
+  See `docs/reference/session-contracts.mdx#assistant-message-identity`.
+- `meerkat_core::AgentEvent::assistant_message_id(&self) -> Option<AssistantMessageId>`
+  reads the id from any event that carries one.
+- The Python, TypeScript and Web SDKs expose the optional
+  `assistant_message_id` / `assistantMessageId` on `turn_started`,
+  `text_delta`, `text_complete`, `turn_completed`, `retrying` and
+  `run_completed` events and on `block_assistant` history rows (the Web SDK
+  types cover all ten events and export `AssistantMessageId`); raw-preserved
+  events keep the key in their payload.
+
 ### Fixed
 
+- The Python and TypeScript SDK `retrying` parsers accept the canonical wire
+  shape, which carries one typed `retry` schedule; `attempt`, `max_attempts` /
+  `maxAttempts`, `error` and `delay_ms` / `delayMs` are derived from it and the
+  schedule is kept in `retry`. Current `retrying` events previously parsed as
+  `malformed_event`.
 - `@rkat/web` ships its runtime with the 8 MiB wasm stack it was built to
   have. Every published package from 0.8.30 through 0.8.44 linked the 1 MiB
   default and failed its first turn with `RuntimeError: memory access out of

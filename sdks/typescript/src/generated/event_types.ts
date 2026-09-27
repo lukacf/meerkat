@@ -172,6 +172,30 @@ export interface AssistantImageEvent {
 }
 
 /**
+ * Session-scoped identity of one committed assistant message occurrence.
+ *
+ * The agent loop mints this id when a provider turn starts, before any
+ * streamed delta, and stamps the same value on every live event for that
+ * message (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,
+ * `server_tool_content`, `assistant_image_appended`, `turn_completed`) and on
+ * the canonical [`BlockAssistantMessage`] it commits. A consumer joins live
+ * rows to history by this id alone; it never has to compare text or rank.
+ *
+ * The value is opaque. It is never derived from content, so two
+ * byte-identical answers always carry different ids, and it is not a
+ * timestamp: native builds happen to mint UUIDv7 while browser builds mint
+ * UUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints
+ * ids; other crates copy and compare them. Persisted and wire values
+ * round-trip verbatim through serde.
+ *
+ * Retries of the same provider turn (same-model, empty-output, stall,
+ * timeout, model fallback, and a re-poll after compaction) reuse the id, so
+ * an id is on at most one committed message. Messages written before this
+ * field existed, realtime/live rows, and compaction summaries carry none.
+ */
+export type AssistantMessageId = string;
+
+/**
  * Opaque identifier for an input accepted by the runtime layer.
  *
  * Core passes this through in `contributing_input_ids` on receipts and events
@@ -1216,6 +1240,7 @@ export type AgentEvent = {
   session_id: SessionId;
   type: "run_started";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   extraction_required?: boolean;
   identity?: TranscriptMessageIdentity;
   result: string;
@@ -1266,26 +1291,33 @@ export type AgentEvent = {
   reason_code: HookReasonCode;
   type: "hook_denied";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   turn_number: number;
   type: "turn_started";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   delta: string;
   type: "reasoning_delta";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   content: string;
   type: "reasoning_complete";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   delta: string;
   type: "text_delta";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   content: string;
   type: "text_complete";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   content: unknown;
   id?: string | null;
   kind: ServerToolKind;
   type: "server_tool_content";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   image: AssistantImageEvent;
   type: "assistant_image_appended";
 } | {
@@ -1300,6 +1332,7 @@ export type AgentEvent = {
   name: string;
   type: "tool_result_received";
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   stop_reason: StopReason;
   type: "turn_completed";
   usage?: TurnUsage | null;
@@ -1339,6 +1372,7 @@ export type AgentEvent = {
   type: "budget_warning";
   used: number;
 } | {
+  assistant_message_id?: AssistantMessageId | null;
   retry: LlmRetrySchedule;
   type: "retrying";
 } | {

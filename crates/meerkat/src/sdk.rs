@@ -738,7 +738,7 @@ pub fn spawn_event_logger(
 
         while let Some(event) = agent_event_rx.recv().await {
             if config.stream
-                && let AgentEvent::TextDelta { delta } = &event
+                && let AgentEvent::TextDelta { delta, .. } = &event
             {
                 print!("{delta}");
                 let _ = std::io::stdout().flush();

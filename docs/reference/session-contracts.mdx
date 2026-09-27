@@ -230,6 +230,89 @@ already-committed turn. Clients that see live
 `stream_truncated` reconcile from `events/list_since`, a current snapshot, or
 ATIF export.
 
+## Assistant message identity
+
+Every assistant message the agent loop commits carries a session-scoped
+`assistant_message_id` (0.8.45+). The same value is on the committed
+`block_assistant` history row and on every live event for that message, so a
+client pairs live rows with canonical history by id alone. It never has to
+compare text or rank, and identical answers stay distinct.
+
+**Assignment.** The id is minted in the provider-neutral agent loop when a
+provider turn starts, before hooks run, before the request is sent and before
+any delta. It is opaque: never derived from content, and not a timestamp
+(native builds mint UUIDv7, browser builds UUIDv4). Assignment happens for all
+providers; the id never enters the provider request.
+
+**Events that carry it.** `turn_started`, `reasoning_delta`,
+`reasoning_complete`, `text_delta`, `text_complete`, `server_tool_content`,
+`assistant_image_appended`, `turn_completed` and `retrying` name the message
+they stream or close. `run_completed.assistant_message_id` names the committed
+message whose text `result` repeats. That may be a message from an earlier run
+(for example when a run ends on budget exhaustion before committing new text).
+Rust consumers can read any of these through `AgentEvent::assistant_message_id()`.
+
+**Commit and failure.**
+
+- `turn_completed` with the id is the commit signal. An id opened by
+  `turn_started` with no matching `turn_completed` before the run's terminal
+  event (`run_failed`, or a `run_completed` that references another message)
+  was never committed, and no history row carries it.
+- An id is on at most one committed row, and a failed provider turn never
+  leaves a committed id.
+- Retries of the same provider turn reuse its id: same-model, empty-output,
+  stall and timeout retries, and model fallback. `retrying` carries the id;
+  discard the live buffer held for it and render the retry's deltas in its
+  place.
+- A re-poll after compaction re-emits `turn_started` with the same id. A
+  repeated `turn_started` for an id that is still open restarts that message's
+  live buffer.
+
+**Which rows get one.**
+
+- Each provider turn's assistant message, including tool-use turns and
+  structured-output extraction turns. Extraction turns emit no
+  `turn_started`, `text_complete` or `turn_completed`; their deltas and row
+  still carry the id.
+- An assistant message appended by a tool effect gets its own fresh id, with
+  no `turn_started`. Its images are published as `assistant_image_appended`
+  under that id. The id of a message appended after a callback tool result is
+  fixed when the batch is applied, so replays and redeliveries return the same
+  id.
+- No id: compaction summaries (user rows), realtime/live rows (they pair
+  through `realtime_origin.provider_item_ids`), and any row written before
+  0.8.45. Old rows and events are never backfilled.
+- Deltas with no id are output that is not a transcript assistant message,
+  such as the compaction summary call. They also come from a legacy custom
+  client, or a client decorator that does not forward
+  `AgentLlmClient::prepare_request_attempt`. The loop still stamps
+  `turn_started`, `text_complete`, `turn_completed`, `retrying` and
+  `assistant_image_appended` in those cases.
+
+**History, compaction and rewrite.**
+
+- Paging: the id is on each row, so any `offset`/`limit` page carries it. It
+  implies nothing about position, and history can be read before the final
+  live chunks of the same message arrive.
+- Digests: the id is construction bookkeeping. Transcript revisions, rewrite
+  span digests, continuity guards and the provider-cache prefix identity are
+  identical with and without it.
+- Compaction: retained rows keep their ids byte-for-byte (core validation
+  already requires retained rows to be unchanged). Discarded ids leave the
+  active transcript, are never minted again or reused, and stay readable
+  through `read_transcript_revision(parent)`. The summary row has no id.
+  Reloading a session (whole-blob or head-canonical storage, crash-recovery
+  tail) round-trips rows unchanged.
+- Generic rewrite: replacement rows never carry an id. Core clears any
+  supplied value, and wire rewrite input does not accept one (an echoed
+  history key is ignored). Rows outside the selection keep their ids. A
+  replaced or removed id is gone from the active transcript but stays readable
+  in the parent revision.
+- Forks: `fork`, `fork_at` and `fork_at_complete_boundary` keep row ids (they
+  are the same occurrences; the child session never re-emits them).
+  `fork_replacing` keeps the inherited prefix's ids and clears the id of the
+  edited row, whether it replaced a whole message or one assistant block.
+
 ## Explicit override semantics
 
 Where the surface supports omission vs explicit override, these are distinct facts:

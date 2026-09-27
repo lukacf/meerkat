@@ -435,6 +435,17 @@
           {
             "description": "Agent run completed successfully",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message whose text `result` repeats, so a\nconsumer can bind the result to its history row without comparing\ntext. It may name a message committed by an earlier run (a run that\ncompleted without committing a new text-bearing message repeats the\nlatest one). Absent when no such message carries an id."
+              },
               "extraction_required": {
                 "default": false,
                 "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
@@ -697,8 +708,18 @@
             "type": "object"
           },
           {
-            "description": "New turn started (calling LLM)",
+            "description": "New turn started (calling LLM).\n\n`assistant_message_id` is minted here, before any delta, and names the\nassistant message this provider turn will commit. A repeated\n`turn_started` for an id that is still open (a re-poll after\ncompaction) restarts that message's live buffer. The message is\ncommitted when the matching `turn_completed` arrives; an id opened here\nwith no `turn_completed` before the run ends was never committed.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "turn_number": {
                 "format": "uint32",
                 "minimum": 0,
@@ -716,8 +737,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming reasoning/thinking from the model",
+            "description": "Streaming reasoning/thinking from the model.\n\n`assistant_message_id` names the message this delta belongs to. It is\nabsent on deltas that are not transcript assistant output (for example\nthe compaction summary call) and on clients that do not route through\nthe request-attempt path.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -735,6 +766,16 @@
           {
             "description": "Reasoning/thinking complete for this block",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -750,8 +791,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming text from the model",
+            "description": "Streaming text from the model.\n\n`assistant_message_id` has the same meaning as on\n[`AgentEvent::ReasoningDelta`].",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -769,6 +820,16 @@
           {
             "description": "Text generation complete for this turn",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -786,6 +847,16 @@
           {
             "description": "Provider-executed tool content surfaced during a model turn.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": true,
               "id": {
                 "type": [
@@ -810,8 +881,18 @@
             "type": "object"
           },
           {
-            "description": "Canonical assistant image block appended to transcript history.",
+            "description": "Canonical assistant image block appended to transcript history.\n\n`assistant_message_id` names the committed assistant message that\ncarries the image: the provider turn's message, or the separate message\na tool effect appended (which has no `turn_started`).",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "image": {
                 "$ref": "#/$defs/AssistantImageEvent"
               },
@@ -886,6 +967,17 @@
           {
             "description": "Turn completed.\n\nPublished once per committed agent-loop provider request: each\ntool-loop call (`stop_reason: tool_use`) and the call that closes the\nrun, each after its assistant message is committed, so it pairs with\nthe [`AgentEvent::TurnStarted`] of the same request. Structured-output\nextraction requests publish their accounting on the extraction outcome\nevent instead (`request_usage`).\n\n# Why `usage` is optional\n\nThis event states one semantic fact - a model turn reached its terminal\nand its assistant message is committed - and carries one accounting\nfact beside it. The two have different owners and different failure\nmodes: a provider stream that ends without ever sending a usage event\nhas said nothing about tokens while having said everything about the\nanswer. Absence is therefore representable here, because the only\nalternatives are to fabricate counters no provider issued or to\nsuppress the completion of a turn the caller has already read.\n\n`usage: None` means exactly \"no accounting exists for this turn\": no\ncounter advanced, and no per-call row should be reconciled for it. The\npaired [`AgentEvent::TurnUsageAccountingUnmeasured`] carries the\nexplanation (which provider and model went unaccounted); this field\nowns only the number's presence or absence. Consumers must skip an\nabsent row, never treat it as zero.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message of this provider turn, equal to\nthe id its [`AgentEvent::TurnStarted`] opened."
+              },
               "stop_reason": {
                 "$ref": "#/$defs/StopReason"
               },
@@ -1117,8 +1209,18 @@
             "type": "object"
           },
           {
-            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
+            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.\n\n`assistant_message_id` names the provider turn being retried. Retries\nreuse the id, so a consumer discards the live buffer it holds for that\nid and renders the retry's deltas in its place.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "retry": {
                 "$ref": "#/$defs/LlmRetrySchedule"
               },
@@ -1875,6 +1977,10 @@
         "type": "object"
       },
       "AssistantImageId": {
+        "type": "string"
+      },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
         "type": "string"
       },
       "AuthBindingRef": {
@@ -22223,6 +22329,17 @@
           {
             "description": "Agent run completed successfully",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message whose text `result` repeats, so a\nconsumer can bind the result to its history row without comparing\ntext. It may name a message committed by an earlier run (a run that\ncompleted without committing a new text-bearing message repeats the\nlatest one). Absent when no such message carries an id."
+              },
               "extraction_required": {
                 "default": false,
                 "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
@@ -22485,8 +22602,18 @@
             "type": "object"
           },
           {
-            "description": "New turn started (calling LLM)",
+            "description": "New turn started (calling LLM).\n\n`assistant_message_id` is minted here, before any delta, and names the\nassistant message this provider turn will commit. A repeated\n`turn_started` for an id that is still open (a re-poll after\ncompaction) restarts that message's live buffer. The message is\ncommitted when the matching `turn_completed` arrives; an id opened here\nwith no `turn_completed` before the run ends was never committed.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "turn_number": {
                 "format": "uint32",
                 "minimum": 0,
@@ -22504,8 +22631,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming reasoning/thinking from the model",
+            "description": "Streaming reasoning/thinking from the model.\n\n`assistant_message_id` names the message this delta belongs to. It is\nabsent on deltas that are not transcript assistant output (for example\nthe compaction summary call) and on clients that do not route through\nthe request-attempt path.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -22523,6 +22660,16 @@
           {
             "description": "Reasoning/thinking complete for this block",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -22538,8 +22685,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming text from the model",
+            "description": "Streaming text from the model.\n\n`assistant_message_id` has the same meaning as on\n[`AgentEvent::ReasoningDelta`].",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -22557,6 +22714,16 @@
           {
             "description": "Text generation complete for this turn",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -22574,6 +22741,16 @@
           {
             "description": "Provider-executed tool content surfaced during a model turn.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": true,
               "id": {
                 "type": [
@@ -22598,8 +22775,18 @@
             "type": "object"
           },
           {
-            "description": "Canonical assistant image block appended to transcript history.",
+            "description": "Canonical assistant image block appended to transcript history.\n\n`assistant_message_id` names the committed assistant message that\ncarries the image: the provider turn's message, or the separate message\na tool effect appended (which has no `turn_started`).",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "image": {
                 "$ref": "#/$defs/AssistantImageEvent"
               },
@@ -22674,6 +22861,17 @@
           {
             "description": "Turn completed.\n\nPublished once per committed agent-loop provider request: each\ntool-loop call (`stop_reason: tool_use`) and the call that closes the\nrun, each after its assistant message is committed, so it pairs with\nthe [`AgentEvent::TurnStarted`] of the same request. Structured-output\nextraction requests publish their accounting on the extraction outcome\nevent instead (`request_usage`).\n\n# Why `usage` is optional\n\nThis event states one semantic fact - a model turn reached its terminal\nand its assistant message is committed - and carries one accounting\nfact beside it. The two have different owners and different failure\nmodes: a provider stream that ends without ever sending a usage event\nhas said nothing about tokens while having said everything about the\nanswer. Absence is therefore representable here, because the only\nalternatives are to fabricate counters no provider issued or to\nsuppress the completion of a turn the caller has already read.\n\n`usage: None` means exactly \"no accounting exists for this turn\": no\ncounter advanced, and no per-call row should be reconciled for it. The\npaired [`AgentEvent::TurnUsageAccountingUnmeasured`] carries the\nexplanation (which provider and model went unaccounted); this field\nowns only the number's presence or absence. Consumers must skip an\nabsent row, never treat it as zero.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message of this provider turn, equal to\nthe id its [`AgentEvent::TurnStarted`] opened."
+              },
               "stop_reason": {
                 "$ref": "#/$defs/StopReason"
               },
@@ -22905,8 +23103,18 @@
             "type": "object"
           },
           {
-            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
+            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.\n\n`assistant_message_id` names the provider turn being retried. Retries\nreuse the id, so a consumer discards the live buffer it holds for that\nid and renders the retry's deltas in its place.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "retry": {
                 "$ref": "#/$defs/LlmRetrySchedule"
               },
@@ -23663,6 +23871,10 @@
         "type": "object"
       },
       "AssistantImageId": {
+        "type": "string"
+      },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
         "type": "string"
       },
       "AuthBindingRef": {
@@ -28271,6 +28483,10 @@
       "AssistantImageId": {
         "type": "string"
       },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
+        "type": "string"
+      },
       "BackgroundJobTerminalStatus": {
         "enum": [
           "completed",
@@ -30261,6 +30477,17 @@
           },
           {
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on realtime rows, and on rows\na rewrite or fork edit replaced."
+              },
               "blocks": {
                 "items": {
                   "$ref": "#/$defs/WireAssistantBlock"
@@ -33681,6 +33908,17 @@
           {
             "description": "Agent run completed successfully",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message whose text `result` repeats, so a\nconsumer can bind the result to its history row without comparing\ntext. It may name a message committed by an earlier run (a run that\ncompleted without committing a new text-bearing message repeats the\nlatest one). Absent when no such message carries an id."
+              },
               "extraction_required": {
                 "default": false,
                 "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
@@ -33943,8 +34181,18 @@
             "type": "object"
           },
           {
-            "description": "New turn started (calling LLM)",
+            "description": "New turn started (calling LLM).\n\n`assistant_message_id` is minted here, before any delta, and names the\nassistant message this provider turn will commit. A repeated\n`turn_started` for an id that is still open (a re-poll after\ncompaction) restarts that message's live buffer. The message is\ncommitted when the matching `turn_completed` arrives; an id opened here\nwith no `turn_completed` before the run ends was never committed.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "turn_number": {
                 "format": "uint32",
                 "minimum": 0,
@@ -33962,8 +34210,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming reasoning/thinking from the model",
+            "description": "Streaming reasoning/thinking from the model.\n\n`assistant_message_id` names the message this delta belongs to. It is\nabsent on deltas that are not transcript assistant output (for example\nthe compaction summary call) and on clients that do not route through\nthe request-attempt path.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -33981,6 +34239,16 @@
           {
             "description": "Reasoning/thinking complete for this block",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -33996,8 +34264,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming text from the model",
+            "description": "Streaming text from the model.\n\n`assistant_message_id` has the same meaning as on\n[`AgentEvent::ReasoningDelta`].",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -34015,6 +34293,16 @@
           {
             "description": "Text generation complete for this turn",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -34032,6 +34320,16 @@
           {
             "description": "Provider-executed tool content surfaced during a model turn.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": true,
               "id": {
                 "type": [
@@ -34056,8 +34354,18 @@
             "type": "object"
           },
           {
-            "description": "Canonical assistant image block appended to transcript history.",
+            "description": "Canonical assistant image block appended to transcript history.\n\n`assistant_message_id` names the committed assistant message that\ncarries the image: the provider turn's message, or the separate message\na tool effect appended (which has no `turn_started`).",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "image": {
                 "$ref": "#/$defs/AssistantImageEvent"
               },
@@ -34132,6 +34440,17 @@
           {
             "description": "Turn completed.\n\nPublished once per committed agent-loop provider request: each\ntool-loop call (`stop_reason: tool_use`) and the call that closes the\nrun, each after its assistant message is committed, so it pairs with\nthe [`AgentEvent::TurnStarted`] of the same request. Structured-output\nextraction requests publish their accounting on the extraction outcome\nevent instead (`request_usage`).\n\n# Why `usage` is optional\n\nThis event states one semantic fact - a model turn reached its terminal\nand its assistant message is committed - and carries one accounting\nfact beside it. The two have different owners and different failure\nmodes: a provider stream that ends without ever sending a usage event\nhas said nothing about tokens while having said everything about the\nanswer. Absence is therefore representable here, because the only\nalternatives are to fabricate counters no provider issued or to\nsuppress the completion of a turn the caller has already read.\n\n`usage: None` means exactly \"no accounting exists for this turn\": no\ncounter advanced, and no per-call row should be reconciled for it. The\npaired [`AgentEvent::TurnUsageAccountingUnmeasured`] carries the\nexplanation (which provider and model went unaccounted); this field\nowns only the number's presence or absence. Consumers must skip an\nabsent row, never treat it as zero.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message of this provider turn, equal to\nthe id its [`AgentEvent::TurnStarted`] opened."
+              },
               "stop_reason": {
                 "$ref": "#/$defs/StopReason"
               },
@@ -34363,8 +34682,18 @@
             "type": "object"
           },
           {
-            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
+            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.\n\n`assistant_message_id` names the provider turn being retried. Retries\nreuse the id, so a consumer discards the live buffer it holds for that\nid and renders the retry's deltas in its place.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "retry": {
                 "$ref": "#/$defs/LlmRetrySchedule"
               },
@@ -35121,6 +35450,10 @@
         "type": "object"
       },
       "AssistantImageId": {
+        "type": "string"
+      },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
         "type": "string"
       },
       "AuthBindingRef": {
@@ -43080,6 +43413,17 @@
           },
           {
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on realtime rows, and on rows\na rewrite or fork edit replaced."
+              },
               "blocks": {
                 "items": {
                   "$ref": "#/$defs/WireAssistantBlock"
@@ -47030,6 +47374,17 @@
           {
             "description": "Agent run completed successfully",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message whose text `result` repeats, so a\nconsumer can bind the result to its history row without comparing\ntext. It may name a message committed by an earlier run (a run that\ncompleted without committing a new text-bearing message repeats the\nlatest one). Absent when no such message carries an id."
+              },
               "extraction_required": {
                 "default": false,
                 "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
@@ -47292,8 +47647,18 @@
             "type": "object"
           },
           {
-            "description": "New turn started (calling LLM)",
+            "description": "New turn started (calling LLM).\n\n`assistant_message_id` is minted here, before any delta, and names the\nassistant message this provider turn will commit. A repeated\n`turn_started` for an id that is still open (a re-poll after\ncompaction) restarts that message's live buffer. The message is\ncommitted when the matching `turn_completed` arrives; an id opened here\nwith no `turn_completed` before the run ends was never committed.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "turn_number": {
                 "format": "uint32",
                 "minimum": 0,
@@ -47311,8 +47676,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming reasoning/thinking from the model",
+            "description": "Streaming reasoning/thinking from the model.\n\n`assistant_message_id` names the message this delta belongs to. It is\nabsent on deltas that are not transcript assistant output (for example\nthe compaction summary call) and on clients that do not route through\nthe request-attempt path.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -47330,6 +47705,16 @@
           {
             "description": "Reasoning/thinking complete for this block",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -47345,8 +47730,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming text from the model",
+            "description": "Streaming text from the model.\n\n`assistant_message_id` has the same meaning as on\n[`AgentEvent::ReasoningDelta`].",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -47364,6 +47759,16 @@
           {
             "description": "Text generation complete for this turn",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -47381,6 +47786,16 @@
           {
             "description": "Provider-executed tool content surfaced during a model turn.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": true,
               "id": {
                 "type": [
@@ -47405,8 +47820,18 @@
             "type": "object"
           },
           {
-            "description": "Canonical assistant image block appended to transcript history.",
+            "description": "Canonical assistant image block appended to transcript history.\n\n`assistant_message_id` names the committed assistant message that\ncarries the image: the provider turn's message, or the separate message\na tool effect appended (which has no `turn_started`).",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "image": {
                 "$ref": "#/$defs/AssistantImageEvent"
               },
@@ -47481,6 +47906,17 @@
           {
             "description": "Turn completed.\n\nPublished once per committed agent-loop provider request: each\ntool-loop call (`stop_reason: tool_use`) and the call that closes the\nrun, each after its assistant message is committed, so it pairs with\nthe [`AgentEvent::TurnStarted`] of the same request. Structured-output\nextraction requests publish their accounting on the extraction outcome\nevent instead (`request_usage`).\n\n# Why `usage` is optional\n\nThis event states one semantic fact - a model turn reached its terminal\nand its assistant message is committed - and carries one accounting\nfact beside it. The two have different owners and different failure\nmodes: a provider stream that ends without ever sending a usage event\nhas said nothing about tokens while having said everything about the\nanswer. Absence is therefore representable here, because the only\nalternatives are to fabricate counters no provider issued or to\nsuppress the completion of a turn the caller has already read.\n\n`usage: None` means exactly \"no accounting exists for this turn\": no\ncounter advanced, and no per-call row should be reconciled for it. The\npaired [`AgentEvent::TurnUsageAccountingUnmeasured`] carries the\nexplanation (which provider and model went unaccounted); this field\nowns only the number's presence or absence. Consumers must skip an\nabsent row, never treat it as zero.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message of this provider turn, equal to\nthe id its [`AgentEvent::TurnStarted`] opened."
+              },
               "stop_reason": {
                 "$ref": "#/$defs/StopReason"
               },
@@ -47712,8 +48148,18 @@
             "type": "object"
           },
           {
-            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
+            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.\n\n`assistant_message_id` names the provider turn being retried. Retries\nreuse the id, so a consumer discards the live buffer it holds for that\nid and renders the retry's deltas in its place.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "retry": {
                 "$ref": "#/$defs/LlmRetrySchedule"
               },
@@ -48521,6 +48967,10 @@
         "type": "object"
       },
       "AssistantImageId": {
+        "type": "string"
+      },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
         "type": "string"
       },
       "AuthBindingRef": {
@@ -61496,6 +61946,17 @@
           },
           {
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on realtime rows, and on rows\na rewrite or fork edit replaced."
+              },
               "blocks": {
                 "items": {
                   "$ref": "#/$defs/WireAssistantBlock"
@@ -67618,6 +68079,17 @@
           {
             "description": "Agent run completed successfully",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message whose text `result` repeats, so a\nconsumer can bind the result to its history row without comparing\ntext. It may name a message committed by an earlier run (a run that\ncompleted without committing a new text-bearing message repeats the\nlatest one). Absent when no such message carries an id."
+              },
               "extraction_required": {
                 "default": false,
                 "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
@@ -67880,8 +68352,18 @@
             "type": "object"
           },
           {
-            "description": "New turn started (calling LLM)",
+            "description": "New turn started (calling LLM).\n\n`assistant_message_id` is minted here, before any delta, and names the\nassistant message this provider turn will commit. A repeated\n`turn_started` for an id that is still open (a re-poll after\ncompaction) restarts that message's live buffer. The message is\ncommitted when the matching `turn_completed` arrives; an id opened here\nwith no `turn_completed` before the run ends was never committed.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "turn_number": {
                 "format": "uint32",
                 "minimum": 0,
@@ -67899,8 +68381,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming reasoning/thinking from the model",
+            "description": "Streaming reasoning/thinking from the model.\n\n`assistant_message_id` names the message this delta belongs to. It is\nabsent on deltas that are not transcript assistant output (for example\nthe compaction summary call) and on clients that do not route through\nthe request-attempt path.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -67918,6 +68410,16 @@
           {
             "description": "Reasoning/thinking complete for this block",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -67933,8 +68435,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming text from the model",
+            "description": "Streaming text from the model.\n\n`assistant_message_id` has the same meaning as on\n[`AgentEvent::ReasoningDelta`].",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -67952,6 +68464,16 @@
           {
             "description": "Text generation complete for this turn",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -67969,6 +68491,16 @@
           {
             "description": "Provider-executed tool content surfaced during a model turn.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": true,
               "id": {
                 "type": [
@@ -67993,8 +68525,18 @@
             "type": "object"
           },
           {
-            "description": "Canonical assistant image block appended to transcript history.",
+            "description": "Canonical assistant image block appended to transcript history.\n\n`assistant_message_id` names the committed assistant message that\ncarries the image: the provider turn's message, or the separate message\na tool effect appended (which has no `turn_started`).",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "image": {
                 "$ref": "#/$defs/AssistantImageEvent"
               },
@@ -68069,6 +68611,17 @@
           {
             "description": "Turn completed.\n\nPublished once per committed agent-loop provider request: each\ntool-loop call (`stop_reason: tool_use`) and the call that closes the\nrun, each after its assistant message is committed, so it pairs with\nthe [`AgentEvent::TurnStarted`] of the same request. Structured-output\nextraction requests publish their accounting on the extraction outcome\nevent instead (`request_usage`).\n\n# Why `usage` is optional\n\nThis event states one semantic fact - a model turn reached its terminal\nand its assistant message is committed - and carries one accounting\nfact beside it. The two have different owners and different failure\nmodes: a provider stream that ends without ever sending a usage event\nhas said nothing about tokens while having said everything about the\nanswer. Absence is therefore representable here, because the only\nalternatives are to fabricate counters no provider issued or to\nsuppress the completion of a turn the caller has already read.\n\n`usage: None` means exactly \"no accounting exists for this turn\": no\ncounter advanced, and no per-call row should be reconciled for it. The\npaired [`AgentEvent::TurnUsageAccountingUnmeasured`] carries the\nexplanation (which provider and model went unaccounted); this field\nowns only the number's presence or absence. Consumers must skip an\nabsent row, never treat it as zero.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message of this provider turn, equal to\nthe id its [`AgentEvent::TurnStarted`] opened."
+              },
               "stop_reason": {
                 "$ref": "#/$defs/StopReason"
               },
@@ -68300,8 +68853,18 @@
             "type": "object"
           },
           {
-            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
+            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.\n\n`assistant_message_id` names the provider turn being retried. Retries\nreuse the id, so a consumer discards the live buffer it holds for that\nid and renders the retry's deltas in its place.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "retry": {
                 "$ref": "#/$defs/LlmRetrySchedule"
               },
@@ -69058,6 +69621,10 @@
         "type": "object"
       },
       "AssistantImageId": {
+        "type": "string"
+      },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
         "type": "string"
       },
       "AuthBindingRef": {
@@ -77786,6 +78353,17 @@
           },
           {
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on realtime rows, and on rows\na rewrite or fork edit replaced."
+              },
               "blocks": {
                 "items": {
                   "$ref": "#/$defs/WireAssistantBlock"
@@ -79878,6 +80456,17 @@
           {
             "description": "Agent run completed successfully",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message whose text `result` repeats, so a\nconsumer can bind the result to its history row without comparing\ntext. It may name a message committed by an earlier run (a run that\ncompleted without committing a new text-bearing message repeats the\nlatest one). Absent when no such message carries an id."
+              },
               "extraction_required": {
                 "default": false,
                 "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
@@ -80140,8 +80729,18 @@
             "type": "object"
           },
           {
-            "description": "New turn started (calling LLM)",
+            "description": "New turn started (calling LLM).\n\n`assistant_message_id` is minted here, before any delta, and names the\nassistant message this provider turn will commit. A repeated\n`turn_started` for an id that is still open (a re-poll after\ncompaction) restarts that message's live buffer. The message is\ncommitted when the matching `turn_completed` arrives; an id opened here\nwith no `turn_completed` before the run ends was never committed.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "turn_number": {
                 "format": "uint32",
                 "minimum": 0,
@@ -80159,8 +80758,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming reasoning/thinking from the model",
+            "description": "Streaming reasoning/thinking from the model.\n\n`assistant_message_id` names the message this delta belongs to. It is\nabsent on deltas that are not transcript assistant output (for example\nthe compaction summary call) and on clients that do not route through\nthe request-attempt path.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -80178,6 +80787,16 @@
           {
             "description": "Reasoning/thinking complete for this block",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -80193,8 +80812,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming text from the model",
+            "description": "Streaming text from the model.\n\n`assistant_message_id` has the same meaning as on\n[`AgentEvent::ReasoningDelta`].",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -80212,6 +80841,16 @@
           {
             "description": "Text generation complete for this turn",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -80229,6 +80868,16 @@
           {
             "description": "Provider-executed tool content surfaced during a model turn.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": true,
               "id": {
                 "type": [
@@ -80253,8 +80902,18 @@
             "type": "object"
           },
           {
-            "description": "Canonical assistant image block appended to transcript history.",
+            "description": "Canonical assistant image block appended to transcript history.\n\n`assistant_message_id` names the committed assistant message that\ncarries the image: the provider turn's message, or the separate message\na tool effect appended (which has no `turn_started`).",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "image": {
                 "$ref": "#/$defs/AssistantImageEvent"
               },
@@ -80329,6 +80988,17 @@
           {
             "description": "Turn completed.\n\nPublished once per committed agent-loop provider request: each\ntool-loop call (`stop_reason: tool_use`) and the call that closes the\nrun, each after its assistant message is committed, so it pairs with\nthe [`AgentEvent::TurnStarted`] of the same request. Structured-output\nextraction requests publish their accounting on the extraction outcome\nevent instead (`request_usage`).\n\n# Why `usage` is optional\n\nThis event states one semantic fact - a model turn reached its terminal\nand its assistant message is committed - and carries one accounting\nfact beside it. The two have different owners and different failure\nmodes: a provider stream that ends without ever sending a usage event\nhas said nothing about tokens while having said everything about the\nanswer. Absence is therefore representable here, because the only\nalternatives are to fabricate counters no provider issued or to\nsuppress the completion of a turn the caller has already read.\n\n`usage: None` means exactly \"no accounting exists for this turn\": no\ncounter advanced, and no per-call row should be reconciled for it. The\npaired [`AgentEvent::TurnUsageAccountingUnmeasured`] carries the\nexplanation (which provider and model went unaccounted); this field\nowns only the number's presence or absence. Consumers must skip an\nabsent row, never treat it as zero.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message of this provider turn, equal to\nthe id its [`AgentEvent::TurnStarted`] opened."
+              },
               "stop_reason": {
                 "$ref": "#/$defs/StopReason"
               },
@@ -80560,8 +81230,18 @@
             "type": "object"
           },
           {
-            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
+            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.\n\n`assistant_message_id` names the provider turn being retried. Retries\nreuse the id, so a consumer discards the live buffer it holds for that\nid and renders the retry's deltas in its place.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "retry": {
                 "$ref": "#/$defs/LlmRetrySchedule"
               },
@@ -81318,6 +81998,10 @@
         "type": "object"
       },
       "AssistantImageId": {
+        "type": "string"
+      },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
         "type": "string"
       },
       "AuthBindingRef": {
@@ -105238,6 +105922,10 @@
       "AssistantImageId": {
         "type": "string"
       },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
+        "type": "string"
+      },
       "BackgroundJobTerminalStatus": {
         "enum": [
           "completed",
@@ -107240,6 +107928,17 @@
           },
           {
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on realtime rows, and on rows\na rewrite or fork edit replaced."
+              },
               "blocks": {
                 "items": {
                   "$ref": "#/$defs/WireAssistantBlock"
@@ -134888,6 +135587,17 @@
           {
             "description": "Agent run completed successfully",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message whose text `result` repeats, so a\nconsumer can bind the result to its history row without comparing\ntext. It may name a message committed by an earlier run (a run that\ncompleted without committing a new text-bearing message repeats the\nlatest one). Absent when no such message carries an id."
+              },
               "extraction_required": {
                 "default": false,
                 "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
@@ -135150,8 +135860,18 @@
             "type": "object"
           },
           {
-            "description": "New turn started (calling LLM)",
+            "description": "New turn started (calling LLM).\n\n`assistant_message_id` is minted here, before any delta, and names the\nassistant message this provider turn will commit. A repeated\n`turn_started` for an id that is still open (a re-poll after\ncompaction) restarts that message's live buffer. The message is\ncommitted when the matching `turn_completed` arrives; an id opened here\nwith no `turn_completed` before the run ends was never committed.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "turn_number": {
                 "format": "uint32",
                 "minimum": 0,
@@ -135169,8 +135889,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming reasoning/thinking from the model",
+            "description": "Streaming reasoning/thinking from the model.\n\n`assistant_message_id` names the message this delta belongs to. It is\nabsent on deltas that are not transcript assistant output (for example\nthe compaction summary call) and on clients that do not route through\nthe request-attempt path.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -135188,6 +135918,16 @@
           {
             "description": "Reasoning/thinking complete for this block",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -135203,8 +135943,18 @@
             "type": "object"
           },
           {
-            "description": "Streaming text from the model",
+            "description": "Streaming text from the model.\n\n`assistant_message_id` has the same meaning as on\n[`AgentEvent::ReasoningDelta`].",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "delta": {
                 "type": "string"
               },
@@ -135222,6 +135972,16 @@
           {
             "description": "Text generation complete for this turn",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -135239,6 +135999,16 @@
           {
             "description": "Provider-executed tool content surfaced during a model turn.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "content": true,
               "id": {
                 "type": [
@@ -135263,8 +136033,18 @@
             "type": "object"
           },
           {
-            "description": "Canonical assistant image block appended to transcript history.",
+            "description": "Canonical assistant image block appended to transcript history.\n\n`assistant_message_id` names the committed assistant message that\ncarries the image: the provider turn's message, or the separate message\na tool effect appended (which has no `turn_started`).",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "image": {
                 "$ref": "#/$defs/AssistantImageEvent"
               },
@@ -135339,6 +136119,17 @@
           {
             "description": "Turn completed.\n\nPublished once per committed agent-loop provider request: each\ntool-loop call (`stop_reason: tool_use`) and the call that closes the\nrun, each after its assistant message is committed, so it pairs with\nthe [`AgentEvent::TurnStarted`] of the same request. Structured-output\nextraction requests publish their accounting on the extraction outcome\nevent instead (`request_usage`).\n\n# Why `usage` is optional\n\nThis event states one semantic fact - a model turn reached its terminal\nand its assistant message is committed - and carries one accounting\nfact beside it. The two have different owners and different failure\nmodes: a provider stream that ends without ever sending a usage event\nhas said nothing about tokens while having said everything about the\nanswer. Absence is therefore representable here, because the only\nalternatives are to fabricate counters no provider issued or to\nsuppress the completion of a turn the caller has already read.\n\n`usage: None` means exactly \"no accounting exists for this turn\": no\ncounter advanced, and no per-call row should be reconciled for it. The\npaired [`AgentEvent::TurnUsageAccountingUnmeasured`] carries the\nexplanation (which provider and model went unaccounted); this field\nowns only the number's presence or absence. Consumers must skip an\nabsent row, never treat it as zero.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The committed assistant message of this provider turn, equal to\nthe id its [`AgentEvent::TurnStarted`] opened."
+              },
               "stop_reason": {
                 "$ref": "#/$defs/StopReason"
               },
@@ -135570,8 +136361,18 @@
             "type": "object"
           },
           {
-            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.",
+            "description": "Retrying after a recoverable LLM failure.\n\nThe typed schedule is the single owner of the retry facts (failure\nkind/provider/diagnostic and plan attempt/delay); display strings are\nderived from it, never carried beside it.\n\n`assistant_message_id` names the provider turn being retried. Retries\nreuse the id, so a consumer discards the live buffer it holds for that\nid and renders the retry's deltas in its place.",
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "retry": {
                 "$ref": "#/$defs/LlmRetrySchedule"
               },
@@ -136328,6 +137129,10 @@
         "type": "object"
       },
       "AssistantImageId": {
+        "type": "string"
+      },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
         "type": "string"
       },
       "AuthBindingRef": {
@@ -141387,6 +142192,10 @@
       "AssistantImageId": {
         "type": "string"
       },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
+        "type": "string"
+      },
       "BackgroundJobTerminalStatus": {
         "enum": [
           "completed",
@@ -143332,6 +144141,17 @@
           },
           {
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on realtime rows, and on rows\na rewrite or fork edit replaced."
+              },
               "blocks": {
                 "items": {
                   "$ref": "#/$defs/WireAssistantBlock"
@@ -148812,6 +149632,10 @@
       "AssistantImageId": {
         "type": "string"
       },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
+        "type": "string"
+      },
       "BackgroundJobTerminalStatus": {
         "enum": [
           "completed",
@@ -150761,6 +151585,17 @@
           },
           {
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on realtime rows, and on rows\na rewrite or fork edit replaced."
+              },
               "blocks": {
                 "items": {
                   "$ref": "#/$defs/WireAssistantBlock"
@@ -155779,6 +156614,10 @@
       "AssistantImageId": {
         "type": "string"
       },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
+        "type": "string"
+      },
       "BackgroundJobTerminalStatus": {
         "enum": [
           "completed",
@@ -157724,6 +158563,17 @@
           },
           {
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on realtime rows, and on rows\na rewrite or fork edit replaced."
+              },
               "blocks": {
                 "items": {
                   "$ref": "#/$defs/WireAssistantBlock"
@@ -158085,6 +158935,10 @@
   "WireSessionMessage": {
     "$defs": {
       "AssistantImageId": {
+        "type": "string"
+      },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
         "type": "string"
       },
       "BackgroundJobTerminalStatus": {
@@ -160144,6 +160998,17 @@
       },
       {
         "properties": {
+          "assistant_message_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AssistantMessageId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on realtime rows, and on rows\na rewrite or fork edit replaced."
+          },
           "blocks": {
             "items": {
               "$ref": "#/$defs/WireAssistantBlock"
@@ -160853,6 +161718,10 @@
   "WireSessionTranscriptRevision": {
     "$defs": {
       "AssistantImageId": {
+        "type": "string"
+      },
+      "AssistantMessageId": {
+        "description": "Session-scoped identity of one committed assistant message occurrence.\n\nThe agent loop mints this id when a provider turn starts, before any\nstreamed delta, and stamps the same value on every live event for that\nmessage (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,\n`server_tool_content`, `assistant_image_appended`, `turn_completed`) and on\nthe canonical [`BlockAssistantMessage`] it commits. A consumer joins live\nrows to history by this id alone; it never has to compare text or rank.\n\nThe value is opaque. It is never derived from content, so two\nbyte-identical answers always carry different ids, and it is not a\ntimestamp: native builds happen to mint UUIDv7 while browser builds mint\nUUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints\nids; other crates copy and compare them. Persisted and wire values\nround-trip verbatim through serde.\n\nRetries of the same provider turn (same-model, empty-output, stall,\ntimeout, model fallback, and a re-poll after compaction) reuse the id, so\nan id is on at most one committed message. Messages written before this\nfield existed, realtime/live rows, and compaction summaries carry none.",
         "type": "string"
       },
       "BackgroundJobTerminalStatus": {
@@ -162800,6 +163669,17 @@
           },
           {
             "properties": {
+              "assistant_message_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AssistantMessageId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Session-scoped occurrence id of this assistant message, equal to\nthe `assistant_message_id` its live events carried. Join live rows\nto history by this id; it implies nothing about position. Absent\non messages committed before 0.8.45, on realtime rows, and on rows\na rewrite or fork edit replaced."
+              },
               "blocks": {
                 "items": {
                   "$ref": "#/$defs/WireAssistantBlock"

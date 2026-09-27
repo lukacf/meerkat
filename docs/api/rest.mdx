@@ -484,13 +484,18 @@ Query parameters:
     {
       "role": "block_assistant",
       "blocks": [{ "block_type": "text", "data": { "text": "Hi there." } }],
-      "stop_reason": "end_turn"
+      "stop_reason": "end_turn",
+      "assistant_message_id": "01936f8a-7b2c-7000-8000-00000000a001"
     }
   ]
 }
 ```
 
 History is returned oldest-to-newest and reflects the last committed session snapshot only.
+`block_assistant` rows committed by 0.8.45 or later carry `assistant_message_id`,
+the same id the message's live SSE events carried; join live output to history
+by that id. See
+[assistant message identity](/reference/session-contracts#assistant-message-identity).
 
 ### POST /sessions/\{id\}/system_context
 
@@ -828,12 +833,12 @@ Event types:
 | `run_started` | Agent execution began |
 | `run_completed` | Agent run finished |
 | `run_failed` | Agent run failed |
-| `turn_started` | New LLM call within the turn |
+| `turn_started` | New LLM call within the turn; `assistant_message_id` names the assistant message it will commit |
 | `text_delta` | Streaming text chunk from LLM |
 | `text_complete` | Full text for this turn |
 | `tool_call_requested` | LLM wants to call a tool |
 | `tool_result_received` | Tool result processed |
-| `turn_completed` | LLM call finished |
+| `turn_completed` | LLM call finished; commits `assistant_message_id` |
 | `tool_execution_started` | Tool dispatch began |
 | `tool_execution_completed` | Tool returned a result |
 | `tool_execution_timed_out` | Tool exceeded timeout |
@@ -841,7 +846,7 @@ Event types:
 | `compaction_completed` | Compaction finished |
 | `compaction_failed` | Compaction failed |
 | `budget_warning` | Approaching resource limits |
-| `retrying` | Retrying after transient error |
+| `retrying` | Retrying after transient error; the retry reuses `assistant_message_id` |
 | `hook_started` | Hook execution began |
 | `hook_completed` | Hook finished |
 | `hook_failed` | Hook execution failed |

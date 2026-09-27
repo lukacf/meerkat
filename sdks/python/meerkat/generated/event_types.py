@@ -222,6 +222,29 @@ class AssistantImageEvent(TypedDict, total=False):
     width: Required[int]
 
 
+# Session-scoped identity of one committed assistant message occurrence.
+#
+# The agent loop mints this id when a provider turn starts, before any
+# streamed delta, and stamps the same value on every live event for that
+# message (`turn_started`, `text_delta`, `text_complete`, `reasoning_*`,
+# `server_tool_content`, `assistant_image_appended`, `turn_completed`) and on
+# the canonical [`BlockAssistantMessage`] it commits. A consumer joins live
+# rows to history by this id alone; it never has to compare text or rank.
+#
+# The value is opaque. It is never derived from content, so two
+# byte-identical answers always carry different ids, and it is not a
+# timestamp: native builds happen to mint UUIDv7 while browser builds mint
+# UUIDv4, so ordering by the id is meaningless. Only `meerkat-core` mints
+# ids; other crates copy and compare them. Persisted and wire values
+# round-trip verbatim through serde.
+#
+# Retries of the same provider turn (same-model, empty-output, stall,
+# timeout, model fallback, and a re-poll after compaction) reuse the id, so
+# an id is on at most one committed message. Messages written before this
+# field existed, realtime/live rows, and compaction summaries carry none.
+AssistantMessageId = str
+
+
 # Opaque identifier for an input accepted by the runtime layer.
 #
 # Core passes this through in `contributing_input_ids` on receipts and events
@@ -1546,6 +1569,7 @@ class AgentEventRunStarted(TypedDict, total=False):
 class AgentEventRunCompleted(TypedDict, total=False):
     """Agent run completed successfully
     """
+    assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     extraction_required: NotRequired[bool]
     identity: NotRequired[TranscriptMessageIdentity]
     result: Required[str]
@@ -1626,15 +1650,29 @@ class AgentEventHookDenied(TypedDict, total=False):
 
 
 class AgentEventTurnStarted(TypedDict, total=False):
-    """New turn started (calling LLM)
+    """New turn started (calling LLM).
+
+    `assistant_message_id` is minted here, before any delta, and names the
+    assistant message this provider turn will commit. A repeated
+    `turn_started` for an id that is still open (a re-poll after
+    compaction) restarts that message's live buffer. The message is
+    committed when the matching `turn_completed` arrives; an id opened here
+    with no `turn_completed` before the run ends was never committed.
     """
+    assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     turn_number: Required[int]
     type: Required[Literal['turn_started']]
 
 
 class AgentEventReasoningDelta(TypedDict, total=False):
-    """Streaming reasoning/thinking from the model
+    """Streaming reasoning/thinking from the model.
+
+    `assistant_message_id` names the message this delta belongs to. It is
+    absent on deltas that are not transcript assistant output (for example
+    the compaction summary call) and on clients that do not route through
+    the request-attempt path.
     """
+    assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     delta: Required[str]
     type: Required[Literal['reasoning_delta']]
 
@@ -1642,13 +1680,18 @@ class AgentEventReasoningDelta(TypedDict, total=False):
 class AgentEventReasoningComplete(TypedDict, total=False):
     """Reasoning/thinking complete for this block
     """
+    assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     content: Required[str]
     type: Required[Literal['reasoning_complete']]
 
 
 class AgentEventTextDelta(TypedDict, total=False):
-    """Streaming text from the model
+    """Streaming text from the model.
+
+    `assistant_message_id` has the same meaning as on
+    [`AgentEvent::ReasoningDelta`].
     """
+    assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     delta: Required[str]
     type: Required[Literal['text_delta']]
 
@@ -1656,6 +1699,7 @@ class AgentEventTextDelta(TypedDict, total=False):
 class AgentEventTextComplete(TypedDict, total=False):
     """Text generation complete for this turn
     """
+    assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     content: Required[str]
     type: Required[Literal['text_complete']]
 
@@ -1663,6 +1707,7 @@ class AgentEventTextComplete(TypedDict, total=False):
 class AgentEventServerToolContent(TypedDict, total=False):
     """Provider-executed tool content surfaced during a model turn.
     """
+    assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     content: Required[Any]
     id: NotRequired[Optional[str]]
     kind: Required[ServerToolKind]
@@ -1671,7 +1716,12 @@ class AgentEventServerToolContent(TypedDict, total=False):
 
 class AgentEventAssistantImageAppended(TypedDict, total=False):
     """Canonical assistant image block appended to transcript history.
+
+    `assistant_message_id` names the committed assistant message that
+    carries the image: the provider turn's message, or the separate message
+    a tool effect appended (which has no `turn_started`).
     """
+    assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     image: Required[AssistantImageEvent]
     type: Required[Literal['assistant_image_appended']]
 
@@ -1729,6 +1779,7 @@ class AgentEventTurnCompleted(TypedDict, total=False):
     owns only the number's presence or absence. Consumers must skip an
     absent row, never treat it as zero.
     """
+    assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     stop_reason: Required[StopReason]
     type: Required[Literal['turn_completed']]
     usage: NotRequired[Optional[TurnUsage]]
@@ -1830,7 +1881,12 @@ class AgentEventRetrying(TypedDict, total=False):
     The typed schedule is the single owner of the retry facts (failure
     kind/provider/diagnostic and plan attempt/delay); display strings are
     derived from it, never carried beside it.
+
+    `assistant_message_id` names the provider turn being retried. Retries
+    reuse the id, so a consumer discards the live buffer it holds for that
+    id and renders the retry's deltas in its place.
     """
+    assistant_message_id: NotRequired[Optional[AssistantMessageId]]
     retry: Required[LlmRetrySchedule]
     type: Required[Literal['retrying']]
 

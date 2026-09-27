@@ -2270,9 +2270,10 @@ mod tests {
 
         async fn stream_response(
             &self,
+            assistant_message_id: meerkat_core::AssistantMessageId,
         ) -> Result<meerkat_core::LlmStreamResult, meerkat_core::AgentError> {
             self.stream_calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.stream_response().await
+            self.inner.stream_response(assistant_message_id).await
         }
     }
 

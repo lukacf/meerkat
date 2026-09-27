@@ -526,10 +526,27 @@ Content may be text or content blocks; the continuation variant does not
 fabricate a prompt. `RunFailedEvent` accepts the current `error_report` and
 derives its `errorClass` and `error` display fields from that report.
 
-The handwritten `RetryingEvent` and `HookFailedEvent` parsers still expect
-legacy flat fields. Current wire events carry `retry` and `reason`,
-respectively, so those payloads arrive as `MalformedEvent` with raw data
-preserved. These are remaining SDK parser gaps, not alternate wire contracts.
+`RetryingEvent` parses the current wire shape, which carries one typed
+`retry` schedule: `attempt`, `maxAttempts`, `error` and `delayMs` are
+projections of `retry.plan.attempt`, `retry.plan.max_retries`,
+`retry.failure.message` and `retry.plan.selected_delay_ms`, and the schedule
+itself is kept in `retry`. The flat legacy shape is still accepted. The
+handwritten `HookFailedEvent` parser still expects the legacy flat `error`
+field; current wire events carry `reason`, so those payloads arrive as
+`MalformedEvent` with raw data preserved. That is a remaining SDK parser gap,
+not an alternate wire contract.
+
+`TurnStartedEvent`, `TextDeltaEvent`, `TextCompleteEvent`,
+`TurnCompletedEvent` and `RetryingEvent` carry an optional
+`assistantMessageId`. It equals `assistantMessageId` on the `block_assistant`
+`SessionMessage` that history returns for the same message, so join live rows
+to history by that id, never by text or position.
+`RunCompletedEvent.assistantMessageId` names the message whose text `result`
+repeats. The raw payloads of `reasoning_delta`, `reasoning_complete`,
+`server_tool_content` and `assistant_image_appended` carry the same
+`assistant_message_id` key. See
+[assistant message identity](/reference/session-contracts#assistant-message-identity)
+for retry, compaction and rewrite semantics.
 
 ### Session lifecycle events
 
@@ -543,6 +560,7 @@ interface RunCompletedEvent {
   extractionRequired?: boolean;
   usage: Usage;
   terminalCauseKind?: TurnTerminalCauseKind;
+  assistantMessageId?: string;
 }
 interface ExtractionSucceededEvent {
   type: "extraction_succeeded";
@@ -570,12 +588,12 @@ interface RunFailedEvent {
 ### Turn and LLM events
 
 ```typescript
-interface TurnStartedEvent        { type: "turn_started";         turnNumber: number }
-interface TextDeltaEvent          { type: "text_delta";            delta: string }
-interface TextCompleteEvent       { type: "text_complete";         content: string }
+interface TurnStartedEvent        { type: "turn_started";         turnNumber: number; assistantMessageId?: string }
+interface TextDeltaEvent          { type: "text_delta";            delta: string; assistantMessageId?: string }
+interface TextCompleteEvent       { type: "text_complete";         content: string; assistantMessageId?: string }
 interface ToolCallRequestedEvent  { type: "tool_call_requested";   id: string; name: string; args: ToolCallArguments }
 interface ToolResultReceivedEvent { type: "tool_result_received";  id: string; name: string; content: readonly ContentBlock[]; isError?: boolean }
-interface TurnCompletedEvent      { type: "turn_completed";        stopReason?: StopReason; usage?: Usage }
+interface TurnCompletedEvent      { type: "turn_completed";        stopReason?: StopReason; usage?: Usage; assistantMessageId?: string }
 ```
 
 ```typescript
@@ -616,7 +634,7 @@ type BudgetType = "tokens" | "time" | "tool_calls";
 ### Retry events
 
 ```typescript
-interface RetryingEvent { type: "retrying"; attempt: number; maxAttempts: number; error: string; delayMs: number }
+interface RetryingEvent { type: "retrying"; attempt: number; maxAttempts: number; error: string; delayMs: number; retry?: Record<string, unknown>; assistantMessageId?: string }
 ```
 
 ### Hook events

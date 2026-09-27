@@ -8303,6 +8303,7 @@ class WireSessionMessageUser(TypedDict, total=False):
     transcript_role: NotRequired[TranscriptUserRole]
 
 class WireSessionMessageBlockAssistant(TypedDict, total=False):
+    assistant_message_id: NotRequired[Optional[str]]
     blocks: Required[list[WireAssistantBlock]]
     created_at: Required[str]
     interaction_id: NotRequired[Optional[str]]

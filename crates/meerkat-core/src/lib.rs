@@ -531,8 +531,8 @@ pub use turn_execution_authority::{
 // path-reference `turn_terminal::TurnTerminalOutcome`.
 pub use turn_terminal::{ClassifiedTurnTerminal, TurnTerminalClassifier, TurnTerminalKind};
 pub use types::{
-    ArtifactRef, AssistantBlock, BlockAssistantMessage, CommsNoticeKind, ContentBlock,
-    ContentInput, CumulativeUsage, ExtractionError, HandlingMode, ImageData,
+    ArtifactRef, AssistantBlock, AssistantMessageId, BlockAssistantMessage, CommsNoticeKind,
+    ContentBlock, ContentInput, CumulativeUsage, ExtractionError, HandlingMode, ImageData,
     InstructionActivationId, InstructionActivationIdentity, InstructionContentDigest,
     InstructionKey, InstructionNamespace, InstructionRevisionId, InstructionRevisionRef,
     InvalidInstructionContentDigest, InvalidInstructionIdentifier, LiveContextObservationId,

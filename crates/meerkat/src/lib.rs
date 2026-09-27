@@ -58,6 +58,7 @@ pub use meerkat_core::{
     AgentToolDispatcher,
     ArtifactRef,
     AssistantBlock,
+    AssistantMessageId,
     // Phase 3 provider-auth redesign — realm-scoped connection identity.
     AuthBindingRef,
     BindingId,

@@ -307,6 +307,7 @@ mod tests {
             event: AgentEvent::TurnCompleted {
                 stop_reason: meerkat_core::StopReason::EndTurn,
                 usage: Some(usage.clone()),
+                assistant_message_id: None,
             },
             contract_version: ContractVersion::CURRENT,
         };
@@ -350,6 +351,7 @@ mod tests {
                 extraction_required: false,
                 usage: cumulative,
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             },
             contract_version: ContractVersion::CURRENT,
         };

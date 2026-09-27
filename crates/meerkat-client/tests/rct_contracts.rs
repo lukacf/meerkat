@@ -132,7 +132,7 @@ async fn test_llm_adapter_streaming_contract() -> Result<(), Box<dyn std::error:
 
     let event = rx.recv().await.ok_or("text delta event missing")?;
     match event {
-        AgentEvent::TextDelta { delta } => assert_eq!(delta, "hello"),
+        AgentEvent::TextDelta { delta, .. } => assert_eq!(delta, "hello"),
         _ => return Err("unexpected event".into()),
     }
 
@@ -169,7 +169,7 @@ async fn test_llm_adapter_event_tap_mirrors_text_delta() -> Result<(), Box<dyn s
 
     let event = tap_rx.recv().await.ok_or("tap event missing")?;
     match event {
-        AgentEvent::TextDelta { delta } => assert_eq!(delta, "tap-delta"),
+        AgentEvent::TextDelta { delta, .. } => assert_eq!(delta, "tap-delta"),
         _ => return Err("unexpected tap event".into()),
     }
 

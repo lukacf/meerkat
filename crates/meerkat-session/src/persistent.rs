@@ -18107,6 +18107,7 @@ mod tests {
                         stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
+                        assistant_message_id: None,
                     },
                 ));
                 RunResult {
@@ -18564,6 +18565,7 @@ mod tests {
                 let _ = event_tx
                     .send(AgentEvent::TextDelta {
                         delta: format!("dense event {index}"),
+                        assistant_message_id: None,
                     })
                     .await;
             }
@@ -18577,6 +18579,7 @@ mod tests {
                     extraction_required: false,
                     usage: result.usage.clone().into(),
                     terminal_cause_kind: result.terminal_cause_kind,
+                    assistant_message_id: None,
                 })
                 .await;
             Ok(result)
@@ -19812,6 +19815,7 @@ mod tests {
                     stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 },
             ));
             Ok(RunResult {
@@ -20023,6 +20027,7 @@ mod tests {
                     stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 },
             ));
             Ok(RunResult {
@@ -23294,6 +23299,7 @@ mod tests {
                                 stop_reason: Some(StopReason::EndTurn),
                                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                                 created_at: meerkat_core::types::message_timestamp_now(),
+                                assistant_message_id: None,
                             },
                         )],
                         reason: TranscriptRewriteReason::new("compaction"),
@@ -23430,6 +23436,7 @@ mod tests {
                             stop_reason: Some(StopReason::EndTurn),
                             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                             created_at: meerkat_core::types::message_timestamp_now(),
+                            assistant_message_id: None,
                         },
                     )],
                     reason: TranscriptRewriteReason::new("compaction"),
@@ -23630,6 +23637,7 @@ mod tests {
                             stop_reason: Some(StopReason::EndTurn),
                             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                             created_at: meerkat_core::types::message_timestamp_now(),
+                            assistant_message_id: None,
                         },
                     )],
                     reason: TranscriptRewriteReason::new("compaction"),
@@ -23835,6 +23843,7 @@ mod tests {
                             stop_reason: Some(StopReason::EndTurn),
                             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                             created_at: meerkat_core::types::message_timestamp_now(),
+                            assistant_message_id: None,
                         },
                     )],
                     reason: TranscriptRewriteReason::new("compaction"),
@@ -25103,6 +25112,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             }),
         ]
     }
@@ -26517,6 +26527,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         let rejected_snapshot = serde_json::to_vec(&rejected)?;
@@ -26584,6 +26595,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         let rejected_snapshot = serde_json::to_vec(&rejected)?;
@@ -26690,6 +26702,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         let newer_snapshot = serde_json::to_vec(&newer)?;
@@ -26843,6 +26856,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         let stale_parent_revision = stale_parent.transcript_revision()?;
@@ -31309,6 +31323,7 @@ mod tests {
                         stop_reason: Some(StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
+                        assistant_message_id: None,
                     },
                 ));
             }
@@ -31427,6 +31442,7 @@ mod tests {
                         stop_reason: Some(StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
+                        assistant_message_id: None,
                     },
                 ));
             }
@@ -36497,9 +36513,13 @@ mod tests {
             .append(
                 &session_id,
                 &[
-                    AgentEvent::TurnStarted { turn_number: 0 },
+                    AgentEvent::TurnStarted {
+                        turn_number: 0,
+                        assistant_message_id: None,
+                    },
                     AgentEvent::TextComplete {
                         content: "two".to_string(),
+                        assistant_message_id: None,
                     },
                 ],
             )

@@ -116,6 +116,8 @@ impl SessionGeneration {
     }
 }
 
+#[cfg(test)]
+mod assistant_message_identity_tests;
 mod digest_accumulator;
 mod head_metadata;
 mod import_0810;
@@ -619,6 +621,20 @@ pub(crate) fn canonicalize_released_0810_messages_for_digest(messages: &[Message
     canonical
 }
 
+/// Concatenated display and spoken text of one assistant message, the
+/// projection a run result repeats.
+fn assistant_message_text(message: &crate::types::BlockAssistantMessage) -> String {
+    let mut buf = String::new();
+    for block in &message.blocks {
+        match block {
+            crate::types::AssistantBlock::Text { text, .. }
+            | crate::types::AssistantBlock::Transcript { text, .. } => buf.push_str(text),
+            _ => {}
+        }
+    }
+    buf
+}
+
 fn erase_message_construction_bookkeeping(message: &mut Message) {
     match message {
         Message::System(system) => {
@@ -634,6 +650,11 @@ fn erase_message_construction_bookkeeping(message: &mut Message) {
         }
         Message::BlockAssistant(assistant) => {
             assistant.identity = crate::types::TranscriptMessageIdentity::default();
+            // Occurrence identity is bookkeeping about WHICH commit produced
+            // the row, never transcript meaning: revisions, span digests,
+            // continuity guards and the provider-cache prefix stay identical
+            // with or without it.
+            assistant.assistant_message_id = None;
             assistant.created_at = digest_timestamp_sentinel();
         }
         Message::ToolResults { created_at, .. } => {
@@ -5550,23 +5571,22 @@ impl Session {
     /// in document order, since both lanes project to the same human-readable
     /// stream. Lane provenance is preserved on the underlying `AssistantBlock`
     /// for callers that need it.
-    pub fn last_assistant_text(&self) -> Option<String> {
+    /// The text [`Session::last_assistant_text`] returns, paired with the
+    /// occurrence id of the exact assistant message it was read from.
+    pub(crate) fn last_assistant_text_occurrence(
+        &self,
+    ) -> Option<(String, Option<crate::types::AssistantMessageId>)> {
         self.messages.iter().rev().find_map(|m| match m {
             Message::BlockAssistant(a) => {
-                let mut buf = String::new();
-                for block in &a.blocks {
-                    match block {
-                        crate::types::AssistantBlock::Text { text, .. }
-                        | crate::types::AssistantBlock::Transcript { text, .. } => {
-                            buf.push_str(text);
-                        }
-                        _ => {}
-                    }
-                }
-                if buf.is_empty() { None } else { Some(buf) }
+                let text = assistant_message_text(a);
+                (!text.is_empty()).then_some((text, a.assistant_message_id))
             }
             _ => None,
         })
+    }
+
+    pub fn last_assistant_text(&self) -> Option<String> {
+        self.last_assistant_text_occurrence().map(|(text, _)| text)
     }
 
     /// Count tool calls made
@@ -6167,9 +6187,19 @@ impl Session {
     /// ToolResults tail has been admitted as a pending continuation. This
     /// preserves provider adjacency and prevents the effects from hiding the
     /// continuation boundary from session admission.
+    ///
+    /// Each returned image is paired with the occurrence id of the assistant
+    /// message that carries it (minted when the batch was applied, so a replay
+    /// returns the same ids).
     pub(crate) fn apply_pending_callback_resume_effects(
         &mut self,
-    ) -> Result<Vec<crate::event::AssistantImageEvent>, PendingCallbackBatchError> {
+    ) -> Result<
+        Vec<(
+            Option<crate::types::AssistantMessageId>,
+            crate::event::AssistantImageEvent,
+        )>,
+        PendingCallbackBatchError,
+    > {
         let Some(CallbackToolBatchState::Applied {
             tool_use_order,
             results,
@@ -6186,11 +6216,16 @@ impl Session {
         let image_events = post_tool_messages
             .iter()
             .filter_map(|message| match message {
-                Message::BlockAssistant(assistant) => Some(assistant.blocks.as_slice()),
+                Message::BlockAssistant(assistant) => Some(assistant),
                 _ => None,
             })
-            .flatten()
-            .filter_map(crate::event::AssistantImageEvent::from_assistant_block)
+            .flat_map(|assistant| {
+                assistant
+                    .blocks
+                    .iter()
+                    .filter_map(crate::event::AssistantImageEvent::from_assistant_block)
+                    .map(|image| (assistant.assistant_message_id, image))
+            })
             .collect::<Vec<_>>();
         let applied_state = CallbackToolBatchState::Applied {
             tool_use_order,
@@ -7027,7 +7062,13 @@ impl Session {
         for message in &mut replacement {
             match message {
                 Message::User(user) => user.identity.realtime_origin = None,
-                Message::BlockAssistant(assistant) => assistant.identity.realtime_origin = None,
+                Message::BlockAssistant(assistant) => {
+                    assistant.identity.realtime_origin = None;
+                    // A replacement row is new content, not the occurrence
+                    // that streamed: the replaced id stays readable only in
+                    // the parent revision and is never re-attached here.
+                    assistant.assistant_message_id = None;
+                }
                 Message::SystemNotice(notice) => notice.runtime_origin = None,
                 _ => {}
             }
@@ -7643,6 +7684,13 @@ impl Session {
             ));
         }
 
+        // The edited row is new content on a new branch. It keeps no
+        // occurrence id, whether it replaced a whole message or one block of
+        // an assistant message; the inherited prefix keeps its ids.
+        let mut replacement_message = replacement_message;
+        if let Message::BlockAssistant(assistant) = &mut replacement_message {
+            assistant.assistant_message_id = None;
+        }
         let mut forked = self.fork_at(message_index);
         forked.push(replacement_message);
         validate_transcript_tool_result_shape(forked.messages())?;
@@ -9367,6 +9415,7 @@ mod tests {
                     objective_id: None,
                 },
                 created_at: base_time,
+                assistant_message_id: None,
             }),
         ];
         let mut restamped = stamped.clone();
@@ -11436,6 +11485,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
 
@@ -11477,6 +11527,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         let parent_revision = session.transcript_revision().expect("parent revision");
@@ -11514,6 +11565,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         let parent_revision = original.transcript_revision().expect("parent revision");
@@ -11529,6 +11581,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -11544,6 +11597,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         crate::session_store::run_boundary_snapshot_save_guard(&incoming, Some(&original))
@@ -11582,6 +11636,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -11606,6 +11661,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
 
@@ -11623,6 +11679,7 @@ mod tests {
                     stop_reason: Some(StopReason::ToolUse),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -11647,6 +11704,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let parent_revision = session.transcript_revision().expect("parent revision");
 
@@ -11692,6 +11750,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         session.push(Message::User(UserMessage::text("keep suffix".to_string())));
 
@@ -11707,6 +11766,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -11747,6 +11807,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         let first_parent = session.transcript_revision().expect("first parent");
@@ -11761,6 +11822,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -11777,6 +11839,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let bridge_parent = session
             .transcript_revision()
@@ -11801,6 +11864,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -11834,6 +11898,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let parent = base.transcript_revision().expect("parent revision");
 
@@ -11849,6 +11914,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -11872,6 +11938,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -11907,6 +11974,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         let parent = session.transcript_revision().expect("parent revision");
@@ -11921,6 +11989,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -11971,6 +12040,7 @@ mod tests {
                         stop_reason: Some(StopReason::EndTurn),
                         identity: crate::types::TranscriptMessageIdentity::default(),
                         created_at: crate::types::message_timestamp_now(),
+                        assistant_message_id: None,
                     }),
                 ],
                 TranscriptRewriteReason::new("compaction"),
@@ -12002,6 +12072,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         let parent = session.transcript_revision().expect("parent revision");
@@ -12016,6 +12087,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -12082,6 +12154,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let original_messages = session.messages().to_vec();
         let parent = session.transcript_revision().expect("parent revision");
@@ -12096,6 +12169,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -12153,6 +12227,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         let first_parent = session.transcript_revision().expect("first parent");
@@ -12167,6 +12242,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -12183,6 +12259,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         let bridge_messages = session.messages().to_vec();
         let bridge_revision = session.transcript_revision().expect("bridge revision");
@@ -12198,6 +12275,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 })],
                 TranscriptRewriteReason::new("compaction"),
                 Some("unit-test".to_string()),
@@ -14256,6 +14334,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
 
         // Fork at index 2 (system + user)
@@ -14888,6 +14967,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
+            assistant_message_id: None,
         }));
         session.record_cumulative_usage(Usage {
             input_tokens: 10,

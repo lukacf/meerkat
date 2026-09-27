@@ -443,7 +443,7 @@ async fn fallback_process_child() {
         let retries: Vec<_> = events
             .iter()
             .filter_map(|e| {
-                if let AgentEvent::Retrying { retry } = e {
+                if let AgentEvent::Retrying { retry, .. } = e {
                     Some(retry)
                 } else {
                     None
@@ -451,6 +451,45 @@ async fn fallback_process_child() {
             })
             .collect();
         assert_eq!(retries.len(), 3);
+        // Same-model retries and the cross-provider fallback are attempts of
+        // ONE provider turn: they stream under the id its turn_started opened,
+        // and exactly that id is committed on the durable row.
+        let opened: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TurnStarted {
+                    assistant_message_id,
+                    ..
+                } => Some(*assistant_message_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened.len(), 1, "retries never reopen the provider turn");
+        let turn_id = opened[0].expect("turn_started carries the assistant message id");
+        assert!(events.iter().all(|e| match e {
+            AgentEvent::Retrying {
+                assistant_message_id,
+                ..
+            }
+            | AgentEvent::TextDelta {
+                assistant_message_id,
+                ..
+            }
+            | AgentEvent::TurnCompleted {
+                assistant_message_id,
+                ..
+            } => *assistant_message_id == Some(turn_id),
+            _ => true,
+        }));
+        let durable = service
+            .load_authoritative_session(&id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(durable.messages().iter().any(|message| matches!(message,
+            meerkat_core::Message::BlockAssistant(assistant)
+                if assistant.assistant_message_id == Some(turn_id)
+                    && assistant.text_blocks().any(|text| text.contains(&marker)))));
         for (index, retry) in retries.iter().enumerate() {
             assert_eq!(retry.plan.attempt, index as u32 + 1);
             assert_eq!(retry.failure.provider, "openai");

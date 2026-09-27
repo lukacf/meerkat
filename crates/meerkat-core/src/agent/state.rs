@@ -80,6 +80,10 @@ enum LlmCallWait {
 struct LlmRetryRequest<'a> {
     run_id: &'a RunId,
     turn_count: u32,
+    /// Occurrence id of the assistant message this provider turn will
+    /// commit. Every attempt (same-model retry, empty-output retry, stall and
+    /// timeout retry, model fallback) streams under this same id.
+    assistant_message_id: crate::types::AssistantMessageId,
     event_tx: &'a Option<mpsc::Sender<AgentEvent>>,
     /// Already-composed, hydrated provider request. Ownership crosses into the
     /// retry loop so ordinary calls do not deep-clone the accumulated
@@ -379,18 +383,6 @@ fn assistant_image_events_from_blocks(
         .collect()
 }
 
-pub(super) fn assistant_image_events_from_effects(
-    effects: &[crate::ops::SessionEffect],
-) -> Vec<crate::event::AssistantImageEvent> {
-    let mut images = Vec::new();
-    for effect in effects {
-        if let crate::ops::SessionEffect::AppendAssistantBlocks { blocks } = effect {
-            images.extend(assistant_image_events_from_blocks(blocks));
-        }
-    }
-    images
-}
-
 fn assistant_blocks_have_user_visible_output(blocks: &[crate::types::AssistantBlock]) -> bool {
     blocks.iter().any(|block| match block {
         crate::types::AssistantBlock::Text { text, .. }
@@ -584,6 +576,12 @@ struct CallingLlmTurnCtx<'a> {
     event_stream_open: &'a mut bool,
     run_has_visible_or_actionable_output: &'a mut bool,
     sticky_fallback_durable_visibility_parent: &'a mut Option<crate::SessionToolVisibilityState>,
+    /// Assistant message id reserved by the provider turn that is open but not
+    /// yet committed. Minted at the first `prepare_calling_llm_request` of a
+    /// provider turn, kept across re-polls of that same turn (compaction),
+    /// and cleared exactly once when the turn commits. Run-local; never
+    /// persisted.
+    reserved_assistant_message: &'a mut Option<crate::types::AssistantMessageId>,
     turn_count: u32,
     tool_call_count: u32,
 }
@@ -622,6 +620,7 @@ enum CallingLlmStep {
 /// Request parameters resolved ahead of the LLM call.
 struct CallingLlmPrepared {
     in_extraction: bool,
+    assistant_message_id: crate::types::AssistantMessageId,
     effective_max_tokens: u32,
     effective_temperature: Option<f32>,
     typed_provider_params: Option<ProviderParamsOverride>,
@@ -1843,6 +1842,7 @@ where
         let LlmRetryRequest {
             run_id,
             turn_count,
+            assistant_message_id,
             event_tx,
             messages,
             tools,
@@ -2058,7 +2058,7 @@ where
             // identically on wasm32 (tokio_with_wasm) and native.
             let wait_outcome = {
                 let probe_client = Arc::clone(&self.client);
-                let call_fut = request_attempt.stream_response();
+                let call_fut = request_attempt.stream_response(assistant_message_id);
                 let mut call_fut = std::pin::pin!(call_fut);
                 let call_started = crate::time_compat::Instant::now();
                 let mut last_activity = call_started;
@@ -2283,6 +2283,7 @@ where
                                 event_tx.as_ref(),
                                 AgentEvent::Retrying {
                                     retry: retry_schedule.clone(),
+                                    assistant_message_id: Some(assistant_message_id),
                                 },
                             )
                             .await;
@@ -2444,6 +2445,7 @@ where
                             event_tx.as_ref(),
                             AgentEvent::Retrying {
                                 retry: retry_schedule.clone(),
+                                assistant_message_id: Some(assistant_message_id),
                             },
                         )
                         .await;
@@ -4222,6 +4224,7 @@ where
         let mut tool_call_count = 0u32;
         let mut event_stream_open = true;
         let mut run_has_visible_or_actionable_output = false;
+        let mut reserved_assistant_message: Option<crate::types::AssistantMessageId> = None;
         // Arm the per-turn aggregate horizon. Every segment of a turn is
         // separately bounded (per-call LLM timeout, stream-inactivity
         // watchdog, per-tool-call timeout); this is the only owner of their
@@ -4414,6 +4417,7 @@ where
                             &mut run_has_visible_or_actionable_output,
                         sticky_fallback_durable_visibility_parent:
                             &mut sticky_fallback_durable_visibility_parent,
+                        reserved_assistant_message: &mut reserved_assistant_message,
                         turn_count,
                         tool_call_count,
                     };
@@ -4586,7 +4590,12 @@ where
             CallingLlmGate::Done(result) => return Ok(CallingLlmStep::Done(result)),
         };
         let assistant = match self
-            .commit_calling_llm_response(ctx, prepared.in_extraction, result)
+            .commit_calling_llm_response(
+                ctx,
+                prepared.in_extraction,
+                prepared.assistant_message_id,
+                result,
+            )
             .await?
         {
             CallingLlmGate::Continue(assistant) => assistant,
@@ -5138,6 +5147,13 @@ where
         ctx: &mut CallingLlmTurnCtx<'_>,
     ) -> Result<CallingLlmGate<CallingLlmPrepared>, AgentError> {
         let in_extraction = self.turn_in_extraction_flow()?;
+        // Provider turn start: assign the assistant message identity before
+        // hooks, dispatch, or any delta. A re-poll of the same provider turn
+        // (compaction rewrote the request) keeps its reservation, so every
+        // retry and re-entry streams under one id.
+        let assistant_message_id = *ctx
+            .reserved_assistant_message
+            .get_or_insert_with(crate::types::AssistantMessageId::mint);
 
         if !in_extraction {
             emit_phase_event!(
@@ -5145,6 +5161,7 @@ where
                 ctx,
                 AgentEvent::TurnStarted {
                     turn_number: ctx.turn_count,
+                    assistant_message_id: Some(assistant_message_id),
                 }
             );
         }
@@ -5272,6 +5289,7 @@ where
             Some(effective_provider_params).filter(|params| !params.is_empty());
         Ok(CallingLlmGate::Continue(CallingLlmPrepared {
             in_extraction,
+            assistant_message_id,
             effective_max_tokens,
             effective_temperature,
             typed_provider_params,
@@ -5524,6 +5542,7 @@ where
             .call_llm_with_retry(LlmRetryRequest {
                 run_id: ctx.run_id,
                 turn_count: ctx.turn_count,
+                assistant_message_id: prepared.assistant_message_id,
                 event_tx: ctx.event_tx,
                 messages: request_messages,
                 tools: call_tool_defs,
@@ -5832,8 +5851,14 @@ where
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
         in_extraction: bool,
+        assistant_message_id: crate::types::AssistantMessageId,
         result: LlmStreamResult,
     ) -> Result<CallingLlmGate<CallingLlmAssistantTurn>, AgentError> {
+        // The provider turn answered; its reservation is spent here, exactly
+        // once. Every exit below either commits the message under this id or
+        // ends the run, so the next provider turn always mints a fresh id and
+        // an id is never on two committed rows.
+        *ctx.reserved_assistant_message = None;
         // A request carrying the structured-output instruction projection has
         // a leading system prompt the canonical transcript does not contain,
         // so a breakpoint the provider authored over it is evidence about that
@@ -6063,6 +6088,7 @@ where
         let assistant_msg = self.stamp_assistant_message_identity(
             BlockAssistantMessage::new(blocks, stop_reason),
             ctx.run_id,
+            assistant_message_id,
         );
         let assistant_text = assistant_msg.to_string();
 
@@ -6187,6 +6213,7 @@ where
                 ctx,
                 AgentEvent::TextComplete {
                     content: assistant_text.clone(),
+                    assistant_message_id: Some(assistant_message_id),
                 }
             );
         }
@@ -6581,6 +6608,7 @@ where
             accumulated_session_effects,
             mut callback_pending,
         } = batch;
+        let assistant_message_id = assistant_msg.assistant_message_id;
         if self.noncommitting_live_bridge_run
             && (!pending_op_refs.is_empty() || !callback_pending.is_empty())
         {
@@ -6662,10 +6690,19 @@ where
                 .push(Message::BlockAssistant(assistant_msg.clone()));
         }
         for image in assistant_image_events_from_blocks(&assistant_msg.blocks) {
-            emit_phase_event!(self, ctx, AgentEvent::AssistantImageAppended { image });
+            emit_phase_event!(
+                self,
+                ctx,
+                AgentEvent::AssistantImageAppended {
+                    image,
+                    assistant_message_id,
+                }
+            );
         }
 
         if !callback_batch_pending && !pre_tool_effects.is_empty() {
+            // Pre-tool effects never append assistant messages (partitioned
+            // above), so there are no images to publish from them.
             self.apply_session_effects(&pre_tool_effects, Some(ctx.run_id))?;
         }
         let tool_batch_produced_output = tool_results.iter().any(|result| !result.is_error)
@@ -6685,17 +6722,26 @@ where
                 .push(Message::tool_results(tool_results.clone()));
         }
 
-        let assistant_image_events = assistant_image_events_from_effects(&post_tool_effects);
-        if !callback_batch_pending && !post_tool_effects.is_empty() {
-            self.apply_session_effects(&post_tool_effects, Some(ctx.run_id))?;
-        }
+        // Each effect-appended assistant message has its own occurrence id,
+        // minted when it is committed; its images are published under that
+        // id, never under the provider turn's.
+        let assistant_image_events = if !callback_batch_pending && !post_tool_effects.is_empty() {
+            self.apply_session_effects(&post_tool_effects, Some(ctx.run_id))?
+        } else {
+            Vec::new()
+        };
         if tool_batch_produced_output {
             *ctx.run_has_visible_or_actionable_output = true;
         }
-        if !callback_batch_pending {
-            for image in assistant_image_events {
-                emit_phase_event!(self, ctx, AgentEvent::AssistantImageAppended { image });
-            }
+        for (effect_message_id, image) in assistant_image_events {
+            emit_phase_event!(
+                self,
+                ctx,
+                AgentEvent::AssistantImageAppended {
+                    image,
+                    assistant_message_id: Some(effect_message_id),
+                }
+            );
         }
         // The tool-loop call's assistant message is committed (or staged
         // with its callback batch), so its turn is complete. Publishing it
@@ -6703,7 +6749,15 @@ where
         // event stream, where a consumer sees every agent-loop provider call
         // rather than only the one that closes the run.
         let CallingLlmToolTurnAccounting { stop_reason, usage } = accounting;
-        emit_phase_event!(self, ctx, AgentEvent::TurnCompleted { stop_reason, usage });
+        emit_phase_event!(
+            self,
+            ctx,
+            AgentEvent::TurnCompleted {
+                stop_reason,
+                usage,
+                assistant_message_id,
+            }
+        );
 
         self.observe_cancel_after_boundary_request(ctx.run_id)?;
 
@@ -6789,9 +6843,17 @@ where
         } = assistant;
         // Extraction turn response — validate against schema
         let assistant_image_events = assistant_image_events_from_blocks(&assistant_msg.blocks);
+        let assistant_message_id = assistant_msg.assistant_message_id;
         self.session.push(Message::BlockAssistant(assistant_msg));
         for image in assistant_image_events {
-            emit_phase_event!(self, ctx, AgentEvent::AssistantImageAppended { image });
+            emit_phase_event!(
+                self,
+                ctx,
+                AgentEvent::AssistantImageAppended {
+                    image,
+                    assistant_message_id,
+                }
+            );
         }
 
         // Drain turn boundary (fires TurnBoundary hooks, drains comms)
@@ -7007,9 +7069,20 @@ where
         // No tool calls - we're done with the agentic loop
         let final_text = assistant_text.clone();
         let assistant_image_events = assistant_image_events_from_blocks(&assistant_msg.blocks);
+        let assistant_message_id = assistant_msg.assistant_message_id;
         self.session.push(Message::BlockAssistant(assistant_msg));
+        // The run's result repeats this message's text on every completion
+        // path below (plain, extraction-required, cancel-after-boundary).
+        self.run_result_assistant_message = assistant_message_id;
         for image in assistant_image_events {
-            emit_phase_event!(self, ctx, AgentEvent::AssistantImageAppended { image });
+            emit_phase_event!(
+                self,
+                ctx,
+                AgentEvent::AssistantImageAppended {
+                    image,
+                    assistant_message_id,
+                }
+            );
         }
 
         self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
@@ -7057,6 +7130,7 @@ where
                 AgentEvent::TurnCompleted {
                     stop_reason,
                     usage: usage.clone(),
+                    assistant_message_id,
                 }
             );
 
@@ -7190,7 +7264,15 @@ where
 
         // Emit turn completed only after all terminal hooks accept
         // and boundary side effects are committed.
-        emit_phase_event!(self, ctx, AgentEvent::TurnCompleted { stop_reason, usage });
+        emit_phase_event!(
+            self,
+            ctx,
+            AgentEvent::TurnCompleted {
+                stop_reason,
+                usage,
+                assistant_message_id,
+            }
+        );
 
         // No extraction needed - complete normally
         let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
@@ -7217,7 +7299,17 @@ where
         let cause_kind = self.turn_terminal_cause_kind()?;
         match classify_terminal(&outcome, cause_kind) {
             SurfaceResultClass::Success => Ok(RunResult {
-                text: self.session.last_assistant_text().unwrap_or_default(),
+                text: {
+                    // The result repeats the latest text-bearing message,
+                    // which may predate this run (budget exhaustion or a
+                    // cancel before any commit); reference that exact row.
+                    let (text, assistant_message_id) = self
+                        .session
+                        .last_assistant_text_occurrence()
+                        .unwrap_or_default();
+                    self.run_result_assistant_message = assistant_message_id;
+                    text
+                },
                 session_id: self.session.id().clone(),
                 usage: self.reported_session_usage(),
                 run_usage: self.run_usage_delta(),
@@ -11500,6 +11592,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_repoll_reopens_the_same_assistant_message_and_parks_discarded_ids() {
+        let client = Arc::new(CompactionAwareLlmClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(Arc::new(DiscardingCompactor::new(1)))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        let first_answer = agent
+            .session()
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::BlockAssistant(assistant) => assistant.assistant_message_id,
+                _ => None,
+            })
+            .expect("the first answer carries an occurrence id");
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(256);
+        agent.run_with_events("second".into(), tx).await.unwrap();
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+
+        let opened = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                crate::event::AgentEvent::TurnStarted {
+                    assistant_message_id,
+                    ..
+                } => Some((
+                    index,
+                    assistant_message_id.expect("turn_started carries the id"),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            opened.len(),
+            2,
+            "the pre-dispatch compaction re-poll re-enters the same provider turn"
+        );
+        assert_eq!(
+            opened[0].1, opened[1].1,
+            "the re-poll keeps its reservation"
+        );
+        let reopened = opened[0].1;
+        assert_ne!(reopened, first_answer);
+        let compaction_completed = events
+            .iter()
+            .position(|event| matches!(event, crate::event::AgentEvent::CompactionCompleted { .. }))
+            .expect("compaction committed a rewrite");
+        assert!(opened[0].0 < compaction_completed && compaction_completed < opened[1].0);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            crate::event::AgentEvent::TurnCompleted {
+                assistant_message_id,
+                ..
+            } if *assistant_message_id == Some(reopened)
+        )));
+
+        let rows = agent
+            .session()
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::BlockAssistant(assistant) => Some(assistant.assistant_message_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![Some(reopened)],
+            "the discarded answer left the active transcript and the re-polled turn \
+             committed exactly once"
+        );
+        assert!(
+            agent.session().messages().iter().any(|message| matches!(
+                message,
+                Message::User(user) if user.transcript_role.is_compaction_summary()
+            )),
+            "the summary row is a user row and has no assistant id"
+        );
+        let compaction = agent
+            .session()
+            .validated_transcript_history_state()
+            .unwrap()
+            .expect("compaction recorded history")
+            .last_commit()
+            .expect("compaction commit")
+            .clone();
+        let parent_rows = agent
+            .session()
+            .transcript_revision_messages(&compaction.parent_revision)
+            .unwrap()
+            .expect("the compaction parent stays readable");
+        assert!(
+            parent_rows.iter().any(|message| matches!(
+                message,
+                Message::BlockAssistant(assistant)
+                    if assistant.assistant_message_id == Some(first_answer)
+            )),
+            "a discarded id stays readable in the parent revision"
+        );
+    }
+
+    #[tokio::test]
     async fn failed_compaction_attempt_uses_cadence_guard_before_retry() {
         let client = Arc::new(FailingCompactionLlmClient::new());
         let compactor = Arc::new(CadenceAwareFailingCompactor::new());
@@ -12443,7 +12641,7 @@ mod tests {
                     );
                     saw_completed = true;
                 }
-                crate::event::AgentEvent::TurnStarted { turn_number } => {
+                crate::event::AgentEvent::TurnStarted { turn_number, .. } => {
                     turns_started.push(turn_number);
                 }
                 crate::event::AgentEvent::TurnCompleted { .. } => turns_completed += 1,
@@ -16255,7 +16453,7 @@ mod tests {
         assert!(
             !initial_events.iter().any(|event| matches!(
                 event,
-                crate::event::AgentEvent::AssistantImageAppended { image }
+                crate::event::AgentEvent::AssistantImageAppended { image, .. }
                     if image.image_id
                         == crate::AssistantImageId::new(uuid::Uuid::from_u128(777))
             )),
@@ -16311,6 +16509,35 @@ mod tests {
                 false,
             )])
             .expect("the callback result should atomically publish the complete staged batch");
+        // The effect message's occurrence id is fixed when the batch is
+        // applied (it lives in the applied receipt), so an exact redelivery
+        // neither mints nor changes it.
+        let applied_receipt = agent
+            .session()
+            .metadata()
+            .get(crate::session::SESSION_PENDING_CALLBACK_BATCH_KEY)
+            .cloned()
+            .expect("applied callback receipt");
+        let staged_effect_id = applied_receipt["post_tool_messages"][0]["assistant_message_id"]
+            .as_str()
+            .map(str::to_string)
+            .expect("the staged effect message carries its occurrence id");
+        agent
+            .apply_pending_callback_tool_results(vec![ToolResult::new(
+                "callback-first".to_string(),
+                "approved".to_string(),
+                false,
+            )])
+            .expect("an exact redelivery is idempotent");
+        assert_eq!(
+            agent
+                .session()
+                .metadata()
+                .get(crate::session::SESSION_PENDING_CALLBACK_BATCH_KEY)
+                .cloned(),
+            Some(applied_receipt),
+            "redelivery must not re-mint the staged effect id"
+        );
 
         let messages = agent.session().messages();
         let tool_results_index = messages
@@ -16523,7 +16750,7 @@ mod tests {
                 .iter()
                 .filter(|event| matches!(
                     event,
-                    crate::event::AgentEvent::AssistantImageAppended { image }
+                    crate::event::AgentEvent::AssistantImageAppended { image, .. }
                         if image.image_id
                             == crate::AssistantImageId::new(uuid::Uuid::from_u128(777))
                 ))
@@ -16543,6 +16770,47 @@ mod tests {
                     })
             )
         }));
+        let committed_effect_id = agent
+            .session()
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::BlockAssistant(assistant)
+                    if assistant.blocks.iter().any(|block| {
+                        matches!(
+                            block,
+                            AssistantBlock::Text { text, .. } if text == "sibling effect"
+                        )
+                    }) =>
+                {
+                    assistant.assistant_message_id
+                }
+                _ => None,
+            })
+            .expect("the committed effect message keeps its occurrence id");
+        assert_eq!(committed_effect_id.to_string(), staged_effect_id);
+        let tool_turn_id = agent
+            .session()
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::BlockAssistant(assistant) if assistant.has_tool_calls() => {
+                    assistant.assistant_message_id
+                }
+                _ => None,
+            })
+            .expect("the tool-use turn carries its own id");
+        assert_ne!(tool_turn_id, committed_effect_id);
+        assert!(
+            resume_events.iter().any(|event| matches!(
+                event,
+                crate::event::AgentEvent::AssistantImageAppended {
+                    assistant_message_id,
+                    ..
+                } if *assistant_message_id == Some(committed_effect_id)
+            )),
+            "the resumed image is published under the effect message's id"
+        );
     }
 
     #[tokio::test]
@@ -17486,7 +17754,7 @@ mod tests {
 
         let mut image_events = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            if let crate::event::AgentEvent::AssistantImageAppended { image } = event {
+            if let crate::event::AgentEvent::AssistantImageAppended { image, .. } = event {
                 image_events.push(image);
             }
         }
@@ -17582,7 +17850,7 @@ mod tests {
                 "assistant image append event should follow tool-result events"
             );
             match &events[image_event_index] {
-                crate::event::AgentEvent::AssistantImageAppended { image } => {
+                crate::event::AgentEvent::AssistantImageAppended { image, .. } => {
                     assert_eq!(image.blob_ref.blob_id.as_str(), "image-blob");
                     assert_eq!(image.media_type.as_str(), "image/png");
                     assert_eq!(image.width, 1);
@@ -19430,7 +19698,10 @@ mod tests {
             Ok(None)
         }
 
-        async fn stream_response(&self) -> Result<super::LlmStreamResult, AgentError> {
+        async fn stream_response(
+            &self,
+            _assistant_message_id: crate::types::AssistantMessageId,
+        ) -> Result<super::LlmStreamResult, AgentError> {
             self.dispatches
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(text_response("ok after route stabilization"))
@@ -23848,7 +24119,7 @@ mod tests {
         let mut extraction_succeeded_count = 0;
         while let Ok(event) = rx.try_recv() {
             match event {
-                crate::event::AgentEvent::TextComplete { content } => {
+                crate::event::AgentEvent::TextComplete { content, .. } => {
                     text_complete_payloads.push(content);
                 }
                 crate::event::AgentEvent::TurnCompleted { .. } => {
@@ -24307,7 +24578,7 @@ mod tests {
         let mut saw_extraction_failed = false;
         while let Ok(event) = rx.try_recv() {
             match event {
-                crate::event::AgentEvent::TextComplete { content } => {
+                crate::event::AgentEvent::TextComplete { content, .. } => {
                     text_complete_payloads.push(content);
                 }
                 crate::event::AgentEvent::ExtractionFailed { .. } => {

@@ -189,6 +189,11 @@ export interface RunCompletedEvent {
   readonly usage: Usage;
   readonly terminalCauseKind?: TurnTerminalCauseKind;
   readonly identity?: TranscriptMessageIdentity;
+  /**
+   * The committed assistant message whose text `result` repeats (possibly a
+   * message from an earlier run). Absent when no such message carries an id.
+   */
+  readonly assistantMessageId?: string;
 }
 
 export interface ExtractionSucceededEvent {
@@ -280,19 +285,49 @@ export interface RunFailedEvent {
 // Turn / LLM events
 // ---------------------------------------------------------------------------
 
+/**
+ * A provider turn started. `assistantMessageId` is assigned here, before any
+ * delta. A repeated `turn_started` for an id that is still open (a re-poll
+ * after compaction) restarts that message's live buffer; the message is
+ * committed when the matching `turn_completed` arrives.
+ */
 export interface TurnStartedEvent {
   readonly type: "turn_started";
   readonly turnNumber: number;
+  /**
+   * Session-scoped occurrence id of the assistant message this event belongs
+   * to. It equals `assistantMessageId` on the committed `block_assistant`
+   * history row, so live rows join history by id, never by text or rank.
+   * Absent on events written before 0.8.45 and on output that is not a
+   * transcript assistant message.
+   */
+  readonly assistantMessageId?: string;
 }
 
 export interface TextDeltaEvent {
   readonly type: "text_delta";
   readonly delta: string;
+  /**
+   * Session-scoped occurrence id of the assistant message this event belongs
+   * to. It equals `assistantMessageId` on the committed `block_assistant`
+   * history row, so live rows join history by id, never by text or rank.
+   * Absent on events written before 0.8.45 and on output that is not a
+   * transcript assistant message.
+   */
+  readonly assistantMessageId?: string;
 }
 
 export interface TextCompleteEvent {
   readonly type: "text_complete";
   readonly content: string;
+  /**
+   * Session-scoped occurrence id of the assistant message this event belongs
+   * to. It equals `assistantMessageId` on the committed `block_assistant`
+   * history row, so live rows join history by id, never by text or rank.
+   * Absent on events written before 0.8.45 and on output that is not a
+   * transcript assistant message.
+   */
+  readonly assistantMessageId?: string;
 }
 
 export interface ToolCallRequestedEvent {
@@ -324,6 +359,14 @@ export interface TurnCompletedEvent {
   readonly type: "turn_completed";
   readonly stopReason?: StopReason;
   readonly usage?: Usage;
+  /**
+   * Session-scoped occurrence id of the assistant message this event belongs
+   * to. It equals `assistantMessageId` on the committed `block_assistant`
+   * history row, so live rows join history by id, never by text or rank.
+   * Absent on events written before 0.8.45 and on output that is not a
+   * transcript assistant message.
+   */
+  readonly assistantMessageId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -393,12 +436,31 @@ export interface BudgetWarningEvent {
 // Retry events
 // ---------------------------------------------------------------------------
 
+/**
+ * A provider request is being retried. Retries reuse `assistantMessageId`, so
+ * discard the live buffer held for that id and render the retry's deltas in
+ * its place.
+ */
 export interface RetryingEvent {
   readonly type: "retrying";
+  /** One-based retry attempt (`retry.plan.attempt`). */
   readonly attempt: number;
+  /** Configured retry ceiling (`retry.plan.max_retries`). */
   readonly maxAttempts: number;
+  /** Display diagnostic (`retry.failure.message`). */
   readonly error: string;
+  /** Selected delay before the retry (`retry.plan.selected_delay_ms`). */
   readonly delayMs: number;
+  /** The canonical typed retry schedule, when the wire carried one. */
+  readonly retry?: Readonly<Record<string, unknown>>;
+  /**
+   * Session-scoped occurrence id of the assistant message this event belongs
+   * to. It equals `assistantMessageId` on the committed `block_assistant`
+   * history row, so live rows join history by id, never by text or rank.
+   * Absent on events written before 0.8.45 and on output that is not a
+   * transcript assistant message.
+   */
+  readonly assistantMessageId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -750,6 +812,41 @@ function requireRecordField(raw: Record<string, unknown>, field: string): Record
     throw new Error(`${field} must be object`);
   }
   return value;
+}
+
+function assistantMessageIdField(raw: Record<string, unknown>): { assistantMessageId?: string } {
+  if (!hasOwn(raw, "assistant_message_id") || raw.assistant_message_id === null) return {};
+  return { assistantMessageId: requireStringField(raw, "assistant_message_id") };
+}
+
+/**
+ * Parse `retrying`. The canonical wire carries one typed `retry` schedule;
+ * the flat projection fields are derived from it. The flat legacy shape is
+ * still accepted when no schedule is present.
+ */
+function parseRetryingEvent(raw: Record<string, unknown>): RetryingEvent {
+  if (hasOwn(raw, "retry")) {
+    const retry = requireRecordField(raw, "retry");
+    const plan = requireRecordField(retry, "plan");
+    const failure = requireRecordField(retry, "failure");
+    return {
+      type: "retrying",
+      attempt: requireNumberField(plan, "attempt"),
+      maxAttempts: requireNumberField(plan, "max_retries"),
+      error: requireStringField(failure, "message"),
+      delayMs: requireNumberField(plan, "selected_delay_ms"),
+      retry,
+      ...assistantMessageIdField(raw),
+    };
+  }
+  return {
+    type: "retrying",
+    attempt: requireNumberField(raw, "attempt"),
+    maxAttempts: requireNumberField(raw, "max_attempts"),
+    error: requireStringField(raw, "error"),
+    delayMs: requireNumberField(raw, "delay_ms"),
+    ...assistantMessageIdField(raw),
+  };
 }
 
 function transcriptIdentityField(raw: Record<string, unknown>): { identity?: TranscriptMessageIdentity } {
@@ -1452,6 +1549,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         usage: parseUsage(raw.usage),
         ...terminalCauseKindField(raw),
         ...transcriptIdentityField(raw),
+        ...assistantMessageIdField(raw),
       };
     case "extraction_succeeded": {
       const rawWarnings = Array.isArray(raw.schema_warnings) ? raw.schema_warnings : undefined;
@@ -1493,11 +1591,11 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
 
     // Turn / LLM
     case "turn_started":
-      return { type, turnNumber: requireNumberField(raw, "turn_number") };
+      return { type, turnNumber: requireNumberField(raw, "turn_number"), ...assistantMessageIdField(raw) };
     case "text_delta":
-      return { type, delta: requireStringField(raw, "delta") };
+      return { type, delta: requireStringField(raw, "delta"), ...assistantMessageIdField(raw) };
     case "text_complete":
-      return { type, content: requireStringField(raw, "content") };
+      return { type, content: requireStringField(raw, "content"), ...assistantMessageIdField(raw) };
     case "tool_call_requested":
       return {
         type,
@@ -1526,6 +1624,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         // right, and rejecting the event would let an accounting gap erase a
         // completed turn.
         ...(raw.usage !== undefined && raw.usage !== null ? { usage: parseUsage(raw.usage) } : {}),
+        ...assistantMessageIdField(raw),
       };
 
     // Tool execution
@@ -1559,7 +1658,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
 
     // Retry
     case "retrying":
-      return { type, attempt: requireNumberField(raw, "attempt"), maxAttempts: requireNumberField(raw, "max_attempts"), error: requireStringField(raw, "error"), delayMs: requireNumberField(raw, "delay_ms") };
+      return parseRetryingEvent(raw);
 
     // Hooks
     case "hook_started":

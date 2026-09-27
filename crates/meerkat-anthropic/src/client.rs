@@ -426,6 +426,7 @@ fn project_anthropic_replay_messages(messages: &[Message]) -> Result<Vec<Message
                         blocks,
                         stop_reason: assistant.stop_reason,
                         identity: assistant.identity.clone(),
+                        assistant_message_id: assistant.assistant_message_id,
                         created_at: assistant.created_at,
                     }))
                 }
@@ -2935,6 +2936,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         });
 
         let request = LlmRequest::new(
@@ -3050,6 +3052,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         });
 
         let request = LlmRequest::new(
@@ -3094,6 +3097,7 @@ mod tests {
             stop_reason: Some(StopReason::ToolUse),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         });
 
         let request = LlmRequest::new(
@@ -4100,6 +4104,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         });
 
         let request = LlmRequest::new(
@@ -4145,6 +4150,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         });
 
         let request = LlmRequest::new(
@@ -4530,6 +4536,111 @@ mod tests {
             "Expected Done event from message_delta stop_reason"
         );
         assert!(done_is_success, "Expected successful Done outcome");
+    }
+
+    fn wire_message_id(uuid: &str) -> meerkat_core::AssistantMessageId {
+        serde_json::from_value(serde_json::json!(uuid)).expect("assistant message id")
+    }
+
+    /// History with a committed assistant row that carries an occurrence id,
+    /// and the same history with the id stripped.
+    fn history_with_and_without_assistant_ids(
+        id: meerkat_core::AssistantMessageId,
+    ) -> (Vec<Message>, Vec<Message>) {
+        let mut prior = meerkat_core::BlockAssistantMessage::new(
+            vec![meerkat_core::AssistantBlock::Text {
+                text: "prior answer".to_string(),
+                meta: None,
+            }],
+            meerkat_core::StopReason::EndTurn,
+        );
+        prior.assistant_message_id = Some(id);
+        let with_ids = vec![
+            Message::User(UserMessage::text("first".to_string())),
+            Message::BlockAssistant(prior.clone()),
+            Message::User(UserMessage::text("again".to_string())),
+        ];
+        prior.assistant_message_id = None;
+        let without_ids = vec![
+            with_ids[0].clone(),
+            Message::BlockAssistant(prior),
+            with_ids[2].clone(),
+        ];
+        (with_ids, without_ids)
+    }
+
+    #[tokio::test]
+    async fn adapter_attempt_stamps_anthropic_live_events_and_keeps_request_bytes() {
+        use meerkat_core::AgentLlmClient as _;
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"thinking","thinking":""}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Plan the search."}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"signature_delta","signature":"sig-1"}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search"}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"query\":\"meerkat\"}"}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","title":"Result","url":"https://example.com"}]}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Found it."}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":5},"delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, bodies, server) = spawn_anthropic_replay_capture_server(payload).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let adapter = Arc::new(meerkat_llm_core::LlmClientAdapter::with_event_channel(
+            Arc::new(client),
+            "claude-sonnet-4-5".to_string(),
+            tx,
+        ));
+        let history_id = wire_message_id("0190f5c2-4a1e-7c3d-8e2f-00000000aa01");
+        let turn_id = wire_message_id("0190f5c2-4a1e-7c3d-8e2f-00000000aa02");
+        let (with_ids, without_ids) = history_with_and_without_assistant_ids(history_id);
+
+        for messages in [with_ids, without_ids] {
+            let attempt = Arc::clone(&adapter)
+                .prepare_request_attempt(Arc::new(messages), Arc::from([]), 1024, None, None)
+                .unwrap();
+            attempt.stream_response(turn_id).await.unwrap();
+        }
+        server.abort();
+
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let kinds = events
+            .iter()
+            .map(meerkat_core::agent_event_type)
+            .collect::<std::collections::BTreeSet<_>>();
+        for kind in [
+            "reasoning_delta",
+            "reasoning_complete",
+            "server_tool_content",
+            "text_delta",
+        ] {
+            assert!(kinds.contains(kind), "{kind} published: {kinds:?}");
+        }
+        assert!(
+            events
+                .iter()
+                .all(|event| event.assistant_message_id() == Some(turn_id)),
+            "every live event names the provider turn's message"
+        );
+
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(
+            bodies[0], bodies[1],
+            "assistant message ids never change the provider request"
+        );
+        assert!(!bodies[0].to_string().contains(&history_id.to_string()));
     }
 
     #[tokio::test]

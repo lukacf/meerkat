@@ -6129,6 +6129,9 @@ class MeerkatClient:
                     f"{context}: unsupported transcript_role {transcript_role!r}",
                 )
         elif role == "block_assistant":
+            MeerkatClient._validate_nullable_response_string(
+                row, "assistant_message_id", context
+            )
             blocks = MeerkatClient._require_present_list_field(
                 row,
                 "blocks",
@@ -8050,6 +8053,9 @@ class MeerkatClient:
             stop_reason=data.get("stop_reason"),
             interaction_id=data.get("interaction_id"),
             run_id=data.get("run_id"),
+            assistant_message_id=data.get("assistant_message_id")
+            if role == "block_assistant"
+            else None,
             prompt_version=prompt_version,
             instruction_activation=instruction_activation,
             blocks=[

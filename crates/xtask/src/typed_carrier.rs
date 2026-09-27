@@ -76,6 +76,23 @@ pub const TYPED_CARRIER_REGISTRY: &[CarrierEntry] = &[
     // on every declaration (keyed by type ident, not path).
     // crates/meerkat-core/src/comms.rs + crates/meerkat-contracts/src/wire/comms.rs
     ("CommsCommandRequest", "intent", "CommsPeerRequestIntent"),
+    // Assistant message occurrence identity: the core-minted typed id rides
+    // the canonical assistant row, its wire history projection, and every
+    // message-scoped live event. It must never degrade to a bare string or a
+    // content-derived value.
+    // crates/meerkat-core/src/types.rs, crates/meerkat-core/src/event.rs,
+    // crates/meerkat-contracts/src/wire/session.rs
+    (
+        "BlockAssistantMessage",
+        "assistant_message_id",
+        "AssistantMessageId",
+    ),
+    ("AgentEvent", "assistant_message_id", "AssistantMessageId"),
+    (
+        "WireSessionMessage",
+        "assistant_message_id",
+        "AssistantMessageId",
+    ),
     // BY-DESIGN opaque — NOT enforced and MUST NOT be migrated. These three
     // carry arbitrary provider-native knobs and are a deliberate §3 opaque
     // pass-through at the durable/config boundary: `provider_params` only

@@ -9252,6 +9252,7 @@ mod tests {
             None,
             AgentEvent::TextDelta {
                 delta: "hello".to_string(),
+                assistant_message_id: None,
             },
         );
 
@@ -9288,6 +9289,7 @@ mod tests {
             None,
             AgentEvent::TextDelta {
                 delta: "hello".to_string(),
+                assistant_message_id: None,
             },
         );
 
@@ -9356,6 +9358,7 @@ mod tests {
             None,
             AgentEvent::TextDelta {
                 delta: "hello".to_string(),
+                assistant_message_id: None,
             },
         );
 

@@ -3969,6 +3969,7 @@ capabilities = [{capability_values}]
                 Some("mob-web-unit".to_string()),
                 meerkat_core::AgentEvent::TextDelta {
                     delta: "hello".to_string(),
+                    assistant_message_id: None,
                 },
             ),
         };
@@ -4501,6 +4502,7 @@ capabilities = [{capability_values}]
             None,
             meerkat_core::AgentEvent::TextDelta {
                 delta: "first".to_string(),
+                assistant_message_id: None,
             },
         ))
         .unwrap_or(0);
@@ -4510,6 +4512,7 @@ capabilities = [{capability_values}]
             None,
             meerkat_core::AgentEvent::TextDelta {
                 delta: "second".to_string(),
+                assistant_message_id: None,
             },
         ))
         .unwrap_or(0);

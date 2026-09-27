@@ -6446,6 +6446,7 @@ export interface WireSessionMessageUser {
 }
 
 export interface WireSessionMessageBlockAssistant {
+  assistant_message_id?: string | null;
   blocks: WireAssistantBlock[];
   created_at: string;
   interaction_id?: string | null;

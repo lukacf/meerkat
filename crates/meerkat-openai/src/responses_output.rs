@@ -333,6 +333,127 @@ mod tests {
         )
     }
 
+    fn wire_message_id(uuid: &str) -> meerkat_core::AssistantMessageId {
+        serde_json::from_value(json!(uuid)).expect("assistant message id")
+    }
+
+    /// Responses stub that records every request body it receives.
+    async fn capturing_stub(
+        events: Vec<Value>,
+    ) -> (
+        OpenAiClient,
+        Arc<std::sync::Mutex<Vec<Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mut payload = String::new();
+        for event in events {
+            write!(payload, "data: {event}\n\n").expect("formatting into a String cannot fail");
+        }
+        type Captured = (String, Arc<std::sync::Mutex<Vec<Value>>>);
+        async fn respond(
+            State((payload, bodies)): State<Captured>,
+            axum::Json(body): axum::Json<Value>,
+        ) -> impl axum::response::IntoResponse {
+            bodies.lock().unwrap().push(body);
+            ([("content-type", "text/event-stream")], payload)
+        }
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/responses", post(respond))
+            .with_state((payload, Arc::clone(&bodies)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            OpenAiClient::new_with_base_url("unused".into(), url),
+            bodies,
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn adapter_attempt_stamps_responses_live_events_and_keeps_request_bytes() {
+        let reasoning = json!({"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Plan"}]});
+        let search = json!({"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"meerkat"}});
+        let answer = message("msg_1", "final_answer", "Found it.");
+        let events = vec![
+            json!({"type":"response.created","response":{"id":"resp_1"}}),
+            json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"Plan"}),
+            json!({"type":"response.reasoning_summary.done","item":reasoning}),
+            json!({"type":"response.web_search_call.searching","item_id":"ws_1","output_index":1}),
+            json!({"type":"response.output_item.added","output_index":2,"item":answer}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","delta":"Found it."}),
+            json!({"type":"response.completed","response":{"id":"resp_1","status":"completed",
+                "output":[reasoning, search, answer],
+                "usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}),
+        ];
+        let (client, bodies, server) = capturing_stub(events).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let adapter = Arc::new(LlmClientAdapter::with_event_channel(
+            Arc::new(client),
+            "gpt-5.5".into(),
+            tx,
+        ));
+        let history_id = wire_message_id("0190f5c2-4a1e-7c3d-8e2f-00000000bb01");
+        let turn_id = wire_message_id("0190f5c2-4a1e-7c3d-8e2f-00000000bb02");
+        let mut prior = meerkat_core::BlockAssistantMessage::new(
+            vec![meerkat_core::AssistantBlock::Text {
+                text: "prior answer".into(),
+                meta: None,
+            }],
+            meerkat_core::StopReason::EndTurn,
+        );
+        prior.assistant_message_id = Some(history_id);
+        let with_ids = vec![
+            Message::User(UserMessage::text("first")),
+            Message::BlockAssistant(prior.clone()),
+            Message::User(UserMessage::text("again")),
+        ];
+        prior.assistant_message_id = None;
+        let without_ids = vec![
+            with_ids[0].clone(),
+            Message::BlockAssistant(prior),
+            with_ids[2].clone(),
+        ];
+
+        for messages in [with_ids, without_ids] {
+            let attempt = Arc::clone(&adapter)
+                .prepare_request_attempt(Arc::new(messages), Arc::from([]), 1000, None, None)
+                .unwrap();
+            attempt.stream_response(turn_id).await.unwrap();
+        }
+        server.abort();
+
+        let published = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let kinds = published
+            .iter()
+            .map(meerkat_core::agent_event_type)
+            .collect::<std::collections::BTreeSet<_>>();
+        for kind in [
+            "reasoning_delta",
+            "reasoning_complete",
+            "server_tool_content",
+            "text_delta",
+        ] {
+            assert!(kinds.contains(kind), "{kind} published: {kinds:?}");
+        }
+        assert!(
+            published
+                .iter()
+                .all(|event| event.assistant_message_id() == Some(turn_id)),
+            "every live event names the provider turn's message"
+        );
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(
+            bodies[0], bodies[1],
+            "assistant message ids never change the provider request"
+        );
+        assert!(!bodies[0].to_string().contains(&history_id.to_string()));
+    }
+
     fn message(id: &str, phase: &str, text: &str) -> Value {
         json!({"type":"message","id":id,"role":"assistant","phase":phase,
             "content":[{"type":"output_text","text":text,"annotations":[]}]})
@@ -377,7 +498,7 @@ mod tests {
         assert_eq!(result.usage().output_tokens, 7);
         let mut visible = String::new();
         while let Ok(event) = rx.try_recv() {
-            if let meerkat_core::AgentEvent::TextDelta { delta } = event {
+            if let meerkat_core::AgentEvent::TextDelta { delta, .. } = event {
                 visible.push_str(&delta);
             }
         }

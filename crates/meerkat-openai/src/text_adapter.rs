@@ -588,6 +588,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         })
     }
 
@@ -811,6 +812,7 @@ mod tests {
             stop_reason: Some(StopReason::ToolUse),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
         });
         let tool_results = Message::ToolResults {
             results: vec![ToolResult::new(

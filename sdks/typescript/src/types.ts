@@ -285,6 +285,13 @@ export interface SessionMessage {
   readonly stopReason?: string;
   readonly interactionId?: string;
   readonly runId?: string;
+  /**
+   * Session-scoped occurrence id of a `block_assistant` row, equal to the
+   * `assistantMessageId` its live events carried. Join live rows to history
+   * by this id; it implies nothing about position. Absent on rows committed
+   * before 0.8.45, realtime rows, and rows a rewrite or fork edit replaced.
+   */
+  readonly assistantMessageId?: string;
   readonly promptVersion?: SystemPromptVersionIdentity;
   readonly instructionActivation?: InstructionActivationIdentity;
   readonly blocks: readonly SessionAssistantBlock[];

@@ -1738,6 +1738,47 @@ mod tests {
     }
 
     #[test]
+    fn compaction_retains_assistant_message_ids_exactly_and_rejects_tampering() {
+        let occurrence = crate::types::AssistantMessageId::mint();
+        let mut kept = crate::types::BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "kept answer".to_string(),
+                meta: None,
+            }],
+            crate::types::StopReason::EndTurn,
+        );
+        kept.assistant_message_id = Some(occurrence);
+        let discarded_row = Message::User(UserMessage::text("old question"));
+        let kept = Message::BlockAssistant(kept);
+        let source = vec![discarded_row.clone(), kept.clone()];
+        let (summary_message, summary) = valid_summary("summary");
+        let discarded = vec![CompactionDiscard::new(0, discarded_row)];
+
+        let rebuilt = vec![summary_message.clone(), kept.clone()];
+        let retained = vec![CompactionRetained::new(1, 1, kept.clone())];
+        validate_compaction_rebuild(
+            &source, &rebuilt, &summary, "summary", &retained, &discarded,
+        )
+        .expect("a retained row with its exact id is a valid rebuild");
+
+        // A rebuild that re-mints, strips, or swaps the retained id is not the
+        // same occurrence and must be refused.
+        for tampered_id in [None, Some(crate::types::AssistantMessageId::mint())] {
+            let mut tampered = kept.clone();
+            if let Message::BlockAssistant(assistant) = &mut tampered {
+                assistant.assistant_message_id = tampered_id;
+            }
+            let rebuilt = vec![summary_message.clone(), tampered.clone()];
+            let retained = vec![CompactionRetained::new(1, 1, tampered)];
+            let error = validate_compaction_rebuild(
+                &source, &rebuilt, &summary, "summary", &retained, &discarded,
+            )
+            .expect_err("a retained row whose id changed is rejected");
+            assert!(matches!(error, CompactionError::InvalidRebuild(_)));
+        }
+    }
+
+    #[test]
     fn compaction_rebuild_rejects_source_claimed_as_retained_and_discarded() {
         let first = Message::User(UserMessage::text("first"));
         let second = Message::User(UserMessage::text("second"));

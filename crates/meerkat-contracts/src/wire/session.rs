@@ -1301,6 +1301,10 @@ impl TranscriptRewriteMessage {
                     blocks,
                     stop_reason: stop_reason.map(Into::into),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+                    // Occurrence identity is minted only by the agent loop;
+                    // rewrite ingress never accepts one (an echoed history
+                    // key is ignored by serde).
+                    assistant_message_id: None,
                     created_at: transcript_message_timestamp(created_at)?,
                 }))
             }
@@ -1500,6 +1504,13 @@ pub enum WireSessionMessage {
         interaction_id: Option<InteractionId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<RunId>,
+        /// Session-scoped occurrence id of this assistant message, equal to
+        /// the `assistant_message_id` its live events carried. Join live rows
+        /// to history by this id; it implies nothing about position. Absent
+        /// on messages committed before 0.8.45, on realtime rows, and on rows
+        /// a rewrite or fork edit replaced.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<meerkat_core::AssistantMessageId>,
         created_at: String,
     },
     #[serde(rename = "tool_results")]
@@ -1568,6 +1579,7 @@ impl From<Message> for WireSessionMessage {
                 stop_reason: message.stop_reason.map(Into::into),
                 interaction_id: message.identity.interaction_id,
                 run_id: message.identity.run_id,
+                assistant_message_id: message.assistant_message_id,
                 created_at: message.created_at.to_rfc3339(),
             },
             Message::ToolResults {
@@ -1719,6 +1731,47 @@ mod tests {
     use super::*;
     use meerkat_core::time_compat::SystemTime;
     use meerkat_core::{BlockAssistantMessage, Message, SystemMessage, UserMessage};
+
+    #[test]
+    fn history_projection_carries_assistant_message_id_and_rewrite_ignores_it() {
+        let id: meerkat_core::AssistantMessageId =
+            serde_json::from_value(serde_json::json!("0190f5c2-4a1e-7c3d-8e2f-00000000ee01"))
+                .unwrap();
+        let mut assistant = BlockAssistantMessage::new(
+            vec![meerkat_core::AssistantBlock::Text {
+                text: "answer".to_string(),
+                meta: None,
+            }],
+            meerkat_core::StopReason::EndTurn,
+        );
+        assistant.assistant_message_id = Some(id);
+        let wire = WireSessionMessage::from(Message::BlockAssistant(assistant.clone()));
+        let encoded = serde_json::to_value(&wire).unwrap();
+        assert_eq!(encoded["assistant_message_id"], id.to_string());
+        let decoded: WireSessionMessage = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(matches!(
+            decoded,
+            WireSessionMessage::BlockAssistant {
+                assistant_message_id: Some(decoded_id),
+                ..
+            } if decoded_id == id
+        ));
+
+        // A row without an id keeps the 0.8.44 wire shape exactly.
+        assistant.assistant_message_id = None;
+        let legacy =
+            serde_json::to_value(WireSessionMessage::from(Message::BlockAssistant(assistant)))
+                .unwrap();
+        assert!(legacy.get("assistant_message_id").is_none());
+
+        // A client that echoes a history row back into a rewrite cannot
+        // author occurrence identity: the key is ignored.
+        let echoed: TranscriptRewriteMessage = serde_json::from_value(encoded).unwrap();
+        let Message::BlockAssistant(rewritten) = echoed.into_core().unwrap() else {
+            panic!("block assistant rewrite row");
+        };
+        assert_eq!(rewritten.assistant_message_id, None);
+    }
 
     #[test]
     fn test_fork_session_params_roundtrip_typed_replacement() {
@@ -2379,6 +2432,7 @@ mod tests {
                     interaction_id: None,
                     run_id: None,
                     created_at: "2026-04-27T00:00:03Z".to_string(),
+                    assistant_message_id: None,
                 },
                 WireSessionMessage::ToolResults {
                     results: vec![WireToolResult {

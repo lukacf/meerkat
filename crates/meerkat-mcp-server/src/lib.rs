@@ -9327,6 +9327,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         session.push(meerkat_core::types::Message::User(
@@ -9341,6 +9342,7 @@ mod tests {
                 stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
             },
         ));
         store

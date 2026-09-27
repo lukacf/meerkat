@@ -223,6 +223,7 @@ mod tests {
             extraction_required: extraction,
             usage: crate::Usage::default().into(),
             terminal_cause_kind: None,
+            assistant_message_id: None,
         }
     }
 
@@ -433,12 +434,16 @@ mod tests {
             classifier
                 .observe(&AgentEvent::TextDelta {
                     delta: "streaming".to_string(),
+                    assistant_message_id: None,
                 })
                 .is_none()
         );
         assert!(
             classifier
-                .observe(&AgentEvent::TurnStarted { turn_number: 1 })
+                .observe(&AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None
+                })
                 .is_none()
         );
     }

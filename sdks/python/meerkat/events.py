@@ -161,6 +161,9 @@ class RunCompleted(Event):
     structured_output: Any = None
     extraction_required: bool = False
     identity: TranscriptMessageIdentity | None = None
+    # The committed assistant message whose text ``result`` repeats (possibly
+    # one from an earlier run). ``None`` when no such message carries an id.
+    assistant_message_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,16 +286,31 @@ class RunFailed(Event):
 
 @dataclass(frozen=True, slots=True)
 class TurnStarted(Event):
-    """A new LLM turn has begun."""
+    """A new LLM turn has begun.
+
+    ``assistant_message_id`` is assigned here, before any delta, and equals the
+    ``assistant_message_id`` of the ``block_assistant`` history row this turn
+    commits. Join live rows to history by this id, never by text or rank. A
+    repeated ``turn_started`` for an id that is still open (a re-poll after
+    compaction) restarts that message's live buffer; the message is committed
+    when the matching ``turn_completed`` arrives. ``None`` on events written
+    before 0.8.45.
+    """
 
     turn_number: int = 0
+    assistant_message_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class TextDelta(Event):
-    """An incremental text chunk from the LLM."""
+    """An incremental text chunk from the LLM.
+
+    ``assistant_message_id`` names the assistant message the chunk belongs to;
+    ``None`` on output that is not a transcript assistant message.
+    """
 
     delta: str = ""
+    assistant_message_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,6 +318,7 @@ class TextComplete(Event):
     """Full assistant text for the current turn."""
 
     content: str = ""
+    assistant_message_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +354,7 @@ class TurnCompleted(Event):
 
     stop_reason: str | None = None
     usage: Usage | None = None
+    assistant_message_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -420,12 +440,21 @@ class BudgetWarning(Event):
 
 @dataclass(frozen=True, slots=True)
 class Retrying(Event):
-    """An LLM request is being retried after a transient failure."""
+    """An LLM request is being retried after a transient failure.
+
+    The wire carries one typed ``retry`` schedule; ``attempt`` (``plan.attempt``),
+    ``max_attempts`` (``plan.max_retries``), ``error`` (``failure.message``) and
+    ``delay_ms`` (``plan.selected_delay_ms``) are projections of it. Retries
+    reuse ``assistant_message_id``, so discard the live buffer held for that id
+    and render the retry's deltas in its place.
+    """
 
     attempt: int = 0
     max_attempts: int = 0
     error: str = ""
     delay_ms: int = 0
+    retry: dict[str, Any] | None = None
+    assistant_message_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1309,6 +1338,44 @@ def _parse_run_input(value: Any) -> RunInput:
     return cast(RunInput, value)
 
 
+def _parse_retry_projection(raw: dict[str, Any]) -> dict[str, Any]:
+    """Project ``retrying`` onto its flat fields from the typed schedule.
+
+    The canonical wire shape is ``{"type": "retrying", "retry": {"plan": ...,
+    "failure": ...}}``; the flat legacy shape is accepted when no schedule is
+    present.
+    """
+    retry = raw.get("retry")
+    if retry is None:
+        _require_number(raw, "attempt")
+        _require_number(raw, "max_attempts")
+        _require_str(raw, "error")
+        _require_number(raw, "delay_ms")
+        return {
+            "attempt": raw["attempt"],
+            "max_attempts": raw["max_attempts"],
+            "error": raw["error"],
+            "delay_ms": raw["delay_ms"],
+        }
+    if not isinstance(retry, dict):
+        raise ValueError("retry must be object")
+    plan = retry.get("plan")
+    failure = retry.get("failure")
+    if not isinstance(plan, dict) or not isinstance(failure, dict):
+        raise ValueError("retry.plan and retry.failure must be objects")
+    _require_number(plan, "attempt")
+    _require_number(plan, "max_retries")
+    _require_number(plan, "selected_delay_ms")
+    _require_str(failure, "message")
+    return {
+        "attempt": plan["attempt"],
+        "max_attempts": plan["max_retries"],
+        "error": failure["message"],
+        "delay_ms": plan["selected_delay_ms"],
+        "retry": retry,
+    }
+
+
 def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
     required: dict[str, tuple[str, ...]] = {
         "run_started": ("session_id", "input"),
@@ -1331,7 +1398,8 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "compaction_completed": ("summary_tokens", "messages_before", "messages_after"),
         "compaction_failed": ("reason",),
         "budget_warning": ("budget_type", "used", "limit", "percent"),
-        "retrying": ("attempt", "max_attempts", "error", "delay_ms"),
+        # `retrying` is validated separately: the canonical wire carries one
+        # typed `retry` schedule, the flat legacy shape is still accepted.
         "hook_started": ("hook_id", "point"),
         "hook_completed": ("hook_id", "point", "duration_ms"),
         "hook_failed": ("hook_id", "point", "error"),
@@ -1340,6 +1408,12 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "interaction_complete": ("interaction_id", "result"),
         "interaction_failed": ("interaction_id",),
     }
+    if raw.get("assistant_message_id") is not None and not isinstance(
+        raw.get("assistant_message_id"), str
+    ):
+        raise ValueError("assistant_message_id must be string")
+    if event_type == "retrying":
+        _parse_retry_projection(raw)
     if event_type == "interaction_failed":
         _parse_interaction_failure_reason(raw.get("reason"))
     if event_type == "stream_truncated":
@@ -1533,6 +1607,8 @@ def parse_event(raw: dict[str, Any]) -> Event:
         if cls is RunFailed and kwargs["error_report"] is not None:
             kwargs["error_class"] = kwargs["error_report"].class_
             kwargs["error"] = kwargs["error_report"].message
+        if cls is Retrying:
+            kwargs.update(_parse_retry_projection(raw))
         return cls(**kwargs)
     except (AssertionError, KeyError, TypeError, ValueError):
         return _malformed(raw, "malformed known event")

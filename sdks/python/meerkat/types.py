@@ -847,6 +847,12 @@ class SessionMessage:
     stop_reason: str | None = None
     interaction_id: str | None = None
     run_id: str | None = None
+    # Session-scoped occurrence id of a ``block_assistant`` row, equal to the
+    # ``assistant_message_id`` its live events carried. Join live rows to
+    # history by this id; it implies nothing about position. ``None`` on rows
+    # committed before 0.8.45, realtime rows, and rows a rewrite or fork edit
+    # replaced.
+    assistant_message_id: str | None = None
     prompt_version: SystemPromptVersionIdentity | None = None
     instruction_activation: InstructionActivationIdentity | None = None
     blocks: list[SessionAssistantBlock] = field(default_factory=list)

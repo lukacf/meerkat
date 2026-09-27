@@ -321,6 +321,7 @@ fn wire_session_history_roundtrip() {
                 interaction_id: None,
                 run_id: None,
                 created_at: "2026-04-27T00:00:02Z".to_string(),
+                assistant_message_id: None,
             },
             WireSessionMessage::ToolResults {
                 results: vec![meerkat_contracts::WireToolResult {
@@ -357,7 +358,10 @@ fn wire_event_envelope_shape() {
     let wire = WireEvent {
         session_id: SessionId::new(),
         sequence: 42,
-        event: AgentEvent::TurnStarted { turn_number: 1 },
+        event: AgentEvent::TurnStarted {
+            turn_number: 1,
+            assistant_message_id: None,
+        },
         contract_version: ContractVersion::CURRENT,
     };
     let value = serde_json::to_value(&wire).unwrap();
@@ -445,6 +449,7 @@ fn agent_event_all_variants_roundtrip() {
             }
             .into(),
             terminal_cause_kind: None,
+            assistant_message_id: None,
         },
         AgentEvent::RunFailed {
             identity: Default::default(),
@@ -477,18 +482,25 @@ fn agent_event_all_variants_roundtrip() {
             message: "denied".to_string(),
             payload: None,
         },
-        AgentEvent::TurnStarted { turn_number: 1 },
+        AgentEvent::TurnStarted {
+            turn_number: 1,
+            assistant_message_id: None,
+        },
         AgentEvent::ReasoningDelta {
             delta: "thinking...".to_string(),
+            assistant_message_id: None,
         },
         AgentEvent::ReasoningComplete {
             content: "I think therefore I am".to_string(),
+            assistant_message_id: None,
         },
         AgentEvent::TextDelta {
             delta: "chunk".to_string(),
+            assistant_message_id: None,
         },
         AgentEvent::TextComplete {
             content: "full text".to_string(),
+            assistant_message_id: None,
         },
         AgentEvent::ToolCallRequested {
             id: "tc1".to_string(),
@@ -508,6 +520,7 @@ fn agent_event_all_variants_roundtrip() {
                 "wire-test",
                 Usage::default(),
             )),
+            assistant_message_id: None,
         },
         AgentEvent::ToolExecutionStarted {
             id: "tc2".to_string(),
@@ -566,6 +579,7 @@ fn agent_event_all_variants_roundtrip() {
                     budget_capped: false,
                 },
             },
+            assistant_message_id: None,
         },
         AgentEvent::SkillsResolved {
             skills: vec![meerkat_core::skills::SkillKey::builtin(
@@ -702,6 +716,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             extraction_required: false,
             usage: Usage::default().into(),
             terminal_cause_kind: None,
+            assistant_message_id: None,
         },
         AgentEvent::RunFailed {
             identity: Default::default(),
@@ -734,18 +749,25 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             message: "denied".to_string(),
             payload: None,
         },
-        AgentEvent::TurnStarted { turn_number: 1 },
+        AgentEvent::TurnStarted {
+            turn_number: 1,
+            assistant_message_id: None,
+        },
         AgentEvent::ReasoningDelta {
             delta: "think".to_string(),
+            assistant_message_id: None,
         },
         AgentEvent::ReasoningComplete {
             content: "done".to_string(),
+            assistant_message_id: None,
         },
         AgentEvent::TextDelta {
             delta: "chunk".to_string(),
+            assistant_message_id: None,
         },
         AgentEvent::TextComplete {
             content: "done".to_string(),
+            assistant_message_id: None,
         },
         AgentEvent::ToolCallRequested {
             id: "tool-1".to_string(),
@@ -765,6 +787,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
                 "wire-test",
                 Usage::default(),
             )),
+            assistant_message_id: None,
         },
         AgentEvent::ToolExecutionStarted {
             id: "tool-1".to_string(),
@@ -823,6 +846,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
                     budget_capped: false,
                 },
             },
+            assistant_message_id: None,
         },
         AgentEvent::SkillsResolved {
             skills: vec![],
@@ -877,6 +901,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
                 revised_prompt: RevisedPromptDisposition::NotRequested,
                 meta: ProviderImageMetadata::NotEmitted,
             },
+            assistant_message_id: None,
         },
         AgentEvent::background_job_completed(
             "j_123",

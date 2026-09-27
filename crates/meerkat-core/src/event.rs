@@ -2103,6 +2103,13 @@ pub enum AgentEvent {
         usage: CumulativeUsage,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_cause_kind: Option<TurnTerminalCauseKind>,
+        /// The committed assistant message whose text `result` repeats, so a
+        /// consumer can bind the result to its history row without comparing
+        /// text. It may name a message committed by an earlier run (a run that
+        /// completed without committing a new text-bearing message repeats the
+        /// latest one). Absent when no such message carries an id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<crate::types::AssistantMessageId>,
     },
 
     /// Structured-output extraction succeeded after a completed main run.
@@ -2196,20 +2203,55 @@ pub enum AgentEvent {
     },
 
     // === LLM Interaction ===
-    /// New turn started (calling LLM)
-    TurnStarted { turn_number: u32 },
+    /// New turn started (calling LLM).
+    ///
+    /// `assistant_message_id` is minted here, before any delta, and names the
+    /// assistant message this provider turn will commit. A repeated
+    /// `turn_started` for an id that is still open (a re-poll after
+    /// compaction) restarts that message's live buffer. The message is
+    /// committed when the matching `turn_completed` arrives; an id opened here
+    /// with no `turn_completed` before the run ends was never committed.
+    TurnStarted {
+        turn_number: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<crate::types::AssistantMessageId>,
+    },
 
-    /// Streaming reasoning/thinking from the model
-    ReasoningDelta { delta: String },
+    /// Streaming reasoning/thinking from the model.
+    ///
+    /// `assistant_message_id` names the message this delta belongs to. It is
+    /// absent on deltas that are not transcript assistant output (for example
+    /// the compaction summary call) and on clients that do not route through
+    /// the request-attempt path.
+    ReasoningDelta {
+        delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<crate::types::AssistantMessageId>,
+    },
 
     /// Reasoning/thinking complete for this block
-    ReasoningComplete { content: String },
+    ReasoningComplete {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<crate::types::AssistantMessageId>,
+    },
 
-    /// Streaming text from the model
-    TextDelta { delta: String },
+    /// Streaming text from the model.
+    ///
+    /// `assistant_message_id` has the same meaning as on
+    /// [`AgentEvent::ReasoningDelta`].
+    TextDelta {
+        delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<crate::types::AssistantMessageId>,
+    },
 
     /// Text generation complete for this turn
-    TextComplete { content: String },
+    TextComplete {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<crate::types::AssistantMessageId>,
+    },
 
     /// Provider-executed tool content surfaced during a model turn.
     ServerToolContent {
@@ -2221,10 +2263,20 @@ pub enum AgentEvent {
         /// codegen emits a typed `kind` field instead of an inlined enum.
         kind: ServerToolKind,
         content: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<crate::types::AssistantMessageId>,
     },
 
     /// Canonical assistant image block appended to transcript history.
-    AssistantImageAppended { image: AssistantImageEvent },
+    ///
+    /// `assistant_message_id` names the committed assistant message that
+    /// carries the image: the provider turn's message, or the separate message
+    /// a tool effect appended (which has no `turn_started`).
+    AssistantImageAppended {
+        image: AssistantImageEvent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<crate::types::AssistantMessageId>,
+    },
 
     /// Model requested a tool call
     ToolCallRequested {
@@ -2277,6 +2329,10 @@ pub enum AgentEvent {
         stop_reason: StopReason,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<crate::types::TurnUsage>,
+        /// The committed assistant message of this provider turn, equal to
+        /// the id its [`AgentEvent::TurnStarted`] opened.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<crate::types::AssistantMessageId>,
     },
 
     // === Tool Execution ===
@@ -2370,7 +2426,15 @@ pub enum AgentEvent {
     /// The typed schedule is the single owner of the retry facts (failure
     /// kind/provider/diagnostic and plan attempt/delay); display strings are
     /// derived from it, never carried beside it.
-    Retrying { retry: LlmRetrySchedule },
+    ///
+    /// `assistant_message_id` names the provider turn being retried. Retries
+    /// reuse the id, so a consumer discards the live buffer it holds for that
+    /// id and renders the retry's deltas in its place.
+    Retrying {
+        retry: LlmRetrySchedule,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<crate::types::AssistantMessageId>,
+    },
 
     // === Skill Events ===
     /// Skills resolved for this turn.
@@ -2615,6 +2679,62 @@ pub struct BoundaryAppendsDiscarded {
 }
 
 impl AgentEvent {
+    /// The assistant message this event belongs to or references, when the
+    /// event carries one.
+    ///
+    /// Message-scoped live events (`turn_started`, `reasoning_delta`,
+    /// `reasoning_complete`, `text_delta`, `text_complete`,
+    /// `server_tool_content`, `assistant_image_appended`, `turn_completed`,
+    /// `retrying`) name the message they stream or close; `run_completed`
+    /// names the message whose text its `result` repeats. Every other event,
+    /// and every event written before 0.8.45, returns `None`.
+    #[must_use]
+    pub fn assistant_message_id(&self) -> Option<crate::types::AssistantMessageId> {
+        match self {
+            Self::TurnStarted {
+                assistant_message_id,
+                ..
+            }
+            | Self::ReasoningDelta {
+                assistant_message_id,
+                ..
+            }
+            | Self::ReasoningComplete {
+                assistant_message_id,
+                ..
+            }
+            | Self::TextDelta {
+                assistant_message_id,
+                ..
+            }
+            | Self::TextComplete {
+                assistant_message_id,
+                ..
+            }
+            | Self::ServerToolContent {
+                assistant_message_id,
+                ..
+            }
+            | Self::AssistantImageAppended {
+                assistant_message_id,
+                ..
+            }
+            | Self::TurnCompleted {
+                assistant_message_id,
+                ..
+            }
+            | Self::Retrying {
+                assistant_message_id,
+                ..
+            }
+            | Self::RunCompleted {
+                assistant_message_id,
+                ..
+            } => *assistant_message_id,
+            _ => None,
+        }
+    }
+
     pub fn background_job_completed(
         job_id: impl Into<String>,
         display_name: impl Into<String>,
@@ -2752,7 +2872,7 @@ pub fn format_verbose_event_with_config(
     config: &VerboseEventConfig,
 ) -> Option<String> {
     match event {
-        AgentEvent::TurnStarted { turn_number } => {
+        AgentEvent::TurnStarted { turn_number, .. } => {
             Some(format!("\n━━━ Turn {} ━━━", turn_number + 1))
         }
         AgentEvent::ToolCallRequested { name, args, .. } => {
@@ -2774,7 +2894,9 @@ pub fn format_verbose_event_with_config(
                 "  {status} {name} ({duration_ms}ms): {result_preview}"
             ))
         }
-        AgentEvent::TurnCompleted { stop_reason, usage } => Some(match usage {
+        AgentEvent::TurnCompleted {
+            stop_reason, usage, ..
+        } => Some(match usage {
             Some(usage) => format!(
                 "  ── Turn complete: {stop_reason:?}, {}",
                 turn_usage_summary(usage)
@@ -2807,7 +2929,7 @@ pub fn format_verbose_event_with_config(
             ),
             request_usage,
         )),
-        AgentEvent::TextComplete { content } => {
+        AgentEvent::TextComplete { content, .. } => {
             if content.is_empty() {
                 None
             } else {
@@ -2815,7 +2937,7 @@ pub fn format_verbose_event_with_config(
                 Some(format!("  💬 Response: {preview}"))
             }
         }
-        AgentEvent::ReasoningComplete { content } => {
+        AgentEvent::ReasoningComplete { content, .. } => {
             if content.is_empty() {
                 None
             } else {
@@ -2823,7 +2945,7 @@ pub fn format_verbose_event_with_config(
                 Some(format!("  💭 Thinking: {preview}"))
             }
         }
-        AgentEvent::Retrying { retry } => Some(format!(
+        AgentEvent::Retrying { retry, .. } => Some(format!(
             "  ⟳ Retry {}/{}: {} (waiting {}ms)",
             retry.plan.attempt,
             retry.plan.max_retries,
@@ -2973,6 +3095,51 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_scoped_events_are_backward_compatible_and_carry_the_id() {
+        // 0.8.44 payloads carry no identity; they parse to `None` and
+        // re-serialize to the exact same bytes.
+        for legacy in [
+            r#"{"type":"turn_started","turn_number":3}"#,
+            r#"{"type":"text_delta","delta":"he"}"#,
+            r#"{"type":"text_complete","content":"hello"}"#,
+            r#"{"type":"reasoning_delta","delta":"hm"}"#,
+            r#"{"type":"reasoning_complete","content":"hm"}"#,
+            r#"{"type":"turn_completed","stop_reason":"end_turn"}"#,
+        ] {
+            let event: AgentEvent = serde_json::from_str(legacy).expect(legacy);
+            assert_eq!(event.assistant_message_id(), None, "{legacy}");
+            assert_eq!(serde_json::to_string(&event).unwrap(), legacy);
+        }
+
+        let id = crate::types::AssistantMessageId::mint();
+        let stamped = AgentEvent::TextDelta {
+            delta: "he".to_string(),
+            assistant_message_id: Some(id),
+        };
+        let encoded = serde_json::to_value(&stamped).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "text_delta",
+                "delta": "he",
+                "assistant_message_id": id.to_string(),
+            })
+        );
+        let decoded: AgentEvent = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.assistant_message_id(), Some(id));
+
+        assert_eq!(
+            AgentEvent::ToolExecutionStarted {
+                id: "call-1".to_string(),
+                name: "lookup".to_string(),
+            }
+            .assistant_message_id(),
+            None,
+            "events outside a message never report one"
+        );
+    }
     use crate::retry::{LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule};
     use crate::skills::SkillName;
     use crate::types::{ContentBlock, Usage};
@@ -3375,8 +3542,11 @@ mod tests {
 
     #[test]
     fn transcript_rewrite_commit_ignores_other_event_kinds() {
-        let payload = serde_json::to_string(&AgentEvent::TurnStarted { turn_number: 1 })
-            .expect("payload serializes");
+        let payload = serde_json::to_string(&AgentEvent::TurnStarted {
+            turn_number: 1,
+            assistant_message_id: None,
+        })
+        .expect("payload serializes");
         let payload = serde_json::value::RawValue::from_string(payload).expect("payload is json");
         assert!(
             transcript_rewrite_commits_from_payload(&payload)
@@ -3768,8 +3938,12 @@ mod tests {
             },
             AgentEvent::TextDelta {
                 delta: "chunk".to_string(),
+                assistant_message_id: None,
             },
-            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
             AgentEvent::TurnCompleted {
                 stop_reason: StopReason::EndTurn,
                 usage: Some(crate::types::TurnUsage::host_declared(
@@ -3777,6 +3951,7 @@ mod tests {
                     "event-test",
                     Usage::default(),
                 )),
+                assistant_message_id: None,
             },
             AgentEvent::ToolCallRequested {
                 id: "tc_1".to_string(),
@@ -3814,6 +3989,7 @@ mod tests {
                         budget_capped: false,
                     },
                 },
+                assistant_message_id: None,
             },
             AgentEvent::RunCompleted {
                 identity: Default::default(),
@@ -3831,6 +4007,7 @@ mod tests {
                 }
                 .into(),
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             },
             AgentEvent::RunFailed {
                 identity: Default::default(),
@@ -4106,7 +4283,10 @@ mod tests {
                 budget_capped: false,
             },
         };
-        let event = AgentEvent::Retrying { retry: schedule };
+        let event = AgentEvent::Retrying {
+            retry: schedule,
+            assistant_message_id: None,
+        };
 
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["retry"]["failure"]["kind"], "rate_limited");
@@ -4340,6 +4520,7 @@ mod tests {
                 extraction_required: false,
                 usage: Usage::default().into(),
                 terminal_cause_kind: None,
+                assistant_message_id: None,
             },
             AgentEvent::RunFailed {
                 identity: Default::default(),
@@ -4372,18 +4553,25 @@ mod tests {
                 message: "nope".to_string(),
                 payload: None,
             },
-            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
             AgentEvent::ReasoningDelta {
                 delta: "think".to_string(),
+                assistant_message_id: None,
             },
             AgentEvent::ReasoningComplete {
                 content: "done".to_string(),
+                assistant_message_id: None,
             },
             AgentEvent::TextDelta {
                 delta: "chunk".to_string(),
+                assistant_message_id: None,
             },
             AgentEvent::TextComplete {
                 content: "done".to_string(),
+                assistant_message_id: None,
             },
             AgentEvent::AssistantImageAppended {
                 image: AssistantImageEvent {
@@ -4398,6 +4586,7 @@ mod tests {
                     revised_prompt: crate::RevisedPromptDisposition::NotRequested,
                     meta: crate::ProviderImageMetadata::NotEmitted,
                 },
+                assistant_message_id: None,
             },
             AgentEvent::ToolCallRequested {
                 id: "tool-1".to_string(),
@@ -4417,6 +4606,7 @@ mod tests {
                     "event-test",
                     Usage::default(),
                 )),
+                assistant_message_id: None,
             },
             AgentEvent::ToolExecutionStarted {
                 id: "tool-1".to_string(),
@@ -4472,6 +4662,7 @@ mod tests {
                         budget_capped: false,
                     },
                 },
+                assistant_message_id: None,
             },
             AgentEvent::SkillsResolved {
                 skills: vec![],
@@ -4557,6 +4748,7 @@ mod tests {
                 revised_prompt: crate::RevisedPromptDisposition::NotRequested,
                 meta: crate::ProviderImageMetadata::NotEmitted,
             },
+            assistant_message_id: None,
         };
 
         let json = serde_json::to_value(&event).unwrap();
@@ -4566,7 +4758,7 @@ mod tests {
 
         let roundtrip: AgentEvent = serde_json::from_value(json).unwrap();
         match roundtrip {
-            AgentEvent::AssistantImageAppended { image } => {
+            AgentEvent::AssistantImageAppended { image, .. } => {
                 assert_eq!(image.blob_ref.blob_id.as_str(), "generated-image");
                 assert_eq!(image.width, 1024);
                 assert_eq!(image.height, 1024);
@@ -4597,6 +4789,7 @@ mod tests {
             }],
             AgentEvent::TextDelta {
                 delta: "hello".to_string(),
+                assistant_message_id: None,
             },
         );
 
@@ -4622,7 +4815,7 @@ mod tests {
         assert_eq!(roundtrip.scope_id, "mob:writer");
         assert!(matches!(
             roundtrip.event,
-            AgentEvent::TextDelta { ref delta } if delta == "hello"
+            AgentEvent::TextDelta { ref delta, .. } if delta == "hello"
         ));
     }
 
@@ -4652,6 +4845,7 @@ mod tests {
             Some("mob_1".to_string()),
             AgentEvent::TextDelta {
                 delta: "hello".to_string(),
+                assistant_message_id: None,
             },
         );
         let value = serde_json::to_value(&envelope).expect("serialize envelope");
@@ -4663,7 +4857,7 @@ mod tests {
         assert!(parsed.timestamp_ms > 0);
         assert!(matches!(
             parsed.payload,
-            AgentEvent::TextDelta { delta } if delta == "hello"
+            AgentEvent::TextDelta { delta, .. } if delta == "hello"
         ));
     }
 
@@ -4690,8 +4884,24 @@ mod tests {
 
     #[test]
     fn test_compare_event_envelopes_total_order() {
-        let mut a = EventEnvelope::new("a", 1, None, AgentEvent::TurnStarted { turn_number: 1 });
-        let mut b = EventEnvelope::new("a", 2, None, AgentEvent::TurnStarted { turn_number: 2 });
+        let mut a = EventEnvelope::new(
+            "a",
+            1,
+            None,
+            AgentEvent::TurnStarted {
+                turn_number: 1,
+                assistant_message_id: None,
+            },
+        );
+        let mut b = EventEnvelope::new(
+            "a",
+            2,
+            None,
+            AgentEvent::TurnStarted {
+                turn_number: 2,
+                assistant_message_id: None,
+            },
+        );
         a.timestamp_ms = 10;
         b.timestamp_ms = 10;
         assert_eq!(compare_event_envelopes(&a, &b), Ordering::Less);
@@ -4765,6 +4975,7 @@ mod tests {
             format_verbose_event(&AgentEvent::TurnCompleted {
                 stop_reason: StopReason::ToolUse,
                 usage: Some(anthropic.clone()),
+                assistant_message_id: None,
             })
             .as_deref(),
             Some("  ── Turn complete: ToolUse, 4510 tokens (4420 in / 90 out, 4300 cached)")

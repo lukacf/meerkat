@@ -417,10 +417,29 @@ the continuation variant does not fabricate a prompt. `RunFailed` accepts
 the current `error_report` and derives its `error_class` and `error` display
 fields from that report.
 
-The handwritten `Retrying` and `HookFailed` parsers still expect legacy flat
-fields. Current wire events carry `retry` and `reason`, respectively, so those
-payloads arrive as `UnknownEvent(type="malformed_event")` with raw data
-preserved. These are remaining SDK parser gaps, not alternate wire contracts.
+`Retrying` parses the current wire shape, which carries one typed `retry`
+schedule: `attempt`, `max_attempts`, `error` and `delay_ms` are projections of
+`retry.plan.attempt`, `retry.plan.max_retries`, `retry.failure.message` and
+`retry.plan.selected_delay_ms`, and the schedule itself is kept in `retry`.
+The flat legacy shape is still accepted. The handwritten `HookFailed` parser
+still expects the legacy flat `error` field; current wire events carry
+`reason`, so those payloads arrive as `UnknownEvent(type="malformed_event")`
+with raw data preserved. That is a remaining SDK parser gap, not an alternate
+wire contract.
+
+### Assistant message identity
+
+`TurnStarted`, `TextDelta`, `TextComplete`, `TurnCompleted` and `Retrying`
+carry an optional `assistant_message_id`. It equals `assistant_message_id` on
+the `block_assistant` `SessionMessage` that history returns for the same
+message, so join live rows to history by that id, never by text or position.
+`RunCompleted.assistant_message_id` names the message whose text `result`
+repeats. The raw-preserving `UnknownEvent` payloads of `reasoning_delta`,
+`reasoning_complete`, `server_tool_content` and `assistant_image_appended`
+carry the same key in `event.data`. The value is `None` on data written before
+0.8.45. See
+[assistant message identity](/reference/session-contracts#assistant-message-identity)
+for retry, compaction and rewrite semantics.
 
 ## Capability and error model
 

@@ -5064,6 +5064,7 @@ export class MeerkatClient {
       return;
     }
     if (role === "block_assistant") {
+      MeerkatClient.validateOptionalStringField(raw, "assistant_message_id", context);
       MeerkatClient.requireRecordArray(raw.blocks, `${context}: blocks`).forEach(
         (block, index) =>
           MeerkatClient.validateWireAssistantBlock(
@@ -7313,6 +7314,10 @@ export class MeerkatClient {
       stopReason: data.stop_reason != null ? String(data.stop_reason) : undefined,
       interactionId: data.interaction_id != null ? String(data.interaction_id) : undefined,
       runId: data.run_id != null ? String(data.run_id) : undefined,
+      assistantMessageId:
+        role === "block_assistant" && data.assistant_message_id != null
+          ? String(data.assistant_message_id)
+          : undefined,
       promptVersion,
       instructionActivation,
       // System-notice blocks have their own generated union and remain

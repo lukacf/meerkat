@@ -7758,6 +7758,7 @@ async fn session_task<A: SessionAgent>(
                             &source,
                             AgentEvent::TextComplete {
                                 content: text_content,
+                                assistant_message_id: None,
                             },
                         );
                         control.publish_session_event(envelope).await;
@@ -7772,6 +7773,7 @@ async fn session_task<A: SessionAgent>(
                         AgentEvent::TurnCompleted {
                             stop_reason,
                             usage: usage_for_event,
+                            assistant_message_id: None,
                         },
                     );
                     control.publish_session_event(envelope).await;
@@ -7812,6 +7814,7 @@ async fn session_task<A: SessionAgent>(
                                     &source,
                                     AgentEvent::TextComplete {
                                         content: text.clone(),
+                                        assistant_message_id: None,
                                     },
                                 );
                                 control.publish_session_event(envelope).await;
@@ -7822,6 +7825,7 @@ async fn session_task<A: SessionAgent>(
                                 AgentEvent::TurnCompleted {
                                     stop_reason: *stop_reason,
                                     usage: usage.clone(),
+                                    assistant_message_id: None,
                                 },
                             );
                             control.publish_session_event(envelope).await;

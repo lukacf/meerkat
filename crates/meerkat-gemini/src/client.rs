@@ -278,6 +278,7 @@ fn project_gemini_replay_messages(messages: &[Message]) -> Result<Vec<Message>, 
                         blocks,
                         stop_reason: assistant.stop_reason,
                         identity: assistant.identity.clone(),
+                        assistant_message_id: assistant.assistant_message_id,
                         created_at: assistant.created_at,
                     }))
                 }
@@ -3317,6 +3318,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adapter_attempt_stamps_gemini_live_events_and_keeps_request_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::AgentLlmClient as _;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let payload = [
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"Plan the search.","thought":true}]}}]}"#,
+            "",
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"grounded"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["meerkat runtime"],"groundingChunks":[{"web":{"uri":"https://example.com","title":"Example"}}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4}}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, handle) =
+            spawn_gemini_stream_stub("gemini-3.5-flash", payload, seen.clone()).await;
+        let client = GeminiClient::new_with_base_url("test-key".to_string(), base_url);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let adapter = Arc::new(meerkat_llm_core::LlmClientAdapter::with_event_channel(
+            Arc::new(client),
+            "gemini-3.5-flash".to_string(),
+            tx,
+        ));
+        let history_id: meerkat_core::AssistantMessageId =
+            serde_json::from_value(serde_json::json!("0190f5c2-4a1e-7c3d-8e2f-00000000dd01"))?;
+        let turn_id: meerkat_core::AssistantMessageId =
+            serde_json::from_value(serde_json::json!("0190f5c2-4a1e-7c3d-8e2f-00000000dd02"))?;
+        let mut prior = BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "prior answer".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        );
+        prior.assistant_message_id = Some(history_id);
+        let with_ids = vec![
+            Message::User(UserMessage::text("first".to_string())),
+            Message::BlockAssistant(prior.clone()),
+            Message::User(UserMessage::text("again".to_string())),
+        ];
+        prior.assistant_message_id = None;
+        let without_ids = vec![
+            with_ids[0].clone(),
+            Message::BlockAssistant(prior),
+            with_ids[2].clone(),
+        ];
+
+        for messages in [with_ids, without_ids] {
+            let attempt = Arc::clone(&adapter).prepare_request_attempt(
+                Arc::new(messages),
+                Arc::from([]),
+                1024,
+                None,
+                None,
+            )?;
+            attempt.stream_response(turn_id).await?;
+        }
+        handle.abort();
+
+        let published = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let kinds = published
+            .iter()
+            .map(meerkat_core::agent_event_type)
+            .collect::<std::collections::BTreeSet<_>>();
+        for kind in [
+            "reasoning_delta",
+            "reasoning_complete",
+            "server_tool_content",
+            "text_delta",
+        ] {
+            assert!(kinds.contains(kind), "{kind} published: {kinds:?}");
+        }
+        assert!(
+            published
+                .iter()
+                .all(|event| event.assistant_message_id() == Some(turn_id)),
+            "every live event names the provider turn's message"
+        );
+        let bodies = seen.lock().expect("seen mutex");
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(
+            bodies[0], bodies[1],
+            "assistant message ids never change the provider request"
+        );
+        assert!(!bodies[0].to_string().contains(&history_id.to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stream_emits_grounding_metadata_as_server_tool_content()
     -> Result<(), Box<dyn std::error::Error>> {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -3770,6 +3857,7 @@ mod tests {
                     stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
                 Message::ToolResults {
                     results: vec![meerkat_core::ToolResult::new(
@@ -5931,6 +6019,7 @@ mod tests {
                     stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
                 Message::ToolResults {
                     results: vec![meerkat_core::ToolResult::new(
@@ -6210,6 +6299,7 @@ mod tests {
                     stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
+                    assistant_message_id: None,
                 }),
                 Message::ToolResults {
                     results: vec![meerkat_core::ToolResult::with_blocks(

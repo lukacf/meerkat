@@ -39,7 +39,7 @@ async fn process_events(
     let mut tool_calls = 0usize;
     while let Some(event) = event_rx.recv().await {
         match &event {
-            AgentEvent::TextDelta { delta } => {
+            AgentEvent::TextDelta { delta, .. } => {
                 text_bytes += delta.len();
                 output.write_all(delta.as_bytes())?;
                 output.flush()?;

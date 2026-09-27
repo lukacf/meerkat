@@ -5224,6 +5224,8 @@ struct FaultInjectedMobEventStore {
     fail_clear: AtomicBool,
     poll_calls: AtomicU64,
     replay_calls: AtomicU64,
+    stall_replay: AtomicBool,
+    replay_released: tokio::sync::Notify,
 }
 
 /// SQLite-backed store that can faithfully model a committed append whose
@@ -5322,6 +5324,8 @@ impl FaultInjectedMobEventStore {
             fail_clear: AtomicBool::new(false),
             poll_calls: AtomicU64::new(0),
             replay_calls: AtomicU64::new(0),
+            stall_replay: AtomicBool::new(false),
+            replay_released: tokio::sync::Notify::new(),
         }
     }
 
@@ -5335,6 +5339,17 @@ impl FaultInjectedMobEventStore {
 
     fn fail_clear(&self) {
         self.fail_clear.store(true, Ordering::Relaxed);
+    }
+
+    /// Park every `replay_all` until [`Self::release_replay`], modelling a
+    /// full event-log replay that outlasts a caller's deadline.
+    fn stall_replay(&self) {
+        self.stall_replay.store(true, Ordering::SeqCst);
+    }
+
+    fn release_replay(&self) {
+        self.stall_replay.store(false, Ordering::SeqCst);
+        self.replay_released.notify_waiters();
     }
 
     fn allow_clear(&self) {
@@ -5642,6 +5657,14 @@ impl MobEventStore for FaultInjectedMobEventStore {
 
     async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
         self.replay_calls.fetch_add(1, Ordering::Relaxed);
+        loop {
+            // Created before the check so a release between the two is seen.
+            let released = self.replay_released.notified();
+            if !self.stall_replay.load(Ordering::SeqCst) {
+                break;
+            }
+            released.await;
+        }
         Ok(self.events.read().await.clone())
     }
 

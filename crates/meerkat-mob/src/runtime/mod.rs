@@ -211,6 +211,7 @@ mod builder;
 pub mod composition;
 pub mod conditions;
 mod delegation;
+mod delivery_wait;
 mod disposal;
 mod edge_locks;
 mod event_pump;
@@ -377,6 +378,11 @@ pub use delegation::{
     DelegationExecutionRequest, DelegationExecutionService, DelegationExecutionSource,
     DelegationMemberOptions, DelegationParentContext, DelegationTerminalizedExecution,
     DelegationTurnTerminal, LiveDelegationTerminalEvidence, render_bounded_delegation_task,
+};
+pub use delivery_wait::{
+    DeliveryNotTerminalCause, DeliveryTerminalRecord, DeliveryTerminalResolution,
+    DeliveryTerminalWait, DeliveryTerminalWaitError, DeliveryTerminalWaitReport,
+    DeliveryUnknownCause,
 };
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};

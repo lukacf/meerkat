@@ -3537,6 +3537,20 @@ pub enum DurableBoundedWorkState {
         input_id: meerkat_core::InputId,
         result: Result<BoundedTurnResult, BoundedTurnFailure>,
     },
+    /// The input is terminal through a runtime transition that stages no
+    /// completion receipt (superseded or coalesced by a later admission,
+    /// consumed on accept, cancelled by member-host boot revival, or
+    /// abandoned at the stage-attempt cap after a failed batch start), so no
+    /// run result exists for it. The same row reads as
+    /// `DeliveryTerminalResolution::WithoutRun` from
+    /// `MobHandle::wait_bounded_work_for_identity_with_delivery_identity`.
+    TerminalWithoutRun {
+        input_id: meerkat_core::InputId,
+        terminal: meerkat_runtime::InputTerminalOutcome,
+        /// The last run the input was staged into, if any; it did not answer
+        /// the input.
+        last_run_id: Option<meerkat_core::lifecycle::RunId>,
+    },
     Broken {
         input_id: Option<meerkat_core::InputId>,
         reason: String,
@@ -3861,7 +3875,7 @@ fn bounded_exact_turn_result(
     }
 }
 
-fn bounded_runtime_turn_result(
+pub(super) fn bounded_runtime_turn_result(
     outcome: meerkat_runtime::completion::CompletionOutcome,
     admitted_session_id: &SessionId,
     session_id: SessionId,
@@ -11062,7 +11076,7 @@ impl MobHandle {
     // Work lane
     // -----------------------------------------------------------------
 
-    async fn durable_bounded_member_state(
+    pub(super) async fn durable_bounded_member_state(
         &self,
         identity: &AgentIdentity,
     ) -> Result<DurableBoundedMemberState, MobError> {
@@ -11239,6 +11253,19 @@ impl MobHandle {
                     work: DurableBoundedWorkState::InFlight {
                         input_id,
                         phase: stored.seed.phase,
+                    },
+                });
+            }
+            Err(meerkat_runtime::RuntimeDriverError::InputTerminalWithoutReceipt {
+                terminal,
+                ..
+            }) => {
+                return Ok(DurableBoundedWorkRecovery {
+                    member,
+                    work: DurableBoundedWorkState::TerminalWithoutRun {
+                        input_id,
+                        terminal,
+                        last_run_id: stored.seed.last_run_id.clone(),
                     },
                 });
             }

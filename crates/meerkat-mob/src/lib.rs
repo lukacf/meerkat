@@ -317,6 +317,11 @@ pub use runtime::{
     LiveBridgeOperationStartError, LiveBridgeOperationTerminal, LiveBridgeOperationTerminalError,
     LiveBridgeOperationTerminalFuture,
 };
+pub use runtime::{
+    DeliveryNotTerminalCause, DeliveryTerminalRecord, DeliveryTerminalResolution,
+    DeliveryTerminalWait, DeliveryTerminalWaitError, DeliveryTerminalWaitReport,
+    DeliveryUnknownCause,
+};
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{
     FlowTurnExecutor, FlowTurnFailureDisposition, FlowTurnOutcome, FlowTurnTicket,

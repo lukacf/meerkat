@@ -86,10 +86,13 @@ env:
   MEERKAT_GCP_BUILDBUDDY_DOWN_MODE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_DOWN_MODE || 'stopped' }}
   # 50 minutes from control-plane start, sized from the first full-fresh runs
   # (2026-09-22/23): executors up + lane setup ~2 min; the cold `//...`
-  # prebuild needs ~12-13 min of Bazel time and gates the native lanes; the
-  # SDK suites are bounded by the Web suite, whose wasm-pack build plus tests
-  # ran 1912 s on its own executor. 1200 s only ever held while the skipped
-  # `changed-paths` mode reported unrun lanes as passed.
+  # prebuild needs ~12-13 min of Bazel time (18 min on the v0.8.44 tag run)
+  # and gates only the Bazel-native clippy lane that reads its cache; the
+  # cold Cargo-equivalent unit and integration-fast lanes (~22-25 min each)
+  # start with the executors instead; the SDK suites are bounded by the Web
+  # suite, whose wasm-pack build plus tests ran 1912 s on its own executor.
+  # 1200 s only ever held while the skipped `changed-paths` mode reported
+  # unrun lanes as passed.
   MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "3000"
   MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS: "3000"
   MEERKAT_BUILDBUDDY_EXECUTOR_POOL: ${{ vars.MEERKAT_BUILDBUDDY_EXECUTOR_POOL || 'meerkat-ci' }}
@@ -310,26 +313,52 @@ jobs:
       - name: Verify RPC surface alignment
         run: make verify-rpc-surface-alignment
 
-      - name: Select native lanes
-        id: lanes
-        shell: bash
-        run: |
-          {
-            echo "lanes<<LANES"
-            printf '%s\n' \
-              cargo-all-features-clippy \
-              test-unit \
-              integration-fast
-            echo "LANES"
-          } >> "${GITHUB_OUTPUT}"
-
+      # The Bazel-native all-features clippy lane reads the warm `//...`
+      # prebuild cache, so it waits for the prebuild. The Cargo-equivalent
+      # test lanes read nothing from it and run in native-cargo-submit.
       - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
         with:
           group: gcp
           profile: submitter
           mode: ${{ inputs.mode || 'full-fresh' }}
+          batch_jobs: "1"
+          lanes: |
+            cargo-all-features-clippy
+
+  native-cargo-submit:
+    name: Native Cargo-equivalent submitter
+    # The unit and integration-fast lanes each run cold nested Cargo on one
+    # heavy executor (//tools/buildbuddy:*_cargo_equivalent_test) and read
+    # nothing the `//...` prebuild produces, so they start with the
+    # executors, in parallel with the prebuild and with each other. Queued
+    # behind the prebuild and a second submitter slot, integration-fast
+    # started ~28 min into the 50-min SLO and still ran at the deadline on
+    # the v0.8.43 and v0.8.44 tag runs (it needs ~22-25 min cold).
+    needs: [control-plane-up, executors-up]
+    runs-on: ubuntu-latest
+    # Above the SLO left when it starts, so the SLO watchdog, not a GitHub
+    # timeout, stops an overrunning batch.
+    timeout-minutes: 60
+    env:
+      BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
+      BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}
+      BUILDBUDDY_ENDPOINT: ${{ needs.control-plane-up.outputs.grpc_url }}
+      CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
+        with:
+          group: gcp-native-cargo
+          profile: submitter
+          mode: ${{ inputs.mode || 'full-fresh' }}
           batch_jobs: "2"
-          lanes: ${{ steps.lanes.outputs.lanes }}
+          lanes: |
+            test-unit
+            integration-fast
 
   governance-submit:
     name: Governance submitter
@@ -558,6 +587,7 @@ jobs:
       - prebuild-submit
       - static-submit
       - native-submit
+      - native-cargo-submit
       - governance-submit
       - wasm-feature-changes
       - wasm-sdk-submit
@@ -617,6 +647,7 @@ jobs:
       - prebuild-submit
       - static-submit
       - native-submit
+      - native-cargo-submit
       - governance-submit
       - wasm-feature-changes
       - wasm-sdk-submit

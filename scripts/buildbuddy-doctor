@@ -433,6 +433,7 @@ if job_has_line .github/workflows/nightly.yml gcp-buildbuddy 'name: GCP BuildBud
   job_has_line .github/workflows/buildbuddy.yml static-submit 'group: gcp-static' &&
   job_has_line .github/workflows/buildbuddy.yml static-submit 'fmt-static' &&
   job_has_line .github/workflows/buildbuddy.yml native-submit 'name: Native submitter' &&
+  job_has_line .github/workflows/buildbuddy.yml native-cargo-submit 'name: Native Cargo-equivalent submitter' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'name: Governance submitter' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-feature-changes 'name: WASM, SDK, and feature change detection' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-sdk-submit 'name: SDK suites submitter' &&
@@ -443,6 +444,9 @@ if job_has_line .github/workflows/nightly.yml gcp-buildbuddy 'name: GCP BuildBud
   job_has_line .github/workflows/buildbuddy.yml feature-submit 'name: Feature matrix submitter' &&
   job_has_line .github/workflows/buildbuddy.yml audit-submit 'name: Security audit submitter' &&
   job_has_line .github/workflows/buildbuddy.yml native-submit 'needs: [control-plane-up, executors-up, prebuild-submit]' &&
+  job_has_line .github/workflows/buildbuddy.yml native-cargo-submit 'needs: [control-plane-up, executors-up]' &&
+  ! job_has_line .github/workflows/buildbuddy.yml native-cargo-submit 'prebuild-submit' &&
+  job_has_line .github/workflows/buildbuddy.yml native-cargo-submit 'timeout-minutes: 60' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'needs: [control-plane-up, executors-up]' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-feature-changes 'needs: [control-plane-up]' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-sdk-submit 'needs: [control-plane-up, executors-up, wasm-feature-changes]' &&
@@ -451,6 +455,7 @@ if job_has_line .github/workflows/nightly.yml gcp-buildbuddy 'name: GCP BuildBud
   job_has_line .github/workflows/buildbuddy.yml feature-submit 'needs: [control-plane-up, executors-up, wasm-feature-changes]' &&
   job_has_line .github/workflows/buildbuddy.yml audit-submit 'needs: [control-plane-up, executors-up, wasm-feature-changes]' &&
   job_has_line .github/workflows/buildbuddy.yml native-submit 'CI_STARTED_AT_EPOCH:' &&
+  job_has_line .github/workflows/buildbuddy.yml native-cargo-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-sdk-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-check-submit 'CI_STARTED_AT_EPOCH:' &&
@@ -458,8 +463,16 @@ if job_has_line .github/workflows/nightly.yml gcp-buildbuddy 'name: GCP BuildBud
   job_has_line .github/workflows/buildbuddy.yml feature-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml audit-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml native-submit 'group: gcp' &&
-  job_has_line .github/workflows/buildbuddy.yml native-submit 'batch_jobs: "2"' &&
+  job_has_line .github/workflows/buildbuddy.yml native-submit 'batch_jobs: "1"' &&
+  job_has_line .github/workflows/buildbuddy.yml native-submit 'cargo-all-features-clippy' &&
+  ! job_has_line .github/workflows/buildbuddy.yml native-submit 'test-unit' &&
+  ! job_has_line .github/workflows/buildbuddy.yml native-submit 'integration-fast' &&
   ! job_has_line .github/workflows/buildbuddy.yml native-submit 'fmt-static' &&
+  job_has_line .github/workflows/buildbuddy.yml native-cargo-submit 'group: gcp-native-cargo' &&
+  job_has_line .github/workflows/buildbuddy.yml native-cargo-submit 'batch_jobs: "2"' &&
+  job_has_line .github/workflows/buildbuddy.yml native-cargo-submit 'test-unit' &&
+  job_has_line .github/workflows/buildbuddy.yml native-cargo-submit 'integration-fast' &&
+  ! job_has_line .github/workflows/buildbuddy.yml native-cargo-submit 'cargo-all-features-clippy' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'group: gcp-governance' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-sdk-submit 'group: gcp-sdk-suites' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-check-submit 'group: gcp-wasm-check' &&
@@ -502,12 +515,16 @@ if job_has_line .github/workflows/nightly.yml gcp-buildbuddy 'name: GCP BuildBud
   grep -Fq 'All BuildBuddy lanes completed successfully before the SLO watchdog was reaped' scripts/buildbuddy-ci-lane-batch &&
   grep -Fq "inputs.profile == 'submitter' || inputs.profile == 'doctor'" .github/actions/setup-buildbuddy-ci/action.yml &&
   grep -Fq 'scripts/buildbuddy-ci-lane-batch' .github/actions/run-buildbuddy-ci-lane-batch/action.yml &&
+  job_has_line .github/workflows/buildbuddy.yml executors-down '- native-submit' &&
+  job_has_line .github/workflows/buildbuddy.yml executors-down '- native-cargo-submit' &&
   job_has_line .github/workflows/buildbuddy.yml executors-down '- wasm-feature-changes' &&
   job_has_line .github/workflows/buildbuddy.yml executors-down '- wasm-sdk-submit' &&
   job_has_line .github/workflows/buildbuddy.yml executors-down '- wasm-check-submit' &&
   job_has_line .github/workflows/buildbuddy.yml executors-down '- minimal-feature-submit' &&
   job_has_line .github/workflows/buildbuddy.yml executors-down '- feature-submit' &&
   job_has_line .github/workflows/buildbuddy.yml executors-down '- audit-submit' &&
+  job_has_line .github/workflows/buildbuddy.yml gate '- native-submit' &&
+  job_has_line .github/workflows/buildbuddy.yml gate '- native-cargo-submit' &&
   job_has_line .github/workflows/buildbuddy.yml gate '- wasm-feature-changes' &&
   job_has_line .github/workflows/buildbuddy.yml gate '- wasm-sdk-submit' &&
   job_has_line .github/workflows/buildbuddy.yml gate '- wasm-check-submit' &&

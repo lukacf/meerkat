@@ -19,9 +19,16 @@
 # missing, or was built by a different rustc, does the gate check out the
 # baseline tag and run the generator there as well.
 #
+# The baseline is the newest published release, except for a post-release
+# tree whose `## [Unreleased]` notes follow the stamped workspace version: those
+# are measured against the workspace version's own tag (scripts/semver-baseline.sh).
+#
 # Environment:
 #   MEERKAT_SEMVER_BASELINE_VERSION      override the baseline version (default:
-#                                        the newest meerkat-core version on crates.io)
+#                                        the newest meerkat-core version on crates.io,
+#                                        or the workspace version after its release)
+#   MEERKAT_SEMVER_REQUIRE_RELEASE_TREE  "1" refuses a post-release tree (the release
+#                                        workflow's own measurement sets it)
 #   MEERKAT_SEMVER_BASELINE_RUSTDOC_DIR  use this directory of baseline rustdoc
 #                                        JSON (manifest.json + <crate>.json)
 #                                        instead of downloading the release asset
@@ -54,7 +61,8 @@ cleanup() {
 trap cleanup EXIT
 
 if ! "$PYTHON" "$ROOT/scripts/test_check_semver_breaks.py" >"$selftest_log" 2>&1 \
-    || ! "$PYTHON" "$ROOT/scripts/test_semver_changed_crates.py" >>"$selftest_log" 2>&1; then
+    || ! "$PYTHON" "$ROOT/scripts/test_semver_changed_crates.py" >>"$selftest_log" 2>&1 \
+    || ! PYTHON="$PYTHON" "$ROOT/scripts/test-semver-baseline.sh" >>"$selftest_log" 2>&1; then
     cat "$selftest_log" >&2
     echo "error: the semver-breaks analyser failed its own unit tests" >&2
     exit 1
@@ -71,28 +79,19 @@ workspace_version="$(
     "$PYTHON" -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])'
 )"
 
-# The baseline is the newest published release. crates.io is the source of
-# truth because the gate exists to protect exact-pinned downstreams of what is
-# actually published, not of what a local tag claims.
-baseline_version="${MEERKAT_SEMVER_BASELINE_VERSION:-}"
-if [[ -z "$baseline_version" ]]; then
-    baseline_version="$(
-        curl -fsSL --retry 6 --retry-delay 10 \
-            -H 'User-Agent: meerkat-semver-breaks (https://github.com/lukacf/meerkat)' \
-            'https://crates.io/api/v1/crates/meerkat-core' \
-            | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["crate"]["max_version"])'
-    )" || {
-        echo "error: could not resolve the published baseline version from crates.io" >&2
-        echo "set MEERKAT_SEMVER_BASELINE_VERSION explicitly to retry offline" >&2
-        exit 1
-    }
-fi
-if [[ "$baseline_version" == "$workspace_version" ]]; then
-    echo "error: workspace version ${workspace_version} is already the published baseline" >&2
-    exit 1
-fi
+# shellcheck source=scripts/semver-baseline.sh
+source "$ROOT/scripts/semver-baseline.sh"
+semver_analyser="$ROOT/scripts/check_semver_breaks.py"
+semver_changelog="$ROOT/CHANGELOG.md"
+baseline_version=""
+post_release=false
+resolve_semver_baseline || exit 1
 baseline_tag="v${baseline_version}"
-echo "semver-breaks: baseline ${baseline_tag}, candidate ${workspace_version}"
+if [[ "$post_release" == true ]]; then
+    echo "semver-breaks: baseline ${baseline_tag}, candidate the \`## [Unreleased]\` notes after ${workspace_version}"
+else
+    echo "semver-breaks: baseline ${baseline_tag}, candidate ${workspace_version}"
+fi
 
 if ! git rev-parse -q --verify "refs/tags/${baseline_tag}^{commit}" >/dev/null 2>&1; then
     echo "semver-breaks: fetching ${baseline_tag}"

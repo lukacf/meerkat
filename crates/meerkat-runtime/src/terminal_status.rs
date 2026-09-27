@@ -17,9 +17,12 @@
 use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::{InputId, RunId};
 
+use crate::completion::CompletionOutcome;
 use crate::identifiers::IdempotencyKey;
 use crate::input_state::{
-    InputAbandonReason, InputLifecycleState, InputTerminalOutcome, StoredInputState,
+    InputAbandonReason, InputLifecycleState, InputTerminalCompletionBatchKey,
+    InputTerminalCompletionBatchRead, InputTerminalCompletionPhase,
+    InputTerminalCompletionReadError, InputTerminalOutcome, StoredInputState,
 };
 
 /// Exactly-one lookup key for an interaction terminal-status query.
@@ -94,6 +97,253 @@ pub struct RunTerminalReport {
 pub struct Sourced<T> {
     pub source: TerminalWitnessSource,
     pub report: T,
+}
+
+/// Which exact terminal batch produced an input's terminal receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InputTerminalReceiptScope {
+    /// The run that consumed (or failed) the input. Every input the same run
+    /// committed shares this scope and one recipient set.
+    Run { run_id: RunId },
+    /// The runtime stopped, retired or was destroyed with the input pending;
+    /// no run answered it.
+    RuntimeTermination,
+}
+
+/// The finalized terminal receipt of one input, read from the runtime's own
+/// durable terminal-completion batch.
+///
+/// The recipient set and the outcome come from the batch's canonical owner
+/// row, so every recipient of one batch reads the same set and the same
+/// outcome. `input_id`, `terminal` and `attempt_count` are the target input's
+/// own machine-owned facts.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct InputTerminalReceipt {
+    input_id: InputId,
+    terminal: InputTerminalOutcome,
+    attempt_count: u32,
+    scope: InputTerminalReceiptScope,
+    owner_input_id: InputId,
+    recipient_input_ids: Vec<InputId>,
+    outcome: CompletionOutcome,
+}
+
+impl InputTerminalReceipt {
+    /// The input this receipt was read for.
+    #[must_use]
+    pub fn input_id(&self) -> &InputId {
+        &self.input_id
+    }
+
+    /// The input's machine-owned terminal outcome.
+    #[must_use]
+    pub fn terminal(&self) -> &InputTerminalOutcome {
+        &self.terminal
+    }
+
+    /// Execution attempts the machine recorded for the input.
+    #[must_use]
+    pub const fn attempt_count(&self) -> u32 {
+        self.attempt_count
+    }
+
+    /// The batch scope that produced the receipt.
+    #[must_use]
+    pub fn scope(&self) -> &InputTerminalReceiptScope {
+        &self.scope
+    }
+
+    /// The run that produced the receipt, when a run did.
+    #[must_use]
+    pub fn run_id(&self) -> Option<&RunId> {
+        match &self.scope {
+            InputTerminalReceiptScope::Run { run_id } => Some(run_id),
+            InputTerminalReceiptScope::RuntimeTermination => None,
+        }
+    }
+
+    /// The canonical owner input of the batch (the first recipient).
+    #[must_use]
+    pub fn owner_input_id(&self) -> &InputId {
+        &self.owner_input_id
+    }
+
+    /// Every input the same batch answered, in canonical (input-id) order.
+    /// It always contains [`Self::input_id`]; more than one entry means one
+    /// run answered several inputs together.
+    #[must_use]
+    pub fn recipient_input_ids(&self) -> &[InputId] {
+        &self.recipient_input_ids
+    }
+
+    /// The batch's finalized public outcome.
+    #[must_use]
+    pub fn outcome(&self) -> &CompletionOutcome {
+        &self.outcome
+    }
+
+    /// Take the batch's finalized public outcome.
+    #[must_use]
+    pub fn into_outcome(self) -> CompletionOutcome {
+        self.outcome
+    }
+}
+
+/// Terminal-receipt read for one input.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum InputTerminalReceiptRead {
+    /// No finalized receipt yet. `terminal` is `Some` once the terminal
+    /// transaction committed but its receipt is still being finalized.
+    Pending {
+        input_id: InputId,
+        phase: InputLifecycleState,
+        terminal: Option<InputTerminalOutcome>,
+        last_run_id: Option<RunId>,
+        attempt_count: u32,
+    },
+    /// The runtime finalized the input's terminal receipt.
+    Finalized(Box<InputTerminalReceipt>),
+    /// The input reached a terminal the machine never stages a receipt for:
+    /// superseded, coalesced, or consumed on accept without a run.
+    TerminalWithoutReceipt {
+        input_id: InputId,
+        terminal: InputTerminalOutcome,
+        last_run_id: Option<RunId>,
+        attempt_count: u32,
+    },
+}
+
+impl InputTerminalReceiptRead {
+    /// The input this read describes.
+    #[must_use]
+    pub fn input_id(&self) -> &InputId {
+        match self {
+            Self::Pending { input_id, .. } | Self::TerminalWithoutReceipt { input_id, .. } => {
+                input_id
+            }
+            Self::Finalized(receipt) => receipt.input_id(),
+        }
+    }
+
+    /// Whether the read is final: a finalized receipt or a receipt-less
+    /// terminal. Only `Pending` can still change.
+    #[must_use]
+    pub const fn is_resolved(&self) -> bool {
+        !matches!(self, Self::Pending { .. })
+    }
+}
+
+/// Result of [`crate::MeerkatMachine::wait_input_terminal_receipt`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum InputTerminalReceiptWait {
+    /// The input's receipt resolved (`Finalized` or `TerminalWithoutReceipt`).
+    Resolved(Sourced<InputTerminalReceiptRead>),
+    /// The input is not resolved and the session has no live registration
+    /// to wait on. Carries the current durable read (`None` when there is no
+    /// durable row for the input). A `Pending` read here can only advance
+    /// once the session is registered and recovery runs it.
+    Detached(Option<Sourced<InputTerminalReceiptRead>>),
+}
+
+/// Classify the terminal receipt of `input_id` from rows that hold the target
+/// and every row of its terminal-completion batch.
+///
+/// `Ok(None)` means the target is not among the rows. This shares the batch
+/// validation of the public completion reader; only the classification of
+/// receipt-less terminals differs: the machine transitions that never stage a
+/// receipt (supersede, coalesce, consume-on-accept) are typed here instead of
+/// being reported as a lost receipt. Every other receipt-less terminal keeps
+/// the reader's repair-blocked / corruption classification.
+pub(crate) fn input_terminal_receipt_read(
+    states: &[StoredInputState],
+    input_id: &InputId,
+) -> Result<Option<InputTerminalReceiptRead>, InputTerminalCompletionReadError> {
+    match crate::input_state::input_terminal_completion_batch(states, input_id)? {
+        InputTerminalCompletionBatchRead::TargetAbsent => Ok(None),
+        InputTerminalCompletionBatchRead::NoReceipt { target } => {
+            let seed = &target.seed;
+            match &seed.terminal_outcome {
+                None => Ok(Some(InputTerminalReceiptRead::Pending {
+                    input_id: target.state.input_id.clone(),
+                    phase: seed.phase,
+                    terminal: None,
+                    last_run_id: seed.last_run_id.clone(),
+                    attempt_count: seed.attempt_count,
+                })),
+                Some(
+                    terminal @ (InputTerminalOutcome::Superseded { .. }
+                    | InputTerminalOutcome::Coalesced { .. }),
+                ) => Ok(Some(receipt_less_terminal(target, terminal.clone()))),
+                Some(terminal @ InputTerminalOutcome::Consumed) if seed.last_run_id.is_none() => {
+                    Ok(Some(receipt_less_terminal(target, terminal.clone())))
+                }
+                Some(_) => Err(crate::input_state::receipt_less_terminal_read_error(target)),
+            }
+        }
+        InputTerminalCompletionBatchRead::Batch { target, owner } => {
+            let seed = &target.seed;
+            match owner.phase {
+                InputTerminalCompletionPhase::Pending => {
+                    Ok(Some(InputTerminalReceiptRead::Pending {
+                        input_id: target.state.input_id.clone(),
+                        phase: seed.phase,
+                        terminal: seed.terminal_outcome.clone(),
+                        last_run_id: seed.last_run_id.clone(),
+                        attempt_count: seed.attempt_count,
+                    }))
+                }
+                InputTerminalCompletionPhase::Finalized { .. } => {
+                    let corrupt = |reason: &str| {
+                        InputTerminalCompletionReadError::Corrupt(reason.to_string())
+                    };
+                    let terminal = seed.terminal_outcome.clone().ok_or_else(|| {
+                        corrupt("finalized terminal completion is bound to a non-terminal input")
+                    })?;
+                    let recipient_input_ids = owner.completion_input_ids.ok_or_else(|| {
+                        corrupt("finalized terminal completion owner lost its recipient set")
+                    })?;
+                    let outcome = owner.outcome.ok_or_else(|| {
+                        corrupt("finalized terminal completion owner lost outcome")
+                    })?;
+                    let scope = match owner.batch_key {
+                        InputTerminalCompletionBatchKey::Run { run_id } => {
+                            InputTerminalReceiptScope::Run { run_id }
+                        }
+                        InputTerminalCompletionBatchKey::RuntimeTermination { .. } => {
+                            InputTerminalReceiptScope::RuntimeTermination
+                        }
+                    };
+                    Ok(Some(InputTerminalReceiptRead::Finalized(Box::new(
+                        InputTerminalReceipt {
+                            input_id: target.state.input_id.clone(),
+                            terminal,
+                            attempt_count: seed.attempt_count,
+                            scope,
+                            owner_input_id: owner.owner_input_id,
+                            recipient_input_ids,
+                            outcome,
+                        },
+                    ))))
+                }
+            }
+        }
+    }
+}
+
+fn receipt_less_terminal(
+    target: &StoredInputState,
+    terminal: InputTerminalOutcome,
+) -> InputTerminalReceiptRead {
+    InputTerminalReceiptRead::TerminalWithoutReceipt {
+        input_id: target.state.input_id.clone(),
+        terminal,
+        last_run_id: target.seed.last_run_id.clone(),
+        attempt_count: target.seed.attempt_count,
+    }
 }
 
 /// Project one input-state bundle into its typed interaction report.

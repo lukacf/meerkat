@@ -156,23 +156,10 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
             });
         };
         let runtime_id = Self::logical_runtime_id(session_id);
-        let load = |error: crate::store::RuntimeStoreError| match error {
-            crate::store::RuntimeStoreError::Unsupported(reason) => {
-                RuntimeDriverError::RecoveryRepairBlocked {
-                    evidence_digest: None,
-                    reason: format!(
-                        "runtime store cannot load one exact terminal completion batch: {reason}"
-                    ),
-                }
-            }
-            error => RuntimeDriverError::Internal(format!(
-                "exact terminal completion witness read failed for {runtime_id}: {error}"
-            )),
-        };
         let mut target_rows = store
             .load_input_states_by_ids(&runtime_id, std::slice::from_ref(input_id))
             .await
-            .map_err(load)?;
+            .map_err(|error| Self::terminal_completion_store_error(&runtime_id, error))?;
         let Some(target) = target_rows.pop().ok_or_else(|| {
             RuntimeDriverError::Internal(
                 "exact terminal completion target read returned the wrong cardinality".to_string(),
@@ -182,7 +169,7 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
             let lifecycle = store
                 .load_machine_lifecycle_record(&runtime_id)
                 .await
-                .map_err(load)?;
+                .map_err(|error| Self::terminal_completion_store_error(&runtime_id, error))?;
             return if lifecycle.is_some() {
                 Ok(None)
             } else {
@@ -191,82 +178,11 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
                 })
             };
         };
-        let Some(target_completion) = target.state.terminal_completion.as_ref() else {
-            return crate::input_state::input_terminal_completion_outcome(&[target], input_id)
-                .map_err(|error| match error {
-                    error @ crate::input_state::InputTerminalCompletionReadError::MigratedReceiptUnavailable => {
-                        RuntimeDriverError::RecoveryRepairBlocked {
-                            evidence_digest: None,
-                            reason: error.to_string(),
-                        }
-                    }
-                    crate::input_state::InputTerminalCompletionReadError::Corrupt(reason) => {
-                        RuntimeDriverError::RecoveryCorruption { reason }
-                    }
-                });
-        };
-        let owner_input_id = target_completion.owner_input_id.clone();
-        let owner = if owner_input_id == *input_id {
-            target
-        } else {
-            let mut owner_rows = store
-                .load_input_states_by_ids(&runtime_id, std::slice::from_ref(&owner_input_id))
-                .await
-                .map_err(load)?;
-            owner_rows
-                .pop()
-                .ok_or_else(|| {
-                    RuntimeDriverError::Internal(
-                        "exact terminal completion owner read returned the wrong cardinality"
-                            .to_string(),
-                    )
-                })?
-                .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
-                    reason: "terminal completion target lost its canonical durable owner row"
-                        .to_string(),
-                })?
-        };
-        let recipient_ids = owner
-            .state
-            .terminal_completion
-            .as_ref()
-            .and_then(|completion| completion.completion_input_ids.clone())
-            .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
-                reason: "terminal completion durable owner lost its recipient set".to_string(),
-            })?;
-        let recipient_rows = store
-            .load_input_states_by_ids(&runtime_id, &recipient_ids)
-            .await
-            .map_err(load)?;
-        if recipient_rows.len() != recipient_ids.len() {
-            return Err(RuntimeDriverError::Internal(
-                "exact terminal completion batch read returned the wrong cardinality".to_string(),
-            ));
-        }
-        let witnesses = recipient_rows
-            .into_iter()
-            .zip(recipient_ids)
-            .map(|(stored, recipient_id)| {
-                stored.ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
-                    reason: format!(
-                        "terminal completion durable batch lost recipient row {recipient_id}"
-                    ),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        crate::input_state::input_terminal_completion_outcome(&witnesses, input_id).map_err(
-            |error| match error {
-                error @ crate::input_state::InputTerminalCompletionReadError::MigratedReceiptUnavailable => {
-                    RuntimeDriverError::RecoveryRepairBlocked {
-                        evidence_digest: None,
-                        reason: error.to_string(),
-                    }
-                }
-                crate::input_state::InputTerminalCompletionReadError::Corrupt(reason) => {
-                    RuntimeDriverError::RecoveryCorruption { reason }
-                }
-            },
-        )
+        let witnesses =
+            Self::load_durable_terminal_completion_rows(store.as_ref(), &runtime_id, target)
+                .await?;
+        crate::input_state::input_terminal_completion_outcome(&witnesses, input_id)
+            .map_err(crate::input_state::InputTerminalCompletionReadError::into_driver_error)
     }
 
     async fn input_state_by_idempotency_key(

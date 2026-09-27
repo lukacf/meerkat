@@ -1260,31 +1260,42 @@ impl StoredInputState {
     }
 }
 
-/// Resolve one exact public completion from a full runtime input snapshot.
+/// Validated view of the exact terminal-completion batch one input belongs to.
 ///
-/// `Ok(None)` means no finalized receipt exists. Any partial batch, digest
-/// mismatch, or owner loss is corruption rather than absence.
-pub(crate) fn input_terminal_completion_outcome(
-    states: &[StoredInputState],
+/// This is the single projection shared by the public completion reader
+/// ([`input_terminal_completion_outcome`]) and the terminal-receipt reader in
+/// [`crate::terminal_status`], so both classify the same durable rows the
+/// same way.
+pub(crate) enum InputTerminalCompletionBatchRead<'a> {
+    /// The target input is not among the supplied rows.
+    TargetAbsent,
+    /// The target input carries no terminal-completion receipt row.
+    NoReceipt { target: &'a StoredInputState },
+    /// The target's batch validated. `owner` is the canonical owner row,
+    /// which alone carries the recipient set and the finalized outcome.
+    Batch {
+        target: &'a StoredInputState,
+        owner: InputTerminalCompletion,
+    },
+}
+
+/// Resolve and validate the terminal-completion batch of `input_id` from a
+/// runtime input snapshot that holds every row of that batch.
+///
+/// Any partial batch, digest mismatch, or owner loss is corruption rather
+/// than absence.
+pub(crate) fn input_terminal_completion_batch<'a>(
+    states: &'a [StoredInputState],
     input_id: &InputId,
-) -> Result<Option<crate::completion::CompletionOutcome>, InputTerminalCompletionReadError> {
+) -> Result<InputTerminalCompletionBatchRead<'a>, InputTerminalCompletionReadError> {
     let Some(stored) = states
         .iter()
         .find(|stored| &stored.state.input_id == input_id)
     else {
-        return Ok(None);
+        return Ok(InputTerminalCompletionBatchRead::TargetAbsent);
     };
     let Some(target) = stored.state.terminal_completion.as_ref() else {
-        if stored.seed.terminal_outcome.is_some() {
-            return if stored.state.terminal_completion_unavailable {
-                Err(InputTerminalCompletionReadError::MigratedReceiptUnavailable)
-            } else {
-                Err(InputTerminalCompletionReadError::Corrupt(
-                    "v5 terminal input lost its exact completion receipt".to_string(),
-                ))
-            };
-        }
-        return Ok(None);
+        return Ok(InputTerminalCompletionBatchRead::NoReceipt { target: stored });
     };
     if states.iter().any(|stored| {
         stored
@@ -1306,16 +1317,75 @@ pub(crate) fn input_terminal_completion_outcome(
         .filter(|row| row.batch_key == target.batch_key)
         .collect::<Vec<_>>();
     rows.sort_by_key(|row| row.batch_ordinal);
-    let owner = validate_input_terminal_completion_batch(&rows)
+    validate_input_terminal_completion_batch(&rows)
         .map_err(InputTerminalCompletionReadError::Corrupt)?;
-    match &owner.phase {
-        InputTerminalCompletionPhase::Pending => Ok(None),
-        InputTerminalCompletionPhase::Finalized { .. } => {
-            owner.outcome.clone().map(Some).ok_or_else(|| {
-                InputTerminalCompletionReadError::Corrupt(
-                    "finalized terminal completion owner lost outcome".to_string(),
-                )
-            })
+    // Validation proved the batch nonempty and that row 0 is its owner.
+    let owner = rows.into_iter().next().ok_or_else(|| {
+        InputTerminalCompletionReadError::Corrupt(
+            "validated terminal completion batch lost its owner row".to_string(),
+        )
+    })?;
+    Ok(InputTerminalCompletionBatchRead::Batch {
+        target: stored,
+        owner,
+    })
+}
+
+/// Resolve one exact public completion from a full runtime input snapshot.
+///
+/// `Ok(None)` means no finalized receipt exists. Any partial batch, digest
+/// mismatch, or owner loss is corruption rather than absence.
+pub(crate) fn input_terminal_completion_outcome(
+    states: &[StoredInputState],
+    input_id: &InputId,
+) -> Result<Option<crate::completion::CompletionOutcome>, InputTerminalCompletionReadError> {
+    match input_terminal_completion_batch(states, input_id)? {
+        InputTerminalCompletionBatchRead::TargetAbsent => Ok(None),
+        InputTerminalCompletionBatchRead::NoReceipt { target } => {
+            if target.seed.terminal_outcome.is_some() {
+                return Err(receipt_less_terminal_read_error(target));
+            }
+            Ok(None)
+        }
+        InputTerminalCompletionBatchRead::Batch { owner, .. } => match &owner.phase {
+            InputTerminalCompletionPhase::Pending => Ok(None),
+            InputTerminalCompletionPhase::Finalized { .. } => {
+                owner.outcome.map(Some).ok_or_else(|| {
+                    InputTerminalCompletionReadError::Corrupt(
+                        "finalized terminal completion owner lost outcome".to_string(),
+                    )
+                })
+            }
+        },
+    }
+}
+
+/// Classify a terminal input row that carries no exact completion receipt.
+pub(crate) fn receipt_less_terminal_read_error(
+    target: &StoredInputState,
+) -> InputTerminalCompletionReadError {
+    if target.state.terminal_completion_unavailable {
+        InputTerminalCompletionReadError::MigratedReceiptUnavailable
+    } else {
+        InputTerminalCompletionReadError::Corrupt(
+            "v5 terminal input lost its exact completion receipt".to_string(),
+        )
+    }
+}
+
+impl InputTerminalCompletionReadError {
+    /// The one driver-error mapping every exact-completion reader uses.
+    pub(crate) fn into_driver_error(self) -> crate::traits::RuntimeDriverError {
+        match self {
+            error @ Self::MigratedReceiptUnavailable => {
+                crate::traits::RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: None,
+                    reason: error.to_string(),
+                }
+            }
+            Self::Corrupt(reason) => {
+                crate::traits::RuntimeDriverError::RecoveryCorruption { reason }
+            }
         }
     }
 }

@@ -35,6 +35,38 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat_mob::MobHandle::wait_bounded_work_for_identity_with_delivery_identity(&self, &AgentIdentity, &MobDeliveryIdentity, &BoundedResultSpec, meerkat_core::time_compat::Instant) -> Result<DeliveryTerminalWaitReport, DeliveryTerminalWaitError>`
+  (feature `runtime-adapter`) waits for the terminal of one delivery that was
+  sent with a delivery identity, as the member's runtime recorded it. It works
+  for `AutonomousHost` members, which still refuse completion-bearing
+  admission: the delivery keeps going through the ordinary inbox and still
+  commits as an `ExternalEvent` notice. The report carries that delivery's own
+  runtime input id, the run that answered it, every input the same run
+  answered (so a batched answer reports its batch), the input's typed terminal
+  outcome, and the run's result through the same bounded projection as
+  `WorkTurnHandle::wait_bounded`. A durably finalized terminal is read from
+  the store after a restart, before the member's session is registered again.
+  An unknown delivery returns a typed `Unknown`, and a deadline that elapses
+  first returns `NotTerminal` with the input's last lifecycle facts. The
+  method only reads: it sends no mob actor command and cancels nothing. New
+  types: `DeliveryTerminalWaitReport`, `DeliveryTerminalWait`,
+  `DeliveryTerminalRecord`, `DeliveryTerminalResolution`,
+  `DeliveryNotTerminalCause`, `DeliveryUnknownCause` and
+  `DeliveryTerminalWaitError`.
+- `meerkat_runtime::MeerkatMachine::input_terminal_receipt(&self, &SessionId, InteractionSelector) -> Result<Option<Sourced<InputTerminalReceiptRead>>, RuntimeDriverError>`
+  reads one input's terminal receipt from the runtime's own durable
+  terminal-completion batch: the run scope, the full recipient set, the
+  owner input and the finalized `CompletionOutcome`, or the input's pending
+  lifecycle facts. `MeerkatMachine::wait_input_terminal_receipt(&self, &SessionId, &InputId) -> Result<InputTerminalReceiptWait, RuntimeDriverError>`
+  waits for that receipt without polling. A requeued failed attempt does not
+  resolve it, and it returns `Detached` when the session has no live
+  registration. New types in `meerkat_runtime::terminal_status`:
+  `InputTerminalReceipt`, `InputTerminalReceiptScope`,
+  `InputTerminalReceiptRead` and `InputTerminalReceiptWait`.
+  `input_terminal_completion` is unchanged.
+
 ### Fixed
 
 - Full-fresh BuildBuddy validation no longer runs out of its 50-minute SLO

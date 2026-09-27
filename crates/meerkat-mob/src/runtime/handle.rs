@@ -3780,7 +3780,7 @@ fn bounded_exact_turn_result(
     }
 }
 
-fn bounded_runtime_turn_result(
+pub(super) fn bounded_runtime_turn_result(
     outcome: meerkat_runtime::completion::CompletionOutcome,
     admitted_session_id: &SessionId,
     session_id: SessionId,
@@ -10965,7 +10965,7 @@ impl MobHandle {
     // Work lane
     // -----------------------------------------------------------------
 
-    async fn durable_bounded_member_state(
+    pub(super) async fn durable_bounded_member_state(
         &self,
         identity: &AgentIdentity,
     ) -> Result<DurableBoundedMemberState, MobError> {

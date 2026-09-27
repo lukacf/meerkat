@@ -48143,7 +48143,7 @@ async fn run_input_read_is_false_for_queued_only_and_refuses_a_missing_phase() {
         match &*guard {
             DriverEntry::Ephemeral(driver) => driver.forget_input_phase_for_test(&input_id),
             DriverEntry::Persistent(driver) => {
-                driver.inner_ref().forget_input_phase_for_test(&input_id)
+                driver.inner_ref().forget_input_phase_for_test(&input_id);
             }
         }
     }

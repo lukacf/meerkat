@@ -2932,7 +2932,7 @@ impl MeerkatMachine {
         Ok(None)
     }
 
-    async fn durable_input_witness_by_id(
+    pub(super) async fn durable_input_witness_by_id(
         &self,
         session_id: &SessionId,
         input_id: &InputId,
@@ -2951,7 +2951,7 @@ impl MeerkatMachine {
             })
     }
 
-    async fn durable_input_witness_by_idempotency_key_if_present(
+    pub(super) async fn durable_input_witness_by_idempotency_key_if_present(
         &self,
         session_id: &SessionId,
         key: &str,

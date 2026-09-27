@@ -1152,6 +1152,29 @@ impl MeerkatMachine {
         }
     }
 
+    /// Wake terminal-receipt waiters parked on the queued input this committed
+    /// admission's generated plan coalesced or superseded.
+    ///
+    /// Neither transition stages a terminal-completion receipt or resolves a
+    /// completion waiter, so this commit is the only boundary that can wake
+    /// them. The wake carries no fact and decides nothing: a woken wait
+    /// re-reads the machine-owned lifecycle. Callers hold (or have released)
+    /// the driver lock the commit took, keeping the driver-then-registry order.
+    pub(super) async fn wake_displaced_input_observers(
+        completions: &SharedCompletionRegistry,
+        displaced_input_id: Option<InputId>,
+        outcome: &AcceptOutcome,
+    ) {
+        if let (Some(displaced_input_id), AcceptOutcome::Accepted { .. }) =
+            (displaced_input_id, outcome)
+        {
+            completions
+                .lock()
+                .await
+                .wake_receipt_less_terminal_observers([displaced_input_id]);
+        }
+    }
+
     fn classify_ingress_dsl_rejection(state: RuntimeState, reason: String) -> RuntimeDriverError {
         match crate::meerkat_machine::classify_runtime_lifecycle_state(state) {
             Ok(facts) => match facts.ingress_admission {
@@ -1606,6 +1629,7 @@ impl MeerkatMachine {
                         );
                         Self::classify_ingress_dsl_rejection(state, reason)
                     })?;
+                    let displaced_input_id = resolved.displaced_queued_input_id().cloned();
                     let result = match driver
                         .accept_resolved_input(input, resolved)
                         .await
@@ -1614,6 +1638,8 @@ impl MeerkatMachine {
                         Ok(r) => r,
                         Err(err) => return Err(err),
                     };
+                    Self::wake_displaced_input_observers(&completions, displaced_input_id, &result)
+                        .await;
 
                     match &result {
                         AcceptOutcome::Accepted { input_id, seed, .. } => {
@@ -1952,6 +1978,7 @@ impl MeerkatMachine {
                         );
                         return Err(error);
                     }
+                    let displaced_input_id = resolved.displaced_queued_input_id().cloned();
                     let result = match driver
                         .accept_resolved_input(input, resolved)
                         .await
@@ -1960,6 +1987,8 @@ impl MeerkatMachine {
                         Ok(r) => r,
                         Err(err) => return Err(err),
                     };
+                    Self::wake_displaced_input_observers(&completions, displaced_input_id, &result)
+                        .await;
                     if let AcceptOutcome::Rejected { reason } = &result {
                         crate::hook_observation::dispatch_runtime_input_outcome(
                             &post_commit_hooks,

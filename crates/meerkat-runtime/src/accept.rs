@@ -265,7 +265,19 @@ impl ResolvedAdmission {
     /// admitted input and, for coalesce/supersede, one named queued input.
     pub(crate) fn persistence_changed_input_ids(&self, input_id: &InputId) -> Vec<InputId> {
         let mut input_ids = vec![input_id.clone()];
-        let existing_id = match &self.admission_plan {
+        if let Some(existing_id) = self.displaced_queued_input_id()
+            && existing_id != input_id
+        {
+            input_ids.push(existing_id.clone());
+        }
+        input_ids
+    }
+
+    /// The queued input the generated plan terminalizes by coalescing or
+    /// superseding it when this admission commits. Neither transition stages
+    /// a terminal-completion receipt or resolves a completion waiter.
+    pub(crate) fn displaced_queued_input_id(&self) -> Option<&InputId> {
+        match &self.admission_plan {
             AdmissionPlan::Queued {
                 existing_action:
                     Some(
@@ -275,13 +287,7 @@ impl ResolvedAdmission {
                 ..
             } => Some(existing_id),
             AdmissionPlan::ConsumedOnAccept | AdmissionPlan::Queued { .. } => None,
-        };
-        if let Some(existing_id) = existing_id
-            && existing_id != input_id
-        {
-            input_ids.push(existing_id.clone());
         }
-        input_ids
     }
 
     pub(crate) fn stages_run_boundary(&self) -> bool {

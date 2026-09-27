@@ -43289,6 +43289,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         RuntimeDriverError::RecoveryCorruption { reason } => {
             format!("recovery_corruption:{reason}")
         }
+        RuntimeDriverError::InputTerminalWithoutReceipt { input_id, terminal } => {
+            format!("input_terminal_without_receipt:{input_id}:{terminal:?}")
+        }
         RuntimeDriverError::RecoveryBackoff { reason } => {
             format!("recovery_backoff:{reason}")
         }

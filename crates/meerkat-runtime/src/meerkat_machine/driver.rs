@@ -4513,26 +4513,20 @@ impl DriverEntry {
         }
     }
 
-    pub(crate) fn exact_input_terminal_completion_outcome(
+    /// Load the live rows the exact completion projection needs for
+    /// `input_id`: the target alone when it carries no receipt, otherwise
+    /// every recipient row of its batch in canonical order. `None` means the
+    /// target is not held in memory (never admitted here, or archived after
+    /// its durable obligations closed).
+    pub(crate) fn exact_input_terminal_completion_rows(
         &self,
         input_id: &InputId,
-    ) -> Result<Option<crate::completion::CompletionOutcome>, RuntimeDriverError> {
+    ) -> Result<Option<Vec<crate::input_state::StoredInputState>>, RuntimeDriverError> {
         let Some(target) = self.as_driver().stored_input_state(input_id) else {
             return Ok(None);
         };
         let Some(target_completion) = target.state.terminal_completion.as_ref() else {
-            return crate::input_state::input_terminal_completion_outcome(&[target], input_id)
-                .map_err(|error| match error {
-                    error @ crate::input_state::InputTerminalCompletionReadError::MigratedReceiptUnavailable => {
-                        RuntimeDriverError::RecoveryRepairBlocked {
-                            evidence_digest: None,
-                            reason: error.to_string(),
-                        }
-                    }
-                    crate::input_state::InputTerminalCompletionReadError::Corrupt(reason) => {
-                        RuntimeDriverError::RecoveryCorruption { reason }
-                    }
-                });
+            return Ok(Some(vec![target]));
         };
         let owner_input_id = target_completion.owner_input_id.clone();
         let owner = if owner_input_id == *input_id {
@@ -4552,7 +4546,7 @@ impl DriverEntry {
             .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
                 reason: "terminal completion owner lost its recipient set".to_string(),
             })?;
-        let rows = recipient_ids
+        recipient_ids
             .iter()
             .map(|recipient_id| {
                 self.as_driver()
@@ -4563,20 +4557,19 @@ impl DriverEntry {
                         ),
                     })
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        crate::input_state::input_terminal_completion_outcome(&rows, input_id).map_err(|error| {
-            match error {
-                error @ crate::input_state::InputTerminalCompletionReadError::MigratedReceiptUnavailable => {
-                    RuntimeDriverError::RecoveryRepairBlocked {
-                        evidence_digest: None,
-                        reason: error.to_string(),
-                    }
-                }
-                crate::input_state::InputTerminalCompletionReadError::Corrupt(reason) => {
-                    RuntimeDriverError::RecoveryCorruption { reason }
-                }
-            }
-        })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    }
+
+    pub(crate) fn exact_input_terminal_completion_outcome(
+        &self,
+        input_id: &InputId,
+    ) -> Result<Option<crate::completion::CompletionOutcome>, RuntimeDriverError> {
+        let Some(rows) = self.exact_input_terminal_completion_rows(input_id)? else {
+            return Ok(None);
+        };
+        crate::input_state::input_terminal_completion_outcome(&rows, input_id)
+            .map_err(crate::input_state::InputTerminalCompletionReadError::into_driver_error)
     }
 
     pub(crate) fn silent_comms_intents(&self) -> Vec<String> {

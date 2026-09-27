@@ -12474,9 +12474,10 @@ impl MobActor {
     ///
     /// Returns the observation and, when the session-view read this
     /// observation started was still running at the deadline, that read for
-    /// the caller to drive to completion (it must not be dropped: the
-    /// underlying read may keep running regardless, and the per-session
-    /// single-flight in `view_reads` stays claimed until it finishes).
+    /// the caller to drain up to `MEMBER_STATUS_VIEW_READ_DRAIN_CEILING` (it
+    /// must not be dropped early: the underlying read may keep running
+    /// regardless, and the per-session single-flight in `view_reads` stays
+    /// claimed until it finishes or is orphaned at the ceiling).
     pub(super) async fn observe_member_status_session(
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
@@ -12543,7 +12544,7 @@ impl MobActor {
             MemberStatusViewReadClaim::Owner(owner) => {
                 let mut read = Self::read_member_status_session_view(
                     session_service,
-                    agent_identity,
+                    agent_identity.clone(),
                     session_id.clone(),
                 );
                 tokio::select! {
@@ -12554,7 +12555,7 @@ impl MobActor {
                     }
                     () = deadline.as_mut() => (
                         deadline_reached(),
-                        Some(MemberStatusViewReadDrain::new(owner, read)),
+                        Some(MemberStatusViewReadDrain::new(owner, agent_identity, read)),
                     ),
                 }
             }

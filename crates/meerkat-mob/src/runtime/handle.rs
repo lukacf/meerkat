@@ -73,10 +73,33 @@ const MEMBER_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const HOST_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const REACHABILITY_STALE_AFTER: Duration = Duration::from_secs(15);
+/// How many times the bounded terminal projection attempts each of its
+/// bracketing status reads while it comes back with an unobserved session
+/// view (`preview_unavailable` set). A read degraded at the observation
+/// deadline leaves its underlying read draining, and a retry of the same
+/// member waits on that read for up to another deadline instead of starting
+/// a second one, so three attempts give a slow read about three observation
+/// deadlines to land while each attempt stays individually bounded.
+pub(super) const BOUNDED_PROJECTION_STATUS_READ_ATTEMPTS: usize = 3;
 #[cfg(not(test))]
 const READY_WAIT_BRIDGE_SESSION_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const READY_WAIT_BRIDGE_SESSION_RECHECK_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Whether the previews of the snapshots that observed their member's session
+/// view disagree. A snapshot with `preview_unavailable` set did not observe
+/// it (its missing preview and zero tokens are not facts), so it is left out
+/// rather than read as a change.
+fn observed_member_previews_differ<const N: usize>(snapshots: [&MobMemberSnapshot; N]) -> bool {
+    let mut observed = snapshots
+        .into_iter()
+        .filter(|snapshot| snapshot.preview_unavailable.is_none())
+        .map(|snapshot| (snapshot.output_preview.as_deref(), snapshot.tokens_used));
+    match observed.next() {
+        Some(first) => observed.any(|other| other != first),
+        None => false,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum RetirementTransportIncarnationKey {
@@ -13654,6 +13677,12 @@ impl MobHandle {
     /// through two version-matched `SessionService::read` observations, and
     /// only then applies the compact cap. An unavailable projection leaves the
     /// member intact so the receiver can retry after terminal facts converge.
+    ///
+    /// The member-status reads that bracket the exact reads are compared for
+    /// changes. One that did not observe the member's session view
+    /// (`preview_unavailable` set) is retried a bounded number of times and is
+    /// never taken for a change: its missing preview and zero tokens are left
+    /// out of the comparison.
     pub async fn bounded_terminal_member_result(
         &self,
         identity: &AgentIdentity,
@@ -13673,7 +13702,7 @@ impl MobHandle {
     ) -> Result<(BoundedHelperResult, SessionId), MobError> {
         self.admit_control_scope(mob_dsl::ControlScope::ReadHistory)
             .await?;
-        let before = self.member_status(identity).await?;
+        let before = self.bounded_projection_member_status(identity).await?;
         let session_id = before.current_bridge_session_id().cloned().ok_or_else(|| {
             MobError::BoundedHelperResultUnavailable {
                 member_id: identity.clone(),
@@ -13693,9 +13722,9 @@ impl MobHandle {
             .as_ref()
             .map(|progress| (progress.run_state, progress.in_flight_work));
         let first_view = self.session_service.read(&session_id).await?;
-        let middle = self.member_status(identity).await?;
+        let middle = self.bounded_projection_member_status(identity).await?;
         let second_view = self.session_service.read(&session_id).await?;
-        let after = self.member_status(identity).await?;
+        let after = self.bounded_projection_member_status(identity).await?;
         let middle_runtime = middle
             .runtime_identity_fields()
             .map(|(runtime_id, fence_token)| (runtime_id.clone(), fence_token))
@@ -13739,10 +13768,7 @@ impl MobHandle {
             || before_status != after.status
             || before_open_run != middle_open_run
             || before_open_run != after_open_run
-            || before.output_preview != middle.output_preview
-            || before.output_preview != after.output_preview
-            || before.tokens_used != middle.tokens_used
-            || before.tokens_used != after.tokens_used;
+            || observed_member_previews_differ([&before, &middle, &after]);
         if !stable_session || member_changed {
             return Err(MobError::BoundedHelperResultUnavailable {
                 member_id: identity.clone(),
@@ -13784,6 +13810,28 @@ impl MobHandle {
             failed,
         )?;
         Ok((result, session_id))
+    }
+
+    /// One bracketing status read of the bounded terminal projection.
+    ///
+    /// A snapshot whose session view was not observed (`preview_unavailable`
+    /// set, so no preview and zero tokens) is read again, at most
+    /// [`BOUNDED_PROJECTION_STATUS_READ_ATTEMPTS`] times in all; every attempt
+    /// is itself bounded by the status observation deadline. A snapshot still
+    /// degraded after the last attempt is returned as is, and the projection
+    /// leaves it out of the preview comparison.
+    async fn bounded_projection_member_status(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<MobMemberSnapshot, MobError> {
+        let mut snapshot = self.member_status(identity).await?;
+        for _ in 1..BOUNDED_PROJECTION_STATUS_READ_ATTEMPTS {
+            if snapshot.preview_unavailable.is_none() {
+                break;
+            }
+            snapshot = self.member_status(identity).await?;
+        }
+        Ok(snapshot)
     }
 
     fn bounded_helper_spawn_spec(

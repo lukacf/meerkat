@@ -29,7 +29,11 @@
 //! child.
 //! A read whose run state is unknown (the member was busy and the status
 //! projection's bounded runtime read did not answer) is settled by reading
-//! the child's runtime state directly.
+//! the child's runtime state directly. So is an idle read of a local child:
+//! its status goes idle when its session task returns from the turn, before
+//! the runtime commits the run's boundary and the child's reply reaches its
+//! durable transcript, so the child counts as idle only once its runtime
+//! state agrees.
 //!
 //! The owner is resolved from the job's owner session before anything can
 //! retire the child, never from the child's roster entry. A member of the
@@ -716,8 +720,17 @@ impl ProgressVerdict {
     }
 }
 
-/// Read a fork child's status: its member status, and when that leaves the
-/// run state unknown, its runtime state.
+/// Read a fork child's status: its member status, then its runtime state
+/// whenever the status does not show a run in progress.
+///
+/// A local child's status reports it idle as soon as its session task has
+/// returned from the turn, which is before the runtime machine commits the
+/// run's boundary and with it the child's reply to its durable transcript.
+/// Taking that idle read as settled would look for the reply too early and
+/// deliver `restart_interrupted` for a child that completed. The runtime
+/// state stays running until the boundary is committed, so an idle status is
+/// settled only once the runtime agrees; an unknown run state is settled by
+/// the runtime alone.
 async fn observe_child(
     runtime: Option<&meerkat_runtime::MeerkatMachine>,
     handle: &MobHandle,
@@ -736,25 +749,35 @@ async fn observe_child(
         .map(|progress| (progress.run_state, progress.in_flight_work));
     match ProgressVerdict::of(progress) {
         ProgressVerdict::Running => ChildObservation::Running,
-        ProgressVerdict::Settled => ChildObservation::Settled,
-        ProgressVerdict::Undetermined => {
-            let Some(runtime) = runtime else {
-                // Nothing to ask; nothing can be delivered on this host
-                // either.
-                return ChildObservation::Settled;
-            };
-            let Some(session_id) = handle.resolve_bridge_session_id(child).await else {
-                return ChildObservation::Settled;
-            };
-            use meerkat_runtime::SessionServiceRuntimeExt as _;
-            let state = runtime.runtime_state(&session_id).await;
-            let active_inputs = runtime
-                .list_active_inputs(&session_id)
-                .await
-                .map(|inputs| inputs.len());
-            from_runtime(state, active_inputs)
+        // The read carries no run progress (a member placed on another
+        // host): this host's runtime has nothing to confirm.
+        ProgressVerdict::Settled if progress.is_none() => ChildObservation::Settled,
+        ProgressVerdict::Settled | ProgressVerdict::Undetermined => {
+            observe_child_runtime(runtime, handle, child).await
         }
     }
+}
+
+/// The child's runtime state, read directly (see [`from_runtime`]).
+async fn observe_child_runtime(
+    runtime: Option<&meerkat_runtime::MeerkatMachine>,
+    handle: &MobHandle,
+    child: &AgentIdentity,
+) -> ChildObservation {
+    let Some(runtime) = runtime else {
+        // Nothing to ask; nothing can be delivered on this host either.
+        return ChildObservation::Settled;
+    };
+    let Some(session_id) = handle.resolve_bridge_session_id(child).await else {
+        return ChildObservation::Settled;
+    };
+    use meerkat_runtime::SessionServiceRuntimeExt as _;
+    let state = runtime.runtime_state(&session_id).await;
+    let active_inputs = runtime
+        .list_active_inputs(&session_id)
+        .await
+        .map(|inputs| inputs.len());
+    from_runtime(state, active_inputs)
 }
 
 /// The child's runtime state, read directly: a run in progress, or a retired

@@ -60,12 +60,20 @@ them.
 - Behavior-only: a member status read whose callers all go away no longer
   cancels its session read. Dropping a read's future does not stop a durable
   read running on a blocking thread, so the observation keeps the read, and
-  its unit of the mob-wide capacity, until it finishes; the same holds for a
-  read still running at the 1 s observation deadline, whose callers are
-  answered with `preview_unavailable: observation_deadline` meanwhile. A later
-  read of the same session waits (bounded by its own deadline) on the read
-  still running instead of starting a second one. Actor shutdown still
-  aborts it.
+  its unit of the mob-wide capacity, until it finishes, for at most a 30 s
+  drain ceiling; the same holds for a read still running at the 1 s
+  observation deadline, whose callers are answered with
+  `preview_unavailable: observation_deadline` meanwhile. A later read of the
+  same session waits (bounded by its own deadline) on the read still running
+  instead of starting a second one. A read still running at the ceiling is
+  orphaned: its capacity unit and per-session slot are released, it is logged
+  as a warning with its member and session, its future is dropped (a durable
+  read already on a blocking thread finishes there, unobserved), and the next
+  read of that member starts a fresh read. Until the ceiling, reads stalled
+  on 16 members (a hung durable store, such as an unresponsive network
+  filesystem) hold the whole capacity, so every other status read in the mob,
+  live members included, is refused with `observation_lane_saturated` after
+  its 2 s admission wait. Actor shutdown still aborts a draining read.
 - Behavior-only: `mob_check_member`'s `note` is chosen by the
   `preview_unavailable` variant: `observation_deadline` and `read_failed` say
   to check again later and that only `status` and `progress.run_state` are
@@ -88,7 +96,11 @@ them.
   `observe_member_status_view` to the inner service: a wrapper that inherits
   the default falls back to `SessionService::read`, which waits on the
   member's running turn, so every status read of a busy member ends at the
-  observation deadline with `preview_unavailable: observation_deadline`. The
+  observation deadline with `preview_unavailable: observation_deadline`, and
+  each such read keeps a unit of the mob's status capacity until the turn ends
+  or the 30 s drain ceiling passes. While 16 or more members run turns behind
+  such a wrapper, every status read in the mob, live members included, can be
+  refused with `observation_lane_saturated` for up to that ceiling. The
   RPC, CLI and test wrappers forward it.
 - `PersistentSessionService::observe_live_session_view` reads a live
   session's view from its summary and state watches without a command to the
@@ -116,9 +128,20 @@ them.
 - `MobHandle::wait_all` polls its members one after another from a single
   loop instead of running one polling loop per member, and returns the first
   failed poll instead of waiting for every other member first.
+- `MobHandle::bounded_terminal_member_result` retries a bracketing member
+  status read that did not observe the member's session view
+  (`preview_unavailable` set), up to 3 attempts, and leaves a read still
+  degraded after them out of its version comparison, instead of taking the
+  missing preview and zero tokens for a version change and reporting
+  `BoundedHelperResultUnavailable`.
 - The fork_off re-link pass backs off between status reads that did not
   observe a child (250 ms doubling to 5 s, reset by an observed read) instead
-  of retrying every 100 ms.
+  of retrying every 100 ms. It takes a local child whose status reads idle as
+  finished only once the child's runtime state agrees: a status read no
+  longer waits on the child's session task, so it reports idle as soon as the
+  turn returns, before the runtime commits the run and the child's reply
+  reaches its durable transcript, and the pass would otherwise deliver
+  `restart_interrupted` for a child that completed.
 
 ### Fixed
 
@@ -146,7 +169,11 @@ them.
   `fork_off` child's first turn therefore reported no preview and zero
   tokens as observations. The summary watch is now seeded from the session
   the actor is built from; its `updated_at` is still the actor's creation
-  time.
+  time. The seed applies to every new live session actor, not only resumes
+  and forks: every new live session's summary counts its initial transcript
+  from the actor's birth, so `read` and `list` of a brand-new session report
+  its initial messages (at least the system prompt, so `message_count` is 1
+  or more) from creation instead of 0 until its first publish.
 - The member-status in-flight map no longer keeps an entry for an identity
   whose observation every caller abandoned: the observation tells the actor
   to forget it, and registering an observation prunes any closed entry, so

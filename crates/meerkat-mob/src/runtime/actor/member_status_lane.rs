@@ -29,15 +29,22 @@
 //!   and registering a new observation prunes every closed entry first. The
 //!   map therefore never grows with identities that are no longer read, such
 //!   as the unique children `fork_off` seats in a long-lived mob.
-//! - **An underlying session read is never duplicated or orphaned.** The
-//!   session-view read an observation starts can outlive the observation's
-//!   deadline (a durable read may run on a blocking thread that dropping its
-//!   future does not stop). The observation's callers are answered at the
-//!   deadline with a typed marker, but the task keeps driving the read to
-//!   completion while holding its mob-wide capacity unit, and a later
-//!   observation of the same session waits (bounded by its own deadline) on
-//!   that read through [`MemberStatusViewReads`] instead of starting a second
-//!   one.
+//! - **An underlying session read is never duplicated while it drains, and
+//!   never held without bound.** The session-view read an observation starts
+//!   can outlive the observation's deadline (a durable read may run on a
+//!   blocking thread that dropping its future does not stop). The
+//!   observation's callers are answered at the deadline with a typed marker,
+//!   but the task keeps driving the read while holding its mob-wide capacity
+//!   unit, and a later observation of the same session waits (bounded by its
+//!   own deadline) on that read through [`MemberStatusViewReads`] instead of
+//!   starting a second one. The drain is bounded by
+//!   [`MEMBER_STATUS_VIEW_READ_DRAIN_CEILING`]: a read still running then is
+//!   orphaned. Its capacity unit and single-flight slot are released, it is
+//!   logged as an [`OrphanedMemberStatusViewRead`] with its member and
+//!   session, and its future is dropped (a durable read already on a blocking
+//!   thread finishes there, unobserved). A later read of that member starts a
+//!   fresh read. A stalled store therefore takes capacity units for at most
+//!   the ceiling, never until the actor exits.
 //!
 //! This is actor-owned shell state for read admission. It holds no MobMachine
 //! fact; the machine stays the only authority over what an observation means.
@@ -66,8 +73,32 @@ pub(in crate::runtime) const MEMBER_STATUS_OBSERVATION_ADMISSION_TIMEOUT: Durati
 /// Upper bound on one observation's session reads. A read still running at
 /// this deadline yields a degraded observation carrying a typed
 /// preview-unavailable marker; the underlying read keeps its capacity unit
-/// until it finishes (see [`MemberStatusViewReads`]).
+/// while it drains, for at most [`MEMBER_STATUS_VIEW_READ_DRAIN_CEILING`]
+/// (see [`MemberStatusViewReads`]).
 pub(in crate::runtime) const MEMBER_STATUS_OBSERVATION_DEADLINE: Duration = Duration::from_secs(1);
+
+/// How long an underlying session-view read still running at its
+/// observation's deadline is drained, holding its capacity unit and its
+/// per-session single flight, before it is orphaned.
+///
+/// The drain exists so a poller cannot stack concurrent underlying reads of
+/// one slow session; the ceiling exists so a stalled store (a hung network
+/// filesystem, or a wrapper that does not forward
+/// `MobSessionService::observe_member_status_view` while members run long
+/// turns) cannot hold the mob's whole capacity until the actor exits, which
+/// would refuse every status read in the mob, live members included, with
+/// `observation_lane_saturated`.
+///
+/// 30 s is 30 times the observation deadline and 15 times the admission
+/// wait, and more than three times the slowest healthy read seen in the
+/// field (a full durable transcript load of a busy member that took ~9 s),
+/// so a slow read that is still progressing is drained, not duplicated. It
+/// also bounds the damage of a stalled store: the mob's status capacity is
+/// saturated for at most 30 s (plus the 2 s admission wait) per stalled
+/// read, and a member whose store never answers leaves at most one orphaned
+/// read per 30 s.
+pub(in crate::runtime) const MEMBER_STATUS_VIEW_READ_DRAIN_CEILING: Duration =
+    Duration::from_secs(30);
 
 /// Reply channel of one `member_status` caller.
 pub(in crate::runtime) type MemberStatusReply =
@@ -237,12 +268,27 @@ pub(in crate::runtime) enum MemberStatusSessionViewRead {
 }
 
 /// One underlying session-view read, owning everything it reads through.
+///
+/// `Send` on native targets only: on wasm32 the session service's futures are
+/// `?Send` (single-threaded executor), exactly like the other boxed actor
+/// futures (`MemberEffectFuture`, `ActorCommandFuture`).
+#[cfg(not(target_arch = "wasm32"))]
 pub(in crate::runtime) type MemberStatusViewReadFuture =
     Pin<Box<dyn Future<Output = MemberStatusSessionViewRead> + Send>>;
+#[cfg(target_arch = "wasm32")]
+pub(in crate::runtime) type MemberStatusViewReadFuture =
+    Pin<Box<dyn Future<Output = MemberStatusSessionViewRead>>>;
 
 /// The result slot of one underlying session-view read: `None` until the
 /// read finishes.
 type MemberStatusViewReadResult = watch::Receiver<Option<MemberStatusSessionViewRead>>;
+
+/// One running underlying read in the registry.
+struct MemberStatusViewReadEntry {
+    result: MemberStatusViewReadResult,
+    /// Observations waiting on this read right now.
+    joiners: usize,
+}
 
 /// Underlying member-status session-view reads in flight, at most one per
 /// session.
@@ -253,16 +299,16 @@ type MemberStatusViewReadResult = watch::Receiver<Option<MemberStatusSessionView
 /// holding its mob-wide capacity unit, even after its callers were answered
 /// at the observation deadline; a later observation of the same session
 /// waits on that read instead of starting a second one. An entry removes
-/// itself when its read finishes or its owner is dropped (the owning task
-/// aborted at actor exit), so the registry holds exactly the reads that are
-/// running.
+/// itself when its read finishes, is orphaned at the drain ceiling, or its
+/// owner is dropped (the owning task aborted at actor exit), so the registry
+/// holds exactly the reads that are being driven.
 #[derive(Clone, Default)]
 pub(in crate::runtime) struct MemberStatusViewReads(
-    Arc<std::sync::Mutex<HashMap<SessionId, MemberStatusViewReadResult>>>,
+    Arc<std::sync::Mutex<HashMap<SessionId, MemberStatusViewReadEntry>>>,
 );
 
 impl MemberStatusViewReads {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, MemberStatusViewReadResult>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, MemberStatusViewReadEntry>> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -272,11 +318,22 @@ impl MemberStatusViewReads {
     /// one.
     pub(in crate::runtime) fn claim(&self, session_id: &SessionId) -> MemberStatusViewReadClaim {
         let mut reads = self.lock();
-        if let Some(result) = reads.get(session_id) {
-            return MemberStatusViewReadClaim::Joined(result.clone());
+        if let Some(entry) = reads.get_mut(session_id) {
+            entry.joiners = entry.joiners.saturating_add(1);
+            return MemberStatusViewReadClaim::Joined(MemberStatusViewReadJoin {
+                reads: self.clone(),
+                session_id: session_id.clone(),
+                result: entry.result.clone(),
+            });
         }
         let (result_tx, result_rx) = watch::channel(None);
-        reads.insert(session_id.clone(), result_rx.clone());
+        reads.insert(
+            session_id.clone(),
+            MemberStatusViewReadEntry {
+                result: result_rx.clone(),
+                joiners: 0,
+            },
+        );
         MemberStatusViewReadClaim::Owner(MemberStatusViewReadOwner {
             reads: self.clone(),
             session_id: session_id.clone(),
@@ -289,6 +346,12 @@ impl MemberStatusViewReads {
     pub(in crate::runtime) fn in_flight(&self) -> usize {
         self.lock().len()
     }
+
+    /// How many observations are waiting on a running underlying read.
+    #[cfg(test)]
+    pub(in crate::runtime) fn joiners(&self) -> usize {
+        self.lock().values().map(|entry| entry.joiners).sum()
+    }
 }
 
 /// The outcome of [`MemberStatusViewReads::claim`].
@@ -297,7 +360,27 @@ pub(in crate::runtime) enum MemberStatusViewReadClaim {
     /// drive it to completion.
     Owner(MemberStatusViewReadOwner),
     /// A read of the session is running: wait for its result.
-    Joined(MemberStatusViewReadResult),
+    Joined(MemberStatusViewReadJoin),
+}
+
+/// One observation's wait on another observation's underlying read. Counted
+/// as a joiner of that read until dropped.
+pub(in crate::runtime) struct MemberStatusViewReadJoin {
+    reads: MemberStatusViewReads,
+    session_id: SessionId,
+    result: MemberStatusViewReadResult,
+}
+
+impl Drop for MemberStatusViewReadJoin {
+    fn drop(&mut self) {
+        let mut reads = self.reads.lock();
+        if let Some(entry) = reads
+            .get_mut(&self.session_id)
+            .filter(|entry| entry.result.same_channel(&self.result))
+        {
+            entry.joiners = entry.joiners.saturating_sub(1);
+        }
+    }
 }
 
 /// Custody of one session's underlying view read. Publishing its result, or
@@ -323,7 +406,7 @@ impl Drop for MemberStatusViewReadOwner {
         let mut reads = self.reads.lock();
         if reads
             .get(&self.session_id)
-            .is_some_and(|entry| entry.same_channel(&self.result_rx))
+            .is_some_and(|entry| entry.result.same_channel(&self.result_rx))
         {
             reads.remove(&self.session_id);
         }
@@ -333,9 +416,9 @@ impl Drop for MemberStatusViewReadOwner {
 /// Wait for a joined read's result. An owner dropped without a result (its
 /// task aborted) reads as a failed read.
 pub(in crate::runtime) async fn joined_member_status_view(
-    mut result: MemberStatusViewReadResult,
+    mut join: MemberStatusViewReadJoin,
 ) -> MemberStatusSessionViewRead {
-    match result.wait_for(Option::is_some).await {
+    match join.result.wait_for(Option::is_some).await {
         Ok(view) => match &*view {
             Some(view) => view.clone(),
             None => MemberStatusSessionViewRead::Unavailable(
@@ -352,22 +435,88 @@ pub(in crate::runtime) async fn joined_member_status_view(
 /// answered at the deadline.
 pub(in crate::runtime) struct MemberStatusViewReadDrain {
     owner: MemberStatusViewReadOwner,
+    agent_identity: AgentIdentity,
     read: MemberStatusViewReadFuture,
+}
+
+/// How a drained underlying read ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::runtime) enum MemberStatusViewReadDrainOutcome {
+    /// The read finished within the drain ceiling; its result reached every
+    /// observation that joined it.
+    Published,
+    /// The read was still running at the drain ceiling and was orphaned.
+    Orphaned(OrphanedMemberStatusViewRead),
+}
+
+/// An underlying member-status session-view read given up at
+/// [`MEMBER_STATUS_VIEW_READ_DRAIN_CEILING`]: its capacity unit and
+/// single-flight slot were released and its future dropped. A durable read
+/// already on a blocking thread finishes there, unobserved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::runtime) struct OrphanedMemberStatusViewRead {
+    pub(in crate::runtime) agent_identity: AgentIdentity,
+    pub(in crate::runtime) bridge_session_id: SessionId,
+    /// How long the read was drained after its observation answered.
+    pub(in crate::runtime) drained_for: Duration,
+}
+
+impl OrphanedMemberStatusViewRead {
+    pub(in crate::runtime) fn log(&self) {
+        tracing::warn!(
+            agent_identity = %self.agent_identity,
+            bridge_session_id = %self.bridge_session_id,
+            drained_for_ms = u64::try_from(self.drained_for.as_millis()).unwrap_or(u64::MAX),
+            "member status session view read orphaned at the drain ceiling: its capacity unit \
+             and single-flight slot are released, the read is dropped, and the next status \
+             read of the member starts a fresh read"
+        );
+    }
 }
 
 impl MemberStatusViewReadDrain {
     pub(in crate::runtime) fn new(
         owner: MemberStatusViewReadOwner,
+        agent_identity: AgentIdentity,
         read: MemberStatusViewReadFuture,
     ) -> Self {
-        Self { owner, read }
+        Self {
+            owner,
+            agent_identity,
+            read,
+        }
     }
 
-    /// Drive the read to completion and publish its result to every
-    /// observation that joined it.
-    pub(in crate::runtime) async fn finish(self) {
-        let view = self.read.await;
-        self.owner.publish(view);
+    /// Drive the read for at most `ceiling` and publish its result to every
+    /// observation that joined it. A read still running at the ceiling is
+    /// dropped, and its joiners are answered with the observation-deadline
+    /// marker; either way the session's single-flight slot is released.
+    pub(in crate::runtime) async fn finish(
+        self,
+        ceiling: Duration,
+    ) -> MemberStatusViewReadDrainOutcome {
+        let Self {
+            owner,
+            agent_identity,
+            read,
+        } = self;
+        match tokio::time::timeout(ceiling, read).await {
+            Ok(view) => {
+                owner.publish(view);
+                MemberStatusViewReadDrainOutcome::Published
+            }
+            Err(_elapsed) => {
+                let orphaned = OrphanedMemberStatusViewRead {
+                    agent_identity,
+                    bridge_session_id: owner.session_id.clone(),
+                    drained_for: ceiling,
+                };
+                owner.publish(MemberStatusSessionViewRead::Unavailable(
+                    super::super::handle::MemberPreviewUnavailable::ObservationDeadline,
+                ));
+                MemberStatusViewReadDrainOutcome::Orphaned(orphaned)
+            }
+        }
     }
 }
 
@@ -381,6 +530,9 @@ pub(in crate::runtime) struct MemberStatusLaneProbe {
     pub(in crate::runtime) available_capacity: usize,
     /// Underlying session-view reads still running.
     pub(in crate::runtime) view_reads_in_flight: usize,
+    /// Observations waiting on another observation's running underlying
+    /// read.
+    pub(in crate::runtime) view_read_joiners: usize,
 }
 
 /// Result of waiting for the mob-wide observation capacity.
@@ -473,6 +625,7 @@ impl MobActor {
             observed_identities: self.member_status_observations.keys().cloned().collect(),
             available_capacity: self.member_status_observation_capacity.available_permits(),
             view_reads_in_flight: self.member_status_view_reads.in_flight(),
+            view_read_joiners: self.member_status_view_reads.joiners(),
         }
     }
 
@@ -528,12 +681,16 @@ impl MobActor {
                     )
                     .await;
                     // The capacity unit bounds concurrent session reads, so a
-                    // read still running after the deadline keeps it until it
-                    // finishes; the callers are answered meanwhile, and the
-                    // actor-side completion never holds it.
+                    // read still running after the deadline keeps it while it
+                    // drains, up to the drain ceiling; the callers are
+                    // answered meanwhile, and the actor-side completion never
+                    // holds it.
                     let release = async move {
-                        if let Some(drain) = drain {
-                            drain.finish().await;
+                        if let Some(drain) = drain
+                            && let MemberStatusViewReadDrainOutcome::Orphaned(orphaned) =
+                                drain.finish(MEMBER_STATUS_VIEW_READ_DRAIN_CEILING).await
+                        {
+                            orphaned.log();
                         }
                         drop(permit);
                     };
@@ -882,6 +1039,17 @@ mod tests {
         let MemberStatusViewReadClaim::Joined(joined) = reads.claim(&session) else {
             panic!("a second claim of the same session joins the read");
         };
+        assert_eq!(reads.joiners(), 1, "a joined claim counts as a joiner");
+        let MemberStatusViewReadClaim::Joined(left) = reads.claim(&session) else {
+            panic!("a third claim of the same session joins the read");
+        };
+        assert_eq!(reads.joiners(), 2);
+        drop(left);
+        assert_eq!(
+            reads.joiners(),
+            1,
+            "a joiner that stops waiting is uncounted"
+        );
         assert!(matches!(
             reads.claim(&SessionId::new()),
             MemberStatusViewReadClaim::Owner(_)
@@ -911,6 +1079,86 @@ mod tests {
                 super::super::super::handle::MemberPreviewUnavailable::ReadFailed
             )
         ));
+    }
+
+    /// A drained read that is still running at the drain ceiling is
+    /// orphaned: it releases the capacity unit held across the drain and the
+    /// session's single-flight slot, its joiners are answered with the
+    /// observation-deadline marker, and the next claim of the session owns a
+    /// fresh read. A read finishing before the ceiling publishes its result.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_drain_is_orphaned_at_the_ceiling_and_releases_its_capacity() {
+        let reads = MemberStatusViewReads::default();
+        let session = SessionId::new();
+        let identity = AgentIdentity::from("stalled-member");
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&capacity)
+            .try_acquire_owned()
+            .expect("take the only capacity unit");
+        let MemberStatusViewReadClaim::Owner(owner) = reads.claim(&session) else {
+            panic!("the first claim owns the read");
+        };
+        let stalled: MemberStatusViewReadFuture = Box::pin(std::future::pending());
+        let drain = tokio::spawn({
+            let identity = identity.clone();
+            async move {
+                let outcome = MemberStatusViewReadDrain::new(owner, identity, stalled)
+                    .finish(MEMBER_STATUS_VIEW_READ_DRAIN_CEILING)
+                    .await;
+                drop(permit);
+                outcome
+            }
+        });
+        tokio::time::sleep(
+            MEMBER_STATUS_VIEW_READ_DRAIN_CEILING.saturating_sub(Duration::from_millis(1)),
+        )
+        .await;
+        assert_eq!(capacity.available_permits(), 0, "held until the ceiling");
+        assert_eq!(
+            reads.in_flight(),
+            1,
+            "the slot stays claimed until the ceiling"
+        );
+        let MemberStatusViewReadClaim::Joined(joined) = reads.claim(&session) else {
+            panic!("a claim before the ceiling joins the draining read");
+        };
+
+        let outcome = drain.await.expect("drain task");
+        assert_eq!(
+            outcome,
+            MemberStatusViewReadDrainOutcome::Orphaned(OrphanedMemberStatusViewRead {
+                agent_identity: identity,
+                bridge_session_id: session.clone(),
+                drained_for: MEMBER_STATUS_VIEW_READ_DRAIN_CEILING,
+            })
+        );
+        assert_eq!(capacity.available_permits(), 1, "released at the ceiling");
+        assert_eq!(reads.in_flight(), 0, "the single-flight slot is released");
+        assert!(matches!(
+            joined_member_status_view(joined).await,
+            MemberStatusSessionViewRead::Unavailable(
+                super::super::super::handle::MemberPreviewUnavailable::ObservationDeadline
+            )
+        ));
+        let MemberStatusViewReadClaim::Owner(owner) = reads.claim(&session) else {
+            panic!("a claim after the ceiling starts a fresh read");
+        };
+
+        let finishing: MemberStatusViewReadFuture = Box::pin(async {
+            tokio::time::sleep(Duration::from_secs(9)).await;
+            MemberStatusSessionViewRead::Observed {
+                output_preview: Some("slow but healthy".to_string()),
+                tokens_used: 3,
+            }
+        });
+        assert_eq!(
+            MemberStatusViewReadDrain::new(owner, AgentIdentity::from("slow-member"), finishing)
+                .finish(MEMBER_STATUS_VIEW_READ_DRAIN_CEILING)
+                .await,
+            MemberStatusViewReadDrainOutcome::Published,
+            "a slow read that finishes within the ceiling is drained, not orphaned"
+        );
+        assert_eq!(reads.in_flight(), 0);
     }
 
     /// Every joined caller receives the one result; an error is shared by

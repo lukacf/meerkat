@@ -512,11 +512,13 @@ tool arguments. Without manage scope over the mob, the forker can still:
   `note` says so). Status reads of different members never hold each other
   up, and concurrent reads of one member share one read; a session read that
   outlives its 1 s deadline keeps running (and keeps its share of the mob's
-  read capacity) until it finishes, and later reads of that member wait on it
-  instead of starting another. A read whose session view was not observed
-  still answers, with a typed `preview_unavailable` meaning the preview and
-  token count are missing, not empty or zero, and a `note` chosen by its
-  value: `observation_deadline` (the read did not finish in time) and
+  read capacity) until it finishes, for at most 30 s, and later reads of that
+  member wait on it instead of starting another. A read still running after
+  30 s is given up and its share released, so a stalled session store cannot
+  hold the mob's read capacity for longer. A read whose session view was not
+  observed still answers, with a typed `preview_unavailable` meaning the
+  preview and token count are missing, not empty or zero, and a `note` chosen
+  by its value: `observation_deadline` (the read did not finish in time) and
   `read_failed` say to check again later and that only `status` and
   `progress.run_state` are current; `session_absent` says the member has no
   readable session, so checking again will not bring the preview back;

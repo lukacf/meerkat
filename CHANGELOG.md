@@ -444,7 +444,11 @@ them.
     idle before the recovered run opens; before, the re-link delivered
     `restart_interrupted` there and dropped the later real reply. The watch
     is bounded by the commit ceiling only while the child is not seen
-    running.
+    running. At the ceiling the receipt is read once more, waiting on the
+    runtime, and only a read that is evidence delivers
+    `restart_interrupted`: a read that timed out behind the turn's own
+    commit, or failed, keeps the watch going, for at most three such reads
+    in a row.
   Records without the field (earlier releases, or hosts without a runtime)
   keep the transcript read.
 

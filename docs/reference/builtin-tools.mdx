@@ -487,6 +487,14 @@ was machine evidence; an inconclusive reading names no cause. For a job with
 a delivery identity the same ceiling bounds an input still owed its terminal
 while the child is not seen running; there `commit_never_landed` means a run
 had taken the input up (staged or applied) and it never reached a terminal.
+At that ceiling the receipt is read once more, waiting on the runtime for up
+to two seconds (never past `max_run_secs`), and a receipt found then is
+delivered. Only a read that is evidence (the input still owed a terminal,
+never admitted, or the child without a session or retired) delivers
+`restart_interrupted`; a read that says nothing (it timed out behind a busy
+session driver, such as the turn's own commit, or failed) keeps the watch
+going, and only three such reads in a row deliver `restart_interrupted`,
+naming no cause.
 
 A limit that has already elapsed is decided at once, so an idle child past its
 limit always gets `max_run_elapsed`. When the limit wins, the child's run is

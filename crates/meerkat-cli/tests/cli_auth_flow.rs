@@ -957,6 +957,12 @@ fn rkat_config_get_and_patch_print_legacy_model_fallback_warning() {
 /// no-policy form (the `enabled` key dropped), so
 /// the bootstrap itself must print the warning; `load_config` no longer sees
 /// the legacy shape afterwards.
+///
+/// The credential-read bootstrap only exists in builds with every OAuth
+/// provider (`prepare_credential_reads_with_persistence` is a no-op
+/// otherwise), so the test is compiled under the same features, as its unit
+/// counterpart `credential_bootstrap_reports_legacy_warning_only_when_it_rewrites_global_doc` is.
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 #[test]
 fn rkat_prompt_prints_legacy_warning_when_credential_bootstrap_rewrites_global_doc() {
     let Some(rkat) = rkat_binary() else {
@@ -995,10 +1001,6 @@ fn rkat_prompt_prints_legacy_warning_when_credential_bootstrap_rewrites_global_d
         .output()
         .expect("rkat must spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
-        eprintln!("SKIP: auth provider features unavailable");
-        return;
-    }
     assert!(
         !stderr.contains("panicked"),
         "rkat must not panic; stderr:\n{stderr}"

@@ -4887,6 +4887,21 @@ impl DriverEntry {
         }
     }
 
+    /// Whether a run input awaits its boundary commit on this driver (see
+    /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::run_input_awaits_boundary`]).
+    /// A persistent driver answers only under healthy durability: after a
+    /// failed commit its hot state may already show the inputs consumed while
+    /// durable history does not, so degraded durability is an error.
+    pub(crate) fn run_input_awaits_boundary(&self) -> Result<bool, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.run_input_awaits_boundary(),
+            DriverEntry::Persistent(d) => {
+                d.require_durability_ready()?;
+                d.inner_ref().run_input_awaits_boundary()
+            }
+        }
+    }
+
     pub(crate) fn has_queued_input_in_any_lane(&self) -> bool {
         match self {
             DriverEntry::Ephemeral(d) => d.has_queued_input_in_any_lane(),

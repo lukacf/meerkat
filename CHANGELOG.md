@@ -317,6 +317,30 @@ them.
   its last path segment. Each gap has a doctor fixture that fails without
   the new scenario.
 
+- After a host restart, re-linking a `fork_off` child that was still running
+  no longer reports `restart_interrupted` for a child that answered. Member
+  status reads the live agent, which is terminal before the turn's boundary
+  commit lands, while the re-link reads the outcome from the durable
+  transcript, and in that window it found no reply. The re-link now asks the
+  child's runtime, through the new public
+  `MeerkatMachine::session_has_uncommitted_run_input`, whether a run input
+  still awaits its boundary commit: a machine phase (`Staged`, `Applied` or
+  `AppliedPendingConsumption`), so a turn that compacted reads the same.
+  `Ok(false)` means durability is ready, every input of the session's
+  current driver was read, and none awaits a boundary. Everything else is an
+  error: no runtime holding the session, a driver replaced during the read,
+  degraded durability after a failed boundary commit (which consumes the
+  inputs in memory before persistence fails), or an input without its
+  generated phase. `Queued` input does not count. The re-link takes a
+  pending input or degraded durability as machine evidence, a timed-out or
+  failed read as inconclusive, and a session the runtime no longer holds as
+  settled. It waits on an unconfirmed commit for at most
+  `COMMIT_PENDING_CEILING` (5 minutes), restarted only when the child is seen
+  running again, then delivers `restart_interrupted`, with the typed
+  `restart_reason` `commit_never_landed` only when the reading at the ceiling
+  was machine evidence. `fork_relink::relink_child_within` takes the ceiling
+  explicitly.
+
 - Live host: assistant realtime events (display-text deltas, spoken-transcript
   deltas and spoken-transcript finals) now reach the session with the channel
   they streamed on, through both the RPC `SessionServiceProjectionSink` and the

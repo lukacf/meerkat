@@ -4452,6 +4452,15 @@ impl RuntimeLoopAuthorityBinding {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    async fn run_before_terminal_commit_test_hook(&self) {
+        if let Some(machine) = self.machine.upgrade() {
+            machine
+                .run_runtime_loop_before_terminal_commit_test_hook(&self.session_id)
+                .await;
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     async fn run_before_queue_authority_test_hook(&self) {
         if let Some(machine) = self.machine.upgrade() {
             machine
@@ -6708,6 +6717,10 @@ async fn process_queue(
                             }
                             _ => None,
                         };
+                        #[cfg(any(test, feature = "test-support"))]
+                        authority_binding
+                            .run_before_terminal_commit_test_hook()
+                            .await;
                         let (terminal_authority_guard, commit_outcome) =
                             match commit_runtime_loop_output_owned(
                                 terminal_authority_guard,

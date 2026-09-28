@@ -8893,6 +8893,76 @@ impl MobHandle {
         Self::machine_bridge_session_id_for_identity(identity, &machine_state)
     }
 
+    /// Handle-side live durable-source readiness for `identity`, never
+    /// entering the actor queue.
+    ///
+    /// Checks the facts the actor's durable-source validation checks inline,
+    /// against the published machine-state snapshot and the shared roster:
+    /// the handle's principal holds the live control scope, the member is
+    /// current, its roster runtime matches the machine's `identity_to_runtime`
+    /// binding, that runtime is live, and both the roster and the machine
+    /// bind the member to `canonical_session_id`. It then asks the session
+    /// service for the body-free
+    /// [`MobSessionService::observe_live_durable_source`] observation. A busy
+    /// or blocked mob actor, a member mid-turn, and a large session body
+    /// therefore cannot delay it.
+    ///
+    /// This is readiness, not admission: the live open still runs the
+    /// actor-validated durable check, including the body load, through
+    /// [`MemberHandle::validate_live_durable_source_availability`].
+    #[cfg(feature = "openai-live")]
+    pub async fn observe_live_durable_source_readiness(
+        &self,
+        identity: &AgentIdentity,
+        canonical_session_id: &SessionId,
+    ) -> Result<(), super::LiveDurableSourceReadinessError> {
+        use super::LiveDurableSourceReadinessError as Refusal;
+
+        self.resolve_control_policy(super::scope_gate::control_now_ms())
+            .map_err(|_| Refusal::AccessDenied)?
+            .require(crate::ControlScope::Live)
+            .map_err(|_| Refusal::AccessDenied)?;
+        let entry = self
+            .roster
+            .read()
+            .await
+            .get(identity)
+            .cloned()
+            .ok_or(Refusal::MemberUnavailable)?;
+        if entry.bridge_session_id() != Some(canonical_session_id) {
+            return Err(Refusal::BindingMismatch);
+        }
+        {
+            let machine_state = self.machine_state_watch_rx.borrow();
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+            let runtime = machine_state
+                .identity_to_runtime
+                .get(&dsl_identity)
+                .ok_or(Refusal::MemberUnavailable)?;
+            let bound_session = machine_state
+                .member_session_bindings
+                .get(&dsl_identity)
+                .ok_or(Refusal::BindingMismatch)?;
+            if runtime.0 != entry.agent_runtime_id.to_string()
+                || bound_session.0 != canonical_session_id.to_string()
+                || !machine_state.live_runtime_ids.contains(runtime)
+            {
+                return Err(Refusal::BindingMismatch);
+            }
+        }
+        match self
+            .session_service
+            .observe_live_durable_source(canonical_session_id)
+            .await
+        {
+            Ok(super::LiveDurableSourceObservation::Committed { .. }) => Ok(()),
+            Ok(super::LiveDurableSourceObservation::Archived) => Err(Refusal::SourceArchived),
+            Ok(super::LiveDurableSourceObservation::Absent) => Err(Refusal::SourceAbsent),
+            // A classification this build does not know is never readiness.
+            Ok(_) | Err(_) => Err(Refusal::ObservationFailed),
+        }
+    }
+
     /// Observation-only bridge-session lookup that never enters the actor queue.
     ///
     /// This reads the roster's current member binding as a projection for

@@ -12,6 +12,8 @@ use super::transaction::LifecycleRollback;
 use super::*;
 
 mod explicit_resume;
+#[cfg(feature = "openai-live")]
+pub(super) mod live_durable_source_loads;
 pub(super) mod member_effect_lane;
 pub(super) mod member_status_lane;
 pub(super) mod reload_revival;
@@ -6693,6 +6695,10 @@ pub(super) struct MobActor {
     /// The underlying member-status session-view reads still running, one
     /// per session, shared with the observation tasks.
     pub(super) member_status_view_reads: MemberStatusViewReads,
+    /// The live open's durable-source body loads still running, one per
+    /// session, shared by concurrent opens (see `live_durable_source_loads`).
+    #[cfg(feature = "openai-live")]
+    pub(super) live_durable_source_loads: live_durable_source_loads::LiveDurableSourceLoads,
     /// Actor-issued order for member-status observations. MobMachine remains
     /// the authority that accepts or rejects each observation as monotonic.
     pub(super) next_member_status_observed_at_ms: u64,
@@ -24614,31 +24620,19 @@ impl MobActor {
                     // one voice status poll. Reply from a detached task so
                     // the actor keeps serving; the reply contract is
                     // unchanged.
+                    // Concurrent opens of one session share one body load
+                    // (`live_durable_source_loads`), so a timed-out caller
+                    // never leaves a duplicate load behind.
                     match result {
                         Err(error) => {
                             let _ = reply_tx.send(Err(error));
                         }
                         Ok(session_id) => {
-                            let session_service = Arc::clone(&self.session_service);
-                            tokio::spawn(async move {
-                                let result = async {
-                                    let source = session_service
-                                        .load_persisted_session(&session_id)
-                                        .await
-                                        .map_err(|_| {
-                                            super::LiveBridgeOperationStartError::Rejected
-                                        })?;
-                                    if source
-                                        .as_ref()
-                                        .is_none_or(|session| session.id() != &session_id)
-                                    {
-                                        return Err(super::LiveBridgeOperationStartError::Rejected);
-                                    }
-                                    Ok(())
-                                }
-                                .await;
-                                let _ = reply_tx.send(result);
-                            });
+                            self.live_durable_source_loads.validate(
+                                Arc::clone(&self.session_service),
+                                session_id,
+                                reply_tx,
+                            );
                         }
                     }
                 }

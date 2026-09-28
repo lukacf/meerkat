@@ -2971,6 +2971,103 @@ impl AgentFactory {
             })
     }
 
+    /// Readiness sibling of [`Self::resolve_public_live_target`]: the same
+    /// binding selection, witness check, and catalog admission, then a
+    /// non-mutating credential observation instead of credential
+    /// materialization. Nothing is refreshed, run, or persisted, so a
+    /// readiness poll cannot rotate a token or stall on a credential source.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "openai-live"))]
+    pub async fn observe_public_live_credential_readiness(
+        &self,
+        config: &Config,
+        realm: &RealmId,
+        identity: &SessionLlmIdentity,
+        binding_use_witness: &meerkat_core::AuthBindingUseWitness,
+        auth_lease_handle: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    ) -> Result<meerkat_providers::CredentialReadiness, FactoryError> {
+        let (binding_realm, _, auth_binding) = Self::resolve_realm_binding_for_provider(
+            config,
+            identity.provider,
+            identity.auth_binding.as_ref(),
+            Some(realm),
+        )
+        .map_err(FactoryError::ConnectionTarget)?;
+        if auth_binding != *binding_use_witness.auth_binding() {
+            return Err(FactoryError::ClientCreationFailed(
+                "public live binding-use witness does not match the host identity binding"
+                    .to_string(),
+            ));
+        }
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .map_err(|error| FactoryError::ClientCreationFailed(error.to_string()))?;
+        if registry
+            .profile_witness_for_provider(identity.provider, &identity.model)
+            .is_none()
+        {
+            return Err(FactoryError::ClientCreationFailed(format!(
+                "public live target is not registered for {}:{}",
+                identity.provider.as_str(),
+                identity.model
+            )));
+        }
+        self.observe_selected_binding_credential_readiness(
+            &binding_realm,
+            &auth_binding,
+            auth_lease_handle,
+        )
+        .await
+    }
+
+    /// Readiness sibling of [`Self::complete_experimental_live_admission`]:
+    /// the prepared binding's witness check, then a non-mutating credential
+    /// observation. The preparation is borrowed, not consumed, and no
+    /// admission witness is minted.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn observe_experimental_live_credential_readiness(
+        &self,
+        preparation: &ExperimentalLiveTargetPreparation,
+        binding_use_witness: &meerkat_core::AuthBindingUseWitness,
+        auth_lease_handle: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    ) -> Result<meerkat_providers::CredentialReadiness, FactoryError> {
+        if preparation.auth_binding != *binding_use_witness.auth_binding() {
+            return Err(FactoryError::ClientCreationFailed(
+                "experimental live binding-use witness does not match the prepared binding"
+                    .to_string(),
+            ));
+        }
+        self.observe_selected_binding_credential_readiness(
+            &preparation.binding_realm,
+            &preparation.auth_binding,
+            auth_lease_handle,
+        )
+        .await
+    }
+
+    /// Non-mutating credential readiness for an already-selected binding,
+    /// over the same resolver environment
+    /// [`Self::resolve_realtime_connection_for_selected_binding`] builds.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn observe_selected_binding_credential_readiness(
+        &self,
+        realm: &RealmConnectionSet,
+        auth_binding: &AuthBindingRef,
+        auth_lease_handle: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    ) -> Result<meerkat_providers::CredentialReadiness, FactoryError> {
+        let mut env = meerkat_providers::ResolverEnvironment::with_process_env()
+            .with_auth_lease_handle(auth_lease_handle);
+        if let Some(persistence) = self.resolution_provider_auth_persistence()? {
+            env = env.with_provider_auth_persistence(persistence);
+        }
+        for (handle, resolver) in &self.external_auth_resolvers {
+            env = env.with_external_resolver(handle.clone(), resolver.clone());
+        }
+        self.provider_registry
+            .observe_credential_readiness(realm, auth_binding, &env)
+            .await
+            .map_err(FactoryError::ProviderAuth)
+    }
+
     /// Materialize one prepared target only after the host supplies the
     /// nonforgeable exact binding-use witness minted from authenticated state
     /// and the generated AuthMachine lease for the same durable session.

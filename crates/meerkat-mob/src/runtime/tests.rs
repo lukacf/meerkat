@@ -1971,6 +1971,8 @@ struct MockSessionService {
     create_session_delay_ms: AtomicU64,
     load_persisted_session_delay_ms: AtomicU64,
     load_persisted_session_started: tokio::sync::Notify,
+    live_durable_source_observations: AtomicUsize,
+    fail_load_persisted_session: AtomicBool,
     load_persisted_session_calls: AtomicU64,
     load_persisted_session_metadata_calls: AtomicU64,
     load_persisted_session_in_flight: AtomicU64,
@@ -2132,6 +2134,8 @@ impl MockSessionService {
             create_session_delay_ms: AtomicU64::new(0),
             load_persisted_session_delay_ms: AtomicU64::new(0),
             load_persisted_session_started: tokio::sync::Notify::new(),
+            live_durable_source_observations: AtomicUsize::new(0),
+            fail_load_persisted_session: AtomicBool::new(false),
             load_persisted_session_calls: AtomicU64::new(0),
             load_persisted_session_metadata_calls: AtomicU64::new(0),
             load_persisted_session_in_flight: AtomicU64::new(0),
@@ -4347,6 +4351,31 @@ impl MobSessionService for MockSessionService {
         crate::observe_member_status_view_via_read(self, session_id).await
     }
 
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::LiveDurableSourceObservation, SessionError> {
+        // Body-free: the persisted map and archive set only. Never touches the
+        // load delay, the resume-authority gate, or `load_persisted_session`.
+        self.live_durable_source_observations
+            .fetch_add(1, Ordering::Relaxed);
+        if self.archived_session_ids.read().await.contains(session_id) {
+            return Ok(crate::LiveDurableSourceObservation::Archived);
+        }
+        Ok(
+            if self
+                .persisted_sessions
+                .read()
+                .await
+                .contains_key(session_id)
+            {
+                crate::LiveDurableSourceObservation::Committed { revision: None }
+            } else {
+                crate::LiveDurableSourceObservation::Absent
+            },
+        )
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &meerkat_core::SessionId,
@@ -4983,6 +5012,13 @@ impl MobSessionService for MockSessionService {
             Self::per_session_delay(&self.load_persisted_session_delays_for, session_id)
         {
             tokio::time::sleep(delay).await;
+        }
+        if self.fail_load_persisted_session.load(Ordering::Relaxed) {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(
+                    "durable source body failed typed restore".to_string(),
+                ),
+            ));
         }
         let _authority_guard = self.resume_authority_gate.lock().await;
         // Mirror PersistentSessionService: archived sessions have no loadable
@@ -9083,6 +9119,271 @@ async fn live_durable_source_validation_loads_the_source_body_off_the_mob_actor(
 }
 
 #[cfg(feature = "openai-live")]
+async fn spawn_live_durable_source_member(
+    mob_name: &str,
+    identity: &str,
+) -> (MobHandle, Arc<MockSessionService>, AgentIdentity, SessionId) {
+    let definition = with_unique_mob_id(sample_definition(), mob_name);
+    let (handle, service) = create_test_mob(definition).await;
+    let identity = AgentIdentity::from(identity);
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), identity.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn durable source member");
+    let session_id = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("member is bound to a canonical session");
+    (handle, service, identity, session_id)
+}
+
+#[cfg(feature = "openai-live")]
+#[tokio::test]
+async fn live_durable_source_readiness_is_body_free_and_actor_free() {
+    let (handle, service, identity, session_id) =
+        spawn_live_durable_source_member("live-readiness-actor-free", "voice-member").await;
+
+    // A body load that never completes and a parked mob actor: neither may
+    // delay readiness.
+    service.set_load_persisted_session_delay_ms(3_600_000);
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let parked = handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::ParkActorForObservationTest {
+            entered_tx,
+            release_rx,
+            reply_tx,
+        })
+        .await
+        .expect("enqueue test-only blocked head");
+    entered_rx.await.expect("actor parks");
+    let mut queued_phase = handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::QueryPhase { reply_tx })
+        .await
+        .expect("enqueue an actor command behind the parked head");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut queued_phase)
+            .await
+            .is_err(),
+        "control: an actor command waits while the actor is parked"
+    );
+
+    let loads_before = service.load_persisted_session_calls.load(Ordering::Relaxed);
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        handle.observe_live_durable_source_readiness(&identity, &session_id),
+    )
+    .await
+    .expect("readiness returns within 100 ms with the actor parked and the body load hung")
+    .expect("bound member with a committed source is ready");
+
+    let probes = (0..16)
+        .map(|_| {
+            let handle = handle.clone();
+            let identity = identity.clone();
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                handle
+                    .observe_live_durable_source_readiness(&identity, &session_id)
+                    .await
+            })
+        })
+        .collect::<Vec<_>>();
+    for probe in probes {
+        tokio::time::timeout(Duration::from_millis(500), probe)
+            .await
+            .expect("concurrent readiness probe finishes")
+            .expect("probe task")
+            .expect("probe is ready");
+    }
+    assert_eq!(
+        service.load_persisted_session_calls.load(Ordering::Relaxed),
+        loads_before,
+        "readiness probes never load the session body"
+    );
+    assert_eq!(
+        service
+            .live_durable_source_observations
+            .load(Ordering::Relaxed),
+        17
+    );
+
+    release_tx.send(()).expect("release parked actor");
+    parked
+        .await
+        .expect("parked head reply")
+        .expect("parked head releases cleanly");
+    let phase = queued_phase
+        .await
+        .expect("queued actor command reply after release");
+    assert!(phase.is_ok(), "queued actor command completes: {phase:?}");
+    service.set_load_persisted_session_delay_ms(0);
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+#[cfg(feature = "openai-live")]
+#[tokio::test]
+async fn live_durable_source_readiness_fails_closed_with_typed_refusals() {
+    use super::LiveDurableSourceReadinessError as Refusal;
+
+    let (handle, service, identity, session_id) =
+        spawn_live_durable_source_member("live-readiness-refusals", "voice-member").await;
+
+    assert_eq!(
+        handle
+            .observe_live_durable_source_readiness(&identity, &SessionId::new())
+            .await,
+        Err(Refusal::BindingMismatch),
+        "a session the member is not bound to is never ready"
+    );
+    assert_eq!(
+        handle
+            .observe_live_durable_source_readiness(&AgentIdentity::from("stranger"), &session_id)
+            .await,
+        Err(Refusal::MemberUnavailable)
+    );
+    assert_eq!(
+        handle
+            .clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::internal())
+            .observe_live_durable_source_readiness(&identity, &session_id)
+            .await,
+        Err(Refusal::AccessDenied),
+        "a lane without the live control scope is refused"
+    );
+
+    service
+        .archived_session_ids
+        .write()
+        .await
+        .insert(session_id.clone());
+    assert_eq!(
+        handle
+            .observe_live_durable_source_readiness(&identity, &session_id)
+            .await,
+        Err(Refusal::SourceArchived)
+    );
+    service
+        .archived_session_ids
+        .write()
+        .await
+        .remove(&session_id);
+
+    let persisted = service
+        .persisted_sessions
+        .write()
+        .await
+        .remove(&session_id)
+        .expect("spawned member has a persisted source");
+    assert_eq!(
+        handle
+            .observe_live_durable_source_readiness(&identity, &session_id)
+            .await,
+        Err(Refusal::SourceAbsent)
+    );
+    service
+        .persisted_sessions
+        .write()
+        .await
+        .insert(session_id.clone(), persisted);
+    handle
+        .observe_live_durable_source_readiness(&identity, &session_id)
+        .await
+        .expect("restored source is ready again");
+
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+#[cfg(feature = "openai-live")]
+#[tokio::test]
+async fn live_open_durable_source_body_load_is_single_flight_per_session() {
+    let (handle, service, identity, _session_id) =
+        spawn_live_durable_source_member("live-open-single-flight", "voice-member").await;
+    let member = handle.member(&identity).await.expect("member handle");
+
+    service.set_load_persisted_session_delay_ms(400);
+    let loads_before = service.load_persisted_session_calls.load(Ordering::Relaxed);
+
+    // A caller that gives up leaves its load running for the next caller.
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            member.validate_live_durable_source_availability(),
+        )
+        .await
+        .is_err(),
+        "the impatient caller times out while the body loads"
+    );
+    let opens = (0..8)
+        .map(|_| {
+            let member = member.clone();
+            tokio::spawn(async move { member.validate_live_durable_source_availability().await })
+        })
+        .collect::<Vec<_>>();
+    for open in opens {
+        open.await
+            .expect("open validation task")
+            .expect("the shared load validates the source");
+    }
+    assert_eq!(
+        service.load_persisted_session_calls.load(Ordering::Relaxed) - loads_before,
+        1,
+        "concurrent opens, including an abandoned one, share one body load"
+    );
+
+    // The slot is released once the load settles: a later open loads anew.
+    service.set_load_persisted_session_delay_ms(0);
+    member
+        .validate_live_durable_source_availability()
+        .await
+        .expect("later open validates");
+    assert_eq!(
+        service.load_persisted_session_calls.load(Ordering::Relaxed) - loads_before,
+        2
+    );
+
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+#[cfg(feature = "openai-live")]
+#[tokio::test]
+async fn live_open_still_fails_a_corrupt_or_absent_body_with_a_typed_error() {
+    let (handle, service, identity, session_id) =
+        spawn_live_durable_source_member("live-open-body-validation", "voice-member").await;
+    let member = handle.member(&identity).await.expect("member handle");
+
+    service
+        .fail_load_persisted_session
+        .store(true, Ordering::Relaxed);
+    assert_eq!(
+        member.validate_live_durable_source_availability().await,
+        Err(super::LiveBridgeOperationStartError::Rejected),
+        "a body that fails to restore refuses the open"
+    );
+    assert_eq!(
+        handle
+            .observe_live_durable_source_readiness(&identity, &session_id)
+            .await,
+        Ok(()),
+        "readiness is body-free by design; the open is where the body is validated"
+    );
+    service
+        .fail_load_persisted_session
+        .store(false, Ordering::Relaxed);
+
+    service.persisted_sessions.write().await.remove(&session_id);
+    assert_eq!(
+        member.validate_live_durable_source_availability().await,
+        Err(super::LiveBridgeOperationStartError::Rejected),
+        "an absent body refuses the open"
+    );
+
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+#[cfg(feature = "openai-live")]
 #[tokio::test]
 async fn live_bridge_cancellation_keeps_exact_member_incarnation_and_allows_ordinary_turn() {
     struct AdmitDispatch;
@@ -11468,6 +11769,13 @@ impl MobSessionService for PersistedListingSessionService {
         self.inner.observe_member_status_view(session_id).await
     }
 
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::LiveDurableSourceObservation, SessionError> {
+        self.inner.observe_live_durable_source(session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &meerkat_core::SessionId,
@@ -11883,6 +12191,13 @@ impl MobSessionService for InactiveReadSessionService {
     ) -> Result<crate::MemberStatusSessionView, SessionError> {
         // Serve the view from this wrapper's own inactive-session `read`.
         crate::observe_member_status_view_via_read(self, session_id).await
+    }
+
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::LiveDurableSourceObservation, SessionError> {
+        crate::observe_live_durable_source_via_projection_visibility(self, session_id).await
     }
 
     async fn fork_persisted_session_at_turn_boundary(
@@ -53950,6 +54265,13 @@ impl MobSessionService for RealCommsSessionService {
         crate::observe_member_status_view_via_read(self, session_id).await
     }
 
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::LiveDurableSourceObservation, SessionError> {
+        crate::observe_live_durable_source_via_projection_visibility(self, session_id).await
+    }
+
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         _source_session_id: &meerkat_core::SessionId,
@@ -55289,6 +55611,13 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
     ) -> Result<crate::MemberStatusSessionView, SessionError> {
         // In-memory test double: `read` is the published live state.
         crate::observe_member_status_view_via_read(self, session_id).await
+    }
+
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::LiveDurableSourceObservation, SessionError> {
+        crate::observe_live_durable_source_via_projection_visibility(self, session_id).await
     }
 
     async fn fork_persisted_session_at_turn_boundary(

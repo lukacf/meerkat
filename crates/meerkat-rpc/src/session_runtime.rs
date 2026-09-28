@@ -1570,6 +1570,17 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::LiveDurableSourceObservation, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::observe_live_durable_source(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     async fn tool_scope_snapshot(
         &self,
         session_id: &SessionId,

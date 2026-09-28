@@ -9682,6 +9682,9 @@ impl MobBuilder {
                 )),
                 member_status_view_reads:
                     super::actor::member_status_lane::MemberStatusViewReads::default(),
+                #[cfg(feature = "openai-live")]
+                live_durable_source_loads:
+                    super::actor::live_durable_source_loads::LiveDurableSourceLoads::default(),
                 next_member_status_observed_at_ms,
                 member_live_mutation_tasks: tokio::task::JoinSet::new(),
                 member_effect_tasks: tokio::task::JoinSet::new(),

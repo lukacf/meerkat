@@ -849,6 +849,34 @@ impl MemberStatusSessionView {
     }
 }
 
+pub use meerkat_session::LiveDurableSourceObservation;
+
+/// [`MobSessionService::observe_live_durable_source`] for a service whose
+/// sessions live only in process memory, where archive removes the session
+/// and no store issues a revision: an export-visible session is
+/// `Committed { revision: None }`, anything else is `Absent`.
+///
+/// A service over a persistent store must not use this; it forwards to the
+/// store's body-free observation instead.
+pub async fn observe_live_durable_source_via_projection_visibility<S>(
+    session_service: &S,
+    session_id: &SessionId,
+) -> Result<LiveDurableSourceObservation, SessionError>
+where
+    S: MobSessionService + ?Sized,
+{
+    Ok(
+        if session_service
+            .session_projection_visible(session_id)
+            .await?
+        {
+            LiveDurableSourceObservation::Committed { revision: None }
+        } else {
+            LiveDurableSourceObservation::Absent
+        },
+    )
+}
+
 /// [`MobSessionService::observe_member_status_view`] served from
 /// [`SessionService::read`], for services whose sessions live in process
 /// memory.
@@ -1362,6 +1390,27 @@ pub trait MobSessionService:
         &self,
         session_id: &SessionId,
     ) -> Result<MemberStatusSessionView, SessionError>;
+
+    /// Body-free observation of this session's durable transcript source,
+    /// for live readiness.
+    ///
+    /// Answered from the session authority row, the catalog entry, and the
+    /// lifecycle row only: no body read or decode, no recovery gate, no
+    /// turn-finalization guard, and no queueing behind the member's session
+    /// task. A readiness poll therefore stays fast while the member runs a
+    /// turn, while recovery holds the session, or when its body is large.
+    ///
+    /// REQUIRED, deliberately without a default: a default composed from
+    /// [`Self::load_persisted_session`] would reintroduce the full body load
+    /// this seam exists to avoid, and a wrapper that fell back to it would
+    /// silently make every readiness poll a whole-transcript read. **A wrapper
+    /// over another service MUST forward this method to the inner service.**
+    /// Services whose sessions live only in process memory call
+    /// [`observe_live_durable_source_via_projection_visibility`].
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<LiveDurableSourceObservation, SessionError>;
 
     async fn tool_scope_snapshot(
         &self,
@@ -1925,6 +1974,16 @@ where
     ) -> Result<MemberStatusSessionView, SessionError> {
         // In-memory sessions: `read` is the published live state.
         observe_member_status_view_via_read(self, session_id).await
+    }
+
+    /// The live registry owns ephemeral export visibility and archive removes
+    /// the entry; the check holds the registry lock only and never queues a
+    /// command behind the session task.
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<LiveDurableSourceObservation, SessionError> {
+        observe_live_durable_source_via_projection_visibility(self, session_id).await
     }
 
     async fn publish_boundary_appends_discarded_for_actor(
@@ -2937,6 +2996,16 @@ where
             return Ok(None);
         }
         Ok(Some(session))
+    }
+
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<LiveDurableSourceObservation, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::observe_live_durable_source(
+            self, session_id,
+        )
+        .await
     }
 
     /// Live members answer from the actor's published watches, never from

@@ -27,4 +27,4 @@ pub use catalog::{ProviderRuntimeCatalog, ValidatedBinding};
 pub use errors::{ProviderAuthError, ProviderBindingError, ProviderClientError};
 pub use meerkat_core::AuthLease;
 pub use registry::{ExternalAuthResolverHandle, ProviderRuntimeRegistry, ResolverEnvironment};
-pub use runtime::ProviderRuntime;
+pub use runtime::{CredentialReadiness, ProviderRuntime};

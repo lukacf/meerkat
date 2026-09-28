@@ -10940,6 +10940,18 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::LiveDurableSourceObservation, meerkat_core::service::SessionError>
+    {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::observe_live_durable_source(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn tool_scope_snapshot(
         &self,
         session_id: &SessionId,
@@ -14412,6 +14424,18 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         session_id: &SessionId,
     ) -> Result<meerkat_mob::MemberStatusSessionView, meerkat_core::service::SessionError> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::observe_member_status_view(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::LiveDurableSourceObservation, meerkat_core::service::SessionError>
+    {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::observe_live_durable_source(
             &self.inner,
             session_id,
         )
@@ -22383,6 +22407,14 @@ default_model = "gemma"
             session_id: &SessionId,
         ) -> Result<meerkat_mob::MemberStatusSessionView, SessionError> {
             meerkat_mob::observe_member_status_view_via_read(self, session_id).await
+        }
+
+        async fn observe_live_durable_source(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<meerkat_mob::LiveDurableSourceObservation, SessionError> {
+            meerkat_mob::observe_live_durable_source_via_projection_visibility(self, session_id)
+                .await
         }
 
         async fn fork_persisted_session_at_turn_boundary(

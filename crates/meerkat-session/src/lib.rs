@@ -18,6 +18,7 @@ pub mod tokio {
 
 pub mod ephemeral;
 pub(crate) mod generated;
+mod live_durable_source;
 mod live_transcript_authority;
 pub mod maintenance;
 pub mod staged_registry;
@@ -41,6 +42,7 @@ pub use ephemeral::{
     LiveSessionActorWitnessSlot, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
     SessionSnapshot,
 };
+pub use live_durable_source::LiveDurableSourceObservation;
 pub use live_transcript_authority::LiveAssistantPlaybackObservationResult;
 pub use staged_registry::{AdmissionOutcome, MaterializationStatus, StagedSessionRegistry};
 

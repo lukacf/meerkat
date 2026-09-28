@@ -224,6 +224,40 @@ impl ProviderRuntimeRegistry {
         runtime.resolve_binding(&validated, env).await
     }
 
+    /// Observe a binding's credential readiness through the matching
+    /// provider runtime, with the same catalog validation as
+    /// [`Self::resolve`] and without materializing, refreshing, or persisting
+    /// the credential.
+    pub async fn observe_credential_readiness(
+        &self,
+        realm: &RealmConnectionSet,
+        auth_binding: &AuthBindingRef,
+        env: &ResolverEnvironment,
+    ) -> Result<crate::provider_runtime::runtime::CredentialReadiness, ProviderAuthError> {
+        let (binding, backend, auth) = realm
+            .lookup_auth_binding(auth_binding)
+            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+        if auth_binding.realm != realm.realm_id {
+            return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                "auth_binding realm '{}' does not match resolved realm '{}'",
+                auth_binding.realm, realm.realm_id
+            )));
+        }
+        let validated = ProviderRuntimeCatalog::validate_binding_with_credential_identity(
+            auth_binding,
+            binding.credential_identity(auth_binding),
+            backend,
+            auth,
+            &binding.policy,
+        )
+        .map_err(ProviderAuthError::Binding)?;
+        let runtime = self
+            .runtimes
+            .get(&validated.provider())
+            .ok_or(ProviderAuthError::NoRuntimeRegistered(validated.provider()))?;
+        runtime.observe_credential_readiness(&validated, env).await
+    }
+
     /// Build a client from a resolved connection through the matching
     /// provider runtime.
     pub fn build_client(

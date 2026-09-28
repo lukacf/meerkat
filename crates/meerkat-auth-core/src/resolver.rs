@@ -35,6 +35,7 @@ use meerkat_core::{
 use meerkat_llm_core::provider_runtime::binding::{DynamicLease, StaticLease, ValidatedBinding};
 use meerkat_llm_core::provider_runtime::errors::ProviderAuthError;
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
+use meerkat_llm_core::provider_runtime::runtime::CredentialReadiness;
 
 /// Resolve a [`CredentialSourceSpec`] into a single secret string. Used
 /// by api_key / static_bearer auth methods. Returns the resolved secret
@@ -120,6 +121,93 @@ pub async fn resolve_simple_secret(
         CredentialSourceSpec::PlatformDefault => {
             Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))
         }
+    }
+}
+
+/// Observe a [`CredentialSourceSpec`]'s readiness for the api_key /
+/// static_bearer auth methods, without materializing, refreshing, or
+/// persisting it.
+///
+/// Mirrors [`resolve_simple_secret`] source by source, but only reads: the
+/// process environment, the inline value, the managed token store row and the
+/// AuthMachine lease snapshot. Sources observable only by materializing them
+/// (an external resolver, a credential command, a host file descriptor)
+/// report [`CredentialReadiness::MaterializedAtOpen`].
+pub async fn observe_simple_secret_readiness(
+    source: &CredentialSourceSpec,
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+) -> CredentialReadiness {
+    match source {
+        CredentialSourceSpec::InlineSecret { .. } => CredentialReadiness::Ready,
+        CredentialSourceSpec::Env { env: var, fallback } => {
+            let present = std::iter::once(var.as_str())
+                .chain(fallback.iter().map(String::as_str))
+                .any(|candidate| {
+                    (!candidate.starts_with("RKAT_")
+                        && (env.env_lookup)(&format!("RKAT_{candidate}")).is_some())
+                        || (env.env_lookup)(candidate).is_some()
+                });
+            if present {
+                CredentialReadiness::Ready
+            } else {
+                CredentialReadiness::Missing
+            }
+        }
+        CredentialSourceSpec::ExternalResolver { handle } => {
+            if env.external_resolvers.contains_key(handle) {
+                CredentialReadiness::MaterializedAtOpen
+            } else {
+                CredentialReadiness::Missing
+            }
+        }
+        CredentialSourceSpec::ManagedStore => observe_managed_store_readiness(env, binding).await,
+        CredentialSourceSpec::Command { .. } | CredentialSourceSpec::FileDescriptor { .. } => {
+            CredentialReadiness::MaterializedAtOpen
+        }
+        CredentialSourceSpec::PlatformDefault => CredentialReadiness::NeedsReauth,
+    }
+}
+
+/// Read-only managed-store readiness: the token row and the lease snapshot,
+/// never the lifecycle guard, a lifecycle restore, or a refresh.
+async fn observe_managed_store_readiness(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+) -> CredentialReadiness {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let Some(store) = env
+            .provider_auth_persistence()
+            .map(ProviderAuthPersistence::token_store)
+        else {
+            return CredentialReadiness::NeedsReauth;
+        };
+        if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
+            let lease_key = meerkat_core::handles::LeaseKey::from_credential_identity(
+                binding.credential_identity(),
+            );
+            if auth_lease.snapshot(&lease_key).phase == Some(AuthLeasePhase::ReauthRequired) {
+                return CredentialReadiness::NeedsReauth;
+            }
+        }
+        let key = TokenKey::from_credential_identity(binding.credential_identity());
+        match store.load(&key).await {
+            Ok(Some(tokens))
+                if require_persisted_auth_mode(&tokens, binding).is_ok()
+                    && tokens.primary_secret.is_some() =>
+            {
+                CredentialReadiness::Ready
+            }
+            Ok(_) => CredentialReadiness::Missing,
+            // An unreadable store is not a usable credential.
+            Err(_) => CredentialReadiness::Missing,
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (env, binding);
+        CredentialReadiness::Missing
     }
 }
 
@@ -2142,6 +2230,113 @@ mod tests {
             account_id: Some("acct-1".into()),
             metadata: serde_json::Value::Null,
         }
+    }
+
+    /// Readiness observes every simple-secret source without materializing
+    /// it: no resolver call, no command run, no store write.
+    #[tokio::test]
+    async fn simple_secret_readiness_observes_sources_without_materializing() {
+        struct PanickingResolver;
+
+        #[async_trait::async_trait]
+        impl meerkat_llm_core::provider_runtime::registry::ExternalAuthResolverHandle
+            for PanickingResolver
+        {
+            async fn resolve(
+                &self,
+                _binding: &ValidatedBinding,
+            ) -> Result<ResolvedAuthEnvelope, AuthError> {
+                panic!("readiness must never call an external resolver")
+            }
+        }
+
+        let observe = |source: CredentialSourceSpec, env: ResolverEnvironment| async move {
+            let binding = simple_secret_binding(source, "api_key");
+            observe_simple_secret_readiness(&binding.auth_profile().source, &env, &binding).await
+        };
+        let env_with = |pairs: &'static [(&'static str, &'static str)]| {
+            ResolverEnvironment::testing().with_env_lookup(move |name| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+            })
+        };
+
+        assert_eq!(
+            observe(
+                CredentialSourceSpec::InlineSecret {
+                    secret: "sk-inline".into()
+                },
+                ResolverEnvironment::testing(),
+            )
+            .await,
+            CredentialReadiness::Ready
+        );
+        let env_source = || CredentialSourceSpec::Env {
+            env: "PRIMARY_KEY".into(),
+            fallback: vec!["FALLBACK_KEY".into()],
+        };
+        assert_eq!(
+            observe(env_source(), env_with(&[("FALLBACK_KEY", "sk")])).await,
+            CredentialReadiness::Ready
+        );
+        assert_eq!(
+            observe(env_source(), env_with(&[("RKAT_PRIMARY_KEY", "sk")])).await,
+            CredentialReadiness::Ready
+        );
+        assert_eq!(
+            observe(env_source(), env_with(&[])).await,
+            CredentialReadiness::Missing
+        );
+        let external = || CredentialSourceSpec::ExternalResolver {
+            handle: "host".into(),
+        };
+        assert_eq!(
+            observe(
+                external(),
+                ResolverEnvironment::testing()
+                    .with_external_resolver("host", Arc::new(PanickingResolver)),
+            )
+            .await,
+            CredentialReadiness::MaterializedAtOpen
+        );
+        assert_eq!(
+            observe(external(), ResolverEnvironment::testing()).await,
+            CredentialReadiness::Missing
+        );
+        assert_eq!(
+            observe(
+                CredentialSourceSpec::Command {
+                    program: "/definitely/not/run".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: Default::default(),
+                    timeout_ms: 1,
+                    refresh_interval_ms: None,
+                },
+                ResolverEnvironment::testing(),
+            )
+            .await,
+            CredentialReadiness::MaterializedAtOpen
+        );
+        assert_eq!(
+            observe(
+                CredentialSourceSpec::PlatformDefault,
+                ResolverEnvironment::testing()
+            )
+            .await,
+            CredentialReadiness::NeedsReauth
+        );
+        assert_eq!(
+            observe(
+                CredentialSourceSpec::ManagedStore,
+                ResolverEnvironment::testing()
+            )
+            .await,
+            CredentialReadiness::NeedsReauth,
+            "a managed store without persistence needs a login"
+        );
     }
 
     #[tokio::test]

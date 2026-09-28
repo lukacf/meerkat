@@ -3669,6 +3669,14 @@ mod tests {
             crate::observe_member_status_view_via_read(self, session_id).await
         }
 
+        async fn observe_live_durable_source(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<crate::LiveDurableSourceObservation, meerkat_core::service::SessionError>
+        {
+            crate::observe_live_durable_source_via_projection_visibility(self, session_id).await
+        }
+
         async fn fork_persisted_session_at_turn_boundary(
             &self,
             _source_session_id: &meerkat_core::SessionId,

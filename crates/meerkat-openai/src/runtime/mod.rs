@@ -23,7 +23,8 @@ use meerkat_auth_core::resolver::{
     prepare_managed_store_oauth_refresh_under_lock, resolve_oauth_login_credential_disposition,
 };
 use meerkat_auth_core::resolver::{
-    finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
+    finalize_auth_metadata, observe_simple_secret_readiness, resolve_external_authorizer,
+    resolve_simple_secret,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::{
@@ -39,7 +40,7 @@ use meerkat_llm_core::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
 };
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
-use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
+use meerkat_llm_core::provider_runtime::runtime::{CredentialReadiness, ProviderRuntime};
 use meerkat_llm_core::{ImageGenerationExecutor, LlmClient};
 
 use crate::client::AzureOpenAiWireConfig;
@@ -367,6 +368,34 @@ fn build_openai_client(
 impl ProviderRuntime for OpenAiProviderRuntime {
     fn provider_id(&self) -> Provider {
         Provider::OpenAI
+    }
+
+    /// API-key and static-bearer credentials are observed read-only through
+    /// the same source table [`resolve_simple_secret`] resolves. OAuth,
+    /// Copilot, and external-authorizer credentials are resolved at open.
+    async fn observe_credential_readiness(
+        &self,
+        binding: &ValidatedBinding,
+        env: &ResolverEnvironment,
+    ) -> Result<CredentialReadiness, ProviderAuthError> {
+        if binding.provider() != Provider::OpenAI {
+            return Err(ProviderAuthError::Binding(
+                ProviderBindingError::ProviderMismatch,
+            ));
+        }
+        match binding.auth() {
+            NormalizedAuthMethod::OpenAi(
+                OpenAiAuthMethod::ApiKey
+                | OpenAiAuthMethod::AzureApiKey
+                | OpenAiAuthMethod::StaticBearer,
+            ) => Ok(
+                observe_simple_secret_readiness(&binding.auth_profile().source, env, binding).await,
+            ),
+            NormalizedAuthMethod::OpenAi(_) => Ok(CredentialReadiness::MaterializedAtOpen),
+            _ => Err(ProviderAuthError::Binding(
+                ProviderBindingError::ProviderMismatch,
+            )),
+        }
     }
 
     async fn resolve_binding(

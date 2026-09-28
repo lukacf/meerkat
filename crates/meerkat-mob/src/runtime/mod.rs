@@ -446,7 +446,7 @@ pub use live_bridge_operation::{
     LiveBridgeOperationCancellationHandle, LiveBridgeOperationCancellationSignal,
     LiveBridgeOperationExecutor, LiveBridgeOperationRequest, LiveBridgeOperationService,
     LiveBridgeOperationStartError, LiveBridgeOperationTerminal, LiveBridgeOperationTerminalError,
-    LiveBridgeOperationTerminalFuture,
+    LiveBridgeOperationTerminalFuture, LiveDurableSourceReadinessError,
 };
 pub use member_history_proxy::MemberHistoryPageDomain;
 pub use member_live_proxy::MemberLiveStatusDomain;
@@ -460,13 +460,14 @@ pub use reconcile::{
 };
 pub use recovery::RestoreIncompatible;
 use roster_authority::{RosterAuthority, RosterMutator};
+pub use session_service::LiveDurableSourceObservation;
 pub use session_service::{
     AuthorizedSessionResume, MemberStatusSessionView, MemberStatusViewSource, MobSessionService,
     PersistedSessionAuthorityReadCost, ResumeRejectionKind, ResumeSessionLoad,
     ResumeVerdictTerminality, SessionResumeAuthority, SessionResumeLifecycle,
     SessionResumeMaterialization, SessionResumePreparationReceipt, SessionResumeRejection,
     SessionResumeVerdict, materialize_nonpersistent_session_resume_verdict,
-    observe_member_status_view_via_read,
+    observe_live_durable_source_via_projection_visibility, observe_member_status_view_via_read,
 };
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
 use spawn_profile_authority::{

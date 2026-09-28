@@ -4934,6 +4934,24 @@ impl MobSessionService for LocalSessionService {
         meerkat_mob::observe_member_status_view_via_read(self, session_id).await
     }
 
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::LiveDurableSourceObservation, SessionError> {
+        // In-memory sessions: the live map and the archived-view map are the
+        // whole durable truth; neither read queues behind a session actor.
+        if self.sessions.read().await.contains_key(session_id) {
+            return Ok(meerkat_mob::LiveDurableSourceObservation::Committed { revision: None });
+        }
+        Ok(
+            if self.archived_views.read().await.contains_key(session_id) {
+                meerkat_mob::LiveDurableSourceObservation::Archived
+            } else {
+                meerkat_mob::LiveDurableSourceObservation::Absent
+            },
+        )
+    }
+
     async fn publish_boundary_appends_discarded_for_actor(
         &self,
         actor_witness: &meerkat_session::LiveSessionActorWitness,
@@ -8191,6 +8209,14 @@ mod tests {
             session_id: &SessionId,
         ) -> Result<meerkat_mob::MemberStatusSessionView, SessionError> {
             meerkat_mob::observe_member_status_view_via_read(self, session_id).await
+        }
+
+        async fn observe_live_durable_source(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<meerkat_mob::LiveDurableSourceObservation, SessionError> {
+            meerkat_mob::observe_live_durable_source_via_projection_visibility(self, session_id)
+                .await
         }
 
         async fn fork_persisted_session_at_turn_boundary(

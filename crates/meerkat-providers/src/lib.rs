@@ -18,15 +18,16 @@ pub mod runtime {
     pub use meerkat_auth_core::resolver::resolve_simple_secret;
     pub use meerkat_auth_core::self_hosted::SelfHostedProviderRuntime;
     pub use meerkat_llm_core::provider_runtime::{
-        AuthLease, DynamicLease, ExternalAuthResolverHandle, NormalizedAuthMethod,
-        NormalizedBackendKind, ProviderAuthError, ProviderBindingError, ProviderClientError,
-        ProviderRuntime, ProviderRuntimeCatalog, ProviderRuntimeRegistry, ResolvedConnection,
-        ResolvedRealtimeTarget, ResolverEnvironment, StaticLease, ValidatedBinding,
+        AuthLease, CredentialReadiness, DynamicLease, ExternalAuthResolverHandle,
+        NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
+        ProviderClientError, ProviderRuntime, ProviderRuntimeCatalog, ProviderRuntimeRegistry,
+        ResolvedConnection, ResolvedRealtimeTarget, ResolverEnvironment, StaticLease,
+        ValidatedBinding,
     };
 }
 
 pub use meerkat_llm_core::provider_runtime::{
-    AuthLease, DynamicLease, ExternalAuthResolverHandle, NormalizedAuthMethod,
+    AuthLease, CredentialReadiness, DynamicLease, ExternalAuthResolverHandle, NormalizedAuthMethod,
     NormalizedBackendKind, ProviderAuthError, ProviderBindingError, ProviderClientError,
     ProviderRuntime, ProviderRuntimeCatalog, ProviderRuntimeRegistry, ResolvedConnection,
     ResolvedRealtimeTarget, ResolverEnvironment, StaticLease, ValidatedBinding,

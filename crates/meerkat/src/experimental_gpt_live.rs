@@ -315,6 +315,27 @@ pub trait ExperimentalLiveSessionBindingAuthority: Send + Sync {
         Err(ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable)
     }
 
+    /// Readiness-only observation of the same durable source, for
+    /// [`ExperimentalLiveOpenAuthorityProvider::probe_execution_readiness`].
+    ///
+    /// Hosts should answer from the member's published binding and a
+    /// body-free store observation (for mobs,
+    /// `MobHandle::observe_live_durable_source_readiness`), never through an
+    /// actor queue and never by loading the session body, so a readiness
+    /// poll stays fast while the member is busy or its body is large. The
+    /// real open still calls
+    /// [`Self::validate_live_durable_source_availability`].
+    ///
+    /// The default delegates to that full validation, which is correct but
+    /// slow; hosts override it.
+    async fn observe_live_durable_source_readiness(
+        &self,
+        canonical_session_id: &meerkat_core::SessionId,
+    ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
+        self.validate_live_durable_source_availability(canonical_session_id)
+            .await
+    }
+
     async fn authorize_binding_use(
         &self,
         canonical_session_id: &meerkat_core::SessionId,
@@ -1162,6 +1183,111 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
                 meerkat_contracts::LIVE_EXECUTION_IDENTITY_V1_CAPABILITY,
                 meerkat_contracts::LIVE_CLIENT_CONTEXT_V1_CAPABILITY,
             ]),
+        }
+    }
+
+    /// Readiness without the open's cost: the host's body-free, actor-free
+    /// durable-source observation, binding resolution and authorization, and
+    /// a non-mutating credential observation. It never loads the session
+    /// body, never asks the host for the instructions preface, never
+    /// refreshes or materializes a credential, and never builds a pending
+    /// channel. The open (`prepare_open`) independently runs the full
+    /// actor-validated durable check and credential materialization.
+    async fn probe_execution_readiness(
+        &self,
+        canonical_session_id: &meerkat_core::SessionId,
+        execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+    ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
+        self.binding_authority
+            .observe_live_durable_source_readiness(canonical_session_id)
+            .await
+            .inspect_err(|error| {
+                tracing::debug!(
+                    stage = "durable_source",
+                    %error,
+                    "live readiness probe refused"
+                );
+            })?;
+        let identity = self.execution_identity.clone();
+        let config = self
+            .config_source
+            .current_config()
+            .await
+            .map_err(|_| ExperimentalLiveOpenAuthorityError::Unavailable)?;
+        let readiness = match &self.admission {
+            #[cfg(feature = "experimental-gpt-live")]
+            GptLiveOpenAdmission::Experimental { factory_identity } => {
+                let preparation = self
+                    .agent_factory
+                    .prepare_experimental_live_admission_for_identity(
+                        &config,
+                        &self.realm,
+                        &identity,
+                        factory_identity,
+                        &execution_identity.profile_id,
+                    )
+                    .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
+                let authorization = self
+                    .binding_authority
+                    .authorize_binding_use(canonical_session_id, preparation.auth_binding())
+                    .await?;
+                let (binding_use, auth_lease) = authorization.into_parts();
+                self.agent_factory
+                    .observe_experimental_live_credential_readiness(
+                        &preparation,
+                        &binding_use,
+                        auth_lease,
+                    )
+                    .await
+            }
+            GptLiveOpenAdmission::Public { .. } => {
+                if execution_identity.profile_id != GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID {
+                    return Err(ExperimentalLiveOpenAuthorityError::AdmissionFailed);
+                }
+                let auth_binding = self
+                    .agent_factory
+                    .resolve_public_live_binding_for_identity(&config, &self.realm, &identity)
+                    .inspect_err(|error| {
+                        tracing::warn!(
+                            stage = "binding_resolution",
+                            cause = live_factory_failure_class(error),
+                            "public Live readiness failed"
+                        );
+                    })
+                    .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
+                let authorization = self
+                    .binding_authority
+                    .authorize_binding_use(canonical_session_id, &auth_binding)
+                    .await?;
+                let (binding_use, auth_lease) = authorization.into_parts();
+                self.agent_factory
+                    .observe_public_live_credential_readiness(
+                        &config,
+                        &self.realm,
+                        &identity,
+                        &binding_use,
+                        auth_lease,
+                    )
+                    .await
+            }
+        }
+        .inspect_err(|error| {
+            tracing::warn!(
+                stage = "credential_readiness",
+                cause = live_factory_failure_class(error),
+                "live readiness failed"
+            );
+        })
+        .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
+        if readiness.admits_open() {
+            Ok(())
+        } else {
+            tracing::warn!(
+                stage = "credential_readiness",
+                ?readiness,
+                "live readiness refused: credential not usable"
+            );
+            Err(ExperimentalLiveOpenAuthorityError::AdmissionFailed)
         }
     }
 
@@ -10188,6 +10314,264 @@ mod tests {
         assert!(first_text.starts_with(&format!("Roster entry for session {first}.\n\n")));
         assert!(second_text.starts_with(&format!("Roster entry for session {second}.\n\n")));
         assert!(first_text.ends_with(crate::gpt_live_client_context_session_instructions()));
+    }
+
+    /// Binding authority that separates the open's full durable check (the
+    /// body load) from the readiness observation, and counts both.
+    struct ReadinessSplitBindingAuthority {
+        inner: ExactAllowBindingAuthority,
+        full_validations: Arc<AtomicUsize>,
+        readiness_observations: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ExperimentalLiveSessionBindingAuthority for ReadinessSplitBindingAuthority {
+        async fn validate_live_durable_source_availability(
+            &self,
+            session_id: &meerkat_core::SessionId,
+        ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
+            self.full_validations.fetch_add(1, AtomicOrdering::SeqCst);
+            self.inner
+                .validate_live_durable_source_availability(session_id)
+                .await
+        }
+
+        async fn observe_live_durable_source_readiness(
+            &self,
+            session_id: &meerkat_core::SessionId,
+        ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
+            self.readiness_observations
+                .fetch_add(1, AtomicOrdering::SeqCst);
+            if session_id != &self.inner.session_id {
+                return Err(ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable);
+            }
+            Ok(())
+        }
+
+        async fn authorize_binding_use(
+            &self,
+            session_id: &meerkat_core::SessionId,
+            binding: &meerkat_core::AuthBindingRef,
+        ) -> Result<ExperimentalLiveSessionBindingAuthorization, ExperimentalLiveOpenAuthorityError>
+        {
+            self.inner.authorize_binding_use(session_id, binding).await
+        }
+    }
+
+    /// A host preface that takes ten seconds and counts every call.
+    struct SlowCountingPreface {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl PublicGptLiveInstructionsPreface for SlowCountingPreface {
+        async fn preface(&self, _session_id: &meerkat_core::SessionId) -> Option<String> {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            Some("slow host preface".to_string())
+        }
+    }
+
+    struct ReadinessProbeFixture {
+        authority: Arc<ExperimentalGptLiveOpenAuthority>,
+        session_id: meerkat_core::SessionId,
+        full_validations: Arc<AtomicUsize>,
+        readiness_observations: Arc<AtomicUsize>,
+        binding_calls: Arc<AtomicUsize>,
+        preface_calls: Arc<AtomicUsize>,
+        transport: Arc<ExperimentalGptLiveWebrtcTransport>,
+    }
+
+    fn readiness_probe_fixture(
+        config: impl FnOnce(&meerkat_core::RealmId) -> meerkat_core::Config,
+        with_slow_preface: bool,
+    ) -> ReadinessProbeFixture {
+        let realm = meerkat_core::RealmId::parse("voice").expect("realm");
+        let selected_binding = public_live_binding(&realm);
+        let session_id = meerkat_core::SessionId::new();
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let full_validations = Arc::new(AtomicUsize::new(0));
+        let readiness_observations = Arc::new(AtomicUsize::new(0));
+        let binding_calls = Arc::new(AtomicUsize::new(0));
+        let preface_calls = Arc::new(AtomicUsize::new(0));
+        let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
+        let mut authority_config = public_live_authority_config(
+            &realm,
+            "marin",
+            public_live_identity(selected_binding.clone()),
+            Arc::new(CountingConfigSource {
+                reads: Arc::new(AtomicUsize::new(0)),
+                config: config(&realm),
+            }),
+            Arc::new(ReadinessSplitBindingAuthority {
+                inner: ExactAllowBindingAuthority {
+                    session_id: session_id.clone(),
+                    expected: selected_binding,
+                    calls: Arc::clone(&binding_calls),
+                    auth_lease: machine.generated_auth_lease_handle(),
+                    events: Arc::new(std::sync::Mutex::new(Vec::new())),
+                },
+                full_validations: Arc::clone(&full_validations),
+                readiness_observations: Arc::clone(&readiness_observations),
+            }),
+            Arc::clone(&transport),
+        );
+        if with_slow_preface {
+            authority_config.session_instructions_preface = Some(Arc::new(SlowCountingPreface {
+                calls: Arc::clone(&preface_calls),
+            }));
+        }
+        ReadinessProbeFixture {
+            authority: Arc::new(
+                ExperimentalGptLiveOpenAuthority::new_public(authority_config)
+                    .expect("public authority"),
+            ),
+            session_id,
+            full_validations,
+            readiness_observations,
+            binding_calls,
+            preface_calls,
+            transport,
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_probe_skips_preface_body_check_and_pending_channel() {
+        let fixture = readiness_probe_fixture(public_live_realm_config, true);
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            fixture
+                .authority
+                .probe_execution_readiness(&fixture.session_id, &public_profile_override()),
+        )
+        .await
+        .expect("a ten-second host preface cannot delay readiness")
+        .expect("configured inline credential is ready");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "readiness took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            fixture.preface_calls.load(AtomicOrdering::SeqCst),
+            0,
+            "readiness never asks the host for the instructions preface"
+        );
+        assert_eq!(
+            fixture.full_validations.load(AtomicOrdering::SeqCst),
+            0,
+            "readiness never runs the open's full durable-source check"
+        );
+        assert_eq!(
+            fixture.readiness_observations.load(AtomicOrdering::SeqCst),
+            1
+        );
+        assert_eq!(
+            fixture.binding_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "readiness still authorizes the exact configured binding"
+        );
+        assert!(
+            fixture
+                .transport
+                .registered_by_channel
+                .lock()
+                .await
+                .is_empty(),
+            "readiness builds no pending channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_readiness_probes_never_run_the_body_check() {
+        let fixture = readiness_probe_fixture(public_live_realm_config, true);
+        let probes = (0..16)
+            .map(|_| {
+                let authority = Arc::clone(&fixture.authority);
+                let session_id = fixture.session_id.clone();
+                tokio::spawn(async move {
+                    authority
+                        .probe_execution_readiness(&session_id, &public_profile_override())
+                        .await
+                })
+            })
+            .collect::<Vec<_>>();
+        for probe in probes {
+            tokio::time::timeout(std::time::Duration::from_secs(2), probe)
+                .await
+                .expect("each probe finishes promptly")
+                .expect("probe task")
+                .expect("probe is ready");
+        }
+        assert_eq!(fixture.full_validations.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(fixture.preface_calls.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            fixture.readiness_observations.load(AtomicOrdering::SeqCst),
+            16
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_probe_refuses_a_missing_credential_and_an_unready_source() {
+        let fixture = readiness_probe_fixture(
+            |realm| {
+                let mut config = public_live_realm_config(realm);
+                let realm_config = config.realm.get_mut(realm.as_str()).expect("fixture realm");
+                realm_config
+                    .auth
+                    .get_mut("openai_key")
+                    .expect("fixture auth profile")
+                    .source = meerkat_core::CredentialSourceSpec::Env {
+                    env: format!("MEERKAT_1244_ABSENT_{}", uuid::Uuid::new_v4().simple()),
+                    fallback: Vec::new(),
+                };
+                config
+            },
+            false,
+        );
+        assert_eq!(
+            fixture
+                .authority
+                .probe_execution_readiness(&fixture.session_id, &public_profile_override())
+                .await,
+            Err(ExperimentalLiveOpenAuthorityError::AdmissionFailed),
+            "an unset credential env var is not ready, and nothing is materialized"
+        );
+        assert_eq!(fixture.binding_calls.load(AtomicOrdering::SeqCst), 1);
+
+        let other_session = meerkat_core::SessionId::new();
+        assert_eq!(
+            fixture
+                .authority
+                .probe_execution_readiness(&other_session, &public_profile_override())
+                .await,
+            Err(ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable),
+            "an unready durable source refuses before binding authorization"
+        );
+        assert_eq!(fixture.binding_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(fixture.full_validations.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_real_open_keeps_the_full_durable_source_check() {
+        let fixture = readiness_probe_fixture(public_live_realm_config, false);
+        let pending = fixture
+            .authority
+            .prepare_open(&fixture.session_id, &public_profile_override())
+            .await
+            .expect("public pending open");
+        drop(pending);
+        assert_eq!(
+            fixture.full_validations.load(AtomicOrdering::SeqCst),
+            1,
+            "prepare_open runs the actor-validated durable check"
+        );
+        assert_eq!(
+            fixture.readiness_observations.load(AtomicOrdering::SeqCst),
+            0,
+            "prepare_open never substitutes the readiness observation"
+        );
     }
 
     #[tokio::test]

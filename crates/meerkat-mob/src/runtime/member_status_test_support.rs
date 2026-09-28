@@ -177,6 +177,13 @@ impl MobSessionService for DelayedStatusService {
         ))
     }
 
+    async fn observe_live_durable_source(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::LiveDurableSourceObservation, SessionError> {
+        crate::observe_live_durable_source_via_projection_visibility(self, session_id).await
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         _machine: &meerkat_runtime::MeerkatMachine,

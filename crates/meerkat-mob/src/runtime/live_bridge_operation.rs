@@ -434,6 +434,34 @@ pub enum LiveBridgeOperationStartError {
     Failed,
 }
 
+/// Typed refusal of the handle-side live durable-source readiness observation
+/// ([`super::MobHandle::observe_live_durable_source_readiness`]). Every
+/// variant fails closed: readiness is granted only for a current, bound,
+/// live member whose canonical session has a committed durable source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum LiveDurableSourceReadinessError {
+    /// The handle's principal does not hold the live control scope.
+    #[error("live durable-source readiness access was denied")]
+    AccessDenied,
+    /// The member is not current in the roster or the published machine state.
+    #[error("the live durable-source member is unavailable")]
+    MemberUnavailable,
+    /// The member's runtime or session binding does not match the canonical
+    /// session, or its runtime is not live.
+    #[error("the live durable-source member binding does not match the canonical session")]
+    BindingMismatch,
+    /// The canonical session's durable source is archived.
+    #[error("the live durable source is archived")]
+    SourceArchived,
+    /// The canonical session has no committed durable source.
+    #[error("the live durable source is absent")]
+    SourceAbsent,
+    /// The store observation failed.
+    #[error("the live durable source could not be observed")]
+    ObservationFailed,
+}
+
 impl LiveBridgeOperationStartError {
     #[must_use]
     pub const fn retry_safe_before_acceptance(&self) -> bool {

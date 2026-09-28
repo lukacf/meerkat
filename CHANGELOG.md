@@ -35,6 +35,59 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_mob::MobSessionService` gains the required method
+  `observe_live_durable_source(&self, session_id) -> Result<LiveDurableSourceObservation, SessionError>`
+  (#1244). It has no default on purpose: a default built on
+  `load_persisted_session` would bring back the whole-body load this seam
+  removes. External implementors must add it. Wrappers forward it to their
+  inner service. In-memory services call
+  `observe_live_durable_source_via_projection_visibility`.
+
+### Added
+
+- `meerkat_session::LiveDurableSourceObservation` (`Committed { revision }`,
+  `Archived`, `Absent`, re-exported by `meerkat_mob`) and
+  `PersistentSessionService::observe_live_durable_source`: a body-free
+  durable-source observation. It reads the session authority row, catalog
+  entry, and lifecycle row in one store snapshot. It takes no recovery gate
+  and no turn-finalization guard, and it never reads or decodes the body
+  (#1244).
+- `MobHandle::observe_live_durable_source_readiness(identity, canonical_session_id)`
+  and the typed `LiveDurableSourceReadinessError` (`openai-live`). This is a
+  handle-side readiness check that never enters the mob actor's command queue.
+  It checks the live control scope, then the member's runtime and session
+  binding against the published machine state and the roster. Then it calls
+  the body-free observation (#1244).
+- `ExperimentalLiveSessionBindingAuthority::observe_live_durable_source_readiness`,
+  which defaults to the full `validate_live_durable_source_availability`.
+  Hosts override it with the handle-side observation (#1244).
+- `CredentialReadiness` (`Ready`, `Missing`, `NeedsReauth`,
+  `MaterializedAtOpen`), `ProviderRuntime::observe_credential_readiness`
+  (defaults to `MaterializedAtOpen`), and
+  `ProviderRuntimeRegistry::observe_credential_readiness`. Also
+  `meerkat_auth_core::resolver::observe_simple_secret_readiness`,
+  `AgentFactory::observe_public_live_credential_readiness`, and
+  `AgentFactory::observe_experimental_live_credential_readiness`. These observe
+  a credential without materializing, refreshing, or persisting it (#1244).
+
+### Fixed
+
+- Console voice readiness no longer loads the whole session body on every
+  poll (#1244). `ExperimentalGptLiveOpenAuthority::probe_execution_readiness`
+  now runs only these steps: the host's body-free, actor-free durable-source
+  observation; binding resolution and authorization; and a non-mutating
+  credential readiness check. It no longer runs the member preface, builds a
+  pending channel, or materializes credentials. A busy or blocked mob actor, a
+  member in a hung tool call, a held recovery gate, and a large transcript can
+  no longer delay readiness. The real open keeps its full actor-validated
+  durable check.
+- Concurrent live opens of one session now share a single durable-source body
+  load. A caller that times out no longer leaves a duplicate load running. A
+  load still running after 30 s is abandoned as temporarily unavailable, and
+  its slot is released (#1244).
+
 ## [0.8.46] - 2026-09-28
 
 ### Breaking

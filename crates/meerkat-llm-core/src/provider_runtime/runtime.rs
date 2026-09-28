@@ -15,6 +15,31 @@ use crate::provider_runtime::registry::ResolverEnvironment;
 use crate::realtime_session::RealtimeSessionFactory;
 use crate::{ImageGenerationExecutor, LlmClient};
 
+/// Non-mutating readiness of one binding's credential, observed without
+/// materializing, refreshing, or persisting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CredentialReadiness {
+    /// Credential material is present and usable without a refresh or login.
+    Ready,
+    /// No credential material is present for the binding.
+    Missing,
+    /// The binding's credential lifecycle requires an interactive login.
+    NeedsReauth,
+    /// The source can only be observed by materializing it (an external
+    /// resolver, a credential command, a host file descriptor), so the open
+    /// resolves it and reports any failure there.
+    MaterializedAtOpen,
+}
+
+impl CredentialReadiness {
+    /// Whether a readiness probe may report the binding as usable.
+    #[must_use]
+    pub const fn admits_open(self) -> bool {
+        matches!(self, Self::Ready | Self::MaterializedAtOpen)
+    }
+}
+
 /// Per-provider runtime contract: resolve credentials and construct clients.
 ///
 /// Backend/auth compatibility is owned by
@@ -35,6 +60,23 @@ pub trait ProviderRuntime: Send + Sync {
         binding: &ValidatedBinding,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError>;
+
+    /// Observe whether this binding's credential is usable, without
+    /// materializing, refreshing, or persisting anything.
+    ///
+    /// Readiness probes call this instead of [`Self::resolve_binding`] so a
+    /// poll never refreshes a token, runs a credential command, or asks an
+    /// external resolver. The default reports
+    /// [`CredentialReadiness::MaterializedAtOpen`]: a runtime that does not
+    /// implement the observation leaves the verdict to the open, which
+    /// resolves the credential through [`Self::resolve_binding`].
+    async fn observe_credential_readiness(
+        &self,
+        _binding: &ValidatedBinding,
+        _env: &ResolverEnvironment,
+    ) -> Result<CredentialReadiness, ProviderAuthError> {
+        Ok(CredentialReadiness::MaterializedAtOpen)
+    }
 
     /// Construct a concrete LlmClient from the resolved connection.
     /// Phase 2 shim: extracts shim_credential and hands it to the legacy

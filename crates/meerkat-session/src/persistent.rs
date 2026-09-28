@@ -3232,6 +3232,69 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         ))
     }
 
+    /// Body-free durable-source observation for live readiness.
+    ///
+    /// Reads one RuntimeStore snapshot of the session authority row, the
+    /// catalog entry, and the machine lifecycle row, and applies the archive
+    /// rule of [`Self::session_archived_by_authority`]: either committed
+    /// terminal projection archives. It never reads, decodes, or hashes the
+    /// session body, never takes the recovery gate, and never waits for the
+    /// turn-finalization boundary, so a member mid-turn, a held recovery, or a
+    /// large body cannot stall it. A lifecycle row this build cannot decode is
+    /// a fault, never availability. The live open validates the body itself;
+    /// this observation only says whether a committed source exists.
+    pub async fn observe_live_durable_source(
+        &self,
+        id: &SessionId,
+    ) -> Result<crate::LiveDurableSourceObservation, SessionError> {
+        let runtime_id = Self::runtime_id_for_session(id);
+        let observation = self
+            .runtime_store
+            .load_session_resume_observation(&runtime_id)
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to observe durable source authority for session {id}: {error}"
+                )))
+            })?;
+        let runtime_state = match observation.lifecycle() {
+            meerkat_runtime::store::MachineLifecycleObservation::Missing => None,
+            meerkat_runtime::store::MachineLifecycleObservation::Decoded { record, .. } => {
+                record.runtime_state()
+            }
+            meerkat_runtime::store::MachineLifecycleObservation::Unsupported { .. }
+            | meerkat_runtime::store::MachineLifecycleObservation::Malformed { .. } => {
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "durable source lifecycle row for session {id} is not decodable by this build"
+                ))));
+            }
+        };
+        let catalog_archived = observation
+            .catalog_entry()
+            .and_then(|entry| entry.lifecycle_terminal())
+            .is_some_and(SessionLifecycleTerminal::is_archived);
+        if catalog_archived
+            || matches!(
+                runtime_state,
+                Some(RuntimeState::Retired | RuntimeState::Destroyed)
+            )
+        {
+            return Ok(crate::LiveDurableSourceObservation::Archived);
+        }
+        match observation.session_authority() {
+            None => Ok(crate::LiveDurableSourceObservation::Absent),
+            Some(authority) if authority.session_id() == id => {
+                Ok(crate::LiveDurableSourceObservation::Committed {
+                    revision: Some(authority.store_revision()),
+                })
+            }
+            Some(authority) => Err(SessionError::Agent(AgentError::InternalError(format!(
+                "durable source authority for session {id} identifies session {}",
+                authority.session_id()
+            )))),
+        }
+    }
+
     fn runtime_id_for_session(id: &SessionId) -> LogicalRuntimeId {
         LogicalRuntimeId::for_session(id)
     }
@@ -14470,6 +14533,7 @@ mod tests {
             inner: InMemoryRuntimeStore::new(),
             bounded_authority_reads: AtomicUsize::new(0),
             full_snapshot_reads: AtomicUsize::new(0),
+            raw_body_reads: AtomicUsize::new(0),
         });
         let service = PersistentSessionService::new(
             FailingInstructionActivationExportBuilder,
@@ -21019,6 +21083,8 @@ mod tests {
         inner: InMemoryRuntimeStore,
         bounded_authority_reads: AtomicUsize,
         full_snapshot_reads: AtomicUsize,
+        /// Raw body reads that bypass the decoded snapshot seam.
+        raw_body_reads: AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -21115,6 +21181,7 @@ mod tests {
             &self,
             runtime_id: &LogicalRuntimeId,
         ) -> Result<Option<Arc<Vec<u8>>>, meerkat_runtime::store::RuntimeStoreError> {
+            self.raw_body_reads.fetch_add(1, Ordering::SeqCst);
             self.inner.load_session_snapshot(runtime_id).await
         }
 
@@ -21201,6 +21268,175 @@ mod tests {
         }
     }
 
+    impl WholeBlobAuthorityReadProbe {
+        fn body_reads(&self) -> usize {
+            self.full_snapshot_reads.load(Ordering::SeqCst)
+                + self.raw_body_reads.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Every durable-source state: absent, committed, archived. The
+    /// observation must never read the body, and the counter must catch a
+    /// body read (the positive control at the end).
+    #[tokio::test]
+    async fn live_durable_source_observation_reads_no_body_in_any_state() {
+        let probe = Arc::new(WholeBlobAuthorityReadProbe {
+            inner: InMemoryRuntimeStore::new(),
+            bounded_authority_reads: AtomicUsize::new(0),
+            full_snapshot_reads: AtomicUsize::new(0),
+            raw_body_reads: AtomicUsize::new(0),
+        });
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::clone(&probe) as Arc<dyn RuntimeStore>;
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+
+        let absent = SessionId::new();
+        let before = probe.body_reads();
+        assert_eq!(
+            service
+                .observe_live_durable_source(&absent)
+                .await
+                .expect("observe absent source"),
+            crate::LiveDurableSourceObservation::Absent
+        );
+        assert_eq!(probe.body_reads(), before, "absent: no body read");
+
+        let session = Session::new();
+        let id = session.id().clone();
+        let runtime_id = LogicalRuntimeId::for_session(&id);
+        let artifact = session
+            .to_persisted_artifact()
+            .expect("encode test WholeBlob once");
+        probe
+            .inner
+            .commit_session_snapshot(
+                &runtime_id,
+                SerializedSessionSnapshot {
+                    session_snapshot: artifact.bytes_arc(),
+                },
+            )
+            .await
+            .expect("seed committed WholeBlob row");
+        let revision = probe
+            .inner
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .expect("load seeded authority")
+            .expect("seeded authority exists")
+            .store_revision();
+        let before = probe.body_reads();
+        assert_eq!(
+            service
+                .observe_live_durable_source(&id)
+                .await
+                .expect("observe committed source"),
+            crate::LiveDurableSourceObservation::Committed {
+                revision: Some(revision)
+            }
+        );
+        assert_eq!(probe.body_reads(), before, "committed: no body read");
+
+        // The machine shares the probe's store state (the in-memory store's
+        // clones share one backing map); the service keeps reading through
+        // the counting probe.
+        let machine = meerkat_runtime::MeerkatMachine::persistent(
+            Arc::new(probe.inner.clone()) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        machine
+            .register_session(id.clone())
+            .await
+            .expect("register runtime");
+        meerkat_runtime::RuntimeControlPlane::retire(&machine, &runtime_id)
+            .await
+            .expect("retire runtime");
+        let before = probe.body_reads();
+        assert_eq!(
+            service
+                .observe_live_durable_source(&id)
+                .await
+                .expect("observe archived source"),
+            crate::LiveDurableSourceObservation::Archived
+        );
+        assert_eq!(probe.body_reads(), before, "archived: no body read");
+
+        // Positive control: the full authoritative load does read the body,
+        // so the counter above is not vacuous.
+        let before = probe.body_reads();
+        let _ = service.load_authoritative_session(&id).await;
+        assert!(
+            probe.body_reads() > before,
+            "the counting store observes a real body read"
+        );
+    }
+
+    /// Neither the turn-finalization boundary nor the recovery gate can
+    /// stall the observation. Each phase proves its gate is really held with
+    /// a control read that does wait on it.
+    #[tokio::test]
+    async fn live_durable_source_observation_ignores_turn_boundary_and_recovery_gate() {
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::clone(&runtime_store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        );
+        let session = Session::new();
+        let id = session.id().clone();
+        runtime_store
+            .commit_session_snapshot(
+                &LogicalRuntimeId::for_session(&id),
+                SerializedSessionSnapshot {
+                    session_snapshot: session
+                        .to_persisted_artifact()
+                        .expect("encode test WholeBlob")
+                        .bytes_arc(),
+                },
+            )
+            .await
+            .expect("seed committed WholeBlob row");
+        let bound = std::time::Duration::from_millis(100);
+
+        let turn_boundary = service.acquire_runtime_turn_finalization_guard(&id).await;
+        assert!(
+            tokio::time::timeout(bound, service.live_deferred_first_turn_pending(&id))
+                .await
+                .is_err(),
+            "control: a boundary-taking read waits while the boundary is held"
+        );
+        let observed = tokio::time::timeout(bound, service.observe_live_durable_source(&id))
+            .await
+            .expect("observation returns within 100 ms with the turn boundary held")
+            .expect("observe committed source");
+        assert!(observed.is_committed());
+        drop(turn_boundary);
+
+        let recovery_gate = service.recovery_gate_for_session(&id).await;
+        let recovery_guard = recovery_gate.lock_owned().await;
+        assert!(
+            tokio::time::timeout(
+                bound,
+                service.live_deferred_first_turn_pending_under_runtime_turn_boundary(&id),
+            )
+            .await
+            .is_err(),
+            "control: a recovery-gated read waits while the recovery gate is held"
+        );
+        let observed = tokio::time::timeout(bound, service.observe_live_durable_source(&id))
+            .await
+            .expect("observation returns within 100 ms with the recovery gate held")
+            .expect("observe committed source");
+        assert!(observed.is_committed());
+        drop(recovery_guard);
+    }
+
     #[tokio::test]
     async fn whole_blob_ordinary_acknowledgement_reads_only_bounded_store_authority() {
         let session = Session::new();
@@ -21213,6 +21449,7 @@ mod tests {
             inner: InMemoryRuntimeStore::new(),
             bounded_authority_reads: AtomicUsize::new(0),
             full_snapshot_reads: AtomicUsize::new(0),
+            raw_body_reads: AtomicUsize::new(0),
         });
         probe
             .inner

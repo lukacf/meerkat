@@ -4901,10 +4901,16 @@ pub(crate) fn spawn_runtime_loop_with_completions(
             )
             .await
         {
+            // Never an implicit retry and never a timer: the outcome is typed.
+            // A saga still running keeps its coordinator
+            // (`RuntimeDetachedUnregister::InFlight`); a failed one leaves the
+            // registration `Detached` with its failure retained
+            // (`RuntimeDetachedUnregister::Failed`), which dispatch refuses
+            // typed and an explicit resume (member reload) completes (#1248).
             tracing::warn!(
                 session_id = %teardown_session_id,
                 %error,
-                "runtime-loop exit teardown did not complete; retained for retry"
+                "runtime-loop exit teardown did not complete; the registration is detached until an explicit resume completes its unregister"
             );
         }
     });
@@ -6597,7 +6603,9 @@ async fn process_queue(
                     run_id.clone(),
                     primitive,
                     staged_at,
-                    crate::run_progress::RUN_EXECUTION_START_BOUND,
+                    crate::run_progress::run_execution_start_bound_for_session(
+                        &authority_binding.session_id,
+                    ),
                 )
                 .await;
                 // The window is closed: `apply` returned an outcome, whatever

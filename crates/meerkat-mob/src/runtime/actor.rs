@@ -16752,6 +16752,75 @@ impl MobActor {
         });
     }
 
+    /// Second half of the #1248 reload: the unattached registration was
+    /// unregistered and its live materialization discarded, so revive the
+    /// same session through the machine-authorized missing-live seam and
+    /// require a committed executor attachment before reporting success.
+    #[cfg(feature = "runtime-adapter")]
+    async fn reattach_released_member_registration(
+        context: &DetachedMemberReadinessContext,
+        command_tx: &mpsc::Sender<RoutedMobCommand>,
+        entry: &RosterEntry,
+        member_ref: &MemberRef,
+        bridge_session_id: &SessionId,
+        set_stage: &(dyn Fn(&'static str) + Sync),
+    ) -> Result<super::handle::MemberReloadDisposition, MobError> {
+        set_stage("live_session_revival");
+        match Self::request_member_live_revival(
+            command_tx,
+            &entry.agent_identity,
+            bridge_session_id,
+            MemberLiveRevivalScope::default(),
+        )
+        .await?
+        {
+            MemberLiveRevivalOutcome::Materialized(_) | MemberLiveRevivalOutcome::AlreadyLive => {}
+            MemberLiveRevivalOutcome::NotCurrent => {
+                return Ok(super::handle::MemberReloadDisposition::NotCurrent);
+            }
+            MemberLiveRevivalOutcome::CurrentButOwned => {
+                return Err(MobError::MemberReloadRefused {
+                    session_id: bridge_session_id.clone(),
+                    reason: "the released member session has a competing materialization owner"
+                        .to_string(),
+                });
+            }
+        }
+        let adapter =
+            context
+                .runtime_adapter
+                .as_ref()
+                .ok_or_else(|| MobError::MemberReloadRefused {
+                    session_id: bridge_session_id.clone(),
+                    reason: "reload re-attachment has no runtime owner".to_string(),
+                })?;
+        if adapter
+            .current_executor_attachment_witness(bridge_session_id)
+            .await
+            .is_none()
+        {
+            return Err(MobError::MemberReloadRefused {
+                session_id: bridge_session_id.clone(),
+                reason: "live revival published no committed executor attachment".to_string(),
+            });
+        }
+        set_stage("runtime_readiness");
+        context
+            .provisioner
+            .ensure_runtime_session_state(member_ref)
+            .await?;
+        if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+            context
+                .ensure_autonomous_runtime_ready(&entry.agent_identity, member_ref)
+                .await?;
+        } else {
+            context
+                .ensure_mob_comms_drain(&entry.agent_identity, member_ref)
+                .await?;
+        }
+        Ok(super::handle::MemberReloadDisposition::Reattached)
+    }
+
     async fn run_member_registration_reload(
         context: &DetachedMemberReadinessContext,
         command_tx: &mpsc::Sender<RoutedMobCommand>,
@@ -16804,6 +16873,18 @@ impl MobActor {
                     } => (successor, Some(publication)),
                     super::provisioner::MemberRegistrationReload::Discarded { successor } => {
                         (successor, None)
+                    }
+                    super::provisioner::MemberRegistrationReload::Reattach => {
+                        return Self::reattach_released_member_registration(
+                            context,
+                            command_tx,
+                            &entry,
+                            &member_ref,
+                            &bridge_session_id,
+                            &set_stage,
+                        )
+                        .await
+                        .map(outcome);
                     }
                     other => return Ok(outcome(other.disposition())),
                 };

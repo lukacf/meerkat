@@ -274,6 +274,42 @@ pub enum MemberProvisionFailureCause {
     CallbackTransportClosed { detail: String },
 }
 
+/// Why a member's runtime registration holds no committed attachment,
+/// projected from the runtime's typed attachment fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberRuntimeDetachment {
+    /// The session has no runtime registration.
+    Unregistered,
+    /// The registration lost durable authority and has no attachment.
+    ReloadRequired,
+    /// The registration is detached and no unregister has started.
+    UnregisterNotStarted,
+    /// The registration is detached while its unregister is in flight.
+    UnregisterInFlight,
+    /// The registration's teardown unregister failed and is retained with no
+    /// owner until an explicit resume retries it.
+    UnregisterFailed,
+}
+
+impl MemberRuntimeDetachment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unregistered => "unregistered",
+            Self::ReloadRequired => "reload_required",
+            Self::UnregisterNotStarted => "unregister_not_started",
+            Self::UnregisterInFlight => "unregister_in_flight",
+            Self::UnregisterFailed => "unregister_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for MemberRuntimeDetachment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Errors returned by mob operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MobError {
@@ -534,6 +570,20 @@ pub enum MobError {
     MemberReloadRequired {
         member_id: AgentIdentity,
         reason: String,
+    },
+
+    /// The member's session has no committed runtime attachment, so its
+    /// runtime registration cannot serve work: it is absent or detached (for
+    /// example a runtime-loop teardown whose unregister never completed).
+    /// Dispatch refuses typed from the same attachment fact the registration
+    /// reload reads; `MobHandle::reload_member_registration` completes any
+    /// pending unregister and re-attaches the same session (#1248).
+    #[error(
+        "session '{session_id}' has no committed runtime attachment; explicit create or resume is required ({detachment})"
+    )]
+    MemberRuntimeDetached {
+        session_id: meerkat_core::types::SessionId,
+        detachment: MemberRuntimeDetachment,
     },
 
     /// The member's per-member admission lane already holds the maximum
@@ -1397,6 +1447,17 @@ impl MobError {
                 "authority_retained": true,
                 "required_action": "reload_member_registration",
             })),
+            Self::MemberRuntimeDetached {
+                session_id,
+                detachment,
+            } => Some(serde_json::json!({
+                "kind": "mob_member_runtime_detached",
+                "session_id": session_id.to_string(),
+                "detachment": detachment.as_str(),
+                "retryable": false,
+                "authority_retained": true,
+                "required_action": "reload_member_registration",
+            })),
             Self::MemberAdmissionBacklogFull { member_id, depth } => Some(serde_json::json!({
                 "kind": "mob_member_admission_backlog_full",
                 "member_id": member_id.as_str(),
@@ -1650,6 +1711,7 @@ impl MobError {
             // explicit action closes the gap" shape as
             // `SupervisorProtocolUpgradeRequired`, not ordinary backoff.
             | Self::MemberReloadRequired { .. }
+            | Self::MemberRuntimeDetached { .. }
             | Self::DirectMemberAdoptionPending { .. }
             | Self::WorkInputIdempotencyConflict { .. }
             | Self::RuntimeEffectRefused { .. } => MobFailureClass::RuntimeRejected,

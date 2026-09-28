@@ -125,6 +125,52 @@ const _: () = assert!(
     "the run-execution notice tier must fire strictly before the hard bound"
 );
 
+/// Per-session test override of [`RUN_EXECUTION_START_BOUND`].
+///
+/// Downstream crates (mob reload lanes) must drive the real bound teardown
+/// through a full member stack, where virtual time is unavailable. Keyed by
+/// session so concurrent tests in one process never observe each other's
+/// bound. Absent from production builds.
+#[cfg(any(test, feature = "test-support"))]
+static RUN_EXECUTION_START_BOUND_OVERRIDES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<meerkat_core::types::SessionId, Duration>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn override_run_execution_start_bound_for_session(
+    session_id: &meerkat_core::types::SessionId,
+    bound: Option<Duration>,
+) {
+    let mut overrides = RUN_EXECUTION_START_BOUND_OVERRIDES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match bound {
+        Some(bound) => {
+            overrides.insert(session_id.clone(), bound);
+        }
+        None => {
+            overrides.remove(session_id);
+        }
+    }
+}
+
+/// The execution-start bound the runtime loop arms for `session_id`.
+pub(crate) fn run_execution_start_bound_for_session(
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))]
+    session_id: &meerkat_core::types::SessionId,
+) -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(bound) = RUN_EXECUTION_START_BOUND_OVERRIDES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(session_id)
+        .copied()
+    {
+        return bound;
+    }
+    RUN_EXECUTION_START_BOUND
+}
+
 /// Whether the runtime loop actually signalled this run's turn start on the
 /// shared machine authority.
 ///

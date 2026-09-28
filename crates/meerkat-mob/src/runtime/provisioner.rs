@@ -1310,6 +1310,11 @@ pub enum MemberRegistrationReload {
         successor: meerkat_runtime::RuntimeSessionRegistrationWitness,
         publication: ResumedMemberRollbackAuthority,
     },
+    /// A durability-ready registration without a committed executor
+    /// attachment was unregistered to terminal completion and its live
+    /// materialization discarded. The actor must revive the same session.
+    #[cfg(feature = "runtime-adapter")]
+    Reattach,
 }
 
 impl MemberRegistrationReload {
@@ -1320,6 +1325,8 @@ impl MemberRegistrationReload {
             Self::Discarded { .. } => super::handle::MemberReloadDisposition::Discarded,
             #[cfg(feature = "runtime-adapter")]
             Self::Published { .. } => super::handle::MemberReloadDisposition::Discarded,
+            #[cfg(feature = "runtime-adapter")]
+            Self::Reattach => super::handle::MemberReloadDisposition::Reattached,
         }
     }
 }
@@ -3953,6 +3960,25 @@ pub(super) fn trusted_peer_spec_from_runtime(
     }))
 }
 
+/// Project a detached registration's unregister stage into the mob's typed
+/// detachment vocabulary.
+#[cfg(feature = "runtime-adapter")]
+fn member_runtime_detachment(
+    unregister: &meerkat_runtime::RuntimeDetachedUnregister,
+) -> crate::MemberRuntimeDetachment {
+    match unregister {
+        meerkat_runtime::RuntimeDetachedUnregister::NotStarted => {
+            crate::MemberRuntimeDetachment::UnregisterNotStarted
+        }
+        meerkat_runtime::RuntimeDetachedUnregister::InFlight => {
+            crate::MemberRuntimeDetachment::UnregisterInFlight
+        }
+        meerkat_runtime::RuntimeDetachedUnregister::Failed(_) => {
+            crate::MemberRuntimeDetachment::UnregisterFailed
+        }
+    }
+}
+
 #[cfg(feature = "runtime-adapter")]
 impl SessionBackend {
     #[cfg(test)]
@@ -4668,21 +4694,43 @@ impl SessionBackend {
         let Some(adapter) = self.runtime_adapter.as_ref() else {
             return Ok(None);
         };
-        if let Some(witness) = adapter
-            .current_executor_attachment_witness(session_id)
-            .await
-        {
-            if let Some(existing) = self.runtime_sessions.read().await.get(session_id).cloned()
-                && existing.attachment_is_active(&witness)
-            {
-                return Ok(Some(existing));
+        // The same typed fact the registration reload reads (#1248): only a
+        // committed attachment serves; every other state refuses typed.
+        let witness = match adapter.session_attachment_state(session_id).await {
+            meerkat_runtime::RuntimeSessionAttachmentState::Attached(witness)
+            | meerkat_runtime::RuntimeSessionAttachmentState::ReloadRequired {
+                attachment: Some(witness),
+                ..
+            } => witness,
+            meerkat_runtime::RuntimeSessionAttachmentState::Unregistered => {
+                return Err(MobError::MemberRuntimeDetached {
+                    session_id: session_id.clone(),
+                    detachment: crate::MemberRuntimeDetachment::Unregistered,
+                });
             }
-            return Err(MobError::Internal(format!(
-                "session '{session_id}' has a committed runtime attachment without its exact mob sidecar; explicit resume is required"
-            )));
+            meerkat_runtime::RuntimeSessionAttachmentState::ReloadRequired {
+                attachment: None,
+                ..
+            } => {
+                return Err(MobError::MemberRuntimeDetached {
+                    session_id: session_id.clone(),
+                    detachment: crate::MemberRuntimeDetachment::ReloadRequired,
+                });
+            }
+            meerkat_runtime::RuntimeSessionAttachmentState::Detached { unregister, .. } => {
+                return Err(MobError::MemberRuntimeDetached {
+                    session_id: session_id.clone(),
+                    detachment: member_runtime_detachment(&unregister),
+                });
+            }
+        };
+        if let Some(existing) = self.runtime_sessions.read().await.get(session_id).cloned()
+            && existing.attachment_is_active(&witness)
+        {
+            return Ok(Some(existing));
         }
         Err(MobError::Internal(format!(
-            "session '{session_id}' has no committed runtime attachment; explicit create or resume is required"
+            "session '{session_id}' has a committed runtime attachment without its exact mob sidecar; explicit resume is required"
         )))
     }
 
@@ -4699,6 +4747,80 @@ impl SessionBackend {
         session_id: &SessionId,
     ) -> Option<Arc<RuntimeSessionState>> {
         self.runtime_sessions.read().await.get(session_id).cloned()
+    }
+
+    /// Release a detached registration (durability-ready, no committed
+    /// executor attachment) so the member can be re-attached (#1248).
+    ///
+    /// A runtime-loop teardown (for example the execution-start bound) begins
+    /// the machine-owned unregister and its watcher observes the result once:
+    /// a failed saga is retained with generated `Draining` truth as
+    /// [`meerkat_runtime::RuntimeDetachedUnregister::Failed`], and nothing
+    /// retries it. This reload is the explicit resume that fact asks for: it
+    /// starts or joins the exact registration's unregister coordinator (an
+    /// explicit caller supersedes a retained failure) and awaits that
+    /// coordinator's typed result. No timer or retry loop drives the
+    /// teardown; the actor's reload deadline bounds only caller observation.
+    /// Once the exact registration is gone, the explicit-resume discard
+    /// retires any live materialization and sidecar left behind, and the
+    /// actor revives the same session.
+    async fn release_detached_runtime_registration(
+        &self,
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        registration: meerkat_runtime::RuntimeSessionRegistrationWitness,
+        unregister: &meerkat_runtime::RuntimeDetachedUnregister,
+        deadline: Instant,
+    ) -> Result<MemberRegistrationReload, MobError> {
+        if deadline.saturating_duration_since(Instant::now()).is_zero() {
+            return Err(MobError::MemberReloadTimedOut {
+                session_id: session_id.clone(),
+                stage: "detached_registration_unregister",
+            });
+        }
+        tracing::warn!(
+            session_id = %session_id,
+            unregister = ?unregister,
+            "member reload found a detached runtime registration; completing its unregister and re-attaching the session"
+        );
+        let admission = adapter
+            .observe_unregister_session_registration_if_current(&registration)
+            .await
+            .map_err(|error| MobError::MemberReloadRefused {
+                session_id: session_id.clone(),
+                reason: format!("detached registration unregister could not be admitted: {error}"),
+            })?;
+        match admission {
+            meerkat_runtime::RuntimeSessionUnregisterAdmission::Completed
+            | meerkat_runtime::RuntimeSessionUnregisterAdmission::NotCurrent => {}
+            meerkat_runtime::RuntimeSessionUnregisterAdmission::Pending(mut observer) => {
+                observer.wait_for_result().await.map_err(|error| {
+                    MobError::MemberReloadRefused {
+                        session_id: session_id.clone(),
+                        reason: format!(
+                            "detached registration unregister failed and stays retained for the next reload: {error}"
+                        ),
+                    }
+                })?;
+            }
+        }
+        match adapter.session_attachment_state(session_id).await {
+            meerkat_runtime::RuntimeSessionAttachmentState::Unregistered => {}
+            meerkat_runtime::RuntimeSessionAttachmentState::Detached {
+                registration: current,
+                ..
+            } if current == registration => {
+                return Err(MobError::Internal(format!(
+                    "unregister of the detached registration for '{session_id}' settled while that exact registration remained current"
+                )));
+            }
+            // Another owner registered the session while the predecessor was
+            // released. Never take over a successor.
+            _ => return Ok(MemberRegistrationReload::NotCurrent),
+        }
+        self.retire_exact_attachment_for_explicit_resume(session_id, deadline, None)
+            .await?;
+        Ok(MemberRegistrationReload::Reattach)
     }
 
     async fn remove_reload_custody(
@@ -12075,15 +12197,34 @@ impl MobProvisioner for SessionBackend {
         let custody = match retained {
             Some(custody) => custody,
             None => {
-                let Some(registration) = adapter
-                    .current_session_registration_witness(&session_id)
-                    .await
-                else {
-                    return Ok(MemberRegistrationReload::NotCurrent);
+                // The one typed attachment fact dispatch also reads (#1248):
+                // durability alone does not make a registration healthy.
+                let registration = match adapter.session_attachment_state(&session_id).await {
+                    meerkat_runtime::RuntimeSessionAttachmentState::Unregistered => {
+                        return Ok(MemberRegistrationReload::NotCurrent);
+                    }
+                    meerkat_runtime::RuntimeSessionAttachmentState::Attached(_) => {
+                        return Ok(MemberRegistrationReload::NotDegraded);
+                    }
+                    meerkat_runtime::RuntimeSessionAttachmentState::Detached {
+                        registration,
+                        unregister,
+                    } => {
+                        return self
+                            .release_detached_runtime_registration(
+                                adapter,
+                                &session_id,
+                                registration,
+                                &unregister,
+                                deadline,
+                            )
+                            .await;
+                    }
+                    meerkat_runtime::RuntimeSessionAttachmentState::ReloadRequired {
+                        registration,
+                        ..
+                    } => registration,
                 };
-                if adapter.is_durability_ready(&session_id).await {
-                    return Ok(MemberRegistrationReload::NotDegraded);
-                }
                 let sidecar = self
                     .capture_runtime_session_state(&session_id)
                     .await

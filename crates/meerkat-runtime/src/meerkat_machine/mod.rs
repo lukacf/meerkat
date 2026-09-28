@@ -1215,6 +1215,26 @@ impl RuntimeSessionUnregisterObserver {
         }
         Ok(None)
     }
+
+    /// Await the exact coordinator's terminal result.
+    ///
+    /// Observation only: the coordinator owns the teardown, so dropping this
+    /// future (for example on a caller deadline) never cancels it, and a later
+    /// caller can start or join the next attempt.
+    pub async fn wait_for_result(&mut self) -> Result<(), RuntimeDriverError> {
+        loop {
+            if let Some(result) = self.result_rx.borrow_and_update().clone() {
+                return result;
+            }
+            self.result_rx.changed().await.map_err(|_| {
+                RuntimeDriverError::Internal(format!(
+                    "unregister coordinator {} closed without publishing a result for session {}",
+                    self.coordinator_id,
+                    self.registration.session_id()
+                ))
+            })?;
+        }
+    }
 }
 
 impl std::fmt::Debug for RuntimeSessionUnregisterObserver {
@@ -1237,6 +1257,48 @@ pub enum RuntimeSessionUnregisterAdmission {
     /// The exact coordinator remains process-owned; poll this observer on a
     /// later caller retry.
     Pending(RuntimeSessionUnregisterObserver),
+}
+
+/// Whether one session's runtime registration can serve, as a single typed
+/// fact read from one registration entry.
+///
+/// Dispatch and member reload must read this same fact: a durability-ready
+/// registration is not a serving one, and a registration without a committed
+/// executor attachment is detached, whatever its durability (#1248).
+#[derive(Debug, Clone)]
+pub enum RuntimeSessionAttachmentState {
+    /// No registration for the session exists on this machine.
+    Unregistered,
+    /// The registration is durability-ready and its committed executor
+    /// attachment serves the session.
+    Attached(RuntimeExecutorAttachmentWitness),
+    /// The registration lost durable authority (`ReloadRequired`). Its
+    /// committed attachment, when one still exists, is reported so callers
+    /// keep observing the typed reload-required refusal at admission.
+    ReloadRequired {
+        registration: RuntimeSessionRegistrationWitness,
+        attachment: Option<RuntimeExecutorAttachmentWitness>,
+    },
+    /// The registration is durability-ready but holds no committed executor
+    /// attachment, so it cannot serve. An explicit resume (member reload)
+    /// must complete `unregister` and re-attach the session.
+    Detached {
+        registration: RuntimeSessionRegistrationWitness,
+        unregister: RuntimeDetachedUnregister,
+    },
+}
+
+/// Where a detached registration's machine-owned unregister stands.
+#[derive(Debug, Clone)]
+pub enum RuntimeDetachedUnregister {
+    /// No unregister coordinator exists and none has failed.
+    NotStarted,
+    /// An unregister coordinator owns the teardown now.
+    InFlight,
+    /// The runtime-loop teardown's owned unregister failed. Its failure is
+    /// retained with generated `Draining` truth, and nothing retries it until
+    /// an explicit caller starts the next attempt.
+    Failed(RuntimeDriverError),
 }
 
 /// Joinable result channel for the one owned ordinary-stop cleanup operation
@@ -5598,6 +5660,20 @@ impl MeerkatMachine {
             let _ = entered_tx.send(());
             let _ = release_rx.await;
         }
+    }
+
+    /// Test-support: arm the runtime loop's staged -> executing bound for one
+    /// session at `bound` instead of the production hour (`None` restores
+    /// it). Lets downstream lanes force the real `ExecutorNotProgressing`
+    /// teardown through a full stack whose executor never begins its turn.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn set_run_execution_start_bound_for_test(
+        &self,
+        session_id: &SessionId,
+        bound: Option<std::time::Duration>,
+    ) {
+        crate::run_progress::override_run_execution_start_bound_for_session(session_id, bound);
     }
 
     /// Pause one exact ReloadRequired discard after its cold successor is

@@ -110,8 +110,8 @@ pub use definition::{
 pub use error::{
     FlowStepDispatchRejectKind, ForkSourceUnavailableCause, ForkedParticipantLeaseOperation,
     ForkedParticipantOwnerHostRejection, ForkedParticipantSourceRejection,
-    MemberProvisionFailureCause, MobDefinitionProjectionMismatchKind, MobError, MobFailureClass,
-    RuntimeEffectKind,
+    MemberProvisionFailureCause, MemberRuntimeDetachment, MobDefinitionProjectionMismatchKind,
+    MobError, MobFailureClass, RuntimeEffectKind,
 };
 pub use event::{
     AttributedEvent, FlowCancelClass, MemberWireEdge, MobEvent, MobEventKind, NewMobEvent,

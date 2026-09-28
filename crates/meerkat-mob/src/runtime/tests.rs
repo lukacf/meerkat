@@ -74513,6 +74513,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::KickoffWaitTimedOut { .. } => "kickoff_wait_timed_out".to_string(),
         MobError::ReadyWaitTimedOut { .. } => "ready_wait_timed_out".to_string(),
         MobError::MemberReloadRequired { .. } => "member_reload_required".to_string(),
+        MobError::MemberRuntimeDetached { .. } => "member_runtime_detached".to_string(),
         MobError::MemberAdmissionBacklogFull { .. } => "member_admission_backlog_full".to_string(),
         MobError::ActorCommandTimedOut { .. } => "actor_command_timed_out".to_string(),
         MobError::MemberReloadRefused { .. } => "member_reload_refused".to_string(),

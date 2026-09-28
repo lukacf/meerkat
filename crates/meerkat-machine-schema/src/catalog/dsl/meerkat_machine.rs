@@ -1658,6 +1658,20 @@ pub enum LiveContextDeliveryReadiness {
     Revoked,
 }
 
+/// Why a live channel's conversation counts as started. Startup history that
+/// missed the provider open is appended only after one of these facts, since
+/// the provider treats context appended into silence as a cue to speak.
+/// `SpokenCanonicalRow` is a queued canonical row the channel will voice
+/// (`MirrorParentText` with a materializable payload): that row produces
+/// speech on its own, so holding the summary for the user would deadlock it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveConversationStartCause {
+    #[default]
+    UserTurn,
+    ClientDelegation,
+    SpokenCanonicalRow,
+}
+
 /// Where an admitted delegation result may be delivered. The live model is
 /// the sole foreground author; a result that misses its provider turn can
 /// only become deferred context for a future turn.
@@ -3831,12 +3845,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_execution_generation_by_channel: Map<String, Generation>,
             live_execution_phase_by_channel: Map<String, Enum<LiveExecutionChannelPhase>>,
             live_revoked_execution_channels: Set<String>,
-            // Channels on which the user has spoken (a user provider turn
-            // started, or a client delegation was admitted). Startup history
-            // that missed the provider open is delivered only after this
-            // fact: the provider treats context appended into silence as a
-            // cue to speak.
-            live_conversation_started_channels: Set<String>,
+            // Channels whose conversation has started, keyed to the first
+            // cause: a user provider turn started, a client delegation was
+            // admitted, or a canonical row the channel will voice was queued.
+            // Startup history that missed the provider open is delivered only
+            // after this fact: the provider treats context appended into
+            // silence as a cue to speak, and a queued spoken row is never
+            // silence because it is voiced right after the summary.
+            live_conversation_started_channels: Map<String, Enum<LiveConversationStartCause>>,
             live_cancelled_recovery_channels: Set<String>,
             live_execution_profile_by_channel: Map<String, String>,
             live_execution_mode_by_channel: Map<String, Enum<LiveExecutionMode>>,
@@ -4448,7 +4464,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_execution_generation_by_channel = EmptyMap,
             live_execution_phase_by_channel = EmptyMap,
             live_revoked_execution_channels = EmptySet,
-            live_conversation_started_channels = EmptySet,
+            live_conversation_started_channels = EmptyMap,
             live_cancelled_recovery_channels = EmptySet,
             live_execution_profile_by_channel = EmptyMap,
             live_execution_mode_by_channel = EmptyMap,
@@ -25006,7 +25022,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_provider_turn_by_channel.insert(channel_id, provider_turn_ref);
                 self.live_provider_interaction_by_turn.insert(provider_turn_ref, interaction_id);
                 self.live_provider_turn_channel_by_ref.insert(provider_turn_ref, channel_id);
-                self.live_conversation_started_channels.insert(channel_id);
+                if !self.live_conversation_started_channels.contains_key(channel_id) {
+                    self.live_conversation_started_channels.insert(
+                        channel_id,
+                        LiveConversationStartCause::UserTurn
+                    );
+                }
             }
             to Idle
             emit LiveProviderTurnStarted {
@@ -25200,7 +25221,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 !self.live_delegation_reconciliation_by_operation.contains_key(operation_id)
             }
             update {
-                self.live_conversation_started_channels.insert(channel_id);
+                if !self.live_conversation_started_channels.contains_key(channel_id) {
+                    self.live_conversation_started_channels.insert(
+                        channel_id,
+                        LiveConversationStartCause::ClientDelegation
+                    );
+                }
                 self.live_delegation_operation_by_interaction.insert(interaction_id, operation_id);
                 self.live_delegation_channel_by_operation.insert(operation_id, channel_id);
                 self.live_delegation_schedule_state_by_operation.insert(
@@ -28371,8 +28397,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && !self.live_revoked_execution_channels.contains(channel_id)
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
-            guard "user_has_spoken_on_channel" {
-                self.live_conversation_started_channels.contains(channel_id)
+            guard "conversation_started_on_channel" {
+                self.live_conversation_started_channels.contains_key(channel_id)
             }
             update {
                 self.live_context_bootstrap_append_by_channel.insert(channel_id, append_id);
@@ -28574,6 +28600,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                         LiveContextRowDisposition::ExcludedFromLiveContext
                     } else { disposition } });
                 self.live_context_queued_append_by_cursor.insert(canonical_cursor, append_id);
+                // A row this channel will voice (the Ordinary append of a
+                // materializable parent text row) starts the conversation, so
+                // a held late summary is delivered ahead of it instead of
+                // waiting for speech that only this row would produce. Quiet
+                // reassertions and rows that need no provider send do not.
+                if disposition == LiveContextRowDisposition::MirrorParentText
+                    && payload_availability == LiveContextPayloadAvailability::Materializable
+                    && !self.live_conversation_started_channels.contains_key(channel_id) {
+                    self.live_conversation_started_channels.insert(
+                        channel_id,
+                        LiveConversationStartCause::SpokenCanonicalRow
+                    );
+                }
             }
             to Idle
             emit LiveContextRowQueued {

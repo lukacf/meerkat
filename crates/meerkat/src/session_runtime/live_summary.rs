@@ -77,10 +77,13 @@ pub enum LiveContextBootstrapMode {
 pub const LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND: Duration = Duration::from_millis(2500);
 
 /// Native lane that carries a summary which was not ready at open, once the
-/// user has spoken on the channel (first `session.input_transcript.delta` or
-/// `session.delegation.created`). Never sent while the model is idle after
-/// open: measured, a bare summary appended into silence was spoken aloud 3/3
-/// on the thinking lane and 2/9 on the instructions lane.
+/// conversation has started on the channel: the user has spoken (first
+/// `session.input_transcript.delta` or `session.delegation.created`), or a
+/// typed parent-session row the channel will voice was queued, in which case
+/// the summary goes first and the row is spoken right after it. Never sent
+/// into silence: measured, a bare summary appended while the model was idle
+/// after open was spoken aloud 3/3 on the thinking lane and 2/9 on the
+/// instructions lane.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LiveLateSummaryLane {
     /// `session.thinking.append`: the lane the provider documents for context
@@ -141,7 +144,9 @@ impl LiveContextSummaryPolicy {
 
     /// How long a concurrent open waits for the summary before opening
     /// without it (see [`LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND`]). Zero means
-    /// never wait: the summary is always delivered after the user speaks.
+    /// never wait: the summary is always delivered once the conversation has
+    /// started (the user speaks, or a typed row the channel will voice is
+    /// queued).
     #[must_use]
     pub const fn with_pre_open_bound(mut self, bound: Duration) -> Self {
         self.pre_open_bound = bound;
@@ -427,7 +432,7 @@ pub(crate) enum LivePreOpenSummary {
     /// `session.input` and no preparation lease is needed.
     Seeded,
     /// The open proceeds without it; the running generation is adopted by
-    /// the preparation job and delivered after the first user turn.
+    /// the preparation job and delivered once the conversation has started.
     Late(LiveContextSummaryPregeneration),
 }
 
@@ -561,7 +566,8 @@ impl LiveContextSummaryJob {
     /// Adopt a generation that started before the provider open and missed
     /// the pre-open bound. The job waits for the summary, advances generated
     /// authority from `Capturing` to `Generating`, and delivers it behind
-    /// exact media activation and the first user turn on the channel.
+    /// exact media activation and the conversation start on the channel (the
+    /// first user turn, or a queued row the channel will voice).
     pub(crate) fn spawn_from_pregeneration(
         pregeneration: LiveContextSummaryPregeneration,
         lease: meerkat_runtime::live_execution::LiveContextPreparationLease,

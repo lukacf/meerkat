@@ -465,8 +465,8 @@ mod live_context_mirror_tests {
 
     /// The user's first utterance on a bound channel, as the coordinator
     /// reports it: a user provider turn start. Startup history that missed
-    /// the provider open is released by this fact (or a client delegation
-    /// admission) and by nothing else.
+    /// the provider open is released by this fact, a client delegation
+    /// admission, or a queued row the channel will voice, and by nothing else.
     async fn user_speaks_on(
         machine: &crate::MeerkatMachine,
         session_id: &SessionId,
@@ -616,13 +616,15 @@ mod live_context_mirror_tests {
         );
         assert!(host.appends.lock().expect("records").is_empty());
         user_speaks_on(&machine, &session_id, &channel_id, "first-user-turn").await;
-        assert!(
+        assert_eq!(
             machine
                 .session_dsl_state(&session_id)
                 .await
                 .expect("state")
                 .live_conversation_started_channels
-                .contains(channel_id.as_str()),
+                .get(channel_id.as_str())
+                .copied(),
+            Some(crate::meerkat_machine::dsl::LiveConversationStartCause::UserTurn),
             "the user turn records the conversation start on the channel"
         );
         tokio::time::timeout(

@@ -428,7 +428,8 @@ fn seeded_turn_text(index: usize) -> String {
 
 /// The environment's producer blocks until released, so every open in these
 /// tests misses the pre-open bound; keep the bound short so the open stays
-/// fast and the late path (delivery after the first user turn) is exercised.
+/// fast and the late path (delivery once the conversation starts) is
+/// exercised.
 const TEST_PRE_OPEN_BOUND: Duration = Duration::from_millis(50);
 
 async fn build_environment() -> DeferredSummaryEnvironment {
@@ -700,7 +701,8 @@ impl DeferredSummaryEnvironment {
     /// The user's first utterance on the channel, as the provider reports it:
     /// a user turn start pushed through the sideband, lowered by the
     /// lifecycle activator into the runtime. A held summary is released by
-    /// this fact and by nothing else.
+    /// this fact or by a queued row the channel will voice, and by nothing
+    /// else.
     async fn user_speaks(
         &self,
         sideband: &ControlledAmbiguousSideband,
@@ -988,22 +990,14 @@ async fn concurrent_open_returns_before_the_summary_source_is_read_and_covers_th
     .await
     .expect("queueing the later row never waits on the summary")
     .expect("queue the later row behind the bootstrap");
-    assert!(sideband.context_commands.lock().await.is_empty());
-    env.producer.release.notify_one();
-    // Generated, but held: nothing reaches the provider until the user has
-    // spoken on the channel; a summary appended into silence is spoken aloud.
-    tokio::time::timeout(
-        Duration::from_secs(20),
-        env.runtime.drain_live_context_outbox(&env.session_id),
-    )
-    .await
-    .expect("drain never waits on the held summary")
-    .expect("drain with the summary held");
     assert!(
         sideband.context_commands.lock().await.is_empty(),
-        "no append before the user speaks"
+        "nothing reaches the provider while the summary is generating"
     );
-    env.user_speaks(&sideband, &opened).await;
+    env.producer.release.notify_one();
+    // The queued turn is a row the channel will voice, so it started the
+    // conversation: the generated summary is released without the user
+    // speaking, ahead of that row, instead of deadlocking behind it.
     env.wait_for_preparation(&opened, |status| {
         *status == LiveContextPreparationStatus::ProviderAcknowledged
     })
@@ -1015,42 +1009,11 @@ async fn concurrent_open_returns_before_the_summary_source_is_read_and_covers_th
     .await
     .expect("tail drain completes after the acknowledged bootstrap")
     .expect("ordered tail drain");
-    let commands = sideband.context_commands.lock().await;
-    assert!(
-        matches!(
-            commands.first(),
-            Some(LiveSidebandProviderCommand::AppendThinkingContext { text, .. })
-                if text.starts_with(LIVE_LATE_SUMMARY_PREFIX)
-                    && text.contains(&format!(
-                        "Factual context summary covering {} canonical rows.",
-                        env.seeded_rows
-                    ))
-        ),
-        "the historical summary travels first, on the quiet lane, after the first user turn"
+    assert_summary_then_spoken_row(
+        &sideband.context_commands.lock().await,
+        env.seeded_rows,
+        "Newer code: Amber.",
     );
-    assert!(
-        commands.iter().skip(1).any(|command| matches!(
-            command,
-            LiveSidebandProviderCommand::AppendSessionContext { text, .. }
-                | LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
-                if text.contains("Newer code: Amber.")
-        )),
-        "the turn committed during the capture window is delivered live after the summary"
-    );
-    assert_eq!(
-        commands
-            .iter()
-            .filter(|command| matches!(
-                command,
-                LiveSidebandProviderCommand::AppendSessionContext { text, .. }
-                    | LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
-                    if text.contains("Newer code: Amber.")
-            ))
-            .count(),
-        1,
-        "the later turn is delivered exactly once"
-    );
-    drop(commands);
     let provenance = env
         .authority
         .transport
@@ -1060,6 +1023,142 @@ async fn concurrent_open_returns_before_the_summary_source_is_read_and_covers_th
     assert_eq!(
         provenance.canonical_message_cursor(),
         env.seeded_rows as u64
+    );
+    assert_eq!(env.producer.observed().len(), 1);
+    env.member_host
+        .close_experimental_live_pending_channel(
+            env.authority.as_ref(),
+            opened.channel_id(),
+            opened.pending_receipt(),
+        )
+        .await
+        .expect("close active channel");
+}
+
+/// The exact provider context of a late summary released by a queued typed
+/// row: the summary once, on the quiet lane, then the row once, voiced.
+fn assert_summary_then_spoken_row(
+    commands: &[LiveSidebandProviderCommand],
+    seeded_rows: usize,
+    typed_text: &str,
+) {
+    let summary = format!("Factual context summary covering {seeded_rows} canonical rows.");
+    let kinds: Vec<&str> = commands
+        .iter()
+        .map(|command| match command {
+            LiveSidebandProviderCommand::AppendThinkingContext { .. } => "thinking",
+            LiveSidebandProviderCommand::AppendInstructionsContext { .. } => "instructions",
+            LiveSidebandProviderCommand::AppendSessionContext { .. } => "session",
+            _ => "delegation",
+        })
+        .collect();
+    assert!(
+        matches!(
+            commands,
+            [
+                LiveSidebandProviderCommand::AppendThinkingContext { text: first, .. },
+                LiveSidebandProviderCommand::AppendSessionContext { text: second, .. },
+            ] if first.starts_with(LIVE_LATE_SUMMARY_PREFIX)
+                && first.contains(&summary)
+                && second.contains(typed_text)
+                && !second.contains(&summary)
+        ),
+        "expected exactly [quiet late summary, spoken typed row], got {kinds:?}"
+    );
+}
+
+/// The reopen deadlock: a summary that missed the pre-open bound waited for
+/// the user to speak, while the typed turn that would have produced speech
+/// waited in the outbox for the summary's acknowledgement. The queued typed
+/// row starts the conversation itself, so the summary goes first on the quiet
+/// lane and the row is voiced after it, with no user speech. Without a commit
+/// and without speech nothing is ever appended.
+#[tokio::test]
+async fn late_summary_is_released_by_a_queued_typed_turn_without_user_speech() {
+    const TYPED_TURN: &str = "Typed after the reopen: the door code is 4417.";
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment().await;
+    let (opened, _, _) = env.open().await;
+    env.wait_for_preparation(&opened, |status| {
+        *status == LiveContextPreparationStatus::Preparing(LiveContextPreparationStage::Generating)
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), env.producer.entered.notified())
+        .await
+        .expect("summary generation starts after the open");
+    let sideband = tokio::time::timeout(Duration::from_secs(20), env.activate_media(&opened))
+        .await
+        .expect("media activation never waits on the summary");
+    // The summary is ready after the open (late) and media is active.
+    env.producer.release.notify_one();
+
+    // Silence: no commit and no speech, so nothing reaches the provider.
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.runtime.drain_live_context_outbox(&env.session_id),
+    )
+    .await
+    .expect("drain never waits on the held summary")
+    .expect("drain with the summary held");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        env.preparation_status(&opened).await,
+        LiveContextPreparationStatus::Preparing(LiveContextPreparationStage::Generating),
+        "the late summary is held while the conversation has not started"
+    );
+    assert!(
+        sideband.context_commands.lock().await.is_empty(),
+        "nothing is appended into silence"
+    );
+
+    // A typed turn commits and drains; the user never speaks.
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.service.append_external_user_content(
+            &env.session_id,
+            meerkat_core::ContentInput::Text(TYPED_TURN.into()),
+        ),
+    )
+    .await
+    .expect("committing a typed turn never waits on the held summary")
+    .expect("commit the typed turn");
+    env.runtime.notify_committed_live_context(&env.session_id);
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.runtime.drain_live_context_outbox(&env.session_id),
+    )
+    .await
+    .expect("queueing the typed row never waits on the summary")
+    .expect("queue the typed row behind the bootstrap");
+    env.wait_for_preparation(&opened, |status| {
+        *status == LiveContextPreparationStatus::ProviderAcknowledged
+    })
+    .await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.runtime.drain_live_context_outbox(&env.session_id),
+    )
+    .await
+    .expect("tail drain completes after the acknowledged bootstrap")
+    .expect("ordered tail drain");
+    assert_summary_then_spoken_row(
+        &sideband.context_commands.lock().await,
+        env.seeded_rows,
+        TYPED_TURN,
+    );
+    // The user's later speech delivers nothing more: each was sent once.
+    env.user_speaks(&sideband, &opened).await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.runtime.drain_live_context_outbox(&env.session_id),
+    )
+    .await
+    .expect("drain after the user speaks")
+    .expect("drain after the user speaks");
+    assert_summary_then_spoken_row(
+        &sideband.context_commands.lock().await,
+        env.seeded_rows,
+        TYPED_TURN,
     );
     assert_eq!(env.producer.observed().len(), 1);
     env.member_host
@@ -1231,22 +1330,13 @@ async fn concurrent_open_with_a_turn_mid_flight_stays_body_free_and_summarizes_t
     .await
     .expect("queueing the turn rows never waits on the summary")
     .expect("queue the turn rows behind the bootstrap");
-    assert!(sideband.context_commands.lock().await.is_empty());
-    env.producer.release.notify_one();
-    // Generated, but held: nothing reaches the provider until the user has
-    // spoken on the channel; a summary appended into silence is spoken aloud.
-    tokio::time::timeout(
-        Duration::from_secs(20),
-        env.runtime.drain_live_context_outbox(&env.session_id),
-    )
-    .await
-    .expect("drain never waits on the held summary")
-    .expect("drain with the summary held");
     assert!(
         sideband.context_commands.lock().await.is_empty(),
-        "no append before the user speaks"
+        "nothing reaches the provider while the summary is generating"
     );
-    env.user_speaks(&sideband, &opened).await;
+    env.producer.release.notify_one();
+    // The turn's queued rows are voiced by the channel, so they started the
+    // conversation: the summary is released ahead of them without speech.
     env.wait_for_preparation(&opened, |status| {
         *status == LiveContextPreparationStatus::ProviderAcknowledged
     })
@@ -1269,13 +1359,12 @@ async fn concurrent_open_with_a_turn_mid_flight_stays_body_free_and_summarizes_t
                         env.seeded_rows
                     ))
         ),
-        "the historical summary travels first, on the quiet lane, after the first user turn"
+        "the historical summary travels first, on the quiet lane"
     );
     assert!(
         commands.iter().skip(1).any(|command| matches!(
             command,
             LiveSidebandProviderCommand::AppendSessionContext { text, .. }
-                | LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
                 if text.contains(HELD_TURN_PROMPT)
         )),
         "the turn that was mid-flight at admission is delivered live after the summary"

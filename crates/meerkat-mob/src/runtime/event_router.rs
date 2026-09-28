@@ -146,36 +146,51 @@ impl Drop for MobEventRouterHandle {
     }
 }
 
-/// Spawn the event router task and return its handle.
-pub(super) fn spawn_event_router(
+/// Subscribe the router to every member it starts with, then spawn its task
+/// and return its handle.
+///
+/// The initial member subscriptions (local session streams and placed
+/// members' pump taps) are established before this returns, never inside the
+/// spawned task: a caller that subscribes and then drives a member turn must
+/// see that turn's events. Established in the task, they raced the caller's
+/// first turn, and a fast turn finished before its member's stream was
+/// subscribed, so the merged stream never carried it. Members that join
+/// later are covered by the durable cursor from `initial_cursor` on.
+pub(super) async fn spawn_event_router(
     handle: MobHandle,
     authority: AuthorizedMobEventRouter,
 ) -> MobEventRouterHandle {
     let (event_tx, event_rx) = mpsc::channel(authority.config.channel_capacity);
     let cancel = CancellationToken::new();
-    let cancel_clone = cancel.clone();
-
-    tokio::spawn(async move {
-        run_event_router(handle, authority, event_tx, cancel_clone).await;
-    });
-
+    let initial = subscribe_initial_members(&handle, &authority).await;
+    tokio::spawn(run_event_router(
+        handle,
+        authority,
+        initial,
+        event_tx,
+        cancel.clone(),
+    ));
     MobEventRouterHandle { event_rx, cancel }
 }
 
-#[allow(clippy::ignored_unit_patterns)]
-async fn run_event_router(
-    handle: MobHandle,
-    authority: AuthorizedMobEventRouter,
-    event_tx: mpsc::Sender<AttributedEvent>,
-    cancel: CancellationToken,
-) {
+/// The subscriptions a router starts with: the structural event receiver
+/// and every authorized member's stream.
+struct InitialRouterSubscriptions {
+    structural_events: Option<crate::store::MobEventReceiver>,
+    merged: SelectAll<TaggedStream>,
+    tracked_ids: HashMap<AgentIdentity, AgentRuntimeId>,
+}
+
+async fn subscribe_initial_members(
+    handle: &MobHandle,
+    authority: &AuthorizedMobEventRouter,
+) -> InitialRouterSubscriptions {
     let mut merged: SelectAll<TaggedStream> = SelectAll::new();
     // Track the SUBSCRIBED incarnation per identity: a respawn (ADJ-24)
     // replaces the member's stream, so re-subscription keys on the runtime
     // id, never on bare identity presence.
     let mut tracked_ids: HashMap<AgentIdentity, AgentRuntimeId> = HashMap::new();
-    let mut mob_cursor: u64 = authority.initial_cursor;
-    let mut structural_events = match handle.events.subscribe() {
+    let structural_events = match handle.events.subscribe() {
         Ok(receiver) => Some(receiver),
         Err(error) => {
             tracing::warn!(
@@ -187,35 +202,54 @@ async fn run_event_router(
         }
     };
 
+    for member in handle
+        .authorized_mob_event_router_members(&authority.session_bound_runtimes)
+        .await
     {
-        for member in handle
-            .authorized_mob_event_router_members(&authority.session_bound_runtimes)
-            .await
-        {
-            if tracked_ids.contains_key(&member.agent_identity) {
-                continue;
-            }
-            if let Some(stream) = subscribe_member(&handle, member.clone()).await {
-                tracked_ids.insert(member.agent_identity, member.runtime_id);
-                merged.push(stream);
-            }
+        if tracked_ids.contains_key(&member.agent_identity) {
+            continue;
         }
-        // Placed members fan in through pump taps — shape-identical items
-        // in the SAME merge (phase 6).
-        for dsl_identity in &authority.external_members {
-            let member_identity = AgentIdentity::from(dsl_identity.0.as_str());
-            if tracked_ids.contains_key(&member_identity) {
-                continue;
-            }
-            let Some(runtime_id) = handle.member_runtime_id_observation(&member_identity) else {
-                continue;
-            };
-            if let Some(stream) = subscribe_external_member(&handle, &member_identity).await {
-                tracked_ids.insert(member_identity, runtime_id);
-                merged.push(stream);
-            }
+        if let Some(stream) = subscribe_member(handle, member.clone()).await {
+            tracked_ids.insert(member.agent_identity, member.runtime_id);
+            merged.push(stream);
         }
     }
+    // Placed members fan in through pump taps - shape-identical items in
+    // the SAME merge (phase 6).
+    for dsl_identity in &authority.external_members {
+        let member_identity = AgentIdentity::from(dsl_identity.0.as_str());
+        if tracked_ids.contains_key(&member_identity) {
+            continue;
+        }
+        let Some(runtime_id) = handle.member_runtime_id_observation(&member_identity) else {
+            continue;
+        };
+        if let Some(stream) = subscribe_external_member(handle, &member_identity).await {
+            tracked_ids.insert(member_identity, runtime_id);
+            merged.push(stream);
+        }
+    }
+    InitialRouterSubscriptions {
+        structural_events,
+        merged,
+        tracked_ids,
+    }
+}
+
+#[allow(clippy::ignored_unit_patterns)]
+async fn run_event_router(
+    handle: MobHandle,
+    authority: AuthorizedMobEventRouter,
+    initial: InitialRouterSubscriptions,
+    event_tx: mpsc::Sender<AttributedEvent>,
+    cancel: CancellationToken,
+) {
+    let InitialRouterSubscriptions {
+        mut structural_events,
+        mut merged,
+        mut tracked_ids,
+    } = initial;
+    let mut mob_cursor: u64 = authority.initial_cursor;
 
     // The unconditional first read closes the gap between the actor's
     // `initial_cursor` snapshot and this task installing its subscription.

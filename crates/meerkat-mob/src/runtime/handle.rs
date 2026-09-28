@@ -6882,7 +6882,7 @@ impl MobHandle {
                 // external field; the set is the machine's placement facts.
                 authority.external_members = external_members;
                 Ok(MobMachineCommandResult::MobEventRouter(
-                    super::event_router::spawn_event_router(self.clone(), authority),
+                    super::event_router::spawn_event_router(self.clone(), authority).await,
                 ))
             }
             MobMachineCommand::PollEvents {

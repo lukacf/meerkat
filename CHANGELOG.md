@@ -128,6 +128,23 @@ them.
   Quiet reassertions, rows already present in the live channel, and excluded
   rows do not start the conversation, so nothing is appended into silence
   (lukacf/meerkat-mobkit#474).
+- Public Live under `PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured`
+  commits one canonical assistant row per provider turn instead of one row per
+  transcript delta (#1237). A segment seals only at typed points: the provider
+  turn's end, a between-speech boundary (a provider-acknowledged context
+  append, including the bootstrap acknowledgement cut, or a client
+  delegation), and channel close, EOF, or a terminal failure, so in-flight
+  speech is kept. The row carries the concatenation of the deltas observed in
+  the segment as `ProviderManagedUnmeasured` evidence and never claims
+  finality. Because gpt-live-1 has no assistant completion event, the row now
+  lands when the turn ends. Hosts show in-progress text through the new
+  `PublicGptLiveProvisionalCaptionSink`, installed with
+  `ExperimentalGptLiveOpenAuthority::with_public_provisional_caption_sink`:
+  each `PublicGptLiveProvisionalCaption` names the session, channel, and the
+  segment's item id, the same id the committed row's
+  `realtime_origin.provider_item_ids` records. Playback snapshot rows now
+  carry a `realtime_origin` naming their channel and item even when no live
+  context observation was admitted.
 - Compiled component-owned skill and capability registrations survive optimized
   WASM archive linking, preserving canonical skill resolution across repeated
   runtime initialization.

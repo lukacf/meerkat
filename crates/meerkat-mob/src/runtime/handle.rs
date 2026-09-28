@@ -2045,9 +2045,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::MemberRestoreFailed { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::MemberRestoreFailed
         }
-        // A degraded runtime registration is a session-durability fault of the
-        // existing member; the spawn row records it as its session cause.
-        MobError::MemberReloadRequired { .. } => {
+        // A degraded or detached runtime registration is a session fault of
+        // the existing member; the spawn row records it as its session cause.
+        MobError::MemberReloadRequired { .. } | MobError::MemberRuntimeDetached { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::SessionError
         }
         // Delivery-lane backpressure, bounded actor sends and reload verdicts
@@ -2817,6 +2817,12 @@ pub enum MemberReloadDisposition {
     /// The member's session has no current registration on this runtime, or
     /// the registration changed under the reload. Nothing was replaced.
     NotCurrent,
+    /// The registration was durability-ready but held no committed executor
+    /// attachment (for example a runtime-loop teardown whose unregister never
+    /// completed). Its pending unregister was completed, and the same session
+    /// was re-materialized and re-attached from durable truth. Like
+    /// `Discarded`, the member's runtime registration was replaced.
+    Reattached,
 }
 
 /// Outcome of one non-destructive member registration reload.
@@ -12064,9 +12070,13 @@ impl MobHandle {
     /// and discards the exact degraded registration (retaining the member's
     /// bound operation identity), re-registers the executor for the same
     /// session from durable truth through the machine-authorized revival
-    /// seam, and re-arms autonomous readiness. `NotDegraded` is a success
-    /// no-op. Placed members are reloaded by their member host and are
-    /// rejected typed.
+    /// seam, and re-arms autonomous readiness. A durability-ready
+    /// registration left without a committed executor attachment (a
+    /// runtime-loop teardown whose unregister never completed) is repaired
+    /// too: its pending unregister is completed and the same session is
+    /// re-attached (`Reattached`). `NotDegraded` is a success no-op and is
+    /// reported only for a registration with a committed attachment. Placed
+    /// members are reloaded by their member host and are rejected typed.
     ///
     /// Reload shares the member's single-flight admission lane with delivery,
     /// while other members remain independent. Caller observation is bounded

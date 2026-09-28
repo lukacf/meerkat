@@ -35,6 +35,46 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_mob::MemberReloadDisposition` gains the variant `Reattached`
+  (appended last, so existing discriminants do not move); exhaustive matches
+  must handle it. `MobHandle::reload_member_registration` returns it when a
+  durability-ready registration had no committed executor attachment and the
+  reload completed its pending unregister and re-attached the same session
+  (#1248). Hosts that report "reloaded" must treat `Reattached` like
+  `Discarded`: the member's runtime registration was replaced.
+- `meerkat_mob::MobError` gains the variant
+  `MemberRuntimeDetached { session_id, detachment }`; exhaustive matches must
+  handle it. Its `failure_class()` is `RuntimeRejected`, and its structured
+  data is `kind: "mob_member_runtime_detached"` with
+  `required_action: "reload_member_registration"`.
+- Behaviour-only (not measured by the gate): member dispatch to a session
+  without a committed runtime attachment now fails with
+  `MobError::MemberRuntimeDetached` instead of `MobError::Internal`. The
+  display text keeps the prefix "session '<sid>' has no committed runtime
+  attachment; explicit create or resume is required" (#1248).
+- Behaviour-only (not measured by the gate):
+  `MobHandle::reload_member_registration` no longer reports `NotDegraded` for
+  a durability-ready registration without a committed executor attachment. It
+  repairs that registration and reports `Reattached` (#1248).
+
+### Added
+
+- `meerkat_runtime::RuntimeSessionAttachmentState` (`Unregistered`,
+  `Attached`, `ReloadRequired { registration, attachment }`,
+  `Detached { registration, unregister }`), `RuntimeDetachedUnregister`
+  (`NotStarted`, `InFlight`, `Failed`), and
+  `MeerkatMachine::session_attachment_state`: one typed serving fact for a
+  session, read from a single registration entry. Mob dispatch and member
+  reload both read it (#1248).
+- `meerkat_mob::MemberRuntimeDetachment` (`Unregistered`, `ReloadRequired`,
+  `UnregisterNotStarted`, `UnregisterInFlight`, `UnregisterFailed`), carried
+  by `MobError::MemberRuntimeDetached` (#1248).
+- `meerkat_runtime::RuntimeSessionUnregisterObserver::wait_for_result`
+  awaits the exact unregister coordinator's terminal result. Dropping it
+  never cancels the machine-owned teardown (#1248).
+
 ### Fixed
 
 - The e2e harness's interrupt handling is deterministic (#1243, #1229). The
@@ -68,6 +108,22 @@ them.
   to paint a data-first module's stack (which can overlap `.bss`), and a
   turn's high-water must reach a 16 KiB sanity floor, so a probe that is not
   observing the turn's memory fails instead of passing every budget.
+
+- A member left with a runtime registration but no committed executor
+  attachment after the execution-start bound teardown can be reloaded again
+  (#1248). The runtime-loop watcher observes its owned unregister once and
+  never retries a failed saga, so a failure in post-stop service cleanup left
+  the registration in generated `Draining` with no owner. Reload read
+  durability and answered `NotDegraded`, while dispatch read the attachment
+  and failed with "has no committed runtime attachment". Both now read
+  `RuntimeSessionAttachmentState`. The stranded shape is the typed
+  `Detached { unregister: Failed }` fact, and dispatch refuses it typed.
+  Reload reports `NotDegraded` only for `Attached`. For `Detached` it starts
+  or joins the exact registration's unregister (an explicit caller supersedes
+  the retained failure) and awaits the coordinator's typed result, with no
+  timer or retry loop. It then runs the explicit-resume discard, revives the
+  SAME session, and returns `Reattached` once a committed attachment exists.
+  `NotCurrent` still means no registration for the session.
 
 ## [0.8.48] - 2026-09-28
 

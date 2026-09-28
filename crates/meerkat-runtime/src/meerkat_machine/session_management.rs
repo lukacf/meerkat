@@ -4883,6 +4883,61 @@ impl MeerkatMachine {
         ))
     }
 
+    /// The one typed serving fact for `session_id`, read from a single
+    /// registration entry. See [`RuntimeSessionAttachmentState`].
+    pub async fn session_attachment_state(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+    ) -> RuntimeSessionAttachmentState {
+        let sessions = self.sessions.read().await;
+        let Some(entry) = sessions.get(session_id) else {
+            return RuntimeSessionAttachmentState::Unregistered;
+        };
+        let attachment = match &entry.attachment_slot {
+            RuntimeLoopAttachmentSlot::Attached(attachment)
+                if entry.generated_executor_registration_active() && entry.attachment_is_live() =>
+            {
+                Some(RuntimeExecutorAttachmentWitness::new(
+                    Arc::downgrade(&self.shared),
+                    session_id.clone(),
+                    entry.epoch_id.clone(),
+                    attachment.id,
+                ))
+            }
+            _ => None,
+        };
+        let registration = RuntimeSessionRegistrationWitness::new(
+            Arc::downgrade(&self.shared),
+            session_id.clone(),
+            entry.epoch_id.clone(),
+            Arc::downgrade(&entry.mutation_gate),
+        );
+        if entry.require_durability_ready().is_err() {
+            return RuntimeSessionAttachmentState::ReloadRequired {
+                registration,
+                attachment,
+            };
+        }
+        if let Some(attachment) = attachment {
+            return RuntimeSessionAttachmentState::Attached(attachment);
+        }
+        let unregister = if entry.unregister_coordinator.is_some() {
+            RuntimeDetachedUnregister::InFlight
+        } else if let Some(Err(error)) = entry
+            .runtime_loop_teardown
+            .as_ref()
+            .and_then(|slot| slot.last_unregister_result())
+        {
+            RuntimeDetachedUnregister::Failed(error)
+        } else {
+            RuntimeDetachedUnregister::NotStarted
+        };
+        RuntimeSessionAttachmentState::Detached {
+            registration,
+            unregister,
+        }
+    }
+
     /// Snapshot the terminal-publication capability retained by one exact
     /// serving executor attachment.
     ///

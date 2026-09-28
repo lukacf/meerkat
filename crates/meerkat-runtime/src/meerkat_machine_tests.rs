@@ -2845,6 +2845,163 @@ async fn teardown_required_runtime_loop_exit_unregisters_after_exact_cleanup() {
     assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
 }
 
+/// #1248: the execution-start bound hands a never-started executor off with
+/// `ExecutorNotProgressing`, and the watcher-owned unregister fails in its
+/// post-stop cleanup. The watcher observes that result once and never
+/// retries it, so the registration stays in generated Draining with no
+/// committed attachment. An explicit caller (member reload) must be able to
+/// retry that exact registration's unregister to terminal completion.
+#[tokio::test]
+async fn failed_bound_teardown_unregister_is_retained_then_completed_by_an_explicit_retry() {
+    struct NeverStartedExecutor {
+        cleanup_calls: Arc<AtomicUsize>,
+        cleanup_failures_remaining: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NeverStartedExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(
+                CoreExecutorError::executor_not_progressing_requires_teardown(
+                    "the executor never began executing the staged run",
+                ),
+            )
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn cleanup_after_runtime_stop_terminalized(
+            &mut self,
+        ) -> Result<(), CoreExecutorError> {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            if self
+                .cleanup_failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(CoreExecutorError::control_failed_runtime(
+                    "service cleanup starved behind the non-progressing turn",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let machine = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    let cleanup_calls = Arc::new(AtomicUsize::new(0));
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(NeverStartedExecutor {
+                cleanup_calls: Arc::clone(&cleanup_calls),
+                cleanup_failures_remaining: Arc::new(AtomicUsize::new(1)),
+            }),
+        )
+        .await
+        .expect("runtime executor registration should succeed");
+    let registration = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("registered session has a registration witness");
+
+    let (outcome, _completion) = machine
+        .accept_input_with_completion(&session_id, make_prompt("never begins"))
+        .await
+        .expect("input is admitted before the bound teardown");
+    assert!(outcome.is_accepted());
+
+    // The watcher-owned unregister settles once, as the typed detached fact:
+    // the registration stays current in generated Draining with no committed
+    // attachment, and its retained failure has no owner.
+    let retained = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match machine.session_attachment_state(&session_id).await {
+                crate::RuntimeSessionAttachmentState::Detached {
+                    registration: detached,
+                    unregister: crate::RuntimeDetachedUnregister::Failed(error),
+                } => {
+                    assert_eq!(detached, registration);
+                    return error;
+                }
+                // Before the bound fires, and while the watcher's unregister
+                // is in flight.
+                crate::RuntimeSessionAttachmentState::Attached(_)
+                | crate::RuntimeSessionAttachmentState::Detached { .. } => {}
+                other => panic!("the bound teardown must leave a detached registration: {other:?}"),
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the watcher-owned unregister settles with a retained failure");
+    assert!(
+        retained.to_string().contains("starved"),
+        "the retained failure is the cleanup failure: {retained}"
+    );
+    assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        machine
+            .current_executor_attachment_witness(&session_id)
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("stranded registration keeps generated state")
+            .registration_phase,
+        mm_dsl::RegistrationPhase::Draining
+    );
+
+    // The typed explicit retry supersedes the retained failure and completes.
+    match machine
+        .observe_unregister_session_registration_if_current(&registration)
+        .await
+        .expect("explicit retry is admitted")
+    {
+        crate::RuntimeSessionUnregisterAdmission::Pending(mut observer) => {
+            tokio::time::timeout(Duration::from_secs(5), observer.wait_for_result())
+                .await
+                .expect("the retried unregister settles")
+                .expect("the retried unregister completes");
+        }
+        crate::RuntimeSessionUnregisterAdmission::Completed => {}
+        crate::RuntimeSessionUnregisterAdmission::NotCurrent => {
+            panic!("the stranded registration must still be current")
+        }
+    }
+    assert!(!machine.contains_session(&session_id).await);
+    assert!(matches!(
+        machine.session_attachment_state(&session_id).await,
+        crate::RuntimeSessionAttachmentState::Unregistered
+    ));
+    assert_eq!(cleanup_calls.load(Ordering::SeqCst), 2);
+}
+
 /// Refs #1093: a no-pending terminal (for example the in-loop recovery tail
 /// applying a detached-op completion wake with no prompt) must not retire the
 /// registration while other admitted input is still queued behind it.

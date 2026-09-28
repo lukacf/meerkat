@@ -1385,3 +1385,166 @@ async fn reload_carries_the_audited_endpoint_divergence_typed() {
     // retire + resume path (MobKit's `reload_member` on a held identity); the
     // registration reload stays refused typed until then.
 }
+
+/// #1248 (HomeCore production): a staged run whose consumer never begins
+/// executing trips the execution-start bound, the runtime loop begins
+/// unregister and hands its executor off, and the watcher-owned unregister
+/// fails once in post-stop service cleanup. The failure is retained with
+/// generated Draining truth and no owner retries it, so the member keeps a
+/// durability-ready registration with no committed executor attachment and
+/// every dispatch fails. Reload must treat that as repairable, not as
+/// `NotDegraded`: complete the pending unregister, discard the stale
+/// materialization, and re-attach the SAME session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reload_reattaches_a_registration_stranded_by_the_execution_start_bound_teardown() {
+    let mob = create_isolation_mob(2).await;
+    let session = mob.session(0).clone();
+    let stranded_registration = mob
+        .adapter
+        .current_session_registration_witness(&session)
+        .await
+        .expect("spawned member has a runtime registration");
+
+    // The consumer never begins its turn (the mock never applies the
+    // primitive), and the bound is armed short for this session only.
+    mob.service.set_start_turn_delay_ms(600_000);
+    mob.adapter
+        .set_run_execution_start_bound_for_test(&session, Some(Duration::from_millis(300)));
+    // The teardown's first exact actor discard fails, so the watcher-owned
+    // unregister cannot complete.
+    mob.service.fail_next_exact_actor_discard();
+    mob.send(0, "never begins")
+        .await
+        .expect("the stuck turn is admitted before the bound fires");
+    wait_until(
+        "the bound teardown's unregister failed and was retained with no owner",
+        Duration::from_secs(10),
+        || async {
+            matches!(
+                mob.adapter.session_attachment_state(&session).await,
+                meerkat_runtime::RuntimeSessionAttachmentState::Detached {
+                    unregister: meerkat_runtime::RuntimeDetachedUnregister::Failed(_),
+                    ..
+                }
+            )
+        },
+    )
+    .await;
+    mob.adapter
+        .set_run_execution_start_bound_for_test(&session, None);
+    mob.service.set_start_turn_delay_ms(0);
+
+    // The production shape, as one typed fact: the registration stays
+    // current and durability-ready but is detached, and dispatch refuses
+    // typed from that same fact instead of reading durability alone.
+    match mob.adapter.session_attachment_state(&session).await {
+        meerkat_runtime::RuntimeSessionAttachmentState::Detached { registration, .. } => {
+            assert_eq!(
+                registration, stranded_registration,
+                "the stranded registration stays current"
+            );
+        }
+        other => panic!("expected a detached registration, got {other:?}"),
+    }
+    assert!(mob.adapter.is_durability_ready(&session).await);
+    let stranded = mob
+        .send(0, "dispatch while stranded")
+        .await
+        .expect_err("a detached registration cannot serve");
+    assert!(
+        matches!(
+            stranded,
+            MobError::MemberRuntimeDetached {
+                ref session_id,
+                detachment: crate::MemberRuntimeDetachment::UnregisterFailed,
+            } if session_id == &session
+        ),
+        "dispatch must refuse typed on the detached registration, got {stranded:?}"
+    );
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(15),
+        mob.handle.reload_member_registration(mob.member(0)),
+    )
+    .await
+    .expect("reload settles")
+    .expect("reload re-attaches the stranded member");
+    assert_eq!(outcome.disposition, MemberReloadDisposition::Reattached);
+    assert_eq!(outcome.session_id, session, "reload keeps the SAME session");
+    assert!(
+        matches!(
+            mob.adapter.session_attachment_state(&session).await,
+            meerkat_runtime::RuntimeSessionAttachmentState::Attached(_)
+        ),
+        "reload must publish a committed executor attachment"
+    );
+    assert_ne!(
+        mob.adapter
+            .current_session_registration_witness(&session)
+            .await
+            .as_ref(),
+        Some(&stranded_registration),
+        "the stranded registration was replaced by completing its unregister, not adopted"
+    );
+
+    mob.send(0, "after reattach")
+        .await
+        .expect("dispatch succeeds after the reload");
+    wait_until(
+        "the re-attached member runs its next turn",
+        Duration::from_secs(5),
+        || async {
+            mob.executed_prompts(0)
+                .await
+                .iter()
+                .any(|prompt| prompt == "after reattach")
+        },
+    )
+    .await;
+
+    let again = tokio::time::timeout(
+        Duration::from_secs(5),
+        mob.handle.reload_member_registration(mob.member(0)),
+    )
+    .await
+    .expect("second reload settles")
+    .expect("second reload succeeds");
+    assert_eq!(
+        again.disposition,
+        MemberReloadDisposition::NotDegraded,
+        "a re-attached member is healthy"
+    );
+    let healthy = tokio::time::timeout(
+        Duration::from_secs(5),
+        mob.handle.reload_member_registration(mob.member(1)),
+    )
+    .await
+    .expect("healthy reload settles")
+    .expect("healthy reload succeeds");
+    assert_eq!(
+        healthy.disposition,
+        MemberReloadDisposition::NotDegraded,
+        "a member with a committed attachment is a no-op"
+    );
+}
+
+/// A member whose session has no registration on this runtime keeps the
+/// `NotCurrent` answer: reload never invents a registration to replace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reload_reports_not_current_for_a_member_absent_from_the_runtime() {
+    let mob = create_isolation_mob(1).await;
+    mob.adapter
+        .unregister_session(mob.session(0))
+        .await
+        .expect("unregister the member's runtime registration");
+    assert!(!mob.adapter.contains_session(mob.session(0)).await);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        mob.handle.reload_member_registration(mob.member(0)),
+    )
+    .await
+    .expect("reload settles")
+    .expect("reload of an absent registration is an inert outcome");
+    assert_eq!(outcome.disposition, MemberReloadDisposition::NotCurrent);
+    assert_eq!(&outcome.session_id, mob.session(0));
+}

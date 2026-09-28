@@ -21567,6 +21567,76 @@ mod tests {
         drop(recovery_guard);
     }
 
+    /// A 20 MB member polled 50 times, as a voice console polls readiness:
+    /// every poll reports the same committed revision and none reads the
+    /// body, so the member's size never reaches the readiness path (#1246).
+    #[tokio::test]
+    async fn live_durable_source_observation_of_a_large_member_across_fifty_polls_reads_no_body() {
+        const BODY_BYTES: usize = 20 * 1024 * 1024;
+        let probe = Arc::new(WholeBlobAuthorityReadProbe {
+            inner: InMemoryRuntimeStore::new(),
+            bounded_authority_reads: AtomicUsize::new(0),
+            full_snapshot_reads: AtomicUsize::new(0),
+            raw_body_reads: AtomicUsize::new(0),
+        });
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::clone(&probe) as Arc<dyn RuntimeStore>;
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("x".repeat(BODY_BYTES))));
+        let id = session.id().clone();
+        let runtime_id = LogicalRuntimeId::for_session(&id);
+        let artifact = session
+            .to_persisted_artifact()
+            .expect("encode the large WholeBlob once");
+        assert!(
+            artifact.bytes_arc().len() >= BODY_BYTES,
+            "control: the committed body really is 20 MB"
+        );
+        probe
+            .inner
+            .commit_session_snapshot(
+                &runtime_id,
+                SerializedSessionSnapshot {
+                    session_snapshot: artifact.bytes_arc(),
+                },
+            )
+            .await
+            .expect("seed the large committed WholeBlob row");
+        let revision = probe
+            .inner
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .expect("load seeded authority")
+            .expect("seeded authority exists")
+            .store_revision();
+
+        let before = probe.body_reads();
+        for poll in 0..50 {
+            let observed = service
+                .observe_live_durable_source(&id)
+                .await
+                .expect("observe the large committed source");
+            assert_eq!(
+                observed,
+                crate::LiveDurableSourceObservation::Committed {
+                    revision: Some(revision)
+                },
+                "poll {poll}"
+            );
+        }
+        assert_eq!(
+            probe.body_reads(),
+            before,
+            "fifty polls of a 20 MB member never read its body"
+        );
+    }
+
     #[tokio::test]
     async fn whole_blob_ordinary_acknowledgement_reads_only_bounded_store_authority() {
         let session = Session::new();

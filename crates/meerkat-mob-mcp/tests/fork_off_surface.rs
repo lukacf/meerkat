@@ -1472,6 +1472,112 @@ async fn forker_checks_lists_and_retires_only_its_own_children() {
     fixture.teardown().await;
 }
 
+fn assert_member_absence(
+    result: Result<Value, ToolError>,
+    kind: &str,
+    member: &str,
+    context: &str,
+) {
+    match result {
+        Err(ToolError::ExecutionFailedWithData { data, .. }) => {
+            assert_eq!(data["kind"], kind, "{context}: {data}");
+            assert_eq!(data["member_id"], member, "{context}: {data}");
+            assert_eq!(data["retryable"], false, "{context}: {data}");
+        }
+        other => panic!("{context}: expected a typed {kind} error, got {other:?}"),
+    }
+}
+
+/// #1234: a retired or missing target is typed not-found before ownership,
+/// for manage-scope and non-manage callers alike. The spawner of a retired
+/// child gets member_retired (the event log records the retirement), an
+/// identity the mob never held gets member_not_found, and access_denied is
+/// kept for a present member the caller does not own.
+#[tokio::test(flavor = "multi_thread")]
+async fn owned_member_tools_type_a_retired_or_missing_target_as_not_found() {
+    let fixture = CouncilFixture::new_runtime_backed(routed_script(
+        RequestLog::default(),
+        vec![(CHILD_TASK, ChildReply::Text(CHILD_REPLY))],
+    ));
+    fixture.seed_source_mob(&["forker", "bystander"]).await;
+    let mob_id = fixture.source_mob_id().to_string();
+    let forker = member_surface(&fixture, "forker").await;
+    let bystander = member_surface(&fixture, "bystander").await;
+    let manager = bind_surface(
+        &fixture.state,
+        SessionId::new(),
+        convener_authority(&mob_id),
+    );
+
+    let job_id =
+        start_detached_fork(&forker, "gone-child", fork_args("gone-child", CHILD_TASK)).await;
+    wait_for_completion(&fixture, &forker.session, &job_id).await;
+    call(
+        &forker.surface,
+        "mob_check_member",
+        json!({"mob_id": mob_id, "member_id": "gone-child"}),
+    )
+    .await
+    .expect("the forker checks its present child");
+
+    // Retired out from under its spawner, as by the idle sweep.
+    let handle = source_handle(&fixture).await;
+    handle
+        .retire(AgentIdentity::from("gone-child"))
+        .await
+        .expect("retire the child");
+    assert_not_seated(&handle, "gone-child").await;
+
+    for tool in ["mob_check_member", "mob_retire_member"] {
+        for (surface, who) in [
+            (&forker.surface, "its spawner"),
+            (&bystander.surface, "a non-owner"),
+            (&manager.surface, "a manage-scope caller"),
+        ] {
+            assert_member_absence(
+                call(
+                    surface,
+                    tool,
+                    json!({"mob_id": mob_id, "member_id": "gone-child"}),
+                )
+                .await,
+                "member_retired",
+                "gone-child",
+                &format!("{tool} on a retired child by {who}"),
+            );
+        }
+        for (surface, who) in [
+            (&forker.surface, "a non-manage member"),
+            (&manager.surface, "a manage-scope caller"),
+        ] {
+            assert_member_absence(
+                call(
+                    surface,
+                    tool,
+                    json!({"mob_id": mob_id, "member_id": "never-seated"}),
+                )
+                .await,
+                "member_not_found",
+                "never-seated",
+                &format!("{tool} on an unknown identity by {who}"),
+            );
+        }
+        assert!(
+            matches!(
+                call(
+                    &forker.surface,
+                    tool,
+                    json!({"mob_id": mob_id, "member_id": "bystander"}),
+                )
+                .await,
+                Err(ToolError::AccessDenied { .. })
+            ),
+            "{tool}: a present member the caller does not own stays access_denied"
+        );
+    }
+    fixture.teardown().await;
+}
+
 /// A forks C, C forks D from inside its own running turn. A owns D through
 /// C: it lists and checks D, which a bystander cannot. When C's opt-in
 /// max_run elapses, C is cancelled and retired and so is its running child D.

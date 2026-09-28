@@ -1981,6 +1981,12 @@ struct MockSessionService {
     create_session_gates: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
     archive_delay_ms: AtomicU64,
     start_turn_delay_ms: AtomicU64,
+    /// Typed turn hold: while set, every non-host `start_turn` parks until
+    /// `release_held_start_turns` or an interrupt, like a hung tool call,
+    /// and publishes its entry on `held_start_turn_entries`.
+    hold_start_turns: AtomicBool,
+    held_start_turn_release: tokio::sync::Notify,
+    held_start_turn_entries: tokio::sync::watch::Sender<u64>,
     /// #1102 fault seam: sessions whose `live_session_actor_registered`
     /// lookup parks until `release_live_session_lookups` (models a session
     /// actor whose teardown is retained and never answers).
@@ -2143,6 +2149,9 @@ impl MockSessionService {
             create_session_gates: RwLock::new(HashMap::new()),
             archive_delay_ms: AtomicU64::new(0),
             start_turn_delay_ms: AtomicU64::new(0),
+            hold_start_turns: AtomicBool::new(false),
+            held_start_turn_release: tokio::sync::Notify::new(),
+            held_start_turn_entries: tokio::sync::watch::channel(0).0,
             parked_live_session_lookups: RwLock::new(HashSet::new()),
             live_session_admission_lookups: AtomicU64::new(0),
             release_live_session_lookups: tokio::sync::Notify::new(),
@@ -2950,6 +2959,22 @@ impl MockSessionService {
             .store(1, Ordering::Relaxed);
     }
 
+    /// Park every later non-host `start_turn` until released or interrupted.
+    fn hold_start_turns(&self) {
+        self.hold_start_turns.store(true, Ordering::Release);
+    }
+
+    /// Stop holding turns and release every held one.
+    fn release_held_start_turns(&self) {
+        self.hold_start_turns.store(false, Ordering::Release);
+        self.held_start_turn_release.notify_waiters();
+    }
+
+    /// Typed count of `start_turn` calls that entered the hold.
+    fn held_start_turn_entries(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.held_start_turn_entries.subscribe()
+    }
+
     fn set_start_turn_delay_ms(&self, delay_ms: u64) {
         self.start_turn_delay_ms
             .store(delay_ms, std::sync::atomic::Ordering::Relaxed);
@@ -3664,6 +3689,28 @@ impl SessionService for MockSessionService {
         } else {
             self.non_host_start_turn_calls
                 .fetch_add(1, Ordering::Release);
+        }
+        if self.hold_start_turns.load(Ordering::Acquire) {
+            let released = self.held_start_turn_release.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            self.held_start_turn_entries
+                .send_modify(|entries| *entries += 1);
+            match interrupt_rx.as_mut() {
+                Some(interrupt_rx) => {
+                    tokio::select! {
+                        () = released => {}
+                        changed = interrupt_rx.changed() => {
+                            if changed.is_ok() {
+                                return Err(SessionError::Agent(
+                                    meerkat_core::error::AgentError::Cancelled,
+                                ));
+                            }
+                        }
+                    }
+                }
+                None => released.await,
+            }
         }
         let start_turn_delay = self.start_turn_delay_ms.load(Ordering::Relaxed);
         if start_turn_delay > 0 {
@@ -9367,6 +9414,274 @@ async fn live_open_still_fails_a_corrupt_or_absent_body_with_a_typed_error() {
     );
 
     handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// An exited mob actor leaves the roster and the last machine state frozen;
+/// readiness must report the member unavailable instead of ready (#1246).
+#[cfg(feature = "openai-live")]
+#[tokio::test]
+async fn live_durable_source_readiness_reports_an_exited_actor_unavailable() {
+    use super::LiveDurableSourceReadinessError as Refusal;
+
+    let (handle, _service, identity, session_id) =
+        spawn_live_durable_source_member("live-readiness-exited-actor", "voice-member").await;
+    handle
+        .observe_live_durable_source_readiness(&identity, &session_id)
+        .await
+        .expect("control: a running actor with a bound member is ready");
+
+    handle
+        .crash_stop_preserving_durable_work_for_test()
+        .await
+        .expect("crash-stop the mob actor");
+    assert!(
+        handle.actor_command_channel_closed_for_test(),
+        "control: the actor is gone"
+    );
+    assert!(
+        handle.roster.read().await.get(&identity).is_some(),
+        "control: the frozen roster still names the member"
+    );
+    assert_eq!(
+        handle
+            .observe_live_durable_source_readiness(&identity, &session_id)
+            .await,
+        Err(Refusal::MemberUnavailable),
+        "readiness never reports a member of an exited actor as ready"
+    );
+}
+
+/// A lagging roster projection reads as a binding mismatch, and readiness
+/// corrects itself as soon as the projection catches up: nothing is cached
+/// between polls (#1246).
+#[cfg(feature = "openai-live")]
+#[tokio::test]
+async fn live_durable_source_readiness_snapshot_lag_mismatch_self_corrects() {
+    use super::LiveDurableSourceReadinessError as Refusal;
+
+    let (handle, _service, identity, session_id) =
+        spawn_live_durable_source_member("live-readiness-snapshot-lag", "voice-member").await;
+    let current = handle.roster.read().await.snapshot();
+
+    // The roster still names a predecessor incarnation of the member.
+    let mut lagging = current.clone();
+    let entry = lagging
+        .get_mut(&identity)
+        .expect("voice member roster entry");
+    entry.agent_runtime_id = AgentRuntimeId::new(
+        identity.clone(),
+        entry
+            .agent_runtime_id
+            .generation
+            .next()
+            .expect("next generation"),
+    );
+    *handle.roster.write().await = super::roster_authority::RosterAuthority::from_roster(lagging);
+    assert_eq!(
+        handle
+            .observe_live_durable_source_readiness(&identity, &session_id)
+            .await,
+        Err(Refusal::BindingMismatch)
+    );
+
+    // The roster still names a previous session of the member.
+    let mut lagging = current.clone();
+    lagging
+        .get_mut(&identity)
+        .expect("voice member roster entry")
+        .member_ref = crate::event::MemberRef::from_bridge_session_id(SessionId::new());
+    *handle.roster.write().await = super::roster_authority::RosterAuthority::from_roster(lagging);
+    assert_eq!(
+        handle
+            .observe_live_durable_source_readiness(&identity, &session_id)
+            .await,
+        Err(Refusal::BindingMismatch)
+    );
+
+    // The projection catches up: the next poll is ready again.
+    *handle.roster.write().await = super::roster_authority::RosterAuthority::from_roster(current);
+    handle
+        .observe_live_durable_source_readiness(&identity, &session_id)
+        .await
+        .expect("readiness self-corrects once the roster catches up");
+
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// A member whose turn never finishes (a hung tool call holds the turn open)
+/// is still answered by readiness: readiness reads neither the member's
+/// session actor nor the mob actor queue, and never loads the body (#1246).
+#[cfg(feature = "openai-live")]
+#[tokio::test]
+async fn live_durable_source_readiness_answers_while_the_member_is_stuck_in_a_turn() {
+    let definition = with_unique_mob_id(sample_definition(), "live-readiness-stuck-turn");
+    let (handle, service) = create_test_mob(definition).await;
+    // An externally addressable member, so an ordinary turn can be admitted.
+    let identity = AgentIdentity::from("voice-lead");
+    let session_id = handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn voice member")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    handle
+        .observe_live_durable_source_readiness(&identity, &session_id)
+        .await
+        .expect("control: the idle member is ready");
+
+    service.hold_start_turns();
+    let mut held = service.held_start_turn_entries();
+    let entered_before = *held.borrow_and_update();
+    handle
+        .member(&identity)
+        .await
+        .expect("member handle")
+        .send("run a tool that never returns", HandlingMode::Queue)
+        .await
+        .expect("stuck turn admission");
+    held.wait_for(|entries| *entries > entered_before)
+        .await
+        .expect("the member turn enters the hold");
+
+    let loads_before = service.load_persisted_session_calls.load(Ordering::Relaxed);
+    let observations_before = service
+        .live_durable_source_observations
+        .load(Ordering::Relaxed);
+    for _ in 0..10 {
+        handle
+            .observe_live_durable_source_readiness(&identity, &session_id)
+            .await
+            .expect("a member stuck in a turn with a committed source is ready");
+    }
+    assert_eq!(
+        service
+            .live_durable_source_observations
+            .load(Ordering::Relaxed)
+            - observations_before,
+        10,
+        "every poll is answered by the body-free observation"
+    );
+    assert_eq!(
+        service.load_persisted_session_calls.load(Ordering::Relaxed),
+        loads_before,
+        "readiness never loads the session body"
+    );
+    assert_eq!(
+        *held.borrow(),
+        entered_before + 1,
+        "control: the turn is still held while readiness answers"
+    );
+
+    service.release_held_start_turns();
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// A shared body load that fails reaches every caller that joined it, and
+/// its slot is released: the next open starts a fresh load (#1246).
+///
+/// Time is paused, so the mock load's delay elapses only once every caller
+/// has been admitted and is waiting: all eight join the one load.
+#[cfg(feature = "openai-live")]
+#[tokio::test(start_paused = true)]
+async fn live_open_failed_shared_load_reaches_all_waiters_and_releases_its_slot() {
+    let (handle, service, identity, _session_id) =
+        spawn_live_durable_source_member("live-open-shared-failure", "voice-member").await;
+    let member = handle.member(&identity).await.expect("member handle");
+
+    service.set_load_persisted_session_delay_ms(300);
+    service
+        .fail_load_persisted_session
+        .store(true, Ordering::Relaxed);
+    let loads_before = service.load_persisted_session_calls.load(Ordering::Relaxed);
+    let opens = (0..8)
+        .map(|_| {
+            let member = member.clone();
+            tokio::spawn(async move { member.validate_live_durable_source_availability().await })
+        })
+        .collect::<Vec<_>>();
+    for open in opens {
+        assert_eq!(
+            open.await.expect("open validation task"),
+            Err(super::LiveBridgeOperationStartError::Rejected),
+            "every joined caller receives the one failed load's typed error"
+        );
+    }
+    assert_eq!(
+        service.load_persisted_session_calls.load(Ordering::Relaxed) - loads_before,
+        1,
+        "the failing load was shared, not repeated per caller"
+    );
+
+    // The failed load released its slot: a later open loads anew and succeeds.
+    service
+        .fail_load_persisted_session
+        .store(false, Ordering::Relaxed);
+    service.set_load_persisted_session_delay_ms(0);
+    member
+        .validate_live_durable_source_availability()
+        .await
+        .expect("an open after the failure loads anew");
+    assert_eq!(
+        service.load_persisted_session_calls.load(Ordering::Relaxed) - loads_before,
+        2
+    );
+
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// A body load still running at the 30 s ceiling is abandoned as
+/// temporarily unavailable for every waiter, no earlier, and its slot is
+/// released (#1246).
+#[cfg(feature = "openai-live")]
+#[tokio::test(start_paused = true)]
+async fn live_durable_source_load_is_abandoned_at_its_ceiling_and_releases_its_slot() {
+    use super::actor::live_durable_source_loads::{
+        LIVE_DURABLE_SOURCE_LOAD_CEILING, LiveDurableSourceLoads,
+    };
+
+    let service = Arc::new(MockSessionService::new());
+    service.set_load_persisted_session_delay_ms(3_600_000);
+    let loads = LiveDurableSourceLoads::default();
+    let session_id = SessionId::new();
+    let started = tokio::time::Instant::now();
+    let replies = (0..3)
+        .map(|_| {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            loads.validate(
+                Arc::clone(&service) as Arc<dyn MobSessionService>,
+                session_id.clone(),
+                reply_tx,
+            );
+            reply_rx
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(loads.in_flight(), 1, "the three callers share one load");
+
+    for reply in replies {
+        assert_eq!(
+            reply.await.expect("ceiling reply"),
+            Err(super::LiveBridgeOperationStartError::TemporarilyUnavailable),
+            "a hung body load is temporarily unavailable at its ceiling"
+        );
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= LIVE_DURABLE_SOURCE_LOAD_CEILING
+            && elapsed < LIVE_DURABLE_SOURCE_LOAD_CEILING + Duration::from_secs(1),
+        "the load is abandoned at the ceiling, not before or long after: {elapsed:?}"
+    );
+    assert_eq!(
+        service.load_persisted_session_calls.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(loads.in_flight(), 0, "the abandoned load released its slot");
 }
 
 #[cfg(feature = "openai-live")]
@@ -22566,6 +22881,222 @@ async fn forker_force_cancels_only_running_members_it_owns() {
             .unwrap_or_else(|_| panic!("the retired {member} run must end"));
     }
     assert!(handle.get_member(&grandchild).await.unwrap().is_none());
+}
+
+/// Owned-member tool dispatcher bound to `caller`'s session (#1234).
+async fn owned_member_tool_dispatcher(
+    handle: &MobHandle,
+    caller: &AgentIdentity,
+    authority: meerkat_core::service::MobToolAuthorityContext,
+) -> Arc<dyn AgentToolDispatcher> {
+    let caller_session = handle
+        .resolve_bridge_session_id(caller)
+        .await
+        .expect("caller session");
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline()
+        .unwrap()
+        .clone();
+    let composed = super::tools::compose_external_tools_for_profile(
+        &profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        None,
+        Some(authority),
+    )
+    .expect("compose dispatcher")
+    .expect("operator dispatcher visible");
+    match composed
+        .bind_ops_lifecycle(
+            Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+            caller_session,
+        )
+        .expect("bind caller session")
+    {
+        meerkat_core::agent::BindOutcome::Bound(bound)
+        | meerkat_core::agent::BindOutcome::Skipped(bound) => bound,
+    }
+}
+
+async fn dispatch_owned_member_tool(
+    dispatcher: &Arc<dyn AgentToolDispatcher>,
+    tool: &'static str,
+    member: &str,
+) -> Result<ToolDispatchOutcome, ToolError> {
+    let raw = serde_json::value::RawValue::from_string(
+        serde_json::json!({"member_id": member}).to_string(),
+    )
+    .unwrap();
+    dispatcher
+        .dispatch(ToolCallView {
+            id: "owned-member-target",
+            name: tool,
+            args: &raw,
+        })
+        .await
+}
+
+fn assert_member_absence_error(
+    result: Result<ToolDispatchOutcome, ToolError>,
+    kind: &str,
+    mob_id: &str,
+    member: &str,
+    context: &str,
+) {
+    match result {
+        Err(ToolError::ExecutionFailedWithData { data, .. }) => {
+            assert_eq!(data["kind"], kind, "{context}: {data}");
+            assert_eq!(data["mob_id"], mob_id, "{context}: {data}");
+            assert_eq!(data["member_id"], member, "{context}: {data}");
+            assert_eq!(data["retryable"], false, "{context}: {data}");
+        }
+        other => panic!("{context}: expected a typed {kind} error, got {other:?}"),
+    }
+}
+
+/// Target presence is a typed observation taken before ownership (#1234):
+/// a retired owned child reads as `Retired`, an unknown identity as
+/// `NotFound`, for manage-scope and non-manage callers alike; only a present
+/// target reaches the ownership verdict.
+#[tokio::test]
+async fn owned_member_target_admission_observes_presence_before_ownership() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let forker = AgentIdentity::from("presence-forker");
+    let bystander = AgentIdentity::from("presence-bystander");
+    spawn_bounded_fork_source(&handle, &forker).await;
+    spawn_bounded_fork_source(&handle, &bystander).await;
+    let child = AgentIdentity::from("presence-child");
+    caller_turn_fork_child(&handle, &forker, &child, None)
+        .await
+        .outcome()
+        .await
+        .expect("child outcome");
+
+    let admit = |can_manage: bool, caller: Option<&AgentIdentity>, target: &AgentIdentity| {
+        let handle = handle.clone();
+        let caller = caller.cloned();
+        let target = target.clone();
+        async move {
+            handle
+                .resolve_owned_member_target_admission(can_manage, caller.as_ref(), &target)
+                .await
+                .expect("target admission")
+        }
+    };
+    assert_eq!(
+        admit(false, Some(&forker), &child).await,
+        OwnedMemberTargetAdmission::Allowed
+    );
+    assert_eq!(
+        admit(false, Some(&bystander), &child).await,
+        OwnedMemberTargetAdmission::Denied,
+        "a present target the caller does not own is denied"
+    );
+    assert_eq!(
+        admit(true, None, &child).await,
+        OwnedMemberTargetAdmission::Allowed
+    );
+
+    handle.retire(child.clone()).await.expect("retire child");
+    for (can_manage, caller) in [
+        (false, Some(&forker)),
+        (false, Some(&bystander)),
+        (true, None),
+    ] {
+        assert_eq!(
+            admit(can_manage, caller, &child).await,
+            OwnedMemberTargetAdmission::Absent(MemberTargetAbsence::Retired),
+            "a retired target is typed retired (manage={can_manage}, caller={caller:?})"
+        );
+    }
+    let unknown = AgentIdentity::from("presence-never-spawned");
+    for (can_manage, caller) in [(false, Some(&forker)), (true, None), (false, None)] {
+        assert_eq!(
+            admit(can_manage, caller, &unknown).await,
+            OwnedMemberTargetAdmission::Absent(MemberTargetAbsence::NotFound),
+            "an unknown target is typed not-found (manage={can_manage}, caller={caller:?})"
+        );
+    }
+}
+
+/// The in-mob owned-member tools return typed not-found / retired errors
+/// for an absent target instead of access_denied, and keep access_denied for
+/// a present target the caller does not own (#1234).
+#[tokio::test]
+async fn owned_member_tools_report_absent_targets_as_typed_not_found() {
+    let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    service.set_return_exact_run_result(true);
+    let mob_id = handle.definition().id.to_string();
+    let forker = AgentIdentity::from("absent-forker");
+    let bystander = AgentIdentity::from("absent-bystander");
+    spawn_bounded_fork_source(&handle, &forker).await;
+    spawn_bounded_fork_source(&handle, &bystander).await;
+    let child = AgentIdentity::from("absent-child");
+    caller_turn_fork_child(&handle, &forker, &child, None)
+        .await
+        .outcome()
+        .await
+        .expect("child outcome");
+
+    let forker_tools = owned_member_tool_dispatcher(
+        &handle,
+        &forker,
+        generated_mob_operator_authority_with_spawn_profile(&mob_id, "worker"),
+    )
+    .await;
+    let manager_tools = owned_member_tool_dispatcher(
+        &handle,
+        &bystander,
+        generated_mob_operator_authority_with_scope(&mob_id),
+    )
+    .await;
+
+    dispatch_owned_member_tool(&forker_tools, "member_status", "absent-child")
+        .await
+        .expect("the forker checks its present child");
+    for tool in ["member_status", "retire_member", "force_cancel_member"] {
+        assert!(
+            matches!(
+                dispatch_owned_member_tool(&forker_tools, tool, "absent-bystander").await,
+                Err(ToolError::AccessDenied { .. })
+            ),
+            "{tool}: a present member the forker does not own stays access_denied"
+        );
+    }
+
+    // The child is retired (as by the idle sweep); its spawner asks again.
+    handle.retire(child.clone()).await.expect("retire child");
+    for tool in ["member_status", "retire_member", "force_cancel_member"] {
+        assert_member_absence_error(
+            dispatch_owned_member_tool(&forker_tools, tool, "absent-child").await,
+            "member_retired",
+            &mob_id,
+            "absent-child",
+            &format!("{tool} by the spawner of a retired child"),
+        );
+        assert_member_absence_error(
+            dispatch_owned_member_tool(&manager_tools, tool, "absent-child").await,
+            "member_retired",
+            &mob_id,
+            "absent-child",
+            &format!("{tool} by a manage-scope caller on a retired child"),
+        );
+        for tools in [&forker_tools, &manager_tools] {
+            assert_member_absence_error(
+                dispatch_owned_member_tool(tools, tool, "absent-never-spawned").await,
+                "member_not_found",
+                &mob_id,
+                "absent-never-spawned",
+                &format!("{tool} on an unknown identity"),
+            );
+        }
+    }
 }
 
 async fn caller_turn_fork_child(

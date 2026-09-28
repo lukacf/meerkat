@@ -868,6 +868,71 @@ pub enum CurrentMobAdmission {
     Denied,
 }
 
+/// Why an owned-member target has no roster entry, observed from the mob's
+/// own state before any per-member admission (#1234).
+///
+/// A missing target is a typed fact, never an implicit "not owned": an absent
+/// member is reported as absent to every caller, whatever its scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberTargetAbsence {
+    /// No roster entry and no durable retirement record for the identity in
+    /// the mob's event log.
+    NotFound,
+    /// No roster entry, and the mob's event log durably records the
+    /// identity's retirement after its last spawn.
+    Retired,
+}
+
+impl MemberTargetAbsence {
+    /// The typed `kind` a tool error carries for this absence.
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::NotFound => "member_not_found",
+            Self::Retired => "member_retired",
+        }
+    }
+
+    /// The typed tool error for this absence.
+    ///
+    /// `ExecutionFailedWithData` with `data.kind` set to [`Self::kind`], plus
+    /// the mob and member ids, like the other typed mob tool errors. Callers
+    /// classify by `data.kind`, never by the message text.
+    pub fn to_tool_error(
+        self,
+        tool_name: &str,
+        mob_id: &MobId,
+        member: &AgentIdentity,
+    ) -> meerkat_core::error::ToolError {
+        let state = match self {
+            Self::NotFound => "not found",
+            Self::Retired => "retired",
+        };
+        meerkat_core::error::ToolError::execution_failed_with_data(
+            format!("tool '{tool_name}' failed: mob member {state}: {member}"),
+            serde_json::json!({
+                "kind": self.kind(),
+                "mob_id": mob_id.as_str(),
+                "member_id": member.as_str(),
+                "retryable": false,
+            }),
+        )
+    }
+}
+
+/// Admission to observe or act on one owned member, with the target's
+/// presence observed first (#1234).
+///
+/// `Absent` is decided from the roster and the durable event log before the
+/// ownership admission runs; `Allowed` and `Denied` are MobMachine's verdict
+/// for a present target. Tool surfaces map `Denied` to `access_denied` and
+/// `Absent` to [`MemberTargetAbsence::to_tool_error`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedMemberTargetAdmission {
+    Allowed,
+    Denied,
+    Absent(MemberTargetAbsence),
+}
+
 /// Machine-decided coarse spawn-tool admission verdict for the spawn-member
 /// tool surfaces (`spawn_member` / `spawn_many_members`), mirrored by tool
 /// surfaces. `Denied` maps to a tool `access_denied` error; `Allowed` proceeds.
@@ -8898,8 +8963,8 @@ impl MobHandle {
     ///
     /// Checks the facts the actor's durable-source validation checks inline,
     /// against the published machine-state snapshot and the shared roster:
-    /// the handle's principal holds the live control scope, the member is
-    /// current, its roster runtime matches the machine's `identity_to_runtime`
+    /// the handle's principal holds the live control scope, the mob actor is
+    /// still running, the member is current, its roster runtime matches the machine's `identity_to_runtime`
     /// binding, that runtime is live, and both the roster and the machine
     /// bind the member to `canonical_session_id`. It then asks the session
     /// service for the body-free
@@ -8922,6 +8987,14 @@ impl MobHandle {
             .map_err(|_| Refusal::AccessDenied)?
             .require(crate::ControlScope::Live)
             .map_err(|_| Refusal::AccessDenied)?;
+        // An exited actor (crash-stop, panic) leaves the roster and the last
+        // published machine state frozen, so they would keep reading as ready
+        // while every open fails. Unlike snapshot lag this never corrects
+        // itself: a closed command channel or a dropped machine-state sender
+        // is an unavailable member.
+        if self.command_tx.is_closed() || self.machine_state_watch_rx.has_changed().is_err() {
+            return Err(Refusal::MemberUnavailable);
+        }
         let entry = self
             .roster
             .read()
@@ -15352,33 +15425,119 @@ impl MobHandle {
         caller: Option<&AgentIdentity>,
         target: &AgentIdentity,
     ) -> Result<CurrentMobAdmission, MobError> {
-        // Ownership is transitive, like a process tree: the caller owns every
-        // member reachable by following spawned_by upward from the target.
         let caller_owns_member = match caller {
-            Some(caller) => {
-                let roster = self.roster().await;
-                let mut hops = roster.len();
-                let mut current = roster
-                    .get_by_identity(target)
-                    .and_then(|entry| entry.spawned_by.clone());
-                let mut owned = false;
-                while let Some(spawner) = current {
-                    if &spawner == caller {
-                        owned = true;
-                        break;
-                    }
-                    if hops == 0 {
-                        break;
-                    }
-                    hops -= 1;
-                    current = roster
-                        .get_by_identity(&spawner)
-                        .and_then(|entry| entry.spawned_by.clone());
-                }
-                owned
-            }
+            Some(caller) => Self::spawn_tree_owns(&self.roster().await, caller, target),
             None => false,
         };
+        self.resolve_owned_member_machine_admission(can_manage_mob, caller_owns_member)
+            .await
+    }
+
+    /// Resolve admission for observing or retiring one member, observing the
+    /// target's presence first (#1234).
+    ///
+    /// A target without a roster entry is reported as
+    /// [`OwnedMemberTargetAdmission::Absent`] before the ownership admission,
+    /// for manage-scope and non-manage callers alike: `Retired` when the
+    /// mob's event log durably records its retirement, `NotFound` otherwise.
+    /// Only a present target reaches MobMachine's ownership verdict, so
+    /// `Denied` always means a present member the caller does not own.
+    pub async fn resolve_owned_member_target_admission(
+        &self,
+        can_manage_mob: bool,
+        caller: Option<&AgentIdentity>,
+        target: &AgentIdentity,
+    ) -> Result<OwnedMemberTargetAdmission, MobError> {
+        let roster = self.roster_snapshot().await?;
+        if roster.get_by_identity(target).is_none() {
+            let absence = if self.durable_member_retirement_recorded(target).await? {
+                MemberTargetAbsence::Retired
+            } else {
+                MemberTargetAbsence::NotFound
+            };
+            return Ok(OwnedMemberTargetAdmission::Absent(absence));
+        }
+        let caller_owns_member =
+            caller.is_some_and(|caller| Self::spawn_tree_owns(&roster, caller, target));
+        Ok(
+            match self
+                .resolve_owned_member_machine_admission(can_manage_mob, caller_owns_member)
+                .await?
+            {
+                CurrentMobAdmission::Allowed => OwnedMemberTargetAdmission::Allowed,
+                CurrentMobAdmission::Denied => OwnedMemberTargetAdmission::Denied,
+            },
+        )
+    }
+
+    /// Fallible roster snapshot: an actor failure is an error, never an empty
+    /// roster that would read as every member being absent.
+    async fn roster_snapshot(&self) -> Result<Roster, MobError> {
+        match self
+            .execute_machine_command(MobMachineCommand::RosterSnapshot)
+            .await?
+        {
+            MobMachineCommandResult::RosterSnapshot(roster) => Ok(roster),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
+        }
+    }
+
+    /// Whether the mob's durable event log records `identity`'s retirement
+    /// after its last spawn. Read only for a target the roster no longer
+    /// holds, so the replay stays off every present-member path.
+    async fn durable_member_retirement_recorded(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<bool, MobError> {
+        let mut retired = false;
+        for event in self.events().replay_all().await? {
+            match event.kind {
+                crate::event::MobEventKind::MemberSpawned(spawned)
+                    if &spawned.agent_identity == identity =>
+                {
+                    retired = false;
+                }
+                crate::event::MobEventKind::MemberRetired { agent_identity, .. }
+                    if &agent_identity == identity =>
+                {
+                    retired = true;
+                }
+                _ => {}
+            }
+        }
+        Ok(retired)
+    }
+
+    /// Ownership is transitive, like a process tree: the caller owns every
+    /// member reachable by following spawned_by upward from the target.
+    fn spawn_tree_owns(roster: &Roster, caller: &AgentIdentity, target: &AgentIdentity) -> bool {
+        let mut hops = roster.len();
+        let mut current = roster
+            .get_by_identity(target)
+            .and_then(|entry| entry.spawned_by.clone());
+        while let Some(spawner) = current {
+            if &spawner == caller {
+                return true;
+            }
+            if hops == 0 {
+                return false;
+            }
+            hops -= 1;
+            current = roster
+                .get_by_identity(&spawner)
+                .and_then(|entry| entry.spawned_by.clone());
+        }
+        false
+    }
+
+    /// MobMachine's owned-member verdict over the two raw observations.
+    async fn resolve_owned_member_machine_admission(
+        &self,
+        can_manage_mob: bool,
+        caller_owns_member: bool,
+    ) -> Result<CurrentMobAdmission, MobError> {
         let effects = self
             .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveOwnedMemberAdmission {
                 can_manage_mob,

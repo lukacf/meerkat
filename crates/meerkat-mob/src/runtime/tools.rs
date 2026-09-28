@@ -643,14 +643,20 @@ impl MobOperatorToolDispatcher {
         } else {
             self.caller_identity().await
         };
+        // Target presence is observed before ownership (#1234): an absent
+        // member is typed not-found for every caller, and access_denied only
+        // ever means a present member the caller does not own.
         let admission = self
             .handle
-            .resolve_owned_member_admission(can_manage_mob, caller.as_ref(), target)
+            .resolve_owned_member_target_admission(can_manage_mob, caller.as_ref(), target)
             .await
             .map_err(|error| Self::map_mob_error_to_tool_access(tool_name, error))?;
         match admission {
-            CurrentMobAdmission::Allowed => Ok(()),
-            CurrentMobAdmission::Denied => Err(ToolError::access_denied(tool_name)),
+            OwnedMemberTargetAdmission::Allowed => Ok(()),
+            OwnedMemberTargetAdmission::Denied => Err(ToolError::access_denied(tool_name)),
+            OwnedMemberTargetAdmission::Absent(absence) => {
+                Err(absence.to_tool_error(tool_name, &self.handle.definition().id, target))
+            }
         }
     }
 

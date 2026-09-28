@@ -142,6 +142,103 @@ fn whole_blob_read_error_to_session_error(
 /// counted attempts, never wall clock (issue #1104).
 const OBSERVATION_LOAD_ATTEMPTS: usize = 8;
 
+/// Consecutive transcript-authority invalidations an optimistic live read
+/// absorbs with a plain yield before it warns and starts backing off (#1226).
+const OPTIMISTIC_READ_RETRY_WARN_AFTER: u32 = 64;
+
+/// Upper bound on the backoff an optimistic live read sleeps between
+/// retries once it has exceeded [`OPTIMISTIC_READ_RETRY_WARN_AFTER`].
+const OPTIMISTIC_READ_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(32);
+
+/// How one optimistic-read retry was paced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptimisticReadRetryPacing {
+    /// Below the warn threshold: cooperative yield only.
+    Yield,
+    /// At or above the threshold: slept for a bounded backoff. `warned` is
+    /// true only on the retry that emitted the single WARN.
+    Backoff {
+        delay: std::time::Duration,
+        warned: bool,
+    },
+}
+
+/// Retry pacing for the generation-checked optimistic live-read loops.
+///
+/// The loops must keep retrying: a view whose transcript authority changed
+/// between the two observations is not a consistent view, and returning it
+/// would break the ABA/authority contract. What this bounds is the cost and
+/// the silence: every retry yields, retries past the threshold back off (so
+/// a continuously invalidated read cannot spin hot), and the first retry past
+/// the threshold logs one WARN naming the session and the retry count.
+struct OptimisticReadRetry<'a> {
+    session_id: &'a SessionId,
+    operation: &'static str,
+    retries: u32,
+    warned: bool,
+}
+
+impl<'a> OptimisticReadRetry<'a> {
+    fn new(session_id: &'a SessionId, operation: &'static str) -> Self {
+        Self {
+            session_id,
+            operation,
+            retries: 0,
+            warned: false,
+        }
+    }
+
+    /// Account for one invalidated iteration and decide its pacing.
+    fn record_retry(&mut self) -> OptimisticReadRetryPacing {
+        self.retries = self.retries.saturating_add(1);
+        if self.retries < OPTIMISTIC_READ_RETRY_WARN_AFTER {
+            return OptimisticReadRetryPacing::Yield;
+        }
+        let warned = !self.warned;
+        if warned {
+            self.warned = true;
+            tracing::warn!(
+                session_id = %self.session_id,
+                operation = self.operation,
+                retries = self.retries,
+                "optimistic live session read keeps losing to concurrent transcript-authority \
+                 changes; backing off between retries"
+            );
+        }
+        let exponent = (self.retries - OPTIMISTIC_READ_RETRY_WARN_AFTER).min(5);
+        let delay = std::time::Duration::from_millis(1_u64 << exponent)
+            .min(OPTIMISTIC_READ_RETRY_MAX_BACKOFF);
+        OptimisticReadRetryPacing::Backoff { delay, warned }
+    }
+
+    /// Account for one invalidated iteration and pace the next one.
+    async fn retry(&mut self) {
+        match self.record_retry() {
+            OptimisticReadRetryPacing::Yield => tokio::task::yield_now().await,
+            OptimisticReadRetryPacing::Backoff { delay, .. } => tokio::time::sleep(delay).await,
+        }
+    }
+
+    /// Record the eventual success of a read that had to warn.
+    fn finish(&self) {
+        if self.warned {
+            tracing::info!(
+                session_id = %self.session_id,
+                operation = self.operation,
+                retries = self.retries,
+                "optimistic live session read converged after backing off"
+            );
+        }
+    }
+}
+
+/// Test-only hook run inside `PersistentSessionService::read`'s optimistic
+/// window, after the live view is read and before transcript authority is
+/// re-observed.
+#[cfg(test)]
+type ReadWindowHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
 #[cfg(not(test))]
 const ARCHIVE_RUNTIME_RETIRE_TIMEOUT: meerkat_core::time_compat::Duration =
     meerkat_core::time_compat::Duration::from_secs(30);
@@ -2349,6 +2446,8 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// Drain witnesses survive live-session teardown so a generation cutover
     /// can await consumption of every event queued before producer closure.
     event_projection_drains: EventProjectionDrainRegistry,
+    #[cfg(test)]
+    read_window_hook: std::sync::Mutex<Option<ReadWindowHook>>,
 }
 
 /// How a durable fork holds the source's turn-finalization boundary.
@@ -4492,6 +4591,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<LiveSessionAuthority, SessionError> {
+        let mut retry = OptimisticReadRetry::new(id, "live session authority");
         loop {
             let live_authority = match self.inner.observe_session_transcript_authority(id).await {
                 Ok(authority) => authority,
@@ -4614,8 +4714,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .export_session_with_labels_if_transcript_authority(id, live_authority.clone())
                 .await
             {
-                Ok(Some(session)) => session,
-                Ok(None) => continue,
+                Ok(Some(session)) => {
+                    retry.finish();
+                    session
+                }
+                Ok(None) => {
+                    retry.retry().await;
+                    continue;
+                }
                 Err(SessionError::NotFound { .. }) => {
                     return Ok(LiveSessionAuthority::NoLive);
                 }
@@ -7854,6 +7960,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             event_projection_faults: Arc::new(Mutex::new(HashMap::new())),
             event_projection_gates: Arc::new(Mutex::new(HashMap::new())),
             event_projection_drains: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            read_window_hook: std::sync::Mutex::new(None),
         }
     }
 
@@ -12611,23 +12719,45 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
+        let mut retry = OptimisticReadRetry::new(id, "session read");
         loop {
             match self.live_session_authority(id).await? {
                 LiveSessionAuthority::DurableAuthoritative { session, .. } => {
                     self.reject_if_archived_session(id, &session)
                         .await
                         .map_err(crate::control_error_into_session_error)?;
+                    retry.finish();
                     return Ok(view_from_authoritative_session(&session));
                 }
                 LiveSessionAuthority::LiveAuthoritative { snapshot } => {
                     let view = match self.inner.read(id).await {
                         Ok(view) => view,
-                        Err(SessionError::NotFound { .. }) => continue,
+                        Err(SessionError::NotFound { .. }) => {
+                            retry.retry().await;
+                            continue;
+                        }
                         Err(error) => return Err(error),
                     };
+                    #[cfg(test)]
+                    {
+                        let hook = self
+                            .read_window_hook
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        if let Some(hook) = hook {
+                            hook().await;
+                        }
+                    }
                     match self.inner.observe_session_transcript_authority(id).await {
-                        Ok(current) if current == snapshot => return Ok(view),
-                        Ok(_) | Err(SessionError::NotFound { .. }) => continue,
+                        Ok(current) if current == snapshot => {
+                            retry.finish();
+                            return Ok(view);
+                        }
+                        Ok(_) | Err(SessionError::NotFound { .. }) => {
+                            retry.retry().await;
+                            continue;
+                        }
                         Err(error) => return Err(error),
                     }
                 }
@@ -27805,6 +27935,263 @@ mod tests {
             authoritative.messages().is_empty(),
             "without the machine atomic commit, durable runtime authority must not expose the staged turn"
         );
+    }
+
+    fn issue_1226_service() -> PersistentSessionService<DummyBuilder> {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            runtime_store,
+            memory_blob_store(),
+        )
+    }
+
+    fn set_read_window_hook(
+        service: &PersistentSessionService<DummyBuilder>,
+        hook: Option<ReadWindowHook>,
+    ) {
+        *service
+            .read_window_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    /// Issue every read-only session command once against the live actor.
+    async fn issue_read_only_session_commands(
+        inner: &EphemeralSessionService<DummyBuilder>,
+        id: &SessionId,
+    ) {
+        inner
+            .execution_snapshot(id)
+            .await
+            .expect("execution snapshot should reach the live actor");
+        inner
+            .tool_scope_snapshot(id)
+            .await
+            .expect("tool-scope snapshot should reach the live actor");
+        inner
+            .live_visible_tool_defs(id)
+            .await
+            .expect("visible tool defs should reach the live actor");
+        inner
+            .external_tool_surface_snapshot(id)
+            .await
+            .expect("external tool-surface snapshot should reach the live actor");
+        inner
+            .live_assistant_playback_target(
+                id,
+                meerkat_core::LiveChannelId::new("issue-1226-channel"),
+                "issue-1226-item".to_string(),
+                0,
+            )
+            .await
+            .expect("playback-target lookup should reach the live actor");
+        inner
+            .classify_callback_result_ingress(id, Vec::new())
+            .await
+            .expect("callback-result classification should reach the live actor");
+    }
+
+    #[tokio::test]
+    async fn issue_1226_read_only_commands_keep_generation_and_mutations_advance_it() {
+        let service = issue_1226_service();
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id;
+
+        let before = service
+            .inner
+            .observe_session_transcript_authority(&id)
+            .await
+            .expect("live transcript authority should be observable");
+        for _ in 0..8 {
+            issue_read_only_session_commands(&service.inner, &id).await;
+        }
+        let after_reads = service
+            .inner
+            .observe_session_transcript_authority(&id)
+            .await
+            .expect("live transcript authority should be observable");
+        assert_eq!(
+            before.mutation_generation(),
+            after_reads.mutation_generation(),
+            "read-only session commands must not advance the transcript-authority generation"
+        );
+        assert!(
+            before == after_reads,
+            "read-only session commands must leave the observed authority snapshot intact"
+        );
+
+        // A mutating command still advances, so the optimistic reader keeps
+        // its ABA fence.
+        service
+            .inner
+            .abort_uncommitted_compaction_projections(&id)
+            .await
+            .expect("compaction abort should reach the live actor");
+        let after_mutation = service
+            .inner
+            .observe_session_transcript_authority(&id)
+            .await
+            .expect("live transcript authority should be observable");
+        assert!(
+            after_mutation.mutation_generation() > after_reads.mutation_generation(),
+            "a mutating session command must still advance the transcript-authority generation"
+        );
+        assert!(
+            after_mutation != after_reads,
+            "a mutating session command must invalidate the observed authority snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_1226_read_completes_while_snapshots_interleave_every_window() {
+        let service = issue_1226_service();
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id;
+        let generation_before = service
+            .inner
+            .observe_session_transcript_authority(&id)
+            .await
+            .expect("live transcript authority should be observable")
+            .mutation_generation();
+
+        // Every optimistic window is held open while a status poller's
+        // snapshot commands are processed by the actor. Before #1226 each
+        // one advanced the generation, so this read never converged.
+        let windows = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let hook_inner = Arc::clone(&service.inner);
+        let hook_id = id.clone();
+        let hook_windows = Arc::clone(&windows);
+        set_read_window_hook(
+            &service,
+            Some(Arc::new(move || {
+                let inner = Arc::clone(&hook_inner);
+                let id = hook_id.clone();
+                let windows = Arc::clone(&hook_windows);
+                Box::pin(async move {
+                    windows.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    for _ in 0..4 {
+                        issue_read_only_session_commands(&inner, &id).await;
+                    }
+                })
+            })),
+        );
+
+        let view = tokio::time::timeout(std::time::Duration::from_secs(10), service.read(&id))
+            .await
+            .expect("read must not starve behind interleaved snapshot commands")
+            .expect("read should succeed");
+        set_read_window_hook(&service, None);
+
+        assert_eq!(view.state.session_id, id);
+        assert_eq!(
+            windows.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "interleaved snapshots must not invalidate the optimistic read window"
+        );
+        let generation_after = service
+            .inner
+            .observe_session_transcript_authority(&id)
+            .await
+            .expect("live transcript authority should be observable")
+            .mutation_generation();
+        assert_eq!(
+            generation_before, generation_after,
+            "snapshot commands interleaved with read must not advance the generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_1226_read_backs_off_and_converges_under_forced_continuous_invalidation() {
+        let service = issue_1226_service();
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id;
+
+        // Invalidate every window with a real mutating command until the
+        // read has crossed the warn threshold, then let it converge.
+        let invalidate_windows = OPTIMISTIC_READ_RETRY_WARN_AFTER + 3;
+        let windows = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let hook_inner = Arc::clone(&service.inner);
+        let hook_id = id.clone();
+        let hook_windows = Arc::clone(&windows);
+        set_read_window_hook(
+            &service,
+            Some(Arc::new(move || {
+                let inner = Arc::clone(&hook_inner);
+                let id = hook_id.clone();
+                let windows = Arc::clone(&hook_windows);
+                Box::pin(async move {
+                    let window = windows.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if window < invalidate_windows {
+                        inner
+                            .abort_uncommitted_compaction_projections(&id)
+                            .await
+                            .expect("compaction abort should reach the live actor");
+                    }
+                })
+            })),
+        );
+
+        let view = tokio::time::timeout(std::time::Duration::from_secs(30), service.read(&id))
+            .await
+            .expect("a read that outlives continuous invalidation must converge")
+            .expect("read should succeed");
+        set_read_window_hook(&service, None);
+
+        assert_eq!(view.state.session_id, id);
+        assert_eq!(
+            windows.load(std::sync::atomic::Ordering::SeqCst),
+            invalidate_windows + 1,
+            "the read must retry every invalidated window and succeed on the first clean one"
+        );
+    }
+
+    #[test]
+    fn issue_1226_optimistic_read_retry_warns_once_and_bounds_backoff() {
+        let id = SessionId::new();
+        let mut retry = OptimisticReadRetry::new(&id, "session read");
+        for attempt in 1..OPTIMISTIC_READ_RETRY_WARN_AFTER {
+            assert_eq!(
+                retry.record_retry(),
+                OptimisticReadRetryPacing::Yield,
+                "retry {attempt} is below the threshold and only yields"
+            );
+        }
+        assert_eq!(
+            retry.record_retry(),
+            OptimisticReadRetryPacing::Backoff {
+                delay: std::time::Duration::from_millis(1),
+                warned: true,
+            },
+            "the threshold retry warns once and starts backing off"
+        );
+        let mut last_delay = std::time::Duration::from_millis(1);
+        for _ in 0..64 {
+            match retry.record_retry() {
+                OptimisticReadRetryPacing::Backoff { delay, warned } => {
+                    assert!(!warned, "the WARN fires only once per read");
+                    assert!(delay >= last_delay, "backoff never shrinks");
+                    assert!(delay <= OPTIMISTIC_READ_RETRY_MAX_BACKOFF);
+                    last_delay = delay;
+                }
+                OptimisticReadRetryPacing::Yield => {
+                    panic!("retries past the threshold must back off")
+                }
+            }
+        }
+        assert_eq!(last_delay, OPTIMISTIC_READ_RETRY_MAX_BACKOFF);
     }
 
     #[tokio::test]

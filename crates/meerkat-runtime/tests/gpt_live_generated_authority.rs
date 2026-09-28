@@ -681,8 +681,9 @@ fn activate_bootstrap(authority: &mut mm::MeerkatMachineAuthority) {
 
 /// The user speaks on the bound channel: one provider user turn, started and
 /// completed. Startup history that missed the provider open is released by
-/// this fact (or a client delegation admission) and by nothing else; the
-/// identities are unique per call so a test may speak more than once.
+/// this fact, a client delegation admission, or a queued row the channel will
+/// voice, and by nothing else; the identities are unique per call so a test
+/// may speak more than once.
 fn user_speaks(authority: &mut mm::MeerkatMachineAuthority) {
     user_speaks_on(authority, CHANNEL);
 }
@@ -1730,6 +1731,262 @@ fn non_materializable_live_row_keeps_no_send_coverage_after_summary_ack() {
                 .contains("native-non-text")
         );
     }
+}
+
+fn generate_bootstrap(authority: &mut mm::MeerkatMachineAuthority) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::GenerateLiveContextPreparation {
+            session_id: SESSION.into(),
+            channel_id: CHANNEL.into(),
+            lease_id: "bootstrap-job".into(),
+        },
+    )
+    .expect("one captured source starts generation");
+}
+
+fn bootstrap_append_input(reserved_cursor: u64) -> mm::MeerkatMachineInput {
+    mm::MeerkatMachineInput::AuthorizeLiveContextBootstrapAppend {
+        session_id: SESSION.into(),
+        channel_id: CHANNEL.into(),
+        lease_id: "bootstrap-job".into(),
+        append_id: "bootstrap-append".into(),
+        content_digest: "exact-summary-digest".into(),
+        reserved_cursor,
+    }
+}
+
+fn conversation_start(
+    authority: &mm::MeerkatMachineAuthority,
+) -> Option<mm::LiveConversationStartCause> {
+    authority
+        .state()
+        .live_conversation_started_channels
+        .get(CHANNEL)
+        .copied()
+}
+
+/// A late summary waits for the conversation, and a queued typed row is the
+/// conversation: it is voiced right after the summary. Without this cause the
+/// summary waited for speech that only the held typed row would produce.
+#[test]
+fn queued_spoken_row_starts_the_conversation_and_releases_the_held_summary() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 3);
+    activate_bootstrap(&mut authority);
+    generate_bootstrap(&mut authority);
+    assert_eq!(conversation_start(&authority), None);
+    assert!(
+        apply(&mut authority, bootstrap_append_input(3)).is_err(),
+        "no summary into silence"
+    );
+    enqueue_mirror_row(&mut authority, "typed-turn", 4);
+    assert_eq!(
+        conversation_start(&authority),
+        Some(mm::LiveConversationStartCause::SpokenCanonicalRow)
+    );
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
+                channel_id: CHANNEL.into(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                append_id: "typed-turn".into(),
+                previous_cursor: 3,
+                next_cursor: 4,
+            }
+        )
+        .is_err(),
+        "the spoken row never overtakes the summary"
+    );
+    apply(&mut authority, bootstrap_append_input(3))
+        .expect("the queued spoken row satisfies `conversation_started_on_channel`");
+    resolve_bootstrap(
+        &mut authority,
+        3,
+        mm::LiveContextAppendObservation::Delivered,
+    )
+    .expect("exact summary ACK");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "typed-turn".into(),
+            previous_cursor: 3,
+            next_cursor: 4,
+        },
+    )
+    .expect("the spoken row follows the acknowledged summary");
+    // Speech after the row keeps the first cause.
+    user_speaks(&mut authority);
+    assert_eq!(
+        conversation_start(&authority),
+        Some(mm::LiveConversationStartCause::SpokenCanonicalRow)
+    );
+}
+
+/// Rows the channel will not voice leave the conversation unstarted: a quiet
+/// causal reassertion, a row already present in the live channel, an excluded
+/// row, and a no-payload row. The summary stays held until the user speaks.
+#[test]
+fn quiet_present_and_excluded_rows_do_not_start_the_conversation() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 0);
+    activate_bootstrap(&mut authority);
+    generate_bootstrap(&mut authority);
+    let heard = record_source(&mut authority, CHANNEL, "bootstrap-job", "heard-speech");
+    enqueue_observed_row(
+        &mut authority,
+        "heard-speech",
+        1,
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        Some(&heard),
+    );
+    let observed = record_source(&mut authority, CHANNEL, "bootstrap-job", "assistant-output");
+    enqueue_observed_row(
+        &mut authority,
+        "assistant-output",
+        2,
+        mm::LiveContextRowDisposition::AssistantObservation,
+        Some(&observed),
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["heard-speech"],
+        mm::LiveContextRowDisposition::ReassertCausalTail
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["assistant-output"],
+        mm::LiveContextRowDisposition::ReassertCausalTail
+    );
+    enqueue_observed_row(
+        &mut authority,
+        "fresh-live-transcript",
+        3,
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        None,
+    );
+    enqueue_observed_row(
+        &mut authority,
+        "tool-trace",
+        4,
+        mm::LiveContextRowDisposition::ExcludedFromLiveContext,
+        None,
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::EnqueueLiveContextRow {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "native-non-text".into(),
+            canonical_cursor: 5,
+            content_digest: "non-text-digest".into(),
+            commit_authority_token: "exact-non-text".into(),
+            disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+            payload_availability: mm::LiveContextPayloadAvailability::NoPayload,
+            observation_id: None,
+        },
+    )
+    .expect("admit exact no-payload native row");
+    for (append_id, disposition, payload_availability) in [
+        (
+            "runtime-minted",
+            mm::LiveContextRowDisposition::ReassertCausalTail,
+            mm::LiveContextPayloadAvailability::Materializable,
+        ),
+        (
+            "mirror-without-payload",
+            mm::LiveContextRowDisposition::MirrorParentText,
+            mm::LiveContextPayloadAvailability::NoPayload,
+        ),
+    ] {
+        assert!(
+            apply(
+                &mut authority,
+                mm::MeerkatMachineInput::EnqueueLiveContextRow {
+                    channel_id: CHANNEL.into(),
+                    runtime_id: runtime_id(),
+                    fence_token: fence(),
+                    generation: generation(),
+                    append_id: append_id.into(),
+                    canonical_cursor: 6,
+                    content_digest: format!("digest-{append_id}"),
+                    commit_authority_token: format!("commit-{append_id}"),
+                    disposition,
+                    payload_availability,
+                    observation_id: None,
+                },
+            )
+            .is_err(),
+            "{append_id} is not an admissible source row"
+        );
+    }
+    assert_eq!(conversation_start(&authority), None);
+    assert!(
+        apply(&mut authority, bootstrap_append_input(0)).is_err(),
+        "no row the channel keeps quiet releases the summary"
+    );
+    user_speaks(&mut authority);
+    assert_eq!(
+        conversation_start(&authority),
+        Some(mm::LiveConversationStartCause::UserTurn)
+    );
+    apply(&mut authority, bootstrap_append_input(0)).expect("the user's speech releases it");
+}
+
+/// A client delegation admitted on an interaction that no user provider turn
+/// started records its own cause; after a user turn the first cause stays.
+#[test]
+fn client_delegation_records_its_conversation_start_cause() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AdmitLiveInteraction {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+        },
+    )
+    .expect("client interaction is admitted without a provider user turn");
+    assert_eq!(conversation_start(&authority), None);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AdmitLiveDelegation {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+            delegation_identity_present: true,
+            actionable_input_present: true,
+            exact_join: true,
+        },
+    )
+    .expect("client delegation is admitted");
+    assert_eq!(
+        conversation_start(&authority),
+        Some(mm::LiveConversationStartCause::ClientDelegation)
+    );
+
+    let mut authority = opened_authority();
+    bind_and_admit(&mut authority);
+    assert_eq!(
+        conversation_start(&authority),
+        Some(mm::LiveConversationStartCause::UserTurn),
+        "the delegation's provider turn started the conversation first"
+    );
 }
 
 #[test]
@@ -4005,9 +4262,10 @@ fn acknowledge_recovery_bootstrap(
         },
     )
     .expect("generate exact recovery source");
-    // The recovery summary is released like any startup history: by the
-    // user speaking on this channel (guard `user_has_spoken_on_channel`),
-    // never into the replacement's silence.
+    // The recovery summary is released like any startup history: once the
+    // conversation starts on this channel (guard
+    // `conversation_started_on_channel`), never into the replacement's
+    // silence.
     user_speaks_on(authority, channel);
     apply(
         authority,

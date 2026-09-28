@@ -4411,6 +4411,62 @@ impl std::fmt::Display for LiveContextRowDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveConversationStartCause {
+    #[default]
+    #[serde(rename = "UserTurn")]
+    UserTurn,
+    #[serde(rename = "ClientDelegation")]
+    ClientDelegation,
+    #[serde(rename = "SpokenCanonicalRow")]
+    SpokenCanonicalRow,
+}
+impl LiveConversationStartCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UserTurn => "UserTurn",
+            Self::ClientDelegation => "ClientDelegation",
+            Self::SpokenCanonicalRow => "SpokenCanonicalRow",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveConversationStartCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "UserTurn" => Ok(Self::UserTurn),
+            "ClientDelegation" => Ok(Self::ClientDelegation),
+            "SpokenCanonicalRow" => Ok(Self::SpokenCanonicalRow),
+            other => Err(format!(
+                "invalid LiveConversationStartCause value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveConversationStartCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveConversationStartCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationCancellationOutcome {
     #[default]
     #[serde(rename = "Cancelled")]
@@ -13520,7 +13576,8 @@ pub struct State {
     pub live_execution_phase_by_channel:
         std::collections::BTreeMap<String, LiveExecutionChannelPhase>,
     pub live_revoked_execution_channels: std::collections::BTreeSet<String>,
-    pub live_conversation_started_channels: std::collections::BTreeSet<String>,
+    pub live_conversation_started_channels:
+        std::collections::BTreeMap<String, LiveConversationStartCause>,
     pub live_cancelled_recovery_channels: std::collections::BTreeSet<String>,
     pub live_execution_profile_by_channel: std::collections::BTreeMap<String, String>,
     pub live_execution_mode_by_channel: std::collections::BTreeMap<String, LiveExecutionMode>,

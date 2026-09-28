@@ -494,17 +494,20 @@ impl MeerkatMachine {
                     reason: "bootstrap lease was cancelled".into(),
                 });
             }
-            // Media active and the user has spoken on this channel (a user
-            // provider turn started or a client delegation was admitted):
-            // startup history appended into silence is spoken aloud by the
-            // provider, so the bootstrap waits for the conversation to exist.
+            // Media active and the conversation started on this channel (a
+            // user provider turn started, a client delegation was admitted, or
+            // a row the channel will voice was queued; generated guard
+            // `conversation_started_on_channel`): startup history appended
+            // into silence is spoken aloud by the provider, so the bootstrap
+            // waits for the conversation to exist. The queued-row cause lands
+            // with `LiveContextRowQueued`, which wakes this wait.
             if state
                 .live_execution_phase_by_channel
                 .get(lease.channel_id.as_str())
                 == Some(&dsl::LiveExecutionChannelPhase::Active)
                 && state
                     .live_conversation_started_channels
-                    .contains(lease.channel_id.as_str())
+                    .contains_key(lease.channel_id.as_str())
             {
                 break;
             }

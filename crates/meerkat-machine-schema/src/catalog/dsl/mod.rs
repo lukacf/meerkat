@@ -1218,6 +1218,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Ready", "Pending", "Failed", "Revoked"],
             ),
             NamedTypeBinding::string_enum(
+                "LiveConversationStartCause",
+                &["UserTurn", "ClientDelegation", "SpokenCanonicalRow"],
+            ),
+            NamedTypeBinding::string_enum(
                 "LiveDelegationResultDisposition",
                 &["OpenTurn", "DeferredContext"],
             ),

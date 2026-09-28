@@ -2821,7 +2821,7 @@ struct RegisteredExperimentalGptLiveChannel {
     context_summary_provenance:
         Option<crate::session_runtime::live_summary::LiveContextSummaryProvenance>,
     context_preparation_job: Option<crate::session_runtime::live_summary::LiveContextSummaryJob>,
-    /// Lane for a summary delivered after the first user turn.
+    /// Lane for a summary delivered once the conversation has started.
     late_summary_lane: crate::session_runtime::live_summary::LiveLateSummaryLane,
 }
 
@@ -4722,8 +4722,10 @@ impl ExperimentalGptLiveWebrtcTransport {
         let (authority, sideband) = authority
             .into_sideband_append_authority(binding, &text)
             .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
-        // The late summary is delivered only after the first user turn on the
-        // channel (generated guard `user_has_spoken_on_channel` on
+        // The late summary is delivered only once the conversation has
+        // started on the channel: the first user turn, a client delegation,
+        // or a queued row the channel will voice right after this append
+        // (generated guard `conversation_started_on_channel` on
         // `AuthorizeLiveContextBootstrapAppend`, mirrored by the runtime
         // readiness wait), on the lane the open policy chose. Measured
         // against gpt-live-1 on 2026-09-23 with the append landing while the

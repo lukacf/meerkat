@@ -78,6 +78,14 @@ them.
 
 - `meerkat_contracts::MobSpawnManyFailedResult` gains optional `code`, preserving
   canonical error codes alongside structured remediation data in batch results.
+- `meerkat_runtime::meerkat_machine::dsl::MeerkatMachineState::live_conversation_started_channels`
+  and the generated kernel's `meerkat_machine_kernels::generated::meerkat::State::live_conversation_started_channels`
+  change from a set of channel ids to a map from channel id to the new
+  `LiveConversationStartCause` (`UserTurn`, `ClientDelegation`,
+  `SpokenCanonicalRow`), recording the first fact that started the channel's
+  conversation. Readers must use `contains_key` or `get`; struct literals must
+  supply a map. The `AuthorizeLiveContextBootstrapAppend` guard
+  `user_has_spoken_on_channel` is renamed `conversation_started_on_channel`.
 
 ### Changed
 
@@ -109,6 +117,17 @@ them.
 
 ### Fixed
 
+- Live voice is no longer silent after a reopen whose context summary misses
+  the pre-open bound. The late summary waited for the user to speak, while a
+  typed turn queued after the reopen waited in the outbox for the summary's
+  acknowledgement, and that typed turn was the speech. Queueing a row the
+  channel will voice (`MirrorParentText` with a materializable payload) now
+  starts the conversation (`LiveConversationStartCause::SpokenCanonicalRow`,
+  in the generated `EnqueueLiveContextRow` transition), so the summary is
+  delivered first on its quiet lane and the typed row is spoken after it.
+  Quiet reassertions, rows already present in the live channel, and excluded
+  rows do not start the conversation, so nothing is appended into silence
+  (lukacf/meerkat-mobkit#474).
 - Compiled component-owned skill and capability registrations survive optimized
   WASM archive linking, preserving canonical skill resolution across repeated
   runtime initialization.

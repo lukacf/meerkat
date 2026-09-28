@@ -2221,6 +2221,59 @@ mod tests {
         assert_eq!(origin.provider_item_ids(), ["turn-item".to_string()]);
     }
 
+    /// A caller-confirmed snapshot row commits with a `realtime_origin` naming
+    /// its channel and provider item even without a live context observation
+    /// ordinal, so the live context mirror classifies it as live transcript
+    /// (never echoed back to the provider) and a console can pair it.
+    #[test]
+    fn caller_confirmed_snapshot_row_carries_its_channel_origin_without_an_ordinal() {
+        let mut agent = PlaybackTestAgent::new();
+        let session_id = agent.session_id();
+        let channel = LiveChannelId::new("caller-confirmed-origin");
+        let interaction = InteractionId::new();
+        admit_live_assistant_playback_target(
+            &mut agent,
+            &session_id,
+            channel.clone(),
+            interaction,
+            "confirmed-response".to_string(),
+            "confirmed-item".to_string(),
+            0,
+        )
+        .expect("admit the confirmed segment");
+        let outcome = observe_live_assistant_playback_terminal_with_completion(
+            &mut agent,
+            &session_id,
+            channel.clone(),
+            interaction,
+            "confirmed-response".to_string(),
+            "confirmed-item".to_string(),
+            0,
+            LiveAssistantPlaybackEvidence::CallerConfirmedSnapshot("heard in full".to_string()),
+            meerkat_core::StopReason::EndTurn,
+            meerkat_core::TurnUsage::host_declared(
+                meerkat_core::Provider::OpenAI,
+                "gpt-live-1",
+                meerkat_core::Usage::default(),
+            ),
+        )
+        .expect("caller-confirmed cut commits");
+        assert!(outcome.is_resolved());
+        let assistant = match agent.session.messages() {
+            [meerkat_core::Message::BlockAssistant(assistant)] => Some(assistant),
+            _ => None,
+        }
+        .expect("one committed snapshot row");
+        let origin = assistant
+            .identity
+            .realtime_origin
+            .as_ref()
+            .expect("the snapshot row names its live channel");
+        assert!(origin.matches(&session_id, &channel, 1));
+        assert_eq!(origin.provider_item_ids(), ["confirmed-item".to_string()]);
+        assert_eq!(origin.context_observation_id(), None);
+    }
+
     #[test]
     fn snapshot_cut_commits_without_final_and_preserves_interaction_for_next_segment() {
         let mut agent = PlaybackTestAgent::new();

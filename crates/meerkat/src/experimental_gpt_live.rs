@@ -416,7 +416,9 @@ pub enum PublicGptLivePlaybackPolicy {
     /// speech), and channel close, EOF, or a terminal failure. Its canonical
     /// row carries the concatenation of the deltas observed in it. Until the
     /// segment seals, a host observes its text through
-    /// [`PublicGptLiveProvisionalCaptionSink`].
+    /// [`PublicGptLiveProvisionalCaptionSink`]. A segment is ordered where it
+    /// seals, so speech before a boundary lands after the row whose
+    /// acknowledgement formed the boundary.
     ProviderManagedUnmeasured,
 }
 
@@ -515,14 +517,53 @@ impl fmt::Debug for PublicGptLiveProvisionalCaption {
     }
 }
 
+/// A segment whose provisional captions will never be replaced by a
+/// committed row: its speech could not be released (for example the channel
+/// lost the generated output custody it needed). A host drops the captions it
+/// keyed by `(channel_id, item_id)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicGptLiveProvisionalCaptionRetraction {
+    session_id: meerkat_core::SessionId,
+    channel_id: meerkat_live::LiveChannelId,
+    item_id: String,
+}
+
+impl PublicGptLiveProvisionalCaptionRetraction {
+    #[must_use]
+    pub fn session_id(&self) -> &meerkat_core::SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &meerkat_live::LiveChannelId {
+        &self.channel_id
+    }
+
+    /// The segment item id the retracted captions carried.
+    #[must_use]
+    pub fn item_id(&self) -> &str {
+        &self.item_id
+    }
+}
+
 /// Host-owned receiver of provisional captions for open unmeasured segments.
 ///
 /// Called synchronously on the provider observation path, in delta order. An
 /// implementation must not block: hand the caption to a bounded queue or
 /// drop it. Losing a caption loses display state only; the committed row is
 /// unaffected.
+///
+/// Every method other than [`Self::publish`] has a default implementation,
+/// and methods added later will have one too, so implementing this trait
+/// never breaks on upgrade.
 pub trait PublicGptLiveProvisionalCaptionSink: Send + Sync {
     fn publish(&self, caption: PublicGptLiveProvisionalCaption);
+
+    /// The segment's captions will not be replaced by a committed row. The
+    /// default ignores it; a host that renders captions should drop them.
+    fn retract(&self, retraction: PublicGptLiveProvisionalCaptionRetraction) {
+        let _ = retraction;
+    }
 }
 
 #[cfg(feature = "test-realtime-fixtures")]
@@ -3433,7 +3474,8 @@ struct PendingExperimentalGptLivePlayback {
     /// generated authority advances its own counter on each release and the
     /// release verifies they agree.
     segment: u64,
-    /// A typed between-speech boundary arrived while this segment was open.
+    /// A typed between-speech boundary arrived before this segment observed
+    /// speech: its first delta takes the ordinal admitted after the boundary.
     boundary_pending: bool,
 }
 
@@ -3449,15 +3491,16 @@ struct UnmeasuredSegmentSeal {
     context_observation_id: Option<meerkat_core::LiveContextObservationId>,
     stop_reason: StopReason,
     usage: TurnUsage,
-    /// Segment the same provider turn continues in, when it does.
-    continuation_segment: Option<u64>,
+    /// The provider turn continues in a new segment after this one, so the
+    /// release must hand back exactly one generated continuation.
+    continues_turn: bool,
 }
 
 impl UnmeasuredSegmentSeal {
     fn new(
         item_id: String,
         pending: &PendingExperimentalGptLivePlayback,
-        continuation_segment: Option<u64>,
+        continues_turn: bool,
     ) -> Self {
         Self {
             provider_turn_ref: pending.provider_turn_ref.clone(),
@@ -3468,7 +3511,7 @@ impl UnmeasuredSegmentSeal {
             context_observation_id: pending.context_observation_id.clone(),
             stop_reason: pending.stop_reason,
             usage: pending.usage.clone(),
-            continuation_segment,
+            continues_turn,
         }
     }
 
@@ -3649,11 +3692,19 @@ impl ExperimentalGptLiveDeferredAdapter {
     }
 
     fn local_response_id(turn: &LiveSidebandTurnRef) -> String {
-        format!("experimental-gpt-live-response:{}", turn.adapter_key())
+        Self::response_id_for_turn_key(turn.adapter_key())
     }
 
     fn local_item_id(turn: &LiveSidebandTurnRef) -> String {
-        format!("experimental-gpt-live-item:{}", turn.adapter_key())
+        Self::item_id_for_turn_key(turn.adapter_key())
+    }
+
+    fn response_id_for_turn_key(turn_key: &str) -> String {
+        format!("experimental-gpt-live-response:{turn_key}")
+    }
+
+    fn item_id_for_turn_key(turn_key: &str) -> String {
+        format!("experimental-gpt-live-item:{turn_key}")
     }
 
     fn capture_snapshot_cut(
@@ -3732,6 +3783,40 @@ impl ExperimentalGptLiveDeferredAdapter {
         self.unmeasured_seal_requested.notify_one();
     }
 
+    /// A sealed segment whose release was abandoned: its captions will never
+    /// be replaced by a committed row.
+    fn retract_captions(&self, item_id: &str) {
+        let Some(sink) = self.caption_sink.as_ref() else {
+            return;
+        };
+        let Some((session_id, channel_id)) = self
+            .caption_scope
+            .lock()
+            .ok()
+            .and_then(|scope| scope.clone())
+        else {
+            return;
+        };
+        sink.retract(PublicGptLiveProvisionalCaptionRetraction {
+            session_id,
+            channel_id,
+            item_id: item_id.to_string(),
+        });
+    }
+
+    /// Abandon every sealed segment still awaiting release (a bounded
+    /// terminal attempt failed) and retract its captions.
+    fn abandon_unmeasured_seals(&self) {
+        let abandoned: Vec<UnmeasuredSegmentSeal> = self
+            .unmeasured_seals
+            .lock()
+            .map(|mut seals| seals.drain(..).collect())
+            .unwrap_or_default();
+        for seal in abandoned {
+            self.retract_captions(&seal.item_id);
+        }
+    }
+
     fn has_unmeasured_seals(&self) -> bool {
         self.unmeasured_seals
             .lock()
@@ -3782,17 +3867,55 @@ impl ExperimentalGptLiveDeferredAdapter {
         Ok(())
     }
 
-    /// A typed between-speech boundary: every open unmeasured segment seals
-    /// at the next delta of its turn, which opens a new segment.
+    /// A typed between-speech boundary: every open unmeasured segment that
+    /// observed speech seals now, so it is released before any later row,
+    /// and its provider turn continues in a new segment. The next delta of
+    /// each turn takes the ordinal admitted after the boundary.
     fn mark_speech_boundary(&self) {
         if !self.provider_managed_unmeasured() {
             return;
         }
-        if let Ok(mut playback) = self.playback_by_item.lock() {
-            for pending in playback.values_mut() {
-                pending.boundary_pending = true;
+        let Ok(mut playback) = self.playback_by_item.lock() else {
+            return;
+        };
+        let items: Vec<String> = playback.keys().cloned().collect();
+        for item_id in items {
+            let Some(pending) = playback.get_mut(&item_id) else {
+                continue;
+            };
+            pending.boundary_pending = true;
+            if !pending.output_started_forwarded || pending.snapshot.is_empty() {
+                continue;
             }
+            let Some(segment) = pending.segment.checked_add(1) else {
+                continue;
+            };
+            let Some(mut pending) = playback.remove(&item_id) else {
+                continue;
+            };
+            self.queue_unmeasured_seal(UnmeasuredSegmentSeal::new(item_id, &pending, true));
+            let (response_id, next_item) = Self::unmeasured_segment_ids(&pending, segment);
+            pending.snapshot.clear();
+            pending.response_id = response_id;
+            pending.output_started_forwarded = false;
+            pending.output_id = None;
+            pending.segment = segment;
+            pending.context_observation_id = None;
+            playback.insert(next_item, pending);
         }
+    }
+
+    /// Adapter-local ids of segment `segment` of the pending entry's provider
+    /// turn; segment 0 uses the turn's own ids.
+    fn unmeasured_segment_ids(
+        pending: &PendingExperimentalGptLivePlayback,
+        segment: u64,
+    ) -> (String, String) {
+        let key = &pending.provider_turn_ref;
+        (
+            format!("{}:segment:{segment}", Self::response_id_for_turn_key(key)),
+            format!("{}:segment:{segment}", Self::item_id_for_turn_key(key)),
+        )
     }
 
     /// Seal every open unmeasured segment that observed speech, so close,
@@ -3812,53 +3935,26 @@ impl ExperimentalGptLiveDeferredAdapter {
                 .collect();
             for item_id in open {
                 if let Some(pending) = playback.remove(&item_id) {
-                    self.queue_unmeasured_seal(UnmeasuredSegmentSeal::new(item_id, &pending, None));
+                    self.queue_unmeasured_seal(UnmeasuredSegmentSeal::new(
+                        item_id, &pending, false,
+                    ));
                 }
             }
         }
         self.has_unmeasured_seals()
     }
 
-    /// Seal the turn's open segment at a typed between-speech boundary and
-    /// open its continuation, which takes the ordinal admitted for the delta
-    /// that opens it. Returns the item the delta belongs to.
-    fn rotate_unmeasured_segment_at_boundary(
-        &self,
-        playback: &mut HashMap<String, PendingExperimentalGptLivePlayback>,
-        turn: &LiveSidebandTurnRef,
-        item_id: String,
+    /// The first delta after a typed between-speech boundary opens its
+    /// segment under the ordinal admitted for it, never under one minted
+    /// before the boundary.
+    fn open_unmeasured_segment_after_boundary(
+        pending: &mut PendingExperimentalGptLivePlayback,
         context_observation_id: Option<&meerkat_core::LiveContextObservationId>,
-    ) -> Result<String, String> {
-        let pending = playback
-            .get_mut(&item_id)
-            .ok_or("unmeasured segment disappeared")?;
-        if !pending.boundary_pending {
-            return Ok(item_id);
-        }
-        pending.boundary_pending = false;
-        if !pending.output_started_forwarded || pending.snapshot.is_empty() {
-            // No speech observed before the boundary: this segment opens
-            // after it, so it never keeps an ordinal minted before it.
+    ) {
+        if pending.boundary_pending {
+            pending.boundary_pending = false;
             pending.context_observation_id = context_observation_id.cloned();
-            return Ok(item_id);
         }
-        let segment = pending
-            .segment
-            .checked_add(1)
-            .ok_or("unmeasured segment counter is exhausted")?;
-        let mut pending = playback
-            .remove(&item_id)
-            .ok_or("unmeasured segment disappeared")?;
-        self.queue_unmeasured_seal(UnmeasuredSegmentSeal::new(item_id, &pending, Some(segment)));
-        pending.snapshot.clear();
-        pending.response_id = format!("{}:segment:{segment}", Self::local_response_id(turn));
-        pending.output_started_forwarded = false;
-        pending.output_id = None;
-        pending.segment = segment;
-        pending.context_observation_id = context_observation_id.cloned();
-        let next_item = format!("{}:segment:{segment}", Self::local_item_id(turn));
-        playback.insert(next_item.clone(), pending);
-        Ok(next_item)
     }
 
     fn bind_caption_scope(&self, binding: &ProviderWebrtcBinding) {
@@ -3938,16 +4034,11 @@ impl ExperimentalGptLiveDeferredAdapter {
         }) else {
             return Ok(None); // User snapshots do not carry assistant playback.
         };
-        let item_id = if self.provider_managed_unmeasured() {
-            self.rotate_unmeasured_segment_at_boundary(
-                &mut playback,
-                turn,
-                item_id,
-                context_observation_id.as_ref(),
-            )?
-        } else {
-            item_id
-        };
+        if self.provider_managed_unmeasured()
+            && let Some(pending) = playback.get_mut(&item_id)
+        {
+            Self::open_unmeasured_segment_after_boundary(pending, context_observation_id.as_ref());
+        }
         let next = playback
             .get(&item_id)
             .and_then(|pending| pending.next_segment);
@@ -4138,7 +4229,7 @@ impl ExperimentalGptLiveDeferredAdapter {
                         && !pending.snapshot.is_empty()
                     {
                         self.queue_unmeasured_seal(UnmeasuredSegmentSeal::new(
-                            item_id, &pending, None,
+                            item_id, &pending, false,
                         ));
                     }
                 }
@@ -6206,55 +6297,102 @@ impl ExperimentalGptLiveControlPlane for ExperimentalGptLiveWebrtcTransport {
 }
 
 /// Release every sealed provider-managed unmeasured segment, oldest first:
-/// reserve its generated output, commit the concatenated observed text with
-/// unmeasured provenance, and consume the output. A seal leaves the queue
-/// only after its release commits, so a failed release is retried exactly;
-/// the generated settlement replays idempotently.
+/// commit the concatenated observed text with unmeasured provenance, then
+/// consume the generated output. A seal leaves the queue only after its
+/// release committed, was deferred to the close, or was abandoned, so a
+/// failed release is retried exactly; the generated settlement replays
+/// idempotently.
 async fn release_unmeasured_segments(
     activation: &PreparedExperimentalGptLiveActivation,
     binding: &ProviderWebrtcBinding,
     adapter: &ExperimentalGptLiveDeferredAdapter,
 ) -> Result<(), String> {
     while let Some(seal) = adapter.next_unmeasured_seal()? {
-        release_unmeasured_segment(activation, binding, &seal).await?;
+        let release = release_unmeasured_segment(activation, binding, &seal).await?;
         adapter.complete_unmeasured_seal(&seal.item_id)?;
+        if release == UnmeasuredSegmentRelease::Abandoned {
+            adapter.retract_captions(&seal.item_id);
+        }
     }
     Ok(())
+}
+
+/// How one sealed segment left the release queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnmeasuredSegmentRelease {
+    /// Committed canonically and its generated output consumed.
+    Committed,
+    /// Handed to the close: the member's turn holds the session boundary, so
+    /// the close's deferred settlement applies the release once the boundary
+    /// frees, before it settles leftover playback.
+    Deferred,
+    /// No generated custody remains to commit it against.
+    Abandoned,
 }
 
 async fn release_unmeasured_segment(
     activation: &PreparedExperimentalGptLiveActivation,
     binding: &ProviderWebrtcBinding,
     seal: &UnmeasuredSegmentSeal,
-) -> Result<(), String> {
-    let Some(output_id) = seal.output_id.as_deref() else {
-        // The output was never admitted (its start was deferred behind a
-        // closing member turn), so there is no generated custody to settle.
+) -> Result<UnmeasuredSegmentRelease, String> {
+    let runtime = &activation.runtime;
+    // Read the generated output without reserving it: the reservation holds
+    // the live-open lifecycle lease, which must never wait out a member turn
+    // holding the session boundary. No public handle exists for an
+    // observation-only output, so nothing can race the release.
+    let Some(handle) = seal
+        .output_id
+        .as_deref()
+        .and_then(|output_id| runtime.live_assistant_output_handle(output_id))
+    else {
+        // The segment's output was never admitted (its start was deferred
+        // behind a member turn while the channel closed, and the close
+        // retires that custody), so no canonical target can hold its speech.
         tracing::warn!(
             channel = %binding.channel_id(),
-            "unmeasured segment sealed without an admitted output; its speech has no canonical target"
+            "unmeasured segment has no generated output custody; its speech has no canonical target"
         );
-        return Ok(());
+        return Ok(UnmeasuredSegmentRelease::Abandoned);
     };
-    let reservation = activation
-        .runtime
-        .reserve_live_assistant_output_handle(binding.session_id(), binding.channel_id(), output_id)
-        .await
-        .map_err(|error| error.to_string())?;
-    let handle = reservation.handle();
-    if handle.__target() != Some((seal.response_id.clone(), seal.item_id.clone(), 0))
-        || handle.__assistant_turn_ref() != seal.provider_turn_ref
+    if handle.__assistant_turn_ref() != seal.provider_turn_ref
+        || handle.__target() != Some((seal.response_id.clone(), seal.item_id.clone(), 0))
     {
         return Err("unmeasured segment does not match its generated output target".to_string());
     }
-    let settled = activation
+    let release = seal.release_observation(handle.interaction_id());
+    let defer = |release: LiveAdapterObservation| async move {
+        match activation
+            .live_adapter_host
+            .defer_projection_after_close(binding.channel_id(), release)
+            .await
+        {
+            Ok(()) => UnmeasuredSegmentRelease::Deferred,
+            Err(error) => {
+                tracing::warn!(
+                    target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                    channel = %binding.channel_id(),
+                    %error,
+                    "unmeasured segment release could not be deferred to the close; it is dropped"
+                );
+                UnmeasuredSegmentRelease::Abandoned
+            }
+        }
+    };
+    let settled = match activation
         .live_adapter_host
-        .apply_observation(
-            binding.channel_id(),
-            &seal.release_observation(handle.interaction_id()),
-        )
+        .apply_observation(binding.channel_id(), &release)
         .await
-        .map_err(|error| error.to_string())?;
+    {
+        Ok(settled) => settled,
+        // The close released this channel's projections from the member
+        // turn's boundary. The release replays idempotently, so the close's
+        // deferred settlement applies it once the boundary frees; its output
+        // is retired with the channel.
+        Err(meerkat_live::LiveAdapterHostError::ProjectionError(
+            meerkat_live::LiveProjectionError::SessionBusy(_),
+        )) => return Ok(defer(release).await),
+        Err(error) => return Err(error.to_string()),
+    };
     if !matches!(
         settled,
         meerkat_live::ObservationOutcome::PlaybackTerminalSettled { ref item_id, .. }
@@ -6262,26 +6400,59 @@ async fn release_unmeasured_segment(
     ) {
         return Err("unmeasured segment release did not settle".to_string());
     }
-    if let Some(expected) = seal.continuation_segment {
-        let next = activation
-            .runtime
+    if seal.continues_turn {
+        let next = runtime
             .live_assistant_output_handle_for_turn(
                 binding.session_id(),
                 binding.channel_id(),
                 &seal.provider_turn_ref,
             )
             .ok_or("unmeasured release omitted generated continuation custody")?;
-        if next.__playback_segment() != expected {
+        if Some(next.__playback_segment()) != handle.__playback_segment().checked_add(1) {
             return Err(
-                "unmeasured continuation segment diverged from generated authority".to_string(),
+                "unmeasured continuation did not advance exactly one generated segment".to_string(),
             );
         }
     }
-    activation
-        .runtime
+    // The lease is taken only after the boundary wait, for the consume.
+    let reservation = runtime
+        .reserve_live_assistant_output_handle(
+            binding.session_id(),
+            binding.channel_id(),
+            handle.output_id(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    runtime
         .commit_live_assistant_output_terminal(reservation)
         .map_err(|error| error.to_string())?;
-    Ok(())
+    Ok(UnmeasuredSegmentRelease::Committed)
+}
+
+/// Release the seals a close, EOF, or terminal observation left, bounded:
+/// a failed or stalled release abandons the remaining seals (retracting
+/// their captions) so the terminal is still reported.
+async fn release_unmeasured_segments_before_terminal(
+    activation: &PreparedExperimentalGptLiveActivation,
+    binding: &ProviderWebrtcBinding,
+    adapter: &ExperimentalGptLiveDeferredAdapter,
+) {
+    let released = tokio::time::timeout(
+        LIVE_CLOSE_DRAIN_WAIT_SLICE,
+        release_unmeasured_segments(activation, binding, adapter),
+    )
+    .await;
+    let failure = match released {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => error,
+        Err(_) => "unmeasured segment release did not settle within its bound".to_string(),
+    };
+    tracing::warn!(
+        channel = %binding.channel_id(),
+        error = %failure,
+        "unmeasured speech sealed at the stream end could not be released; the terminal is reported without it"
+    );
+    adapter.abandon_unmeasured_seals();
 }
 
 fn spawn_sideband_actors(
@@ -6548,14 +6719,9 @@ fn spawn_sideband_actors(
             LiveAdapterObservation,
             Option<meerkat_live::ObservationOutcome>,
         )> = None;
-        // A terminal observation waits here while the open unmeasured
-        // segments it sealed are released.
-        let mut deferred_terminal: Option<LiveAdapterObservation> = None;
         loop {
             if pending_projection.is_none() && !pump_adapter.has_unmeasured_seals() {
-                let observation = if let Some(terminal) = deferred_terminal.take() {
-                    terminal
-                } else {
+                let observation = {
                     let next = tokio::select! {
                         () = pump_gate.cancelled() => return,
                         // Lowering sealed a segment without returning an
@@ -6570,9 +6736,20 @@ fn spawn_sideband_actors(
                         Ok(Some(observation)) => observation,
                         Ok(None) => {
                             // Close and EOF release in-flight speech before the
-                            // projection receipt settles.
+                            // projection receipt settles. An owner close drives
+                            // exact retry of a failed release; a remote EOF
+                            // with no close gets one bounded attempt, so the
+                            // stream end is always reported.
                             if pump_adapter.seal_open_unmeasured_segments() {
-                                continue;
+                                if pump_drain.requested.load(Ordering::Acquire) {
+                                    continue;
+                                }
+                                release_unmeasured_segments_before_terminal(
+                                    &activation,
+                                    &pump_binding,
+                                    &pump_adapter,
+                                )
+                                .await;
                             }
                             let reader = pump_drain
                                 .reader
@@ -6618,9 +6795,15 @@ fn spawn_sideband_actors(
                         LiveAdapterObservation::StatusChanged { status } if status.is_terminal()
                     )
                 {
+                    // In-flight speech gets one bounded release; the
+                    // terminal is retained whether or not it succeeds.
                     if pump_adapter.seal_open_unmeasured_segments() {
-                        deferred_terminal = Some(observation);
-                        continue;
+                        release_unmeasured_segments_before_terminal(
+                            &activation,
+                            &pump_binding,
+                            &pump_adapter,
+                        )
+                        .await;
                     }
                     tracing::warn!("experimental live adapter emitted a terminal observation");
                     let retained = pump_drain
@@ -12380,11 +12563,19 @@ mod tests {
     #[derive(Default)]
     struct RecordingCaptionSink {
         captions: std::sync::Mutex<Vec<PublicGptLiveProvisionalCaption>>,
+        retractions: std::sync::Mutex<Vec<PublicGptLiveProvisionalCaptionRetraction>>,
     }
 
     impl RecordingCaptionSink {
         fn captions(&self) -> Vec<PublicGptLiveProvisionalCaption> {
             self.captions.lock().expect("recorded captions").clone()
+        }
+
+        fn retractions(&self) -> Vec<PublicGptLiveProvisionalCaptionRetraction> {
+            self.retractions
+                .lock()
+                .expect("recorded retractions")
+                .clone()
         }
     }
 
@@ -12394,6 +12585,13 @@ mod tests {
                 .lock()
                 .expect("recorded captions")
                 .push(caption);
+        }
+
+        fn retract(&self, retraction: PublicGptLiveProvisionalCaptionRetraction) {
+            self.retractions
+                .lock()
+                .expect("recorded retractions")
+                .push(retraction);
         }
     }
 
@@ -12530,7 +12728,7 @@ mod tests {
         assert!(!seal.item_id.contains(":segment:"));
         assert!(!seal.response_id.contains(":segment:"));
         assert_eq!(seal.output_id.as_deref(), Some("generated-output"));
-        assert_eq!(seal.continuation_segment, None);
+        assert!(!seal.continues_turn);
         assert_eq!(unmeasured_release_text(seal), words.concat());
         assert!(
             adapter
@@ -12636,11 +12834,12 @@ mod tests {
             )
             .is_none()
         );
-        // The reader admitted an acknowledged append between speech.
+        // The reader admitted an acknowledged append between speech: the
+        // open segment seals at once, before any later row can commit.
         adapter.mark_speech_boundary();
         assert!(
-            !adapter.has_unmeasured_seals(),
-            "the boundary alone seals nothing"
+            adapter.has_unmeasured_seals(),
+            "the boundary seals the open segment eagerly"
         );
         let second = lower(
             LiveSidebandObservationKind::TurnSnapshotDelta {
@@ -12695,7 +12894,7 @@ mod tests {
         assert_eq!(first_seal.item_id, provider_item_id);
         assert_eq!(first_seal.output_id.as_deref(), Some("first-output"));
         assert_eq!(first_seal.context_observation_id.as_ref(), Some(&before));
-        assert_eq!(first_seal.continuation_segment, Some(1));
+        assert!(first_seal.continues_turn);
         assert_eq!(
             unmeasured_release_text(first_seal),
             "Before the append is heard."
@@ -12703,7 +12902,7 @@ mod tests {
         assert_eq!(second_seal.item_id, next_item);
         assert_eq!(second_seal.output_id.as_deref(), Some("second-output"));
         assert_eq!(second_seal.context_observation_id.as_ref(), Some(&after));
-        assert_eq!(second_seal.continuation_segment, None);
+        assert!(!second_seal.continues_turn);
         assert_eq!(unmeasured_release_text(second_seal), "After it.");
         let keys: Vec<String> = captions
             .captions()
@@ -12724,7 +12923,8 @@ mod tests {
             meerkat_live::LiveRuntimeBindingGeneration::new(1),
             meerkat_live::LiveRuntimeBindingFence::new(1),
         );
-        let adapter = unmeasured_test_adapter(&binding, Arc::new(RecordingCaptionSink::default()));
+        let captions = Arc::new(RecordingCaptionSink::default());
+        let adapter = unmeasured_test_adapter(&binding, Arc::clone(&captions));
         let turn = LiveSidebandTurnRef::__from_provider_observation(
             binding.channel_id(),
             "public-live-turn:9".to_string(),
@@ -12749,14 +12949,32 @@ mod tests {
                 .lower_observation(LiveSidebandObservation::new(binding.clone(), kind), None);
         }
         assert!(adapter.seal_open_unmeasured_segments());
-        let seals = drain_unmeasured_seals(&adapter);
-        let [seal] = seals.as_slice() else {
-            panic!("close keeps in-flight speech as one segment");
-        };
-        assert_eq!(unmeasured_release_text(seal), "Interrupted mid-sentence");
+        let seal = adapter
+            .next_unmeasured_seal()
+            .expect("seal custody")
+            .expect("close keeps in-flight speech as one segment");
+        assert_eq!(unmeasured_release_text(&seal), "Interrupted mid-sentence");
+        assert!(
+            adapter.seal_open_unmeasured_segments(),
+            "the seal still awaits release and nothing new is sealed"
+        );
+        // A bounded terminal release that fails abandons the seal and
+        // retracts the captions no committed row will replace.
+        adapter.abandon_unmeasured_seals();
+        assert!(!adapter.has_unmeasured_seals());
         assert!(
             !adapter.seal_open_unmeasured_segments(),
             "nothing is left to seal"
+        );
+        let retractions = captions.retractions();
+        assert_eq!(retractions.len(), 1);
+        assert_eq!(retractions[0].item_id(), seal.item_id);
+        assert_eq!(retractions[0].channel_id(), binding.channel_id());
+        assert!(
+            captions
+                .captions()
+                .iter()
+                .all(|caption| caption.item_id() == seal.item_id)
         );
     }
 
@@ -14141,6 +14359,190 @@ mod tests {
         run_shipping_close_matrix(Some(true)).await;
     }
 
+    /// A typed row lands mid-turn: the provider keeps speaking while the
+    /// canonical typed turn commits and is mirrored to the provider, whose
+    /// acknowledgement is a typed between-speech boundary. The open segment
+    /// seals at that acknowledgement, so speech before it is ordered at the
+    /// boundary, after the typed rows already committed and delivered, and
+    /// speech after it follows in its own segment.
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    async fn assert_unmeasured_speech_orders_around_a_mid_turn_typed_row(
+        service: &Arc<crate::PersistentSessionService<crate::FactoryAgentBuilder>>,
+        runtime: &Arc<meerkat_runtime::MeerkatMachine>,
+        sideband: &ControlledAmbiguousSideband,
+        binding: &ProviderWebrtcBinding,
+        captions: &RecordingCaptionSink,
+        session_id: &meerkat_core::SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) {
+        const BEFORE: &str = "Speech before the typed row.";
+        const AFTER: &str = "Speech after it.";
+        const TYPED: &str = "typed row between speech";
+        let read = || async {
+            service
+                .load_authoritative_session(session_id)
+                .await
+                .expect("canonical read")
+                .expect("session")
+        };
+        let speaking = LiveSidebandTurnRef::__from_provider_observation(
+            binding.channel_id(),
+            "interleaved-speech".to_string(),
+            "private-interleaved-speech".to_string(),
+        )
+        .expect("interleaved assistant turn");
+        for kind in [
+            LiveSidebandObservationKind::TurnStarted {
+                turn: speaking.clone(),
+                role: LiveSidebandTurnRole::Assistant,
+            },
+            LiveSidebandObservationKind::TurnSnapshotDelta {
+                turn: speaking.clone(),
+                delta: BEFORE.to_string(),
+            },
+        ] {
+            sideband.push(LiveSidebandObservation::new(binding.clone(), kind));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if captions
+                    .captions()
+                    .iter()
+                    .any(|caption| caption.text() == BEFORE)
+                    && read()
+                        .await
+                        .live_assistant_playback_target_for_channel(channel_id)
+                        .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the open segment's output is admitted");
+        let (_, completion) = runtime
+            .accept_input_with_completion(
+                session_id,
+                meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+                    TYPED.to_string(),
+                    Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            execution_kind: Some(
+                                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                            ),
+                            ..Default::default()
+                        },
+                    ),
+                )),
+            )
+            .await
+            .expect("typed input enters the shared runtime mid-turn");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            completion.expect("runtime completion waiter").try_wait(),
+        )
+        .await
+        .expect("typed input completes while the provider speaks")
+        .expect("typed completion");
+        let (committed, token) = service
+            .export_live_context_committed_boundary(session_id)
+            .await
+            .expect("store-sealed canonical source");
+        runtime
+            .enqueue_committed_parent_session_boundary(session_id, &committed, &token)
+            .await
+            .expect("enqueue the committed typed boundary");
+        runtime
+            .drain_live_context_outbox_for_channel(session_id, channel_id)
+            .await
+            .expect("the typed rows are delivered and acknowledged");
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !unmeasured_rows(&read().await)
+                .iter()
+                .any(|(text, _)| text == BEFORE)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the acknowledgement seals and releases the open segment eagerly");
+        for kind in [
+            LiveSidebandObservationKind::TurnSnapshotDelta {
+                turn: speaking.clone(),
+                delta: AFTER.to_string(),
+            },
+            LiveSidebandObservationKind::TurnFinished {
+                turn: speaking,
+                role: LiveSidebandTurnRole::Assistant,
+                transcript: format!("{BEFORE}{AFTER}"),
+            },
+        ] {
+            sideband.push(LiveSidebandObservation::new(binding.clone(), kind));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !unmeasured_rows(&read().await)
+                .iter()
+                .any(|(text, _)| text == AFTER)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the turn end releases the continuation");
+        let session = read().await;
+        let messages = session.messages();
+        let position = |predicate: &dyn Fn(&meerkat_core::Message) -> bool| {
+            messages
+                .iter()
+                .position(predicate)
+                .expect("row present in canonical history")
+        };
+        let spoken = |expected: &'static str| {
+            move |message: &meerkat_core::Message| {
+                matches!(message, meerkat_core::Message::BlockAssistant(assistant)
+                    if assistant.blocks.iter().any(|block| matches!(block,
+                        meerkat_core::AssistantBlock::Transcript {
+                            text,
+                            source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                            ..
+                        } if text == expected)))
+            }
+        };
+        let typed = position(
+            &|message| matches!(message, meerkat_core::Message::User(user) if user.text_content() == TYPED),
+        );
+        let answer = typed
+            + 1
+            + messages[typed + 1..]
+                .iter()
+                .position(|message| {
+                    matches!(message, meerkat_core::Message::BlockAssistant(assistant)
+                        if assistant.blocks.iter().any(|block| matches!(block,
+                            meerkat_core::AssistantBlock::Text { text, .. } if text == "ok")))
+                })
+                .expect("the typed turn's answer follows it");
+        let before = position(&spoken(BEFORE));
+        let after = position(&spoken(AFTER));
+        assert!(
+            typed < answer && answer < before && before < after,
+            "canonical order across writers: typed row {typed}, its answer {answer}, speech sealed at the acknowledgement {before}, speech after it {after}"
+        );
+        assert_eq!(
+            messages[before + 1..after]
+                .iter()
+                .filter(|message| !matches!(message, meerkat_core::Message::System(_)))
+                .count(),
+            0,
+            "nothing commits between the two segments of the turn"
+        );
+    }
+
     #[cfg(all(
         feature = "session-store",
         feature = "memory-store",
@@ -14160,6 +14562,8 @@ mod tests {
             ContextAppendPendingClose,
             ContextRecoveryFailureThenClose,
             ProviderManaged,
+            UnmeasuredBoundaryBusyClose,
+            UnmeasuredEofReleaseFailure,
             SnapshotCut,
             PrefixCut,
             UnmeasuredCut,
@@ -14191,6 +14595,8 @@ mod tests {
             ExitKind::ContextAppendPendingClose,
             ExitKind::ContextRecoveryFailureThenClose,
             ExitKind::ProviderManaged,
+            ExitKind::UnmeasuredBoundaryBusyClose,
+            ExitKind::UnmeasuredEofReleaseFailure,
             ExitKind::SnapshotCut,
             ExitKind::PrefixCut,
             ExitKind::UnmeasuredCut,
@@ -14339,6 +14745,8 @@ mod tests {
                     | ExitKind::ContextFirstPeer
                     | ExitKind::SnapshotCut
                     | ExitKind::ProviderManaged
+                    | ExitKind::UnmeasuredBoundaryBusyClose
+                    | ExitKind::UnmeasuredEofReleaseFailure
                     | ExitKind::PrefixCut
                     | ExitKind::UnmeasuredCut
                     | ExitKind::UnmeasuredRetry
@@ -14348,6 +14756,8 @@ mod tests {
             if matches!(
                 exit,
                 ExitKind::ProviderManaged
+                    | ExitKind::UnmeasuredBoundaryBusyClose
+                    | ExitKind::UnmeasuredEofReleaseFailure
                     | ExitKind::ContextFirstTyped
                     | ExitKind::ContextFirstPeer
             ) {
@@ -14664,6 +15074,18 @@ mod tests {
                             assert_eq!(assistant.stop_reason, None);
                         }
                         }
+                    }
+                    if incarnation == 1 && matches!(exit, ExitKind::ContextFirstTyped) {
+                        assert_unmeasured_speech_orders_around_a_mid_turn_typed_row(
+                            &service,
+                            &runtime,
+                            &sideband,
+                            &binding,
+                            &captions,
+                            &session_id,
+                            &channel_id,
+                        )
+                        .await;
                     }
                     member_host
                         .close_live_channel(Some(authority.as_ref()), &channel_id)
@@ -15006,6 +15428,8 @@ mod tests {
                 exit,
                 ExitKind::SnapshotCut
                     | ExitKind::ProviderManaged
+                    | ExitKind::UnmeasuredBoundaryBusyClose
+                    | ExitKind::UnmeasuredEofReleaseFailure
                     | ExitKind::PrefixCut
                     | ExitKind::UnmeasuredCut
                     | ExitKind::UnmeasuredRetry
@@ -15529,6 +15953,227 @@ mod tests {
                     .close_live_channel(Some(authority.as_ref()), reopened.channel_id())
                     .await
                     .expect("close pending replacement");
+                continue;
+            }
+            if matches!(exit, ExitKind::UnmeasuredEofReleaseFailure) {
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    loop {
+                        let session = service
+                            .load_authoritative_session(&session_id)
+                            .await
+                            .expect("read admitted target")
+                            .expect("session");
+                        if !captions.captions().is_empty()
+                            && session
+                                .live_assistant_playback_target_for_channel(&channel_id)
+                                .is_some()
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the open segment's output is admitted");
+                // The provider hangs up with no owner close while speech is
+                // open, and the one bounded release attempt fails before its
+                // commit. The stream end must still be reported.
+                live_adapter_host
+                    .__fail_next_projection_for_test(channel_id.clone(), false)
+                    .await;
+                sideband
+                    .close()
+                    .await
+                    .expect("inject unconfirmed stream EOF");
+                tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                    loop {
+                        let drain = adapter.drain.lock().expect("drain custody").clone();
+                        let drain = drain.expect("bound drain");
+                        let reader_ended =
+                            drain.reader.lock().is_ok_and(|receipt| receipt.is_some());
+                        let projection = drain.projection.lock().map(|receipt| *receipt);
+                        if reader_ended && matches!(projection, Ok(Some(_))) {
+                            assert!(
+                                matches!(projection, Ok(Some(Ok(())))),
+                                "the stream end settles its projection receipt: {projection:?}"
+                            );
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("a failed release does not suppress the stream-end receipt");
+                assert!(
+                    unmeasured_rows(
+                        &service
+                            .load_authoritative_session(&session_id)
+                            .await
+                            .expect("read abandoned release")
+                            .expect("session")
+                    )
+                    .is_empty(),
+                    "the failed release committed nothing"
+                );
+                assert_eq!(
+                    captions
+                        .retractions()
+                        .iter()
+                        .map(|retraction| retraction.item_id().to_string())
+                        .collect::<Vec<_>>(),
+                    [ExperimentalGptLiveDeferredAdapter::local_item_id(
+                        &assistant_turn
+                    )],
+                    "the abandoned segment's captions are retracted"
+                );
+                assert_eq!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        member_host.close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &channel_id,
+                            opened.pending_receipt(),
+                        ),
+                    )
+                    .await
+                    .expect("cleanup after the reported stream end is bounded")
+                    .expect("the reported stream end allows exact local cleanup"),
+                    meerkat_contracts::LiveCloseStatus::Closed,
+                );
+                continue;
+            }
+            if matches!(exit, ExitKind::UnmeasuredBoundaryBusyClose) {
+                // The open segment's output is admitted and the user row is
+                // committed before a member turn takes the session boundary.
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    loop {
+                        let session = service
+                            .load_authoritative_session(&session_id)
+                            .await
+                            .expect("read admitted target")
+                            .expect("session");
+                        if !captions.captions().is_empty()
+                            && session
+                                .live_assistant_playback_target_for_channel(&channel_id)
+                                .is_some()
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the open segment's output is admitted");
+                let boundary = service
+                    .acquire_runtime_turn_finalization_guard(&session_id)
+                    .await;
+                // A client delegation is a typed between-speech boundary: the
+                // open segment seals at once and its release parks behind
+                // the member turn.
+                let delegating_user = LiveSidebandTurnRef::__from_provider_observation(
+                    binding.channel_id(),
+                    format!("busy-close-user-{ordinal}"),
+                    format!("private-busy-close-user-{ordinal}"),
+                )
+                .expect("delegating user turn");
+                sideband.push(LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::DelegationRequested {
+                        turn: delegating_user,
+                        delegation: LiveSidebandDelegationRef::__from_provider_observation(
+                            format!("busy-close-delegation-{ordinal}"),
+                            format!("private-busy-close-delegation-{ordinal}"),
+                        )
+                        .expect("fixture delegation identity"),
+                        final_transcript: format!("matrix user {ordinal}"),
+                        request_transcript: format!("matrix user {ordinal}"),
+                        assistant_context: "First spoken checkpoint.".to_string(),
+                    },
+                ));
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                assert!(
+                    unmeasured_rows(
+                        &service
+                            .load_authoritative_session(&session_id)
+                            .await
+                            .expect("read parked release")
+                            .expect("session")
+                    )
+                    .is_empty(),
+                    "the sealed release waits behind the member turn"
+                );
+                // The release holds no live-open lifecycle lease while it
+                // waits, so other lease owners (the RPC notification writer,
+                // live/open, close) are never stalled by the member turn.
+                drop(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        runtime.acquire_live_open_lifecycle_lease(&session_id),
+                    )
+                    .await
+                    .expect("the lifecycle lease is free while a seal waits on the boundary")
+                    .expect("lifecycle lease"),
+                );
+                // The provider turn keeps speaking after the boundary.
+                sideband.push(LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnSnapshotDelta {
+                        turn: assistant_turn.clone(),
+                        delta: " After the delegation.".to_string(),
+                    },
+                ));
+                // The close does not wait for the member turn: the parked
+                // release returns Busy and is deferred to the close's
+                // settlement, so the close converges instead of retiring the
+                // speech as a failed projection.
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    member_host.close_live_channel(Some(authority.as_ref()), &channel_id),
+                )
+                .await
+                .expect("close does not wait for the member turn")
+                .expect("close converges with the deferred release");
+                drop(boundary);
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let rows = unmeasured_rows(
+                            &service
+                                .load_authoritative_session(&session_id)
+                                .await
+                                .expect("read deferred release")
+                                .expect("session"),
+                        );
+                        if !rows.is_empty() {
+                            assert_eq!(
+                                rows.iter()
+                                    .map(|(text, _)| text.as_str())
+                                    .collect::<Vec<_>>(),
+                                ["First spoken checkpoint."],
+                                "the deferred release commits the sealed speech once"
+                            );
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("the deferred release commits once the member turn ends");
+                // Speech after the boundary opened a segment whose own output
+                // start parked behind the member turn during the close. The
+                // close retires that output custody, so the segment cannot
+                // commit and its captions are retracted rather than left
+                // dangling; the deferred first segment is not retracted.
+                let first_item = ExperimentalGptLiveDeferredAdapter::local_item_id(&assistant_turn);
+                let retracted: Vec<String> = captions
+                    .retractions()
+                    .iter()
+                    .map(|retraction| retraction.item_id().to_string())
+                    .collect();
+                assert_eq!(
+                    retracted,
+                    [format!("{first_item}:segment:1")],
+                    "only the uncommittable segment is retracted"
+                );
                 continue;
             }
             if let Some((entered, release)) = publication_gate {
@@ -16275,6 +16920,8 @@ mod tests {
                 }
                 ExitKind::ContextRecoveryFailureThenClose => unreachable!(),
                 ExitKind::ProviderManaged
+                | ExitKind::UnmeasuredBoundaryBusyClose
+                | ExitKind::UnmeasuredEofReleaseFailure
                 | ExitKind::PrefixCut
                 | ExitKind::UnmeasuredCut
                 | ExitKind::UnmeasuredRetry

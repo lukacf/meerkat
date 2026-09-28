@@ -1980,14 +1980,11 @@ fn apply_assistant_playback_snapshot(
     requested_lane: TranscriptLane,
     source_channel: Option<crate::LiveChannelId>,
 ) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
-    if source_channel
-        .as_ref()
-        .is_some_and(|channel| channel.as_str() != channel_id)
-    {
-        return Err(RealtimeTranscriptShellError {
-            op: "playback_snapshot_channel_mismatch",
-        });
-    }
+    // Only the channel the snapshot names can stamp the row's origin. The
+    // session applies it from exactly that channel; a different application
+    // channel is not evidence for this item and stamps nothing (it is not a
+    // reducer failure, which would fail the session closed).
+    let source_channel = source_channel.filter(|channel| channel.as_str() == channel_id);
     let evidence_matches = match (&evidence, requested_lane) {
         (
             crate::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(snapshot),

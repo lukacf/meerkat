@@ -1013,6 +1013,66 @@ mod orchestrator {
             .await
             .ok();
         service.restore_live_projection_turn_boundary_wait(&session_id, &channel_id);
+        // A provider-managed unmeasured release carries the segment's observed
+        // text. The close's leftover settlement below resolves a still-active
+        // target as Unmeasured with no text, so such releases (and the output
+        // starts they commit against, in arrival order) land first. Lists
+        // without one keep the settlement-first order.
+        let (mut transcript_first, deferred_projections) = if deferred_projections
+            .iter()
+            .any(is_unmeasured_playback_release)
+        {
+            (
+                std::collections::VecDeque::from(deferred_projections),
+                Vec::new(),
+            )
+        } else {
+            (std::collections::VecDeque::new(), deferred_projections)
+        };
+        for attempt in 1..=super::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS {
+            while let Some(observation) = transcript_first.front() {
+                match tokio::time::timeout(
+                    super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND,
+                    host.apply_observation(&channel_id, observation),
+                )
+                .await
+                {
+                    Err(_) => break,
+                    Ok(Err(meerkat_live::LiveAdapterHostError::ProjectionError(
+                        meerkat_live::LiveProjectionError::SessionBusy(_),
+                    ))) => {
+                        tokio::time::sleep(super::LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY).await;
+                        break;
+                    }
+                    Ok(outcome) => {
+                        tracing::info!(
+                            target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                            channel = %channel_id,
+                            ?observation,
+                            ?outcome,
+                            "deferred live transcript projection applied before the close settlement"
+                        );
+                        transcript_first.pop_front();
+                    }
+                }
+            }
+            if transcript_first.is_empty() {
+                break;
+            }
+            tracing::warn!(
+                %channel_id,
+                attempt,
+                "deferred live transcript projection still waits for the member turn"
+            );
+        }
+        if !transcript_first.is_empty() {
+            tracing::warn!(
+                %channel_id,
+                deferred_projections = transcript_first.len(),
+                "deferred live transcript projections gave up waiting for the member turn boundary; the deferral stays recorded"
+            );
+            return;
+        }
         let mut settled = false;
         for attempt in 1..=super::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS {
             match meerkat_live::traced_live_close_step(
@@ -1086,6 +1146,22 @@ mod orchestrator {
             .await
         {
             tracing::warn!(%error, %channel_id, "deferred live close settlement could not be resolved in the machine");
+        }
+    }
+
+    fn is_unmeasured_playback_release(
+        observation: &meerkat_core::live_adapter::LiveAdapterObservation,
+    ) -> bool {
+        use meerkat_core::live_adapter::LiveAdapterObservation;
+        match observation {
+            LiveAdapterObservation::WithContextObservation { observation, .. } => {
+                is_unmeasured_playback_release(observation)
+            }
+            LiveAdapterObservation::AssistantPlaybackTerminalObserved { evidence, .. } => matches!(
+                evidence,
+                meerkat_core::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(_)
+            ),
+            _ => false,
         }
     }
 

@@ -142,9 +142,24 @@ them.
   `ExperimentalGptLiveOpenAuthority::with_public_provisional_caption_sink`:
   each `PublicGptLiveProvisionalCaption` names the session, channel, and the
   segment's item id, the same id the committed row's
-  `realtime_origin.provider_item_ids` records. Playback snapshot rows now
-  carry a `realtime_origin` naming their channel and item even when no live
-  context observation was admitted.
+  `realtime_origin.provider_item_ids` records, and
+  `PublicGptLiveProvisionalCaptionSink::retract` (default no-op) names a
+  segment whose captions no row will replace. Ordering change: speech is
+  ordered where its segment seals. Speech the provider said before a mid-turn
+  canonical row from another writer (a typed turn or delegation result that
+  was committed, mirrored, and acknowledged) now lands after that row, at the
+  acknowledgement, instead of before it; speech after the acknowledgement
+  follows in its own row. A segment sealed while a member turn holds the
+  session boundary during close is applied by the close's deferred
+  settlement before leftover playback is settled, so the close no longer
+  loses it; the close does not wait for the member turn.
+- Playback snapshot rows (`ProviderManagedUnmeasured` and
+  `CallerConfirmedSnapshots` alike) now carry a `realtime_origin` naming
+  their channel and provider item even when no live context observation
+  ordinal was admitted. The live context mirror therefore classifies such
+  same-channel rows as live transcript: they are no longer echoed back to the
+  provider as parent-session text, and, having no ordinal, they are not
+  reasserted after a bootstrap summary.
 - Compiled component-owned skill and capability registrations survive optimized
   WASM archive linking, preserving canonical skill resolution across repeated
   runtime initialization.

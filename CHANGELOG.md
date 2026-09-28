@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.47] - 2026-09-28
+
 ### Breaking
 
 - `meerkat_mob::MobSessionService` gains the required method
@@ -14049,7 +14051,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.46...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.47...HEAD
+[0.8.47]: https://github.com/lukacf/meerkat/compare/v0.8.46...v0.8.47
 [0.8.46]: https://github.com/lukacf/meerkat/compare/v0.8.45...v0.8.46
 [0.8.45]: https://github.com/lukacf/meerkat/compare/v0.8.44...v0.8.45
 [0.8.44]: https://github.com/lukacf/meerkat/compare/v0.8.43...v0.8.44

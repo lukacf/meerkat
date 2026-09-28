@@ -37,6 +37,17 @@ them.
 
 ### Breaking
 
+- `meerkat_machine_schema::MobMachineSignal` and `MobMachineSignalVariant`
+  gain `ResolveRecreatedMemberSessionSucceeded`; the kernel `Signal` and
+  `SignalKind` gain `ResolveRecreatedMemberSessionSucceeded`; the kernel
+  `TransitionId` gains `ResolveRecreatedMemberSessionSucceededRunningLocal`
+  (mob cold recovery of a recreated member session, #1215). Exhaustive matches
+  must add the arms. The new variants are inserted in schema order, so the
+  implicit discriminants and `PartialOrd` positions of every later variant of
+  `MobMachineSignal::*`, `MobMachineSignalVariant::*`, `Signal::*`,
+  `SignalKind::*`, and `TransitionId::*` move. Discriminants of generated
+  machine enums are never a stable contract; match by name.
+
 - On WASM, crate `tokio::time` re-exports now use the shared
   `meerkat_core::time_compat::wasm` types, including `Sleep`, `Timeout`,
   `Elapsed`, and `Interval`. Callers naming the previous dependency's concrete

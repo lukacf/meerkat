@@ -5306,6 +5306,8 @@ async fn create_session_inner(
         comms_name: req.comms_name.clone(),
         peer_meta: req.peer_meta.clone(),
         resume_session: Some(pre_session),
+        // `pre_session` only claims the new session's id.
+        resume_session_intent: meerkat_core::SessionBuildIntent::Mint,
         budget_limits: req.budget_limits,
         provider_params: req.provider_params.clone().map(Into::into),
         external_tools: mcp_external_tools,
@@ -6472,6 +6474,7 @@ async fn continue_session_inner(
             comms_name: req.comms_name.clone(),
             peer_meta: req.peer_meta.clone(),
             resume_session: Some(session),
+            resume_session_intent: meerkat_core::SessionBuildIntent::Resume,
             budget_limits: None,
             provider_params: None,
             external_tools: None,

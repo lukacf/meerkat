@@ -553,6 +553,7 @@ pub fn resolve_effective_turn_config(
             .clone()
             .or_else(|| metadata.peer_meta.clone()),
         resume_session: Some(session),
+        resume_session_intent: crate::service::SessionBuildIntent::Resume,
         budget_limits: overrides
             .budget_limits
             .clone()

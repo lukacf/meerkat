@@ -12012,6 +12012,8 @@ async fn run_agent(
             comms_name: comms_name.clone(),
             peer_meta: comms_overrides.peer_meta.clone(),
             resume_session: Some(session),
+            // `session` only claims the new session's id.
+            resume_session_intent: meerkat_core::SessionBuildIntent::Mint,
             budget_limits: Some(limits),
             provider_params,
             external_tools,

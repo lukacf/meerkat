@@ -11133,7 +11133,7 @@ impl MobProvisioner for SessionBackend {
                             "resumed durable provision lost its build configuration".to_string(),
                         )
                     })?
-                    .resume_session = Some(*session);
+                    .resume_existing_session(*session);
                 RequestedSessionMaterialization::Resume {
                     materialization,
                     authority,
@@ -11198,9 +11198,8 @@ impl MobProvisioner for SessionBackend {
                 .map(|s| s.id().clone())
                 .unwrap_or_else(|| {
                     let id = SessionId::new();
-                    let session = meerkat_core::session::Session::with_id(id.clone());
                     if let Some(ref mut build) = req.create_session.build {
-                        build.resume_session = Some(session);
+                        build.mint_session_with_id(id.clone());
                     }
                     id
                 });

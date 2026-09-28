@@ -279,6 +279,13 @@ impl McpScheduleContext {
                     comms_name: create.comms_name.clone(),
                     peer_meta: create.peer_meta.clone(),
                     resume_session: Some(session),
+                    // A durable record this occurrence already materialized is
+                    // continued; otherwise the occurrence's id is minted.
+                    resume_session_intent: if preexisting_authoritative {
+                        meerkat_core::SessionBuildIntent::Resume
+                    } else {
+                        meerkat_core::SessionBuildIntent::Mint
+                    },
                     budget_limits: None,
                     provider_params: create.provider_params.clone(),
                     call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,

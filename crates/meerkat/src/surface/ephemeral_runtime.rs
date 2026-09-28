@@ -125,8 +125,7 @@ async fn materialize_ephemeral_runtime_session_inner<B: SessionAgentBuilder + 's
             "runtime materialization requires a deferred initial turn; submit the prompt through runtime admission after creation".into(),
         ).into());
     }
-    let session = crate::Session::new();
-    let session_id = session.id().clone();
+    let session_id = SessionId::new();
     let boundary = service
         .acquire_runtime_turn_finalization_guard(&session_id)
         .await;
@@ -149,7 +148,7 @@ async fn materialize_ephemeral_runtime_session_inner<B: SessionAgentBuilder + 's
             .await?;
         let build = request.build.get_or_insert_with(Default::default);
         build.runtime_build_mode = RuntimeBuildMode::SessionOwned(prepared.bindings_clone());
-        build.resume_session = Some(session);
+        build.mint_session_with_id(session_id.clone());
         build.keep_alive = keep_alive;
         let permit =
             meerkat_runtime::begin_session_runtime_actor_materialization(prepared.bindings())?;

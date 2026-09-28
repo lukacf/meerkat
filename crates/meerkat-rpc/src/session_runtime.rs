@@ -479,9 +479,8 @@ impl RpcMobSessionService {
         if let Some(session) = build.resume_session.as_ref() {
             return session.id().clone();
         }
-        let session = Session::new();
-        let session_id = session.id().clone();
-        build.resume_session = Some(session);
+        let session_id = SessionId::new();
+        build.mint_session_with_id(session_id.clone());
         session_id
     }
 

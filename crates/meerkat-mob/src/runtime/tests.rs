@@ -1572,6 +1572,9 @@ struct CreateSessionRecord {
     /// Names of the tools the build's composed `external_tools` surface, in
     /// catalog order (the per-spawn overlay composed with mob-owned tools).
     external_tool_names: Vec<String>,
+    /// The session the build is seated on, and what the build does with it.
+    resume_session_id: Option<SessionId>,
+    session_build_intent: meerkat_core::SessionBuildIntent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3566,6 +3569,15 @@ impl MockSessionService {
                             .collect()
                     })
                     .unwrap_or_default(),
+                resume_session_id: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.resume_session.as_ref())
+                    .map(|session| session.id().clone()),
+                session_build_intent: req.build.as_ref().map_or(
+                    meerkat_core::SessionBuildIntent::Mint,
+                    meerkat_core::service::SessionBuildOptions::session_build_intent,
+                ),
             });
 
         let mcp_server_names: Vec<String> = req
@@ -29685,6 +29697,66 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
         crate::runtime::handle::MobMemberStatus::Broken
     );
     assert!(broken_including_retiring.is_final);
+}
+
+/// #1225: a fresh member's session id is assigned before its build, so the
+/// build carries that id in `resume_session`. It is typed as a mint, and a
+/// real resume of the member's durable session is typed as a resume: a
+/// builder can tell them apart without inspecting the carried session.
+#[tokio::test]
+async fn test_member_builds_type_a_spawn_as_a_mint_and_a_revival_as_a_resume() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let identity = AgentIdentity::from("build-intent-worker");
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn");
+    let session_id = handle
+        .get_member(&identity)
+        .await
+        .unwrap()
+        .expect("roster entry")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    let spawned = last_member_build(&service, &identity).await;
+    assert_eq!(
+        spawned.session_build_intent,
+        meerkat_core::SessionBuildIntent::Mint,
+        "a spawn mints the member's session under its pre-assigned id"
+    );
+    assert_eq!(spawned.resume_session_id.as_ref(), Some(&session_id));
+
+    handle.stop().await.expect("stop");
+    MobSessionService::discard_live_session(service.as_ref(), &session_id)
+        .await
+        .expect("discard the live session");
+    crash_stop_and_release_routes(handle).await;
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("reconstruct the mob");
+    resumed.resume().await.expect("resume revives the member");
+    let revived = last_member_build(&service, &identity).await;
+    assert_eq!(
+        revived.session_build_intent,
+        meerkat_core::SessionBuildIntent::Resume,
+        "a revival continues the member's durable session"
+    );
+    assert_eq!(revived.resume_session_id.as_ref(), Some(&session_id));
 }
 
 #[tokio::test]

@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.48] - 2026-09-28
+
 ### Fixed
 
 - Status polling no longer starves a staged run's start (#1226). Read-only
@@ -14068,7 +14070,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.47...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.48...HEAD
+[0.8.48]: https://github.com/lukacf/meerkat/compare/v0.8.47...v0.8.48
 [0.8.47]: https://github.com/lukacf/meerkat/compare/v0.8.46...v0.8.47
 [0.8.46]: https://github.com/lukacf/meerkat/compare/v0.8.45...v0.8.46
 [0.8.45]: https://github.com/lukacf/meerkat/compare/v0.8.44...v0.8.45

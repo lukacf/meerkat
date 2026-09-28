@@ -4938,11 +4938,12 @@ impl MobSessionService for LocalSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_mob::LiveDurableSourceObservation, SessionError> {
-        // In-memory sessions: the live map and the archived-view map are the
-        // whole durable truth; neither read queues behind a session actor.
-        if self.sessions.read().await.contains_key(session_id) {
-            return Ok(meerkat_mob::LiveDurableSourceObservation::Committed { revision: None });
-        }
+        // In-memory sessions have no persisted durable source: this service
+        // inherits `load_persisted_session -> Ok(None)`, so the live open's
+        // durable-source check always rejects. Readiness agrees with the
+        // open and never reports a live session as committed. The archived
+        // map still distinguishes an archived session; neither read queues
+        // behind a session actor.
         Ok(
             if self.archived_views.read().await.contains_key(session_id) {
                 meerkat_mob::LiveDurableSourceObservation::Archived
@@ -8528,6 +8529,54 @@ mod tests {
         assert_eq!(result.status, AppendSystemContextStatus::Applied);
         let pending = service.system_messages.read().await;
         assert_eq!(pending.get(&session_id).map(std::vec::Vec::len), Some(1));
+    }
+
+    /// Readiness agrees with the open (#1246): an in-memory session has no
+    /// persisted durable source, so the live open's body load finds nothing
+    /// and readiness must not report it as committed.
+    #[tokio::test]
+    async fn local_session_service_live_readiness_agrees_with_its_open() {
+        let service = LocalSessionService::new();
+        let run = service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "hello".to_string().into(),
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = run.session_id;
+
+        assert!(
+            meerkat_mob::MobSessionService::load_persisted_session(&service, &session_id)
+                .await
+                .expect("load persisted session")
+                .is_none(),
+            "control: the open's durable-source load finds no persisted body"
+        );
+        assert_eq!(
+            meerkat_mob::MobSessionService::observe_live_durable_source(&service, &session_id)
+                .await
+                .expect("observe live durable source"),
+            meerkat_mob::LiveDurableSourceObservation::Absent,
+            "a live in-memory session is not a committed durable source"
+        );
+        assert_eq!(
+            meerkat_mob::MobSessionService::observe_live_durable_source(
+                &service,
+                &SessionId::new()
+            )
+            .await
+            .expect("observe unknown session"),
+            meerkat_mob::LiveDurableSourceObservation::Absent
+        );
     }
 
     #[tokio::test]

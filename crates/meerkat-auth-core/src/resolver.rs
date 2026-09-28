@@ -130,9 +130,11 @@ pub async fn resolve_simple_secret(
 ///
 /// Mirrors [`resolve_simple_secret`] source by source, but only reads: the
 /// process environment, the inline value, the managed token store row and the
-/// AuthMachine lease snapshot. Sources observable only by materializing them
-/// (an external resolver, a credential command, a host file descriptor)
-/// report [`CredentialReadiness::MaterializedAtOpen`].
+/// AuthMachine's read-only credential-use classification. Sources observable
+/// only by materializing them (an external resolver, a credential command)
+/// report [`CredentialReadiness::MaterializedAtOpen`]. A host file descriptor
+/// is [`CredentialReadiness::Missing`]: the simple-secret resolver always
+/// rejects it, so the open could never use it.
 pub async fn observe_simple_secret_readiness(
     source: &CredentialSourceSpec,
     env: &ResolverEnvironment,
@@ -162,15 +164,22 @@ pub async fn observe_simple_secret_readiness(
             }
         }
         CredentialSourceSpec::ManagedStore => observe_managed_store_readiness(env, binding).await,
-        CredentialSourceSpec::Command { .. } | CredentialSourceSpec::FileDescriptor { .. } => {
-            CredentialReadiness::MaterializedAtOpen
-        }
+        CredentialSourceSpec::Command { .. } => CredentialReadiness::MaterializedAtOpen,
+        // `resolve_simple_secret` has no host-scoped reader and always fails
+        // this source; readiness must not admit an open that cannot succeed.
+        CredentialSourceSpec::FileDescriptor { .. } => CredentialReadiness::Missing,
         CredentialSourceSpec::PlatformDefault => CredentialReadiness::NeedsReauth,
     }
 }
 
-/// Read-only managed-store readiness: the token row and the lease snapshot,
-/// never the lifecycle guard, a lifecycle restore, or a refresh.
+/// Read-only managed-store readiness: the token row and the AuthMachine's
+/// read-only credential-use classification, never the lifecycle guard, a
+/// lifecycle restore, a freshness observation, or a refresh.
+///
+/// Mirrors the verdicts [`resolve_managed_store_secret`] rejects: a lease the
+/// machine classifies as needing a refresh or a re-login is not ready, since
+/// the simple-secret open fails on it. A lease not yet registered keeps the
+/// token row's answer, because the open restores it from the durable marker.
 async fn observe_managed_store_readiness(
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
@@ -187,8 +196,23 @@ async fn observe_managed_store_readiness(
             let lease_key = meerkat_core::handles::LeaseKey::from_credential_identity(
                 binding.credential_identity(),
             );
-            if auth_lease.snapshot(&lease_key).phase == Some(AuthLeasePhase::ReauthRequired) {
-                return CredentialReadiness::NeedsReauth;
+            match resolve_credential_use_admission(
+                auth_lease,
+                &lease_key,
+                meerkat_core::handles::CredentialUseIntent::UseCredential,
+            ) {
+                Ok(
+                    CredentialUseDisposition::Authorized | CredentialUseDisposition::LeaseAbsent,
+                ) => {}
+                Ok(
+                    CredentialUseDisposition::RefreshRequired
+                    | CredentialUseDisposition::RefreshDisallowed
+                    | CredentialUseDisposition::ReauthRequired,
+                ) => return CredentialReadiness::NeedsReauth,
+                // Never emitted for `UseCredential`; the open rejects it too.
+                Ok(CredentialUseDisposition::AlreadyRefreshing) | Err(_) => {
+                    return CredentialReadiness::Missing;
+                }
             }
         }
         let key = TokenKey::from_credential_identity(binding.credential_identity());
@@ -2322,6 +2346,18 @@ mod tests {
         );
         assert_eq!(
             observe(
+                CredentialSourceSpec::FileDescriptor {
+                    fd: 3,
+                    scope_override: None,
+                },
+                ResolverEnvironment::testing(),
+            )
+            .await,
+            CredentialReadiness::Missing,
+            "the simple-secret resolver always rejects a host file descriptor"
+        );
+        assert_eq!(
+            observe(
                 CredentialSourceSpec::PlatformDefault,
                 ResolverEnvironment::testing()
             )
@@ -2337,6 +2373,106 @@ mod tests {
             CredentialReadiness::NeedsReauth,
             "a managed store without persistence needs a login"
         );
+    }
+
+    /// A file-descriptor source is not ready, and the open agrees: the
+    /// simple-secret resolver has no host-scoped reader for it.
+    #[tokio::test]
+    async fn file_descriptor_readiness_agrees_with_the_simple_secret_open() {
+        let binding = simple_secret_binding(
+            CredentialSourceSpec::FileDescriptor {
+                fd: 3,
+                scope_override: None,
+            },
+            "api_key",
+        );
+        let env = ResolverEnvironment::testing();
+        let readiness =
+            observe_simple_secret_readiness(&binding.auth_profile().source, &env, &binding).await;
+        assert_eq!(readiness, CredentialReadiness::Missing);
+        assert!(!readiness.admits_open());
+        assert!(
+            resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
+                .await
+                .is_err(),
+            "control: the open always fails a file-descriptor source"
+        );
+    }
+
+    /// Managed-store readiness with persistence follows the AuthMachine's
+    /// credential-use verdict, and agrees with the open in every lease phase:
+    /// a valid lease with a stored secret is ready; a lease needing a refresh
+    /// or a re-login is not, because the simple-secret open rejects both.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_readiness_with_persistence_agrees_with_the_open() {
+        async fn observe_then_open(
+            phase: AuthLeasePhase,
+        ) -> (CredentialReadiness, Result<String, ProviderAuthError>) {
+            let store = Arc::new(EphemeralTokenStore::new());
+            let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
+            let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
+            store
+                .save(&key, &PersistedTokens::api_key("sk-managed-readiness"))
+                .await
+                .unwrap();
+            let expires_at = match phase {
+                AuthLeasePhase::Expired => 1_000,
+                _ => u64::MAX,
+            };
+            let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
+                phase: Some(phase),
+                expires_at: Some(expires_at),
+                credential_present: true,
+                generation: 1,
+                credential_published_at_millis: None,
+            });
+            let env = ResolverEnvironment::testing()
+                .with_provider_auth_persistence(test_provider_auth_persistence(store))
+                .with_auth_lease_handle(auth_lease.generated());
+            let readiness =
+                observe_simple_secret_readiness(&binding.auth_profile().source, &env, &binding)
+                    .await;
+            let open = resolve_simple_secret(&binding.auth_profile().source, &env, &binding).await;
+            (readiness, open)
+        }
+
+        let (readiness, open) = observe_then_open(AuthLeasePhase::Valid).await;
+        assert_eq!(readiness, CredentialReadiness::Ready);
+        assert_eq!(open.expect("valid lease opens"), "sk-managed-readiness");
+
+        let (readiness, open) = observe_then_open(AuthLeasePhase::ReauthRequired).await;
+        assert_eq!(readiness, CredentialReadiness::NeedsReauth);
+        assert!(matches!(
+            open,
+            Err(ProviderAuthError::Auth(AuthError::UserReauthRequired))
+        ));
+
+        let (readiness, open) = observe_then_open(AuthLeasePhase::Expired).await;
+        assert_eq!(
+            readiness,
+            CredentialReadiness::NeedsReauth,
+            "a lease the machine classifies as refresh-required is not ready"
+        );
+        assert!(matches!(
+            open,
+            Err(ProviderAuthError::Auth(AuthError::RefreshRequired))
+        ));
+
+        for phase in [
+            AuthLeasePhase::Valid,
+            AuthLeasePhase::Expiring,
+            AuthLeasePhase::Expired,
+            AuthLeasePhase::Refreshing,
+            AuthLeasePhase::ReauthRequired,
+        ] {
+            let (readiness, open) = observe_then_open(phase).await;
+            assert_eq!(
+                readiness.admits_open(),
+                open.is_ok(),
+                "{phase:?}: readiness {readiness:?} must agree with the open {open:?}"
+            );
+        }
     }
 
     #[tokio::test]

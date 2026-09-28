@@ -516,6 +516,11 @@ impl AgentMobToolSurface {
     /// Admission to observe or retire one member: manage scope over the mob,
     /// or durable spawner provenance naming the calling member. MobMachine
     /// decides; this mirrors its verdict (Denied -> access_denied).
+    ///
+    /// Target presence is observed first (#1234): a member with no roster
+    /// entry is typed `member_retired` (durable retirement record) or
+    /// `member_not_found` for every caller, so access_denied only ever means
+    /// a present member the caller does not own.
     async fn ensure_owned_member_authority(
         &self,
         tool_name: &str,
@@ -536,15 +541,20 @@ impl AgentMobToolSurface {
             ))
         })?;
         match handle
-            .resolve_owned_member_admission(can_manage_mob, caller.as_ref(), target)
+            .resolve_owned_member_target_admission(can_manage_mob, caller.as_ref(), target)
             .await
             .map_err(|error| {
                 ToolError::execution_failed(format!(
                     "tool '{tool_name}' member admission failed: {error}"
                 ))
             })? {
-            meerkat_mob::CurrentMobAdmission::Allowed => Ok(()),
-            meerkat_mob::CurrentMobAdmission::Denied => Err(ToolError::access_denied(tool_name)),
+            meerkat_mob::OwnedMemberTargetAdmission::Allowed => Ok(()),
+            meerkat_mob::OwnedMemberTargetAdmission::Denied => {
+                Err(ToolError::access_denied(tool_name))
+            }
+            meerkat_mob::OwnedMemberTargetAdmission::Absent(absence) => {
+                Err(absence.to_tool_error(tool_name, mob_id, target))
+            }
         }
     }
 

@@ -77,6 +77,7 @@ them.
 
 ### Fixed
 
+
 - The e2e harness's interrupt handling is deterministic (#1243, #1229). The
   handler now holds the lane-command registry from the moment it reads it
   through `process::exit`, and commands spawn and register under that same
@@ -108,6 +109,49 @@ them.
   to paint a data-first module's stack (which can overlap `.bss`), and a
   turn's high-water must reach a 16 KiB sanity floor, so a probe that is not
   observing the turn's memory fails instead of passing every budget.
+- Owned-member tools no longer tell the spawner of an idle-retired fork child
+  that it lacks permission: a retired or missing target is typed
+  `member_retired` / `member_not_found` instead of `access_denied`, and the
+  same call means the same thing whatever the caller's scope (#1234).
+- Live durable-source readiness (`MobHandle::observe_live_durable_source_readiness`)
+  reports `MemberUnavailable` once the mob actor has exited (its command
+  channel closed or its machine-state sender dropped). The frozen roster and
+  last machine state no longer read as ready while every open fails (#1246).
+- The mob-mcp in-memory `LocalSessionService` reports a live session's durable
+  source as `Absent`, agreeing with its open: it has no persisted body, so
+  `load_persisted_session` returns `None` and the open always rejects (#1246).
+- Simple-secret credential readiness (`observe_simple_secret_readiness`)
+  reports a `FileDescriptor` source as `Missing` (the simple-secret resolver
+  always rejects it), and managed-store readiness follows the AuthMachine's
+  read-only credential-use classification, so a lease that needs a refresh
+  or a re-login reads as `NeedsReauth` instead of ready (#1246).
+
+### Added
+
+
+- `meerkat_mob::MobHandle::resolve_owned_member_target_admission`, with
+  `meerkat_mob::OwnedMemberTargetAdmission` (`Allowed`, `Denied`,
+  `Absent(MemberTargetAbsence)`) and `meerkat_mob::MemberTargetAbsence`
+  (`NotFound`, `Retired`, `kind()`, `to_tool_error`). Target presence is read
+  from the roster, and a durable retirement record from the mob's event log,
+  before the ownership admission runs (#1234).
+
+### Breaking
+
+
+- Behavior-only: the owned-member tools (`mob_check_member` /
+  `mob_retire_member` on the agent surface, `member_status` /
+  `retire_member` / `force_cancel_member` on the in-mob operator surface) now
+  return a typed not-found error for a target with no roster entry, for every
+  caller, before the ownership admission (#1234). The error is
+  `ToolError::ExecutionFailedWithData` (wire `"error": "execution_failed"`)
+  with `data = {"kind": "member_retired" | "member_not_found", "mob_id",
+  "member_id", "retryable": false}`: `member_retired` when the mob's event log
+  records the member's retirement after its last spawn, `member_not_found`
+  otherwise. Callers without manage scope previously got `access_denied` for
+  such a target; a manage-scope `mob_retire_member` on an absent member
+  previously returned `{"ok": true}`. `access_denied` now only ever means a
+  present member the caller does not own.
 
 - A member left with a runtime registration but no committed executor
   attachment after the execution-start bound teardown can be reloaded again

@@ -1382,10 +1382,8 @@ async fn run_command(
         child.process_group(0);
     }
     child.kill_on_drop(true);
-    let child = child
-        .spawn()
+    let (child, mut group) = ProcessGroupKillOnDrop::spawn(&mut child)
         .map_err(|error| format!("failed to run {display}: {error}"))?;
-    let mut group = ProcessGroupKillOnDrop::new(child.id());
 
     let output = timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
         .await
@@ -1428,12 +1426,27 @@ struct ProcessGroupKillOnDrop {
 }
 
 impl ProcessGroupKillOnDrop {
-    fn new(pgid: Option<u32>) -> Self {
+    /// Spawn `command` and register its group under one hold of the registry
+    /// lock. The interrupt handler holds that lock from the moment it takes
+    /// the registry until the process exits, so a command either spawns and
+    /// registers before the handler reads the registry (and is killed with
+    /// the rest) or never spawns at all: none escapes between spawn and
+    /// registration.
+    fn spawn(command: &mut Command) -> std::io::Result<(tokio::process::Child, Self)> {
         #[cfg(unix)]
-        if let Some(pgid) = pgid {
-            live_command_groups().insert(pgid);
+        {
+            let mut groups = live_command_groups();
+            let child = command.spawn()?;
+            let pgid = child.id();
+            if let Some(pgid) = pgid {
+                groups.insert(pgid);
+            }
+            Ok((child, Self { pgid }))
         }
-        Self { pgid }
+        #[cfg(not(unix))]
+        {
+            Ok((command.spawn()?, Self { pgid: None }))
+        }
     }
 
     fn disarm(&mut self) {
@@ -1449,8 +1462,12 @@ impl Drop for ProcessGroupKillOnDrop {
     fn drop(&mut self) {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid.take() {
-            live_command_groups().remove(&pgid);
-            kill_process_group(pgid);
+            // Kill under the registry lock: the interrupt handler, which
+            // holds it through its own kill loop and exit, sees this group
+            // either still registered or already killed.
+            let mut groups = live_command_groups();
+            kill_process_groups(&BTreeSet::from([pgid]));
+            groups.remove(&pgid);
         }
     }
 }
@@ -1466,16 +1483,33 @@ fn live_command_groups() -> std::sync::MutexGuard<'static, BTreeSet<u32>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// SIGKILL every group in `pgids`. A group already gone (ESRCH) and a
+/// refused signal (EPERM, or any other error) are logged: either means the
+/// group was not killed here.
 #[cfg(unix)]
-fn kill_process_group(pgid: u32) {
-    // A group that already exited leaves nothing to kill; kill's failure then
-    // says only that.
-    let _ = StdCommand::new("kill")
-        .args(["-KILL", "--", &format!("-{pgid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+fn kill_process_groups(pgids: &BTreeSet<u32>) {
+    use nix::sys::signal::{Signal, killpg};
+    for pgid in pgids {
+        let Some(group) = i32::try_from(*pgid)
+            .ok()
+            .filter(|pgid| *pgid > 1)
+            .map(nix::unistd::Pid::from_raw)
+        else {
+            eprintln!("warning: e2e command group id {pgid} is not a killable process group");
+            continue;
+        };
+        match killpg(group, Signal::SIGKILL) {
+            Ok(()) => {}
+            Err(nix::errno::Errno::ESRCH) => {
+                eprintln!("e2e command group {pgid} had already exited (ESRCH)");
+            }
+            Err(error) => {
+                eprintln!(
+                    "warning: cannot kill e2e command group {pgid} ({error}); it may keep running"
+                );
+            }
+        }
+    }
 }
 
 /// Install, once per process and before the first command spawns, the
@@ -1483,6 +1517,13 @@ fn kill_process_group(pgid: u32) {
 /// SIGHUP): it kills every registered command group, then exits as that
 /// signal would have (status 128 plus the signal number). It runs on a thread
 /// with a runtime of its own, so it outlives any one test's runtime.
+///
+/// The handler holds the registry lock from the moment it reads the registry
+/// through `process::exit`. A lane command that exits because its group was
+/// killed then cannot let the harness finish first: the command's
+/// [`ProcessGroupKillOnDrop`] disarms (or drops) under the same lock, so the
+/// test that ran it blocks there until the process exits with the signal's
+/// status, never with the status of a harness that ran to completion.
 #[cfg(unix)]
 fn ensure_interrupt_handler() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
@@ -1523,10 +1564,8 @@ fn ensure_interrupt_handler() {
                         _ = terminate.recv() => 15,
                         _ = hangup.recv() => 1,
                     };
-                    let groups = std::mem::take(&mut *live_command_groups());
-                    for pgid in groups {
-                        kill_process_group(pgid);
-                    }
+                    let groups = live_command_groups();
+                    kill_process_groups(&groups);
                     std::process::exit(128 + signal_number);
                 });
             });
@@ -6516,57 +6555,77 @@ mod tests {
         !stat.is_empty() && !stat.starts_with('Z')
     }
 
-    /// A shell command that backgrounds a long `sleep`, writes its pid
-    /// atomically to `pid_file`, and waits.
+    /// A shell command that backgrounds a `sleep` which never ends on its
+    /// own, reports the sleep's pid on the FIFO `pid_fifo` (see
+    /// [`DescendantWatch`]), and waits. The sleep keeps the FIFO open for
+    /// writing for as long as it lives; the shell closes its own copy once
+    /// the pid is written.
     #[cfg(unix)]
-    fn backgrounding_command(pid_file: &std::path::Path) -> Vec<String> {
-        let tmp = pid_file.with_extension("tmp");
+    fn backgrounding_command(pid_fifo: &std::path::Path) -> Vec<String> {
         vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
             format!(
-                "sleep 300 & echo $! > '{}' && mv '{}' '{}'; wait",
-                tmp.display(),
-                tmp.display(),
-                pid_file.display()
+                "exec 3>'{}'; sleep 2147483647 & echo $! >&3; exec 3>&-; wait",
+                pid_fifo.display()
             ),
         ]
     }
 
-    /// The pid `pid_file` records, once it exists; it must name a running
-    /// process.
+    /// Make the FIFO a [`backgrounding_command`] reports on.
     #[cfg(unix)]
-    fn wait_for_running_descendant(pid_file: &std::path::Path, within: Duration) -> u32 {
-        let deadline = std::time::Instant::now() + within;
-        let pid = loop {
-            if let Ok(text) = std::fs::read_to_string(pid_file) {
-                break text
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or_else(|_| panic!("{} holds a pid: {text:?}", pid_file.display()));
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the command never recorded its descendant"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        };
-        assert!(
-            process_running(pid),
-            "the descendant {pid} runs before any kill"
-        );
-        pid
+    fn make_pid_fifo(dir: &std::path::Path) -> PathBuf {
+        let fifo = dir.join("descendant.pid");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).expect("make the pid FIFO");
+        fifo
+    }
+
+    /// The reading end of a [`backgrounding_command`]'s FIFO: typed signals,
+    /// with no polling, for "the descendant is running" (its pid arrives) and
+    /// "the descendant is gone" (end of file: the kernel closes a process's
+    /// descriptors when it exits, and the descendant holds the last writer).
+    /// A descendant that is never killed never ends, so a regression shows
+    /// as a hung test, never as a pass.
+    #[cfg(unix)]
+    struct DescendantWatch {
+        pid: u32,
+        fifo: std::io::BufReader<std::fs::File>,
     }
 
     #[cfg(unix)]
-    fn assert_stops_running(pid: u32, what: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while process_running(pid) {
+    impl DescendantWatch {
+        /// Block until the command reports its descendant, which then runs.
+        fn open(pid_fifo: &std::path::Path) -> Self {
+            use std::io::BufRead;
+            let mut fifo =
+                std::io::BufReader::new(std::fs::File::open(pid_fifo).expect("open the pid FIFO"));
+            let mut line = String::new();
+            fifo.read_line(&mut line)
+                .expect("read the descendant's pid");
+            let pid = line
+                .trim()
+                .parse::<u32>()
+                .unwrap_or_else(|_| panic!("the command reports a pid: {line:?}"));
             assert!(
-                std::time::Instant::now() < deadline,
-                "{what}: descendant {pid} is still running"
+                process_running(pid),
+                "the descendant {pid} runs before any kill"
             );
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            Self { pid, fifo }
+        }
+
+        /// Block until the descendant has exited.
+        fn wait_until_gone(mut self, what: &str) {
+            use std::io::Read;
+            let mut rest = Vec::new();
+            self.fifo
+                .read_to_end(&mut rest)
+                .expect("read the pid FIFO to its end");
+            assert!(rest.is_empty(), "{what}: unexpected FIFO output {rest:?}");
+            assert!(
+                !process_running(self.pid),
+                "{what}: descendant {} closed the FIFO but still runs",
+                self.pid
+            );
         }
     }
 
@@ -6577,23 +6636,22 @@ mod tests {
     #[tokio::test]
     async fn a_timed_out_command_leaves_nothing_it_started_running() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let pid_file = temp.path().join("descendant.pid");
-        let command = backgrounding_command(&pid_file);
+        let pid_fifo = make_pid_fifo(temp.path());
+        let command = backgrounding_command(&pid_fifo);
         let cwd = temp.path().to_path_buf();
         let run = tokio::spawn(async move { run_command(&command, &cwd, &[], 5).await });
-        let pid = tokio::task::spawn_blocking({
-            let pid_file = pid_file.clone();
-            move || wait_for_running_descendant(&pid_file, Duration::from_secs(4))
-        })
-        .await
-        .expect("wait for the descendant");
+        let descendant = tokio::task::spawn_blocking(move || DescendantWatch::open(&pid_fifo))
+            .await
+            .expect("wait for the descendant");
         let error = run
             .await
             .expect("run task")
             .err()
             .expect("the command outlives its timeout");
         assert!(error.contains("timed out"), "{error}");
-        assert_stops_running(pid, "a timed-out command");
+        tokio::task::spawn_blocking(move || descendant.wait_until_gone("a timed-out command"))
+            .await
+            .expect("wait for the descendant to exit");
     }
 
     /// Run by [`an_interrupted_harness_leaves_nothing_it_started_running`],
@@ -6615,14 +6673,30 @@ mod tests {
 
     /// An interrupted harness (Ctrl-C's SIGINT, the SIGTERM a runner
     /// forwards, a SIGHUP) runs no destructors. The command's group is out of
-    /// reach of the signal sent to the harness, so the interrupt handler kills
-    /// it before the harness exits: nothing the command started keeps running.
+    /// reach of the signal sent to the harness, so the interrupt handler
+    /// kills it before the harness exits: nothing the command started keeps
+    /// running.
+    ///
+    /// Every step waits on a typed signal, never on a clock. The helper is
+    /// signalled only once it is interruptible: its handler is installed
+    /// before its command spawns, the command's group is registered under
+    /// the same lock the handler takes, and the command reports its
+    /// descendant only after it spawned. The helper's exit status is its
+    /// handler's: the handler holds the command registry through
+    /// `process::exit`, so the helper's test cannot finish (and exit 0) after
+    /// its command dies (#1243).
     #[cfg(unix)]
     #[test]
     fn an_interrupted_harness_leaves_nothing_it_started_running() {
-        for (signal, code) in [("INT", 130), ("TERM", 143), ("HUP", 129)] {
+        use nix::sys::signal::Signal;
+        for (signal, code) in [
+            (Signal::SIGINT, 130),
+            (Signal::SIGTERM, 143),
+            (Signal::SIGHUP, 129),
+        ] {
             let temp = tempfile::tempdir().expect("temp dir");
-            let mut helper =
+            let pid_fifo = make_pid_fifo(temp.path());
+            let mut helper = HelperHarness(
                 std::process::Command::new(std::env::current_exe().expect("this test binary"))
                     .args([
                         "--exact",
@@ -6636,29 +6710,43 @@ mod tests {
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .spawn()
-                    .expect("start the helper harness");
-            let pid = wait_for_running_descendant(
-                &temp.path().join("descendant.pid"),
-                Duration::from_secs(60),
+                    .expect("start the helper harness"),
             );
-            let sent = std::process::Command::new("kill")
-                .args([format!("-{signal}"), helper.id().to_string()])
-                .status()
-                .expect("run kill");
-            assert!(sent.success(), "SIG{signal} delivered to the helper");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            let status = loop {
-                if let Some(status) = helper.try_wait().expect("poll the helper") {
-                    break status;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the interrupted helper exits"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            };
-            assert_eq!(status.code(), Some(code), "SIG{signal}: {status:?}");
-            assert_stops_running(pid, &format!("a harness interrupted by SIG{signal}"));
+            let descendant = DescendantWatch::open(&pid_fifo);
+            nix::sys::signal::kill(helper.pid(), signal)
+                .unwrap_or_else(|error| panic!("deliver {signal} to the helper: {error}"));
+            let status = helper.0.wait().expect("wait for the helper to exit");
+            assert_eq!(status.code(), Some(code), "{signal}: {status:?}");
+            descendant.wait_until_gone(&format!("a harness interrupted by {signal}"));
+        }
+    }
+
+    /// The helper harness of
+    /// [`an_interrupted_harness_leaves_nothing_it_started_running`]. If the
+    /// test fails before the helper exits, dropping this stops it with
+    /// SIGTERM, so its interrupt handler still kills the command group it
+    /// started, and reaps it. (Without the handler, SIGTERM's default action
+    /// ends it just the same.)
+    #[cfg(unix)]
+    struct HelperHarness(std::process::Child);
+
+    #[cfg(unix)]
+    impl HelperHarness {
+        fn pid(&self) -> nix::unistd::Pid {
+            nix::unistd::Pid::from_raw(
+                i32::try_from(self.0.id()).expect("the helper's pid fits a pid_t"),
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for HelperHarness {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            let _ = nix::sys::signal::kill(self.pid(), nix::sys::signal::Signal::SIGTERM);
+            let _ = self.0.wait();
         }
     }
 

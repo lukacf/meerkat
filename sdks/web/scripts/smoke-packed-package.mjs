@@ -15,7 +15,8 @@
 //      enforced for the release build (profile release, opt-level "s", as the
 //      package's wasm/.meerkat-wasm-build.json records it) and only logged
 //      for other builds, such as the dev-profile build of the manual sdk-web
-//      lane.
+//      lane. On every build the high-water must reach a sanity floor, so a
+//      probe that is not observing the turn's memory fails instead of passing.
 //
 // Usage:
 //   node scripts/smoke-packed-package.mjs <rkat-web-X.Y.Z.tgz>
@@ -30,6 +31,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertWasmStack } from "./wasm-stack.mjs";
 import {
+  assertStackProbeObservedTurn,
   assertStackWithinBudget,
   paintIdleStack,
   stackHighWater,
@@ -160,6 +162,7 @@ async function main(argv) {
       const turnStack = stackHighWater(instance.memory, stack);
       assert.equal(result.text, REPLY, "the packed runtime's turn returned the stubbed reply");
       assert.ok(requests.length >= 1, "the turn reached the provider through fetch");
+      assertStackProbeObservedTurn(turnStack, `${path.basename(tarball)} turn`);
       const budget = turnStackBudget(build);
       if (budget.enforced) {
         console.log(

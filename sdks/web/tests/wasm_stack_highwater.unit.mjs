@@ -6,6 +6,8 @@ import test from "node:test";
 
 import {
   TURN_STACK_BUDGET_BYTES,
+  TURN_STACK_FLOOR_BYTES,
+  assertStackProbeObservedTurn,
   assertStackWithinBudget,
   paintIdleStack,
   stackHighWater,
@@ -30,16 +32,44 @@ test("the deepest overwritten byte below the resting pointer is the high-water",
   assert.equal(stackHighWater(mem, stack), 100 * KiB);
 });
 
-test("a data-first stack is measured from its own base, not address zero", () => {
+test("painting stays below the resting stack pointer and inside the free stack", () => {
+  const stack = { initialStackPointer: 256 * KiB, stackBytes: 128 * KiB, layout: "stack-first" };
+  const mem = memory(512 * KiB);
+  const view = new Uint8Array(mem.buffer);
+  view.fill(1);
+  paintIdleStack(mem, stack);
+  const base = stack.initialStackPointer - stack.stackBytes;
+  assert.equal(view[base - 1], 1, "nothing below the stack's base is painted");
+  assert.notEqual(view[base], 1, "the stack's base is painted");
+  // The resting pointer's own byte, everything above it, and the margin just
+  // below it (where the next call's first frame lands) keep their contents.
+  for (let address = stack.initialStackPointer - 64; address < view.length; address++) {
+    assert.equal(view[address], 1, `byte ${address} at or above the unpainted margin is untouched`);
+  }
+  assert.notEqual(view[stack.initialStackPointer - 65], 1, "the free stack below the margin is painted");
+});
+
+test("a data-first stack is refused: its free stack may overlap .bss", () => {
   const stack = { initialStackPointer: 384 * KiB, stackBytes: 128 * KiB, layout: "data-first" };
   const mem = memory(512 * KiB);
   const view = new Uint8Array(mem.buffer);
-  view.fill(1, 0, 256 * KiB); // data below the stack is left alone
-  paintIdleStack(mem, stack);
-  assert.equal(view[256 * KiB - 1], 1, "the data below the stack is untouched");
-  assert.equal(stackHighWater(mem, stack), 0);
-  view[stack.initialStackPointer - 64 * KiB] = 0;
-  assert.equal(stackHighWater(mem, stack), 64 * KiB);
+  view.fill(1);
+  assert.throws(() => paintIdleStack(mem, stack), /cannot paint a data-first wasm stack/);
+  assert.ok(view.every((byte) => byte === 1), "nothing was painted");
+  assert.throws(
+    () => paintIdleStack(mem, { initialStackPointer: 384 * KiB, stackBytes: 128 * KiB }),
+    /cannot paint a unknown-layout wasm stack/,
+  );
+});
+
+test("a high-water under the floor means the probe missed the turn", () => {
+  assert.equal(assertStackProbeObservedTurn(TURN_STACK_FLOOR_BYTES), TURN_STACK_FLOOR_BYTES);
+  assert.throws(() => assertStackProbeObservedTurn(0), /below the 16384-byte floor/);
+  assert.throws(() => assertStackProbeObservedTurn(TURN_STACK_FLOOR_BYTES - 1), /below the 16384-byte floor/);
+  assert.ok(
+    TURN_STACK_FLOOR_BYTES < TURN_STACK_BUDGET_BYTES / 8,
+    "the floor sits far below a real release-build turn (about 133 KB)",
+  );
 });
 
 test("a turn over its budget is refused, at or under it passes", () => {

@@ -26261,7 +26261,7 @@ capabilities = ["rpc"]
         let temp = tempfile::tempdir().expect("tempdir");
         let mut scope = test_scope_with_context(temp.path().to_path_buf());
         scope.user_config_root = Some(temp.path().to_path_buf());
-        let mob_dir = create_mobpack_fixture_dir_with_skill_path(temp.path());
+        let (mob_dir, mob_id) = create_mobpack_fixture_dir_with_skill_path(temp.path());
         let pack_out = temp.path().join("e2e-pack-deploy.mobpack");
 
         execute_mob_pack(&mob_dir, &pack_out, None)
@@ -26280,7 +26280,7 @@ capabilities = ["rpc"]
         .expect("deploy should succeed");
 
         assert!(
-            output.contains("deployed\tmob=fixture-mob-with-skill\tsurface=cli"),
+            output.contains(&format!("deployed\tmob={mob_id}\tsurface=cli")),
             "deploy should use packed definition id and complete CLI deploy path: {output}"
         );
     }
@@ -26730,84 +26730,30 @@ capabilities = ["rpc"]
         Ok(())
     }
 
-    fn create_mobpack_fixture_dir(base: &std::path::Path) -> PathBuf {
-        let mob_dir = base.join("fixture-mob");
-        std::fs::create_dir_all(mob_dir.join("skills")).expect("create skills dir");
-        std::fs::create_dir_all(mob_dir.join("hooks")).expect("create hooks dir");
-        std::fs::write(
-            mob_dir.join("manifest.toml"),
-            "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
-        )
-        .expect("write manifest");
-        std::fs::write(
-            mob_dir.join("definition.json"),
-            br#"{
-  "id":"fixture-mob",
-  "orchestrator":{"profile":"lead"},
-  "profiles":{
-    "lead":{
-      "model":"claude-sonnet-4-5",
-      "skills":[],
-      "tools":{"comms":true},
-      "peer_description":"Lead",
-      "external_addressable":true
-    }
-  },
-  "skills":{}
-}"#,
-        )
-        .expect("write definition");
-        std::fs::write(mob_dir.join("skills").join("review.md"), "# Review\n")
-            .expect("write skill");
-        std::fs::write(
-            mob_dir.join("hooks").join("run.sh"),
-            "#!/bin/sh\necho run\n",
-        )
-        .expect("write hook");
-        mob_dir
+    /// A mob id no other test in this process uses.
+    ///
+    /// A created or deployed mob's supervisor claims the participant name
+    /// `{mob_id}/__mob_supervisor__` in the in-process comms registry, which
+    /// is the process's own transport and deliberately process-wide: every
+    /// runtime in the process routes through it, and a live route under a
+    /// name is never taken over. These tests leave their mobs running, as the
+    /// CLI process does until it exits, so under an in-process `cargo test` a
+    /// mob id shared between tests makes a later test's claim collide with an
+    /// earlier test's live route.
+    fn unique_test_mob_id(prefix: &str) -> String {
+        format!("{prefix}-{}", uuid::Uuid::new_v4().simple())
     }
 
-    fn create_mobpack_fixture_dir_with_skill_path(base: &std::path::Path) -> PathBuf {
-        let mob_dir = base.join("fixture-mob-with-skill");
-        std::fs::create_dir_all(mob_dir.join("skills")).expect("create skills dir");
-        std::fs::create_dir_all(mob_dir.join("hooks")).expect("create hooks dir");
-        std::fs::write(
-            mob_dir.join("manifest.toml"),
-            "[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n",
-        )
-        .expect("write manifest");
-        std::fs::write(
-            mob_dir.join("definition.json"),
-            br#"{
-  "id":"fixture-mob-with-skill",
-  "orchestrator":{"profile":"lead"},
-  "profiles":{
-    "lead":{
-      "model":"claude-sonnet-4-5",
-      "skills":["review"],
-      "tools":{"comms":true},
-      "peer_description":"Lead",
-      "external_addressable":true
-    }
-  },
-  "skills":{
-    "review":{"source":"path","path":"skills/review.md"}
-  }
-}"#,
-        )
-        .expect("write definition");
-        std::fs::write(mob_dir.join("skills").join("review.md"), "# Review\n")
-            .expect("write skill");
-        std::fs::write(
-            mob_dir.join("hooks").join("run.sh"),
-            "#!/bin/sh\necho run\n",
-        )
-        .expect("write hook");
-        mob_dir
-    }
-
-    fn create_orchestratorless_mobpack_fixture_dir(base: &std::path::Path) -> PathBuf {
-        let mob_dir = base.join("fixture-mob-no-orchestrator");
+    /// Write a mobpack fixture directory `base/dir_name` whose definition is
+    /// `definition` (skills/review.md and hooks/run.sh are included when
+    /// `with_skill_and_hook`).
+    fn write_mobpack_fixture_dir(
+        base: &std::path::Path,
+        dir_name: &str,
+        definition: &serde_json::Value,
+        with_skill_and_hook: bool,
+    ) -> PathBuf {
+        let mob_dir = base.join(dir_name);
         std::fs::create_dir_all(&mob_dir).expect("create mob dir");
         std::fs::write(
             mob_dir.join("manifest.toml"),
@@ -26816,22 +26762,91 @@ capabilities = ["rpc"]
         .expect("write manifest");
         std::fs::write(
             mob_dir.join("definition.json"),
-            br#"{
-  "id":"fixture-mob-no-orchestrator",
-  "profiles":{
-    "worker":{
-      "model":"claude-sonnet-4-5",
-      "skills":[],
-      "tools":{"comms":true},
-      "peer_description":"Worker",
-      "external_addressable":true
-    }
-  },
-  "skills":{}
-}"#,
+            serde_json::to_vec_pretty(definition).expect("encode definition"),
         )
         .expect("write definition");
+        if with_skill_and_hook {
+            std::fs::create_dir_all(mob_dir.join("skills")).expect("create skills dir");
+            std::fs::create_dir_all(mob_dir.join("hooks")).expect("create hooks dir");
+            std::fs::write(mob_dir.join("skills").join("review.md"), "# Review\n")
+                .expect("write skill");
+            std::fs::write(
+                mob_dir.join("hooks").join("run.sh"),
+                "#!/bin/sh\necho run\n",
+            )
+            .expect("write hook");
+        }
         mob_dir
+    }
+
+    fn create_mobpack_fixture_dir(base: &std::path::Path) -> PathBuf {
+        write_mobpack_fixture_dir(
+            base,
+            "fixture-mob",
+            &serde_json::json!({
+                "id": unique_test_mob_id("fixture-mob"),
+                "orchestrator": {"profile": "lead"},
+                "profiles": {
+                    "lead": {
+                        "model": "claude-sonnet-4-5",
+                        "skills": [],
+                        "tools": {"comms": true},
+                        "peer_description": "Lead",
+                        "external_addressable": true
+                    }
+                },
+                "skills": {}
+            }),
+            true,
+        )
+    }
+
+    /// The fixture directory and the mob id its definition declares.
+    fn create_mobpack_fixture_dir_with_skill_path(base: &std::path::Path) -> (PathBuf, String) {
+        let mob_id = unique_test_mob_id("fixture-mob-with-skill");
+        let mob_dir = write_mobpack_fixture_dir(
+            base,
+            "fixture-mob-with-skill",
+            &serde_json::json!({
+                "id": mob_id,
+                "orchestrator": {"profile": "lead"},
+                "profiles": {
+                    "lead": {
+                        "model": "claude-sonnet-4-5",
+                        "skills": ["review"],
+                        "tools": {"comms": true},
+                        "peer_description": "Lead",
+                        "external_addressable": true
+                    }
+                },
+                "skills": {
+                    "review": {"source": "path", "path": "skills/review.md"}
+                }
+            }),
+            true,
+        );
+        (mob_dir, mob_id)
+    }
+
+    fn create_orchestratorless_mobpack_fixture_dir(base: &std::path::Path) -> PathBuf {
+        write_mobpack_fixture_dir(
+            base,
+            "fixture-mob-no-orchestrator",
+            &serde_json::json!({
+                "id": unique_test_mob_id("fixture-mob-no-orchestrator"),
+                "profiles": {
+                    "worker": {
+                        "model": "claude-sonnet-4-5",
+                        "skills": [],
+                        "tools": {"comms": true},
+                        "peer_description": "Worker",
+                        "external_addressable": true
+                    }
+                },
+                "skills": {}
+            }),
+            false,
+        )
     }
 
     #[test]
@@ -28372,7 +28387,7 @@ default_model = "gpt-5.4"
             &dispatcher_a,
             "t-create",
             "mob_create",
-            serde_json::json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
+            serde_json::json!({"definition":{"id":unique_test_mob_id("test_mob"),"orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
         let mob_id = created["mob_id"]
@@ -28461,7 +28476,7 @@ default_model = "gpt-5.4"
             &dispatcher,
             "t-create-runtime",
             "mob_create",
-            serde_json::json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
+            serde_json::json!({"definition":{"id":unique_test_mob_id("test_mob"),"orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
         let mob_id = created["mob_id"].as_str().expect("mob id").to_string();
@@ -28518,7 +28533,7 @@ default_model = "gpt-5.4"
             &dispatcher,
             "t-create",
             "mob_create",
-            serde_json::json!({"definition":{"id":"test_mob","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
+            serde_json::json!({"definition":{"id":unique_test_mob_id("test_mob"),"profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
         let mob_id = created["mob_id"]

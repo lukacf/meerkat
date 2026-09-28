@@ -1963,7 +1963,6 @@ struct MockSessionService {
     /// Per-session read counts, so a test can pin the reads of one member's
     /// session while other sessions are read in the background.
     session_reads_for: SessionReadCountsBySession,
-    load_persisted_session_delays_for: std::sync::Mutex<HashMap<SessionId, Duration>>,
     execution_snapshot_calls: AtomicU64,
     execution_snapshots: std::sync::Mutex<VecDeque<meerkat_core::agent::AgentExecutionSnapshot>>,
     session_read_barriers: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
@@ -2126,7 +2125,6 @@ impl MockSessionService {
             session_read_delays_for: std::sync::Mutex::new(HashMap::new()),
             session_read_failures_for: std::sync::Mutex::new(HashMap::new()),
             session_reads_for: std::sync::Mutex::new(HashMap::new()),
-            load_persisted_session_delays_for: std::sync::Mutex::new(HashMap::new()),
             execution_snapshot_calls: AtomicU64::new(0),
             execution_snapshots: std::sync::Mutex::new(VecDeque::new()),
             session_read_barriers: RwLock::new(HashMap::new()),
@@ -2797,13 +2795,6 @@ impl MockSessionService {
             }
             _ => false,
         }
-    }
-
-    fn set_load_persisted_session_delay_for(&self, session_id: &SessionId, delay: Duration) {
-        self.load_persisted_session_delays_for
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session_id.clone(), delay);
     }
 
     fn per_session_delay(
@@ -5007,11 +4998,6 @@ impl MobSessionService for MockSessionService {
         let delay_ms = self.load_persisted_session_delay_ms.load(Ordering::Relaxed);
         if delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        }
-        if let Some(delay) =
-            Self::per_session_delay(&self.load_persisted_session_delays_for, session_id)
-        {
-            tokio::time::sleep(delay).await;
         }
         if self.fail_load_persisted_session.load(Ordering::Relaxed) {
             return Err(SessionError::Agent(
@@ -61779,6 +61765,16 @@ async fn test_busy_member_execution_snapshot_cannot_block_mob_lifecycle_commands
 /// through an unbounded durable load (~9 s), and `calendar`'s own check on
 /// its idle fork child was refused on the spot. A busy member's slow read
 /// must neither block another member's read nor run unbounded.
+///
+/// Ordering is typed, not timed: calendar's transcript read is held by a
+/// barrier the test releases only at the end, and the test waits for that
+/// read to start before reading the child. The test adds no bound of its
+/// own; the only bounds in play are the production ones (the busy probe, the
+/// observation deadline, the drain ceiling), and their effect is asserted
+/// through the typed markers they produce. The clock is not paused: the
+/// runtime machine serves from its own runtime, and a paused clock
+/// auto-advances whenever this runtime idles waiting on it, which let those
+/// production bounds fire at arbitrary points (the flake this replaced).
 #[tokio::test]
 async fn test_busy_member_slow_status_read_does_not_block_another_member() {
     let (handle, service) = create_test_mob(sample_definition()).await;
@@ -61796,13 +61792,13 @@ async fn test_busy_member_slow_status_read_does_not_block_another_member() {
         .await
         .expect("spawn calendar child");
     // Calendar is mid-turn: its session task cannot answer the execution
-    // snapshot, and every read of its transcript takes ~9 s. The child is
-    // idle and answers at once.
+    // snapshot, and its transcript read does not finish until the test
+    // releases it. The child is idle and answers at once.
     service.set_execution_snapshot_delay_for(&calendar_session, Duration::from_secs(5));
-    service.set_load_persisted_session_delay_for(&calendar_session, Duration::from_secs(9));
-    service.set_session_read_delay_for(&calendar_session, Duration::from_secs(9));
+    let calendar_read = service
+        .install_session_read_barrier(calendar_session.clone())
+        .await;
 
-    tokio::time::pause();
     let calendar_rx = handle
         .enqueue_actor_command_for_test(|reply_tx| MobCommand::ProjectMemberStatus {
             agent_identity: calendar.clone(),
@@ -61810,22 +61806,29 @@ async fn test_busy_member_slow_status_read_does_not_block_another_member() {
         })
         .await
         .expect("enqueue the harness read of calendar");
-    // Past the 250 ms busy probe: calendar's observation is inside its slow
-    // transcript read.
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    let child_snapshot = tokio::time::timeout(Duration::from_secs(1), handle.member_status(&child))
+    // Calendar's observation is past its busy probe and inside its slow
+    // transcript read, holding one unit of the mob's status capacity.
+    service.wait_for_session_read().await;
+
+    let child_snapshot = handle
+        .member_status(&child)
         .await
-        .expect("the child's read is not held behind calendar's slow read")
         .expect("the child's read is not refused while calendar's read is in flight");
     assert_eq!(child_snapshot.preview_unavailable, None);
     assert!(
         child_snapshot.progress.is_some(),
         "the child's read carries its progress"
     );
+    assert_eq!(
+        service.session_reads_of(&calendar_session).in_flight,
+        1,
+        "the child was answered while calendar's slow read was still running, not behind it"
+    );
 
-    let calendar_snapshot = tokio::time::timeout(Duration::from_secs(2), calendar_rx)
+    // Calendar's callers are answered at the observation deadline while its
+    // read is still held: a slow read degrades instead of running unbounded.
+    let calendar_snapshot = calendar_rx
         .await
-        .expect("calendar's slow read is bounded by the observation deadline")
         .expect("calendar reply channel")
         .expect("a slow read degrades instead of failing");
     assert_eq!(calendar_snapshot.output_preview, None);
@@ -61852,6 +61855,7 @@ async fn test_busy_member_slow_status_read_does_not_block_another_member() {
         wire.preview_unavailable,
         Some(meerkat_contracts::WireMemberPreviewUnavailable::ObservationDeadline)
     );
+    calendar_read.release_all();
     handle.shutdown().await.expect("shutdown test mob");
 }
 

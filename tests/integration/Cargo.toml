@@ -52,6 +52,10 @@ futures.workspace = true
 tokio-tungstenite = "0.29"
 uuid = { workspace = true, features = ["v4"] }
 
+[target.'cfg(unix)'.dependencies]
+# The e2e harness terminates its lane commands' process groups (killpg).
+nix = { workspace = true }
+
 [features]
 integration-real-tests = []
 # Path-included mob fixtures use their owning crate's feature name.

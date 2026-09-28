@@ -35,6 +35,40 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- The e2e harness's interrupt handling is deterministic (#1243, #1229). The
+  handler now holds the lane-command registry from the moment it reads it
+  through `process::exit`, and commands spawn and register under that same
+  lock: a command can no longer escape between spawn and registration, and
+  a harness whose lane command dies from the handler's kill can no longer
+  finish its test and exit 0 before the handler exits with 128 plus the
+  signal number. Groups are killed with `nix::sys::signal::killpg` instead
+  of forking an external `kill`, and ESRCH/EPERM are logged. The interrupt
+  and timeout tests wait on typed signals only (a FIFO the backgrounded
+  descendant reports its pid on and holds open until it exits, and a
+  blocking wait on the helper), and a failing test stops its helper harness.
+- `rkat` bin tests pass under an in-process `cargo test` (#1240). Tests that
+  created or deployed mobs shared ids (`test_mob`, `fixture-mob`), and a mob's
+  supervisor claims `{mob_id}/__mob_supervisor__` in the process-wide
+  in-process comms registry, so a later test collided with an earlier test's
+  live route. Each test now uses a unique mob id. The registry stays
+  process-wide: it is the process's own in-process transport, and refusing
+  a second live route under one name is its contract.
+- `meerkat-mob`'s delivery-wait fixture closes its test-opened live context
+  channel before retiring its member, so
+  `unknown_delivery_reports_typed_unknown_by_deadline_and_for_retired_members`
+  passes under `--all-features` (disposal over an open live channel with no
+  cleanup host composed is a composition error by design).
+- `test_busy_member_slow_status_read_does_not_block_another_member` no longer
+  races paused-clock bounds against the runtime machine's own serving
+  runtime: calendar's slow read is held by a typed barrier, and the test
+  waits for it to start before reading the child.
+- The `@rkat/web` packed-package stack probe fails closed (#1229): it refuses
+  to paint a data-first module's stack (which can overlap `.bss`), and a
+  turn's high-water must reach a 16 KiB sanity floor, so a probe that is not
+  observing the turn's memory fails instead of passing every budget.
+
 ## [0.8.48] - 2026-09-28
 
 ### Fixed

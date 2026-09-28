@@ -128,6 +128,39 @@ them.
   Quiet reassertions, rows already present in the live channel, and excluded
   rows do not start the conversation, so nothing is appended into silence
   (lukacf/meerkat-mobkit#474).
+- Public Live under `PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured`
+  commits one canonical assistant row per provider turn instead of one row per
+  transcript delta (#1237). A segment seals only at typed points: the provider
+  turn's end, a between-speech boundary (a provider-acknowledged context
+  append, including the bootstrap acknowledgement cut, or a client
+  delegation), and channel close, EOF, or a terminal failure, so in-flight
+  speech is kept. The row carries the concatenation of the deltas observed in
+  the segment as `ProviderManagedUnmeasured` evidence and never claims
+  finality. Because gpt-live-1 has no assistant completion event, the row now
+  lands when the turn ends. Hosts show in-progress text through the new
+  `PublicGptLiveProvisionalCaptionSink`, installed with
+  `ExperimentalGptLiveOpenAuthority::with_public_provisional_caption_sink`:
+  each `PublicGptLiveProvisionalCaption` names the session, channel, and the
+  segment's item id, the same id the committed row's
+  `realtime_origin.provider_item_ids` records, and
+  `PublicGptLiveProvisionalCaptionSink::retract` (default no-op) names a
+  segment whose captions no row will replace. Ordering change: speech is
+  ordered where its segment seals. Speech the provider said before a mid-turn
+  canonical row from another writer (a typed turn or delegation result that
+  was committed, mirrored, and acknowledged) now lands after that row, at the
+  acknowledgement, instead of before it; speech after the acknowledgement
+  follows in its own row. A segment sealed while a member turn holds the
+  session boundary during a close or at a remote stream end is handed to the
+  channel close, whose deferred settlement applies it before settling
+  leftover playback (even when the member turn ends mid-close), so the
+  speech is kept; the close does not wait for the member turn.
+- Playback snapshot rows (`ProviderManagedUnmeasured` and
+  `CallerConfirmedSnapshots` alike) now carry a `realtime_origin` naming
+  their channel and provider item even when no live context observation
+  ordinal was admitted. The live context mirror therefore classifies such
+  same-channel rows as live transcript: they are no longer echoed back to the
+  provider as parent-session text, and, having no ordinal, they are not
+  reasserted after a bootstrap summary.
 - Compiled component-owned skill and capability registrations survive optimized
   WASM archive linking, preserving canonical skill resolution across repeated
   runtime initialization.

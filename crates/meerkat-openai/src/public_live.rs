@@ -2562,6 +2562,109 @@ mod tests {
         );
     }
 
+    /// gpt-live-1 has no assistant completion event: one spoken reply is one
+    /// open provider turn until the speaker changes or the session closes,
+    /// however many transcript deltas it streams. Consumers group by the turn
+    /// ref, never by delta.
+    #[test]
+    fn word_by_word_assistant_deltas_stay_on_one_provider_turn() {
+        let words = [
+            " keeper.",
+            " pine",
+            " opal",
+            " hazel",
+            ",",
+            " verification",
+            " code:",
+            " opal",
+            " gold",
+            " hazel",
+            " iris.",
+            " The",
+            " keeper",
+            " confirmed",
+            " the",
+            " code",
+            " and",
+            " the",
+            " route",
+            " is",
+            " clear",
+            " now",
+            ".",
+        ];
+        assert_eq!(words.len(), 23);
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta("what is the code")))
+            .unwrap();
+        drain(&mut state);
+        for word in words {
+            state.apply_frame(frame(output_delta(word))).unwrap();
+        }
+        let observations = drain(&mut state);
+        let GptLiveBrokerObservation::TurnFinished {
+            role: GptLiveTurnRole::User,
+            ..
+        } = &observations[0]
+        else {
+            panic!("the assistant reply finishes the user turn first: {observations:?}");
+        };
+        let GptLiveBrokerObservation::TurnStarted {
+            turn: assistant_turn,
+            role: GptLiveTurnRole::Assistant,
+        } = &observations[1]
+        else {
+            panic!("one assistant turn starts: {observations:?}");
+        };
+        let snapshot_turns: Vec<_> = observations
+            .iter()
+            .filter_map(|observation| match observation {
+                GptLiveBrokerObservation::TurnSnapshotDelta { turn, delta } => {
+                    Some((turn, delta.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(snapshot_turns.len(), 23);
+        assert!(
+            snapshot_turns
+                .iter()
+                .all(|(turn, _)| *turn == assistant_turn),
+            "every delta belongs to the one open assistant turn"
+        );
+        assert_eq!(
+            snapshot_turns
+                .iter()
+                .map(|(_, delta)| *delta)
+                .collect::<String>(),
+            words.concat()
+        );
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|observation| matches!(
+                    observation,
+                    GptLiveBrokerObservation::TurnStarted { .. }
+                        | GptLiveBrokerObservation::TurnFinished { .. }
+                ))
+                .count(),
+            2,
+            "no delta starts or finishes a turn"
+        );
+        // Only the speaker change or the session end finishes the turn.
+        state.apply_frame(frame(session_closed())).unwrap();
+        let closed = drain(&mut state);
+        assert!(matches!(
+            closed.first(),
+            Some(GptLiveBrokerObservation::TurnFinished {
+                turn,
+                role: GptLiveTurnRole::Assistant,
+                transcript,
+            }) if turn == assistant_turn && *transcript == words.concat()
+        ));
+    }
+
     #[test]
     fn client_delegation_terminates_the_open_user_turn_as_an_exact_join() {
         let mut state = SessionState::default();

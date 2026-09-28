@@ -829,7 +829,11 @@ fn observe_live_assistant_playback_terminal(
                     evidence: evidence.clone(),
                 }
             };
-            agent.append_realtime_transcript_event(event)?;
+            // Applied from its channel, so the committed row's
+            // `realtime_origin` names the channel and the segment's provider
+            // item even when no context observation ordinal was admitted: the
+            // key a host pairs its provisional caption with.
+            agent.append_realtime_transcript_event_for_channel(event, channel_id.clone())?;
         }
         if target.is_some() {
             agent.resolve_live_assistant_playback_target(
@@ -2026,6 +2030,9 @@ mod tests {
         let session_id = agent.session_id();
         let channel = LiveChannelId::new("continuous-observations");
         let interaction = InteractionId::new();
+        // Each release is one sealed segment: the concatenation of every
+        // delta the adapter observed in it, never one delta per release.
+        let segment_text = ["observed", ",", " never", " measured", " as", " played"].concat();
         for segment in 0..4 {
             let response = format!("unmeasured-response-{segment}");
             let item = format!("unmeasured-item-{segment}");
@@ -2045,7 +2052,7 @@ mod tests {
                         response_id: response.clone(),
                         item_id: item.clone(),
                         content_index: 0,
-                        text: "observed, never measured as played".to_string(),
+                        text: segment_text.clone(),
                     },
                 )
                 .expect("stage text independently of playback");
@@ -2057,9 +2064,7 @@ mod tests {
                 response.clone(),
                 item.clone(),
                 0,
-                LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
-                    "observed, never measured as played".to_string(),
-                ),
+                LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(segment_text.clone()),
             )
             .expect("generated unmeasured release needs no playback-complete call");
             assert_eq!(
@@ -2083,11 +2088,15 @@ mod tests {
                     .live_assistant_playback_target_for_channel(&channel)
                     .is_none()
             );
-            assert_eq!(agent.session.messages().len(), segment + 1);
+            assert_eq!(
+                agent.session.messages().len(),
+                segment + 1,
+                "one sealed segment commits exactly one row"
+            );
             assert!(agent.session.messages().iter().all(|message| matches!(message,
                 meerkat_core::Message::BlockAssistant(assistant) if assistant.stop_reason.is_none() && assistant.blocks.iter().all(|block| matches!(block,
                     meerkat_core::AssistantBlock::Transcript { text, source: meerkat_core::types::TranscriptSource::SpokenUnmeasured, .. }
-                        if text == "observed, never measured as played"
+                        if *text == segment_text
                 ))
             )));
             let bytes = serde_json::to_vec(&agent.session).expect("persist unmeasured receipt");
@@ -2100,9 +2109,7 @@ mod tests {
                 response.clone(),
                 item.clone(),
                 0,
-                LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
-                    "observed, never measured as played".to_string(),
-                ),
+                LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(segment_text.clone()),
             )
             .expect("same unmeasured evidence replays after staging was discarded");
             assert_eq!(receipt, replay);
@@ -2132,6 +2139,139 @@ mod tests {
                 .expect("released channel closes with no pending target")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn provider_managed_unmeasured_word_by_word_segment_commits_one_row() {
+        let mut agent = PlaybackTestAgent::new();
+        let session_id = agent.session_id();
+        let channel = LiveChannelId::new("word-by-word");
+        let interaction = InteractionId::new();
+        let words = [
+            " keeper.",
+            " pine",
+            " opal",
+            " hazel",
+            ",",
+            " verification",
+            " code:",
+            " opal",
+            " gold",
+            " hazel",
+            " iris.",
+            " The",
+            " keeper",
+            " confirmed",
+            " the",
+            " code",
+            " and",
+            " the",
+            " route",
+            " is",
+            " clear",
+            " now",
+            ".",
+        ];
+        let text = words.concat();
+        admit_live_assistant_playback_target(
+            &mut agent,
+            &session_id,
+            channel.clone(),
+            interaction,
+            "turn-response".to_string(),
+            "turn-item".to_string(),
+            0,
+        )
+        .expect("one segment for the whole provider turn");
+        let receipt = commit_live_assistant_playback_truncation(
+            &mut agent,
+            &session_id,
+            channel,
+            interaction,
+            "turn-response".to_string(),
+            "turn-item".to_string(),
+            0,
+            LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(text.clone()),
+        )
+        .expect("the sealed segment releases without staging or playback report");
+        assert_eq!(
+            receipt.disposition(),
+            LiveAssistantPlaybackTruncationDisposition::Unmeasured
+        );
+        let assistant = match agent.session.messages() {
+            [meerkat_core::Message::BlockAssistant(assistant)] => Some(assistant),
+            _ => None,
+        }
+        .expect("one unmeasured commit is one canonical row");
+        assert!(matches!(
+            assistant.blocks.as_slice(),
+            [meerkat_core::AssistantBlock::Transcript {
+                text: committed,
+                source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                ..
+            }] if *committed == text
+        ));
+        assert_eq!(assistant.stop_reason, None);
+        assert_eq!(agent.completed_events, 0);
+        let origin = assistant
+            .identity
+            .realtime_origin
+            .as_ref()
+            .expect("the row names its live channel and provider item");
+        assert_eq!(origin.provider_item_ids(), ["turn-item".to_string()]);
+    }
+
+    /// A caller-confirmed snapshot row commits with a `realtime_origin` naming
+    /// its channel and provider item even without a live context observation
+    /// ordinal, so the live context mirror classifies it as live transcript
+    /// (never echoed back to the provider) and a console can pair it.
+    #[test]
+    fn caller_confirmed_snapshot_row_carries_its_channel_origin_without_an_ordinal() {
+        let mut agent = PlaybackTestAgent::new();
+        let session_id = agent.session_id();
+        let channel = LiveChannelId::new("caller-confirmed-origin");
+        let interaction = InteractionId::new();
+        admit_live_assistant_playback_target(
+            &mut agent,
+            &session_id,
+            channel.clone(),
+            interaction,
+            "confirmed-response".to_string(),
+            "confirmed-item".to_string(),
+            0,
+        )
+        .expect("admit the confirmed segment");
+        let outcome = observe_live_assistant_playback_terminal_with_completion(
+            &mut agent,
+            &session_id,
+            channel.clone(),
+            interaction,
+            "confirmed-response".to_string(),
+            "confirmed-item".to_string(),
+            0,
+            LiveAssistantPlaybackEvidence::CallerConfirmedSnapshot("heard in full".to_string()),
+            meerkat_core::StopReason::EndTurn,
+            meerkat_core::TurnUsage::host_declared(
+                meerkat_core::Provider::OpenAI,
+                "gpt-live-1",
+                meerkat_core::Usage::default(),
+            ),
+        )
+        .expect("caller-confirmed cut commits");
+        assert!(outcome.is_resolved());
+        let assistant = match agent.session.messages() {
+            [meerkat_core::Message::BlockAssistant(assistant)] => Some(assistant),
+            _ => None,
+        }
+        .expect("one committed snapshot row");
+        let origin = assistant
+            .identity
+            .realtime_origin
+            .as_ref()
+            .expect("the snapshot row names its live channel");
+        assert!(origin.matches(&session_id, &channel, 1));
+        assert_eq!(origin.provider_item_ids(), ["confirmed-item".to_string()]);
+        assert_eq!(origin.context_observation_id(), None);
     }
 
     #[test]

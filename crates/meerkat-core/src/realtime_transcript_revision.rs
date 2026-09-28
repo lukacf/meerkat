@@ -1143,6 +1143,7 @@ fn apply_realtime_transcript_event_from_channel_inner(
             text,
             evidence,
             TranscriptLane::Spoken,
+            source_channel,
         )?,
         RealtimeTranscriptEvent::AssistantUnmeasuredSnapshotCommitted {
             channel_id,
@@ -1162,6 +1163,7 @@ fn apply_realtime_transcript_event_from_channel_inner(
             text,
             evidence,
             TranscriptLane::SpokenUnmeasured,
+            source_channel,
         )?,
         RealtimeTranscriptEvent::AssistantTurnInterrupted { response_id } => {
             apply_assistant_turn_interrupted(state, response_id)?
@@ -1976,7 +1978,13 @@ fn apply_assistant_playback_snapshot(
     text: String,
     evidence: crate::LiveAssistantPlaybackEvidence,
     requested_lane: TranscriptLane,
+    source_channel: Option<crate::LiveChannelId>,
 ) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
+    // Only the channel the snapshot names can stamp the row's origin. The
+    // session applies it from exactly that channel; a different application
+    // channel is not evidence for this item and stamps nothing (it is not a
+    // reducer failure, which would fail the session closed).
+    let source_channel = source_channel.filter(|channel| channel.as_str() == channel_id);
     let evidence_matches = match (&evidence, requested_lane) {
         (
             crate::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(snapshot),
@@ -2053,6 +2061,12 @@ fn apply_assistant_playback_snapshot(
         item.lane = lane;
         item.content_segments.insert(content_index, text);
         item.ready = true;
+        // A snapshot observes and materializes its item in one step, so the
+        // channel it was applied from is stamped here, before the row
+        // commits; the row's origin then names this item.
+        if item.source_channel.is_none() {
+            item.source_channel = source_channel;
+        }
         if lane == TranscriptLane::SpokenUnmeasured {
             item.final_content_indices.remove(&content_index);
         }

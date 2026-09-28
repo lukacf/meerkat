@@ -1974,6 +1974,10 @@ struct MockSessionService {
     fail_load_persisted_session: AtomicBool,
     load_persisted_session_calls: AtomicU64,
     load_persisted_session_metadata_calls: AtomicU64,
+    /// #1250 seam: per-read delay for the metadata-only durable read, and
+    /// per-session metadata read counts (proves a single realm scan).
+    load_persisted_session_metadata_delay_ms: AtomicU64,
+    metadata_reads_for: std::sync::Mutex<HashMap<SessionId, u64>>,
     load_persisted_session_in_flight: AtomicU64,
     load_persisted_session_max_in_flight: AtomicU64,
     create_session_in_flight: AtomicU64,
@@ -2145,6 +2149,8 @@ impl MockSessionService {
             fail_load_persisted_session: AtomicBool::new(false),
             load_persisted_session_calls: AtomicU64::new(0),
             load_persisted_session_metadata_calls: AtomicU64::new(0),
+            load_persisted_session_metadata_delay_ms: AtomicU64::new(0),
+            metadata_reads_for: Default::default(),
             load_persisted_session_in_flight: AtomicU64::new(0),
             load_persisted_session_max_in_flight: AtomicU64::new(0),
             create_session_in_flight: AtomicU64::new(0),
@@ -2944,6 +2950,20 @@ impl MockSessionService {
 
     fn persisted_session_load_call_count(&self) -> u64 {
         self.load_persisted_session_calls.load(Ordering::Relaxed)
+    }
+
+    fn set_persisted_session_metadata_delay_ms(&self, delay_ms: u64) {
+        self.load_persisted_session_metadata_delay_ms
+            .store(delay_ms, Ordering::Relaxed);
+    }
+
+    fn persisted_session_metadata_reads_for(&self, session_id: &SessionId) -> u64 {
+        self.metadata_reads_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .copied()
+            .unwrap_or_default()
     }
 
     fn persisted_session_metadata_load_call_count(&self) -> u64 {
@@ -5103,6 +5123,18 @@ impl MobSessionService for MockSessionService {
     ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
         self.load_persisted_session_metadata_calls
             .fetch_add(1, Ordering::Relaxed);
+        *self
+            .metadata_reads_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(session_id.clone())
+            .or_default() += 1;
+        let delay_ms = self
+            .load_persisted_session_metadata_delay_ms
+            .load(Ordering::Relaxed);
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
         let _authority_guard = self.resume_authority_gate.lock().await;
         let persisted = if self.archived_session_ids.read().await.contains(session_id) {
             None
@@ -54076,6 +54108,610 @@ async fn test_explicit_resume_progress_stall_names_member_and_remains_joinable()
         .await
         .expect("retry joins the retained exact Resume operation");
     responder.await.expect("Resume responder task");
+}
+
+/// Persist a canonical successor session for `identity` (a lost-session
+/// member's replacement) or, with `identity = None`, an unrelated realm
+/// session that successor search must scan past.
+#[cfg(feature = "runtime-adapter")]
+async fn create_realm_session_for_test(
+    service: &MockSessionService,
+    identity: Option<&AgentIdentity>,
+) -> SessionId {
+    let comms_name = identity.map(|identity| {
+        super::actor::render_member_comms_name(
+            sample_definition().id.as_str(),
+            "worker",
+            identity.as_str(),
+        )
+        .expect("comms name")
+    });
+    let created = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "realm session".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name,
+                mob_member_binding: None,
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("persist realm session");
+    service
+        .session_comms_names
+        .write()
+        .await
+        .remove(&created.session_id);
+    created.session_id
+}
+
+/// #1250: a cold explicit Resume whose members lost their bound sessions
+/// searches the realm for successors ONCE for all members (each realm
+/// session's metadata is read exactly once) and reports progress per scanned
+/// session. A scan whose total duration exceeds the inactivity watchdog
+/// therefore completes instead of failing `LifecycleOperationProgressStalled`
+/// the way the HomeCore cold boot did.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn explicit_resume_successor_scan_reports_progress_and_scans_realm_once() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let _adapter = service.enable_runtime_adapter();
+    let mut members = Vec::new();
+    for name in ["scan-a", "scan-b", "scan-c"] {
+        let identity = AgentIdentity::from(name);
+        let session_id = handle
+            .spawn_with_options(
+                ProfileName::from("worker"),
+                identity.clone(),
+                None,
+                Some(crate::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn scan member")
+            .bridge_session_id()
+            .cloned()
+            .expect("turn-driven member has a bridge session");
+        members.push((identity, session_id));
+    }
+    whole_crew_stop(&handle, "stop crew").await;
+    let mut successors = Vec::new();
+    for (identity, session_id) in &members {
+        MobSessionService::discard_live_session(service.as_ref(), session_id)
+            .await
+            .expect("discard the member's actor");
+        service.delete_persisted_session(session_id).await;
+        successors.push(create_realm_session_for_test(&service, Some(identity)).await);
+    }
+    let mut unrelated = Vec::new();
+    for _ in 0..18 {
+        unrelated.push(create_realm_session_for_test(&service, None).await);
+    }
+    let reads_before: Vec<u64> = unrelated
+        .iter()
+        .map(|session_id| service.persisted_session_metadata_reads_for(session_id))
+        .collect();
+
+    // 21+ realm sessions at 120 ms each: the single scan alone outlasts the
+    // 2 s test inactivity watchdog, so only per-session progress keeps it
+    // alive. A per-member rescan would additionally triple the reads.
+    service.set_persisted_session_metadata_delay_ms(120);
+    let started = Instant::now();
+    tokio::time::timeout(Duration::from_secs(30), handle.resume())
+        .await
+        .expect("slow successor scan completes within the harness bound")
+        .expect("a scan that keeps reporting progress must not stall the resume");
+    let elapsed = started.elapsed();
+    service.set_persisted_session_metadata_delay_ms(0);
+    assert!(
+        elapsed > super::provisioner::EXPLICIT_RESUME_PROGRESS_TIMEOUT,
+        "the scan must outlast one inactivity window to prove progress ticks: {elapsed:?}"
+    );
+    for (session_id, before) in unrelated.iter().zip(reads_before) {
+        assert_eq!(
+            service.persisted_session_metadata_reads_for(session_id) - before,
+            1,
+            "realm session {session_id} must be scanned exactly once for all members"
+        );
+    }
+    for ((identity, _), successor) in members.iter().zip(&successors) {
+        let status = handle
+            .member_status(identity)
+            .await
+            .expect("repointed member status");
+        assert_eq!(
+            status.current_session_id.as_ref(),
+            Some(successor),
+            "'{identity}' is repointed to its successor"
+        );
+    }
+    assert_eq!(
+        handle.status().await.expect("status after resume"),
+        MobState::Running
+    );
+}
+
+/// #1250: an applied machine input that leaves MobMachine state unchanged
+/// does not republish (clone and wake) the machine-state watch, while a real
+/// transition still does.
+#[tokio::test]
+async fn no_op_machine_input_does_not_publish_machine_state() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("publish-probe"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    let mut watch = handle.machine_state_watch_rx.clone();
+    let before = watch.borrow_and_update().clone();
+    for _ in 0..3 {
+        handle
+            .apply_machine_input_effects(
+                crate::machines::mob_machine::MobMachineInput::ClassifyMemberWait {
+                    agent_identity: crate::machines::mob_machine::AgentIdentity::from(
+                        "publish-probe",
+                    ),
+                },
+            )
+            .await
+            .expect("classification input applies");
+    }
+    assert!(
+        !watch.has_changed().expect("watch sender alive"),
+        "no-op inputs must not publish a machine-state projection"
+    );
+    assert!(*watch.borrow() == before);
+
+    handle
+        .apply_machine_input_effects(
+            crate::machines::mob_machine::MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: crate::machines::mob_machine::AgentIdentity::from(
+                    "publish-probe-new",
+                ),
+                profile_name: "worker".to_string(),
+                model: "test-model".to_string(),
+                profile_material_digest: "publish-probe-material".to_string(),
+                tool_config_digest: "publish-probe-tool-config".to_string(),
+                skills_digest: "publish-probe-skills".to_string(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: false,
+                resolved_spec_digest: None,
+            },
+        )
+        .await
+        .expect("state-changing input applies");
+    assert!(
+        watch.has_changed().expect("watch sender alive"),
+        "a state-changing input must still publish"
+    );
+}
+
+/// A two-member crew, stopped and crash-stopped, reconstructed for a cold
+/// explicit Resume against the SAME session service and runtime adapter (the
+/// HomeCore boot shape for #1251).
+#[cfg(feature = "runtime-adapter")]
+async fn cold_resume_crew_for_test(
+    names: &[&str],
+) -> (
+    Arc<MockSessionService>,
+    Arc<meerkat_runtime::MeerkatMachine>,
+    MobHandle,
+    Vec<(AgentIdentity, SessionId)>,
+) {
+    let storage = MobStorage::in_memory();
+    let storage_for_resume = MobStorage {
+        events: storage.events.clone(),
+        runs: storage.runs.clone(),
+        specs: storage.specs.clone(),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
+        runtime_metadata: storage.runtime_metadata.clone(),
+        identity: storage.identity.clone(),
+        identity_member: storage.identity_member.clone(),
+        identity_status: storage.identity_status.clone(),
+        identity_status_projection_order: storage.identity_status_projection_order.clone(),
+        realm_profiles: storage.realm_profiles.clone(),
+        forked_participants: storage.forked_participants.clone(),
+    };
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let mut members = Vec::new();
+    for name in names {
+        let identity = AgentIdentity::from(*name);
+        let session_id = handle
+            .spawn_with_options(
+                ProfileName::from("worker"),
+                identity.clone(),
+                None,
+                Some(crate::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn crew member")
+            .bridge_session_id()
+            .cloned()
+            .expect("turn-driven member has a bridge session");
+        members.push((identity, session_id));
+    }
+    handle.stop().await.expect("stop original mob");
+    crash_stop_and_release_routes(handle).await;
+    let resumed = MobBuilder::for_resume(storage_for_resume)
+        .with_session_service(service.clone())
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("reconstruct stopped mob");
+    (service, adapter, resumed, members)
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn assert_member_status_for_test(
+    handle: &MobHandle,
+    identity: &AgentIdentity,
+    expected: crate::runtime::handle::MobMemberStatus,
+    context: &str,
+) -> crate::runtime::handle::MobMemberSnapshot {
+    let snapshot = handle
+        .member_status(identity)
+        .await
+        .unwrap_or_else(|error| panic!("{context}: member status for '{identity}': {error}"));
+    assert_eq!(
+        snapshot.status, expected,
+        "{context}: '{identity}' {snapshot:?}"
+    );
+    snapshot
+}
+
+/// #1251 fix (2): explicit-resume preparation of a session whose runtime
+/// registration holds a `RetainedActor` materialization claim (an actor
+/// committed without an executor) and has no executor attachment releases
+/// that exact registration together with the actor, so the rebuild's unique
+/// materialization claim is admitted. A clean ownerless registration is kept.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn explicit_resume_preparation_releases_retained_actor_registration() {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let provisioner =
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()), None);
+
+    let retained = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(retained.clone())
+        .await
+        .expect("compatibility bindings");
+    meerkat_runtime::begin_session_runtime_actor_materialization(&bindings)
+        .expect("claim actor creation")
+        .commit()
+        .expect("leave a RetainedActor claim without an executor attachment");
+    assert!(matches!(
+        adapter
+            .prepare_session_materialization(retained.clone())
+            .await,
+        Err(meerkat_runtime::RuntimeBindingsError::RegistrationOwned(_))
+    ));
+    assert!(
+        provisioner
+            .prepare_member_session_for_explicit_resume(
+                &retained,
+                Instant::now() + Duration::from_secs(2),
+                None,
+            )
+            .await
+            .expect("prepare the retained session for explicit resume"),
+        "the discarded actor's session must be rebuilt"
+    );
+    assert!(
+        adapter
+            .current_session_registration_witness(&retained)
+            .await
+            .is_none(),
+        "the unattached registration is released with its actor"
+    );
+    let mut prepared = adapter
+        .prepare_session_materialization(retained.clone())
+        .await
+        .expect("the rebuild's unique claim is admitted");
+    assert!(prepared.rollback_now().await.expect("rollback"));
+
+    let clean = SessionId::new();
+    adapter
+        .prepare_bindings(clean.clone())
+        .await
+        .expect("clean compatibility bindings");
+    let clean_registration = adapter
+        .current_session_registration_witness(&clean)
+        .await
+        .expect("clean registration");
+    provisioner
+        .prepare_member_session_for_explicit_resume(
+            &clean,
+            Instant::now() + Duration::from_secs(2),
+            None,
+        )
+        .await
+        .expect("prepare the clean session for explicit resume");
+    assert_eq!(
+        adapter.current_session_registration_witness(&clean).await,
+        Some(clean_registration),
+        "a clean ownerless registration is kept"
+    );
+}
+
+/// #1251 fix (1): an attempt refused because another owner holds the
+/// session's materialization claim created nothing. Its settlement is the
+/// proven `NoEffect`, so the member fails cleanly (Broken, with a repair
+/// diagnostic) instead of parking as Unproven, and the mob-wide Resume
+/// completes for everyone else.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cold_resume_occupied_claim_marks_member_broken_without_stalling() {
+    let (_service, _adapter, resumed, members) =
+        cold_resume_crew_for_test(&["owned-a", "owned-b"]).await;
+    let (blocked_identity, blocked_session) = &members[0];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        blocked_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::OccupiedClaim,
+    );
+
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("an occupied claim must not stall the mob-wide resume")
+        .expect("resume completes with the refused member failed cleanly");
+    let broken = assert_member_status_for_test(
+        &resumed,
+        blocked_identity,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "occupied claim",
+    )
+    .await;
+    assert!(broken.is_final);
+    assert!(
+        broken
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("has another owner")),
+        "the typed pre-effect refusal must name the owner conflict: {broken:?}"
+    );
+    assert_member_status_for_test(
+        &resumed,
+        &members[1].0,
+        crate::runtime::handle::MobMemberStatus::Active,
+        "sibling of the refused member",
+    )
+    .await;
+    assert_eq!(resumed.status().await.expect("status"), MobState::Running);
+}
+
+/// #1251 fix (3): an attempt whose own effects cannot be certified parks its
+/// custody, but the member's work settles as a typed failure (Broken, with a
+/// repair diagnostic), so the mob-wide Resume still completes for the others.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cold_resume_unproven_member_is_parked_and_others_continue() {
+    let (_service, _adapter, resumed, members) =
+        cold_resume_crew_for_test(&["unproven-a", "unproven-b", "unproven-c"]).await;
+    let (parked_identity, parked_session) = &members[1];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        parked_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::UnrecordedFailure,
+    );
+
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("an unproven member must not stall the mob-wide resume")
+        .expect("resume completes with the unproven member parked");
+    let parked = assert_member_status_for_test(
+        &resumed,
+        parked_identity,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "unproven member",
+    )
+    .await;
+    assert!(
+        parked
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("repair required")),
+        "the parked member must carry its repair path: {parked:?}"
+    );
+    for (identity, _) in members
+        .iter()
+        .filter(|(identity, _)| identity != parked_identity)
+    {
+        assert_member_status_for_test(
+            &resumed,
+            identity,
+            crate::runtime::handle::MobMemberStatus::Active,
+            "sibling of the unproven member",
+        )
+        .await;
+    }
+    assert_eq!(resumed.status().await.expect("status"), MobState::Running);
+}
+
+/// A durable session outside the mob that a Resume-launch spawn adopts.
+async fn standalone_resume_session_for_test(
+    service: &MockSessionService,
+    identity: &AgentIdentity,
+) -> SessionId {
+    let created = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "adopted session".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(
+                    super::actor::render_member_comms_name(
+                        sample_definition().id.as_str(),
+                        "worker",
+                        identity.as_str(),
+                    )
+                    .expect("comms name"),
+                ),
+                mob_member_binding: None,
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("persist the session to adopt");
+    // Adopt a persisted-only session: its live actor is not running.
+    MobSessionService::discard_live_session(service, &created.session_id)
+        .await
+        .expect("discard the creating actor");
+    service
+        .session_comms_names
+        .write()
+        .await
+        .remove(&created.session_id);
+    created.session_id
+}
+
+fn resume_launch_spec_for_test(
+    identity: &AgentIdentity,
+    session_id: &SessionId,
+) -> SpawnMemberSpec {
+    SpawnMemberSpec::new(ProfileName::from("worker"), identity.clone()).with_launch_mode(
+        crate::launch::MemberLaunchMode::Resume {
+            bridge_session_id: session_id.clone(),
+            resume_from_role: None,
+        },
+    )
+}
+
+/// #1249: the heavy part of a local Spawn (here the resume-session activity
+/// read, which for a persistent service can decode a whole document or wait
+/// behind a busy session task) runs off the actor loop. While that read is
+/// parked, the serialized actor still answers a phase probe promptly and
+/// admits and completes an unrelated spawn; the parked spawn completes once
+/// its read is released.
+#[tokio::test]
+async fn slow_spawn_preparation_does_not_block_the_actor_loop() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let slow_identity = AgentIdentity::from("slow-adopt");
+    let slow_session = standalone_resume_session_for_test(&service, &slow_identity).await;
+    let barrier = service
+        .install_session_read_barrier(slow_session.clone())
+        .await;
+    let slow_spawn = tokio::spawn({
+        let handle = handle.clone();
+        let spec = resume_launch_spec_for_test(&slow_identity, &slow_session);
+        async move { handle.spawn_spec(spec).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), service.wait_for_session_read())
+        .await
+        .expect("the slow spawn reaches its session read");
+
+    let phase = tokio::time::timeout(Duration::from_secs(1), handle.status())
+        .await
+        .expect("the actor answers a phase probe while a spawn prepares off-loop")
+        .expect("phase");
+    assert_eq!(phase, MobState::Running);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        handle.spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("unrelated-member"),
+            None,
+        ),
+    )
+    .await
+    .expect("an unrelated spawn is admitted and completes meanwhile")
+    .expect("unrelated spawn");
+    assert!(
+        !slow_spawn.is_finished(),
+        "the parked spawn is still preparing"
+    );
+    let duplicate = tokio::time::timeout(
+        Duration::from_secs(1),
+        handle.spawn_spec(resume_launch_spec_for_test(&slow_identity, &slow_session)),
+    )
+    .await
+    .expect("a duplicate spawn is answered while the first prepares");
+    assert!(
+        matches!(duplicate, Err(MobError::MemberAlreadyExists(ref id)) if id == &slow_identity),
+        "an in-flight preparation owns its identity: {duplicate:?}"
+    );
+
+    barrier.release_all();
+    tokio::time::timeout(Duration::from_secs(10), slow_spawn)
+        .await
+        .expect("the released spawn completes")
+        .expect("slow spawn task")
+        .expect("the adopted session spawns once its read completes");
+    assert!(
+        handle
+            .get_member(&slow_identity)
+            .await
+            .expect("roster")
+            .is_some()
+    );
+}
+
+/// #1249: a lifecycle Stop fails an in-flight off-loop spawn preparation
+/// with a typed cancellation and settles its custody; the late completion is
+/// inert.
+#[tokio::test]
+async fn stop_cancels_in_flight_spawn_preparation_with_typed_error() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("cancelled-adopt");
+    let session_id = standalone_resume_session_for_test(&service, &identity).await;
+    let barrier = service
+        .install_session_read_barrier(session_id.clone())
+        .await;
+    let spawn = tokio::spawn({
+        let handle = handle.clone();
+        let spec = resume_launch_spec_for_test(&identity, &session_id);
+        async move { handle.spawn_spec(spec).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), service.wait_for_session_read())
+        .await
+        .expect("the spawn reaches its session read");
+    tokio::time::timeout(Duration::from_secs(5), handle.stop())
+        .await
+        .expect("stop is not held behind the preparation")
+        .expect("stop");
+    let result = tokio::time::timeout(Duration::from_secs(5), spawn)
+        .await
+        .expect("the cancelled spawn is answered")
+        .expect("spawn task");
+    assert!(
+        matches!(&result, Err(MobError::Internal(message)) if message.contains("spawn canceled")),
+        "an in-flight preparation fails with the lifecycle cancellation: {result:?}"
+    );
+    barrier.release_all();
+    assert!(
+        handle
+            .get_member(&identity)
+            .await
+            .expect("roster")
+            .is_none(),
+        "a cancelled preparation never seats its member"
+    );
+    assert_eq!(handle.status().await.expect("status"), MobState::Stopped);
 }
 
 #[tokio::test]

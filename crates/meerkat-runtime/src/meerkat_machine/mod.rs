@@ -316,6 +316,22 @@ pub enum RuntimeBindingsError {
     RegistrationOwned(SessionId),
 }
 
+impl RuntimeBindingsError {
+    /// Whether preparation was refused before this call reserved a
+    /// materialization claim, inserted a registration, or installed handles.
+    ///
+    /// Both registration verdicts are returned only from checks that run
+    /// before any mutation, so a caller may treat such a failed attempt as
+    /// proven no-effect rather than as an unproven cleanup obligation.
+    #[must_use]
+    pub fn rejected_before_effect(&self) -> bool {
+        matches!(
+            self,
+            Self::RegistrationOwned(_) | Self::RegistrationNotCurrent(_)
+        )
+    }
+}
+
 /// Generated public projection for an input-state seed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputPublicStateProjection {

@@ -1357,6 +1357,66 @@ impl CommittedWholeBlobSnapshot {
     }
 }
 
+/// Metadata-only observation of one committed WholeBlob row.
+///
+/// Built from the exact committed bytes and the store-issued identity they
+/// were read with, like [`CommittedWholeBlobSnapshot`], but the envelope is
+/// only partially decoded: transcript rows are skipped, never materialized,
+/// validated, or replayed. The physical digest and session identity are still
+/// verified against the store authority.
+#[derive(Debug, Clone)]
+pub struct CommittedWholeBlobMetadata {
+    document: meerkat_core::SessionMetadataDocument,
+    authority: WholeBlobStoreAuthority,
+}
+
+impl CommittedWholeBlobMetadata {
+    pub(crate) fn from_committed_bytes(
+        bytes: &[u8],
+        authority: WholeBlobStoreAuthority,
+    ) -> Result<Self, RuntimeStoreError> {
+        let decoded =
+            meerkat_core::Session::decode_whole_blob_metadata_document(bytes).map_err(|error| {
+                RuntimeStoreError::ReadFailed(format!(
+                    "WholeBlob body metadata is not a valid current Session envelope: {error}"
+                ))
+            })?;
+        if decoded.row_sha256_token() != authority.blob_sha256() {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: authority.session_id().to_string(),
+                detail: "WholeBlob body digest differs from store authority".to_string(),
+            });
+        }
+        let document = decoded.into_document();
+        if document.session_id() != authority.session_id() {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: authority.session_id().to_string(),
+                detail: "WholeBlob body session differs from store authority".to_string(),
+            });
+        }
+        Ok(Self {
+            document,
+            authority,
+        })
+    }
+
+    /// Metadata-only document decoded from the exact committed bytes.
+    #[must_use]
+    pub fn document(&self) -> &meerkat_core::SessionMetadataDocument {
+        &self.document
+    }
+
+    #[must_use]
+    pub fn authority(&self) -> &WholeBlobStoreAuthority {
+        &self.authority
+    }
+
+    #[must_use]
+    pub fn into_document(self) -> meerkat_core::SessionMetadataDocument {
+        self.document
+    }
+}
+
 impl std::fmt::Display for RuntimeSessionPersistenceProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -7841,6 +7901,26 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
         ))
     }
 
+    /// Load only the typed metadata facts of the committed WholeBlob body.
+    ///
+    /// Realm-wide scans (successor search, ownership probes) must not decode
+    /// every transcript. The default reads the raw committed bytes through
+    /// [`Self::load_committed_whole_blob_bytes`] and partially decodes them;
+    /// a store that cannot serve raw bytes reports `Unsupported`, and callers
+    /// fall back to [`Self::load_committed_whole_blob_snapshot`].
+    async fn load_committed_whole_blob_metadata(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<CommittedWholeBlobMetadata>, RuntimeStoreError> {
+        match self.load_committed_whole_blob_bytes(runtime_id).await? {
+            Some((bytes, authority)) => {
+                CommittedWholeBlobMetadata::from_committed_bytes(bytes.as_ref(), authority)
+                    .map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn commit_prepared_whole_blob_snapshot_cas(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -8060,6 +8140,21 @@ pub trait RuntimeStore: Send + Sync {
     ) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError> {
         self.session_authority_ops()
             .load_committed_whole_blob_snapshot(runtime_id)
+            .await
+    }
+
+    /// Metadata-only sibling of [`Self::load_committed_whole_blob_snapshot`].
+    ///
+    /// Reads the same atomically paired body and identity but decodes only
+    /// the session-authority metadata, never the transcript rows. Stores that
+    /// cannot serve raw committed bytes report `Unsupported`; callers then
+    /// fall back to the full snapshot read.
+    async fn load_committed_whole_blob_metadata(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<CommittedWholeBlobMetadata>, RuntimeStoreError> {
+        self.session_authority_ops()
+            .load_committed_whole_blob_metadata(runtime_id)
             .await
     }
 
@@ -10668,5 +10763,85 @@ mod lifecycle_record_compatibility_tests {
         let decoded = decode_machine_lifecycle_store_record(&encode_snapshot(&snapshot))
             .expect("later rotation and old terminal history must recover together");
         assert_eq!(decoded, snapshot);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod committed_whole_blob_metadata_tests {
+    use super::*;
+
+    /// A committed WholeBlob body whose envelope and metadata are current but
+    /// whose transcript rows the full decoder refuses.
+    fn body_with_undecodable_rows() -> (meerkat_core::Session, Vec<u8>) {
+        let mut session = meerkat_core::Session::new();
+        session
+            .set_lifecycle_terminal(meerkat_core::SessionLifecycleTerminal::Active)
+            .unwrap();
+        let mut document = serde_json::to_value(&session).unwrap();
+        document["messages"] = serde_json::json!([{ "role": "not-a-role", "rows": 7 }]);
+        let bytes = serde_json::to_vec(&document).unwrap();
+        (session, bytes)
+    }
+
+    fn authority_for(
+        session_id: &meerkat_core::types::SessionId,
+        bytes: &[u8],
+    ) -> WholeBlobStoreAuthority {
+        let token = meerkat_core::Session::decode_whole_blob_metadata_document(bytes)
+            .unwrap()
+            .row_sha256_token()
+            .to_string();
+        WholeBlobStoreAuthority::issued(session_id.clone(), 1, token).unwrap()
+    }
+
+    #[test]
+    fn metadata_read_never_decodes_transcript_rows() {
+        let (session, bytes) = body_with_undecodable_rows();
+        assert!(
+            meerkat_core::Session::decode_whole_blob_document(&bytes).is_err(),
+            "fixture rows must be refused by the full decoder"
+        );
+        let metadata = CommittedWholeBlobMetadata::from_committed_bytes(
+            &bytes,
+            authority_for(session.id(), &bytes),
+        )
+        .expect("metadata-only read skips the transcript rows");
+        assert_eq!(metadata.document().session_id(), session.id());
+        let view = metadata.into_document().try_into_view().unwrap();
+        assert_eq!(
+            view.lifecycle_terminal,
+            Some(meerkat_core::SessionLifecycleTerminal::Active)
+        );
+    }
+
+    #[test]
+    fn metadata_read_still_verifies_digest_and_identity() {
+        let (session, bytes) = body_with_undecodable_rows();
+        let (other, other_bytes) = body_with_undecodable_rows();
+        let foreign_digest = WholeBlobStoreAuthority::issued(
+            session.id().clone(),
+            1,
+            authority_for(other.id(), &other_bytes)
+                .blob_sha256()
+                .to_string(),
+        )
+        .unwrap();
+        assert!(matches!(
+            CommittedWholeBlobMetadata::from_committed_bytes(&bytes, foreign_digest),
+            Err(RuntimeStoreError::SessionPersistenceAuthorityConflict { .. })
+        ));
+        let foreign_session = WholeBlobStoreAuthority::issued(
+            other.id().clone(),
+            1,
+            authority_for(session.id(), &bytes)
+                .blob_sha256()
+                .to_string(),
+        )
+        .unwrap();
+        assert!(matches!(
+            CommittedWholeBlobMetadata::from_committed_bytes(&bytes, foreign_session),
+            Err(RuntimeStoreError::SessionPersistenceAuthorityConflict { .. })
+        ));
     }
 }

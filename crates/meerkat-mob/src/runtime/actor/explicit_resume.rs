@@ -533,7 +533,7 @@ impl MobActor {
         self.continue_explicit_resume_after_rebuild().await;
     }
 
-    pub(super) fn explicit_resume_member_cleanup_held(
+    pub(super) async fn explicit_resume_member_cleanup_held(
         &mut self,
         work: Arc<ExplicitResumeMemberWork>,
         retry_tx: oneshot::Sender<()>,
@@ -549,24 +549,62 @@ impl MobActor {
         );
         if attempts == 1 && automatic_retry {
             if retry_tx.send(()).is_err() {
-                self.explicit_resume_member_unproven(
+                Box::pin(self.explicit_resume_member_unproven(
                     work,
                     ProvisionAttemptFailure::unproven(MobError::Internal(
                         "resume cleanup owner disappeared before retry".to_string(),
                     )),
-                );
+                ))
+                .await;
             }
             return;
         }
+        let reason = format!(
+            "explicit resume of bridge session '{}' retains uncertified cleanup of its own attempt: {error}; repair required: retire or respawn the member, or stop and resume the mob to retry the retained cleanup",
+            work.rebuild.bridge_session_id
+        );
         self.retained_resume_cleanup
             .push(RetainedExplicitResumeCleanup {
-                work,
+                work: Arc::clone(&work),
                 retry_tx,
                 error,
             });
+        // Isolation (#1251): the retained custody stays parked and is retried
+        // on lifecycle control, but this member's work settles as a typed
+        // failure so the mob-wide Resume continues for every other member.
+        Box::pin(self.explicit_resume_member_settled(
+            work,
+            ExplicitResumeMemberCompletion::Failed(MobError::Internal(reason)),
+        ))
+        .await;
     }
 
-    pub(super) fn explicit_resume_member_unproven(
+    /// Park an attempt whose own effects cannot be certified, then settle the
+    /// member's resume work as a typed failure.
+    ///
+    /// The parked custody keeps the effect obligation visible and is reported
+    /// on every lifecycle control. Settling the work records the member as
+    /// Broken (with a repair diagnostic) instead of leaving it pending, which
+    /// used to stall the whole mob-wide Resume until the inactivity watchdog
+    /// fired (#1251).
+    pub(super) async fn explicit_resume_member_unproven(
+        &mut self,
+        work: Arc<ExplicitResumeMemberWork>,
+        failure: ProvisionAttemptFailure,
+    ) {
+        let reason = format!(
+            "explicit resume of bridge session '{}' could not certify cleanup of its own attempt: {failure}; repair required: retire or respawn the member, or stop and resume the mob to retry the retained cleanup",
+            work.rebuild.bridge_session_id
+        );
+        self.park_unproven_resume_cleanup(Arc::clone(&work), failure);
+        Box::pin(self.explicit_resume_member_settled(
+            work,
+            ExplicitResumeMemberCompletion::Failed(MobError::Internal(reason)),
+        ))
+        .await;
+    }
+
+    fn park_unproven_resume_cleanup(
         &mut self,
         work: Arc<ExplicitResumeMemberWork>,
         failure: ProvisionAttemptFailure,
@@ -574,7 +612,7 @@ impl MobActor {
         tracing::error!(
             agent_identity = %work.rebuild.entry.agent_identity,
             error = %failure,
-            "explicit resume cannot certify member cleanup; authority remains pending"
+            "explicit resume cannot certify member cleanup; custody remains parked"
         );
         self.unproven_resume_cleanup
             .push(UnprovenExplicitResumeCleanup { work, failure });
@@ -588,7 +626,9 @@ impl MobActor {
                 "retrying retained exact resume cleanup after lifecycle control"
             );
             if retained.retry_tx.send(()).is_err() {
-                self.explicit_resume_member_unproven(
+                // The member's work already settled when this custody was
+                // parked; only the effect obligation moves.
+                self.park_unproven_resume_cleanup(
                     retained.work,
                     ProvisionAttemptFailure::unproven(MobError::Internal(
                         "resume cleanup owner is unavailable".to_string(),

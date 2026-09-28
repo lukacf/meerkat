@@ -2110,11 +2110,12 @@ impl MeerkatMachine {
             } else if state.current.is_some()
                 || state.phase != crate::RuntimeActorMaterializationClaimPhase::Vacant
             {
-                return Err(RuntimeDriverError::StaleAuthority {
-                    reason: format!(
-                        "session {session_id} already has an active materialization owner"
-                    ),
-                });
+                // Another owner holds this pre-existing registration's claim.
+                // The refusal happens before this call reserved a claim,
+                // inserted a registration, or installed handles, so it is the
+                // typed pre-effect "registration owned" verdict (#1251), not
+                // an opaque stale-authority failure.
+                return Err(RuntimeDriverError::MaterializationRegistrationOwned { session_id });
             } else {
                 state.current = Some(requested_claim_id);
                 state.phase = crate::RuntimeActorMaterializationClaimPhase::Prepared;

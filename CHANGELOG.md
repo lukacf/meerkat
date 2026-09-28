@@ -38,6 +38,7 @@ them.
 ### Breaking
 
 
+
 - `meerkat_mob::MemberReloadDisposition` gains the variant `Reattached`
   (appended last, so existing discriminants do not move); exhaustive matches
   must handle it. `MobHandle::reload_member_registration` returns it when a
@@ -92,6 +93,7 @@ them.
 ### Added
 
 
+
 - `meerkat_runtime::RuntimeSessionAttachmentState` (`Unregistered`,
   `Attached`, `ReloadRequired { registration, attachment }`,
   `Detached { registration, unregister }`), `RuntimeDetachedUnregister`
@@ -111,8 +113,19 @@ them.
   (`NotFound`, `Retired`, `kind()`, `to_tool_error`). Target presence is read
   from the roster, and a durable retirement record from the mob's event log,
   before the ownership admission runs (#1234).
+- Behavior-only: preparing a unique local session materialization
+  (`MeerkatMachine::prepare_session_materialization` and the
+  `prepare_local_session_materialization*` family) for a session whose
+  pre-existing runtime registration already holds a materialization claim now
+  fails with `RuntimeBindingsError::RegistrationOwned` ("... has another
+  owner") instead of `RuntimeBindingsError::PrepareFailed` wrapping a
+  `StaleAuthority` "already has an active materialization owner" reason. The
+  refusal happens before the call reserves a claim, inserts a registration, or
+  installs handles; the new `RuntimeBindingsError::rejected_before_effect()`
+  reports that (#1251).
 
 ### Fixed
+
 
 
 
@@ -172,6 +185,54 @@ them.
   always rejects it), and managed-store readiness follows the AuthMachine's
   read-only credential-use classification, so a lease that needs a refresh
   or a re-login reads as `NeedsReauth` instead of ready (#1246).
+
+- Cold-boot explicit resume no longer stalls on its successor-session scan
+  (#1250). When members' bound sessions are gone, the realm is listed and
+  scanned ONCE for all members, and each member's successor match runs over
+  that in-memory index instead of re-reading every realm session per member.
+  The scan reads session metadata only: `PersistentSessionService` WholeBlob
+  metadata reads (`load_authoritative_session_metadata`, and so
+  `load_persisted_session_metadata`) now partially decode the committed body
+  through the new `RuntimeStore::load_committed_whole_blob_metadata`
+  (digest and session identity still verified against the store authority,
+  transcript rows skipped rather than decoded and replayed), falling back to
+  the full snapshot only for stores that cannot serve raw committed bytes.
+  The resume reports typed member progress around the bound-session metadata
+  probe (`member_session_metadata_probe`) and per scanned realm session
+  (`member_successor_session_scan`), so a long scan keeps the resume's
+  inactivity watchdog fed. The watchdog bound is unchanged and not
+  configurable: progress is reported per unit of work instead.
+- An applied MobMachine input that leaves the machine state unchanged no
+  longer republishes the machine-state watch (#1250). The actor used to clone
+  the full state and wake every watcher (forwarders, health-monitor
+  reconciles) on each no-op input, which a cold-boot retry storm turned into
+  a steady stream of redundant reconciles.
+- A mob `Spawn` no longer blocks the actor loop while it prepares (#1249).
+  Its session reads (a resume-launch spawn's activity check could decode a
+  whole WholeBlob document or wait behind a busy session task), resume
+  authority checks, fork-source history reads, and agent-config builds now run
+  in a supervised task off the loop, bounded to 8 concurrent preparations
+  (deferred-resume request preparation inside provisioning shares that
+  bound). The actor keeps custody of the reply, respawn origin, and identity
+  actuation permit, re-checks admission when the typed completion arrives, and
+  a lifecycle transition that fails pending spawns also cancels in-flight
+  preparations with the same typed reason. A second spawn of an identity whose
+  preparation is still running is refused with `MemberAlreadyExists`, as for
+  a staged pending spawn. The inline-step watchdog now reports typed per-stage
+  timing (`stage_timings_ms`, `slowest_step`) for any step that exceeds its
+  budget, with typed `Spawn` stages, so a slow step names its slow part.
+- A failed explicit-resume member no longer parks the whole mob resume (#1251).
+  A provisioning attempt refused by typed runtime authority before it created
+  anything (an occupied materialization claim) now settles as proven
+  `NoEffect` and the member fails cleanly as Broken instead of `Unproven`.
+  Explicit-resume preparation that discards an unattached live actor also
+  releases that actor's runtime registration when it still holds a claim
+  (`RetainedActor`, or a stranded `Aborting`), so the rebuild's unique claim
+  is admitted. An attempt whose own effects cannot be certified, or whose
+  cleanup custody is retained, still parks that custody for retry on
+  lifecycle control, but the member now settles as Broken with a repair
+  diagnostic and the resume continues for every other member; operation
+  binding restoration skips members the resume settled as Broken.
 
 ## [0.8.48] - 2026-09-28
 

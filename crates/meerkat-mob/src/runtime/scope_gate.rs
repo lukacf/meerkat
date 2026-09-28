@@ -181,6 +181,7 @@ impl MobCommand {
             // ── Internal / machine-authority plumbing (enumerated so the
             //    closed world stays reviewable) ──
             Self::SpawnProvisioned { .. }
+            | Self::SpawnPreparationSettled { .. }
             // Detached-admission completions and the actor-authority revival
             // re-entry are actor self-sends; the delivery they belong to was
             // admitted on SubmitWork.
@@ -562,6 +563,7 @@ impl MobCommand {
                 tracing::warn!(%error, "internal resume topology command refused by scope gate");
             }
             Self::SpawnProvisioned { .. }
+            | Self::SpawnPreparationSettled { .. }
             | Self::MemberTurnAdmissionSettled { .. }
             | Self::SpawnActivationStageSettled { .. }
             | Self::SpawnCleanupSettled { .. }

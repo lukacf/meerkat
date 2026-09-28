@@ -27,6 +27,19 @@ impl MobActor {
         if let Some(io) = self.resume_operation_binding_io() {
             let entries = self.roster.read().await.list().cloned().collect::<Vec<_>>();
             for entry in entries {
+                // A member this resume settled as Broken has no serving
+                // runtime to bind; its restore failure is its typed outcome.
+                // Restoring owner custody against its unbound registration
+                // would turn one member's outcome into a mob-wide post-commit
+                // failure (#1251 isolation).
+                if self
+                    .dsl_authority
+                    .state()
+                    .member_restore_failures
+                    .contains_key(&mob_dsl::AgentIdentity::from_domain(&entry.agent_identity))
+                {
+                    continue;
+                }
                 match self.prepare_restored_member_operation_binding(entry) {
                     Ok(Some(plan)) => {
                         let identity = plan.entry.agent_identity.clone();

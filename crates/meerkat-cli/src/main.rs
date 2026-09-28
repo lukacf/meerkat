@@ -22301,6 +22301,14 @@ default_model = "gemma"
                 .collect())
         }
 
+        // Mob cold recovery observes liveness before it restores a local
+        // member's operation binding, so this fixture must answer from the
+        // same live-actor registry that `start_turn`/`read` admit against.
+        // The trait default (Unsupported) fail-stops the recovered mob.
+        async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+            Ok(self.actor_registry.contains(id))
+        }
+
         async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
             self.remove_current_actor(id).await;
             Ok(())

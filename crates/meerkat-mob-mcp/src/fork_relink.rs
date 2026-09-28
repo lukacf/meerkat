@@ -711,7 +711,7 @@ async fn relink_owned_child(
     // record: `restart_interrupted` shares the record's `failed` notice
     // status and must stay seated.
     if let Some(runtime) = runtime
-        && crate::detached_delivery::detached_completion_admitted(
+        && let Some(admitted) = crate::detached_delivery::admitted_detached_completion(
             runtime,
             &job.owner_session_id,
             TOOL_FORK_OFF,
@@ -719,8 +719,16 @@ async fn relink_owned_child(
         )
         .await
     {
-        if let Some(committed) = committed_completion(&service, mob_id, child, job).await
-            && committed.retires_child()
+        // While the completion input is pending its outcome is only in the
+        // admitted input (a crash between admission and the owner's commit
+        // leaves exactly that); once its payload is retired the committed
+        // record carries it.
+        let delivered = match pending_completion(&admitted, mob_id, child, job) {
+            Some(pending) => Some(pending),
+            None => committed_completion(&service, mob_id, child, job).await,
+        };
+        if let Some(delivered) = delivered
+            && delivered.retires_child()
             && let Err(error) = handle.retire_with_descendants(child.clone()).await
         {
             tracing::warn!(
@@ -1240,16 +1248,12 @@ async fn relink_by_receipt(
                 meerkat_mob::DeliveryTerminalWait::Terminal(record) => {
                     // Past the limit only a completed turn wins: any other
                     // end loses to the limit, as it does for every job.
-                    let completed = matches!(
-                        record.resolution(),
-                        meerkat_mob::DeliveryTerminalResolution::Receipt { result: Ok(_), .. }
-                    );
-                    if limit_passed && !completed {
+                    if limit_passed && !completed_receipt(&record) {
                         return limit_elapsed(service, delivery, owner, mob_id, handle, child, job)
                             .await;
                     }
                     return deliver_receipt(
-                        service, delivery, owner, mob_id, handle, child, job, *record,
+                        service, delivery, owner, mob_id, handle, child, job, *record, None,
                     )
                     .await;
                 }
@@ -1338,18 +1342,72 @@ async fn relink_by_receipt(
             .await
             .map(|report| report.into_parts().1);
         // The read can end past the limit (the waiter keeps a 100 ms evidence
-        // floor); the limit then decides, where only a completed turn wins.
-        if deadline_ms.is_some_and(|deadline| now_ms() >= deadline) {
-            continue;
-        }
-        let reason = match ceiling_receipt(last_read) {
+        // floor); the limit then decides, where only a completed turn wins,
+        // including the one this read found.
+        let limit_passed = deadline_ms.is_some_and(|deadline| now_ms() >= deadline);
+        let reason = match past_limit_ceiling_receipt(
+            ceiling_receipt(last_read),
+            limit_passed,
+            |record| completed_receipt(record),
+        ) {
             CeilingReceipt::Terminal(record) => {
                 return deliver_receipt(
-                    service, delivery, owner, mob_id, handle, child, job, *record,
+                    service, delivery, owner, mob_id, handle, child, job, *record, None,
                 )
                 .await;
             }
-            CeilingReceipt::Absent => reason,
+            CeilingReceipt::Absent {
+                pending_input: None,
+            } => reason,
+            CeilingReceipt::Absent {
+                pending_input: Some(input_id),
+            } => {
+                // The input is still admitted in the child's runtime, so a
+                // run could still answer it after this read. Fence it first:
+                // settle that exact input, then the job's outcome is its
+                // terminal.
+                match fence_job_input(handle, child, turn_delivery, &spec, &input_id).await {
+                    FencedJobInput::Terminal(record) => {
+                        return deliver_receipt(
+                            service, delivery, owner, mob_id, handle, child, job, *record, reason,
+                        )
+                        .await;
+                    }
+                    FencedJobInput::Unsettled(detail) => {
+                        if !stall_watch.inconclusive_ceiling_read() {
+                            tracing::debug!(
+                                mob_id = %mob_id,
+                                child = %child,
+                                detail = %detail,
+                                "fork_off re-link could not fence the job input at the ceiling; \
+                                 watching on"
+                            );
+                            tokio::time::sleep(within_limit(
+                                unreadable_backoff.next_pause(),
+                                deadline_ms,
+                            ))
+                            .await;
+                            continue;
+                        }
+                        // An outcome committed now could be contradicted by
+                        // a run that still answers the input, so none is:
+                        // the job and its child stay on record for the next
+                        // pass.
+                        tracing::warn!(
+                            mob_id = %mob_id,
+                            child = %child,
+                            detail = %detail,
+                            "fork_off re-link could not fence the job input; the job stays \
+                             owed"
+                        );
+                        return ForkRelinkAction::Failed(format!(
+                            "the job turn's input could not be settled before its outcome: \
+                             {detail}"
+                        ));
+                    }
+                }
+            }
+            CeilingReceipt::LimitDecides => continue,
             CeilingReceipt::Inconclusive(detail) => {
                 if !stall_watch.inconclusive_ceiling_read() {
                     tracing::debug!(
@@ -1382,16 +1440,25 @@ async fn relink_by_receipt(
 }
 
 /// What the last read of a job turn's receipt at the commit ceiling says.
+/// `Record` is the receipt (generic only so the limit's rule can be tested
+/// without a runtime).
 #[derive(Debug)]
-enum CeilingReceipt {
+enum CeilingReceipt<Record = Box<meerkat_mob::DeliveryTerminalRecord>> {
     /// The receipt exists: it is the job's outcome.
-    Terminal(Box<meerkat_mob::DeliveryTerminalRecord>),
+    Terminal(Record),
     /// Evidence that no receipt exists: the waiter's final read found the
     /// input still owed a terminal when the read ended (a reading it takes
     /// armed on the runtime's own terminal signal), or the runtime holds no
     /// input for it that can arrive (never admitted, the member has no
-    /// session, or it is retired).
-    Absent,
+    /// session, or it is retired). `pending_input` is the exact input in the
+    /// first case: it stays admitted, so the watch fences it before an
+    /// outcome is committed.
+    Absent {
+        pending_input: Option<meerkat_core::lifecycle::InputId>,
+    },
+    /// The job's `max_run` limit passed during the read and the read found no
+    /// completed turn: the limit decides.
+    LimitDecides,
     /// The read says nothing: its final evidence read ran out (for example
     /// while the receipt's own commit held the session driver) and only an
     /// earlier pending reading remains, it observed neither the member nor
@@ -1413,17 +1480,88 @@ fn ceiling_receipt(
         }) => CeilingReceipt::Inconclusive(
             "the final evidence read ran out; the pending reading is from before it".to_string(),
         ),
-        Ok(
-            DeliveryTerminalWait::NotTerminal { .. }
-            | DeliveryTerminalWait::Unknown {
-                cause:
-                    DeliveryUnknownCause::NotAdmittedByDeadline
-                    | DeliveryUnknownCause::MemberHasNoSession
-                    | DeliveryUnknownCause::MemberRetired,
-            },
-        ) => CeilingReceipt::Absent,
+        Ok(DeliveryTerminalWait::NotTerminal { input_id, .. }) => CeilingReceipt::Absent {
+            pending_input: Some(input_id),
+        },
+        Ok(DeliveryTerminalWait::Unknown {
+            cause:
+                DeliveryUnknownCause::NotAdmittedByDeadline
+                | DeliveryUnknownCause::MemberHasNoSession
+                | DeliveryUnknownCause::MemberRetired,
+        }) => CeilingReceipt::Absent {
+            pending_input: None,
+        },
         Ok(other) => CeilingReceipt::Inconclusive(format!("{other:?}")),
         Err(error) => CeilingReceipt::Inconclusive(error.to_string()),
+    }
+}
+
+/// The last ceiling read, given whether the job's `max_run` limit passed
+/// while it ran. Past the limit only a completed turn wins, as it does for
+/// every job, so a completed receipt this read found is kept and delivered;
+/// any other reading yields to the limit ([`CeilingReceipt::LimitDecides`]).
+/// Discarding that receipt would leave the job to a second read, which past
+/// the limit gets only the waiter's evidence floor and may say nothing.
+/// `completed` says whether a receipt records a completed turn.
+fn past_limit_ceiling_receipt<Record>(
+    receipt: CeilingReceipt<Record>,
+    limit_passed: bool,
+    completed: impl FnOnce(&Record) -> bool,
+) -> CeilingReceipt<Record> {
+    if !limit_passed {
+        return receipt;
+    }
+    match receipt {
+        CeilingReceipt::Terminal(record) if completed(&record) => CeilingReceipt::Terminal(record),
+        _ => CeilingReceipt::LimitDecides,
+    }
+}
+
+/// Whether a job turn's receipt records a completed turn.
+fn completed_receipt(record: &meerkat_mob::DeliveryTerminalRecord) -> bool {
+    matches!(
+        record.resolution(),
+        meerkat_mob::DeliveryTerminalResolution::Receipt { result: Ok(_), .. }
+    )
+}
+
+/// What fencing a job input still owed a terminal settled.
+#[derive(Debug)]
+enum FencedJobInput {
+    /// The exact input is terminal: by the fence's cancellation, or by a run
+    /// that answered it first. Its receipt is the job's outcome.
+    Terminal(Box<meerkat_mob::DeliveryTerminalRecord>),
+    /// The input was not settled (the child has no session, its runtime no
+    /// longer holds the input live, the cancellation failed, or the terminal
+    /// was not read), so a run may still answer it.
+    Unsettled(String),
+}
+
+/// Fence the job turn's input `input_id` before its outcome is committed:
+/// settle that exact input in the child's runtime and read its terminal
+/// ([`MobHandle::settle_delivery_input_for_identity`]). A run that answered
+/// it first wins; otherwise the cancellation's terminal is the job's.
+async fn fence_job_input(
+    handle: &MobHandle,
+    child: &AgentIdentity,
+    turn_delivery: &meerkat_mob::store::MobDeliveryIdentity,
+    spec: &meerkat_mob::BoundedResultSpec,
+    input_id: &meerkat_core::lifecycle::InputId,
+) -> FencedJobInput {
+    match handle
+        .settle_delivery_input_for_identity(
+            child,
+            turn_delivery,
+            input_id,
+            spec,
+            meerkat_core::time_compat::Instant::now() + RECEIPT_WAIT_SLICE,
+        )
+        .await
+        .map(|report| report.into_parts().1)
+    {
+        Ok(meerkat_mob::DeliveryTerminalWait::Terminal(record)) => FencedJobInput::Terminal(record),
+        Ok(other) => FencedJobInput::Unsettled(format!("the job input was not settled: {other:?}")),
+        Err(error) => FencedJobInput::Unsettled(format!("settling the job input failed: {error}")),
     }
 }
 
@@ -1464,7 +1602,9 @@ fn in_flight_step(
     }
 }
 
-/// Deliver the outcome a job turn's terminal receipt records.
+/// Deliver the outcome a job turn's terminal receipt records. A receipt of
+/// an end the restart caused delivers `restart_interrupted` with
+/// `restart_reason`.
 #[allow(clippy::too_many_arguments)]
 async fn deliver_receipt(
     service: &Arc<dyn meerkat_mob::MobSessionService>,
@@ -1475,7 +1615,13 @@ async fn deliver_receipt(
     child: &AgentIdentity,
     job: &ForkJobRecord,
     record: meerkat_mob::DeliveryTerminalRecord,
+    restart_reason: Option<RestartInterruptedReason>,
 ) -> ForkRelinkAction {
+    let interrupted = || {
+        let mut completion = restart_interrupted(mob_id, child);
+        completion.restart_reason = restart_reason;
+        completion
+    };
     let terminal = record.terminal().clone();
     let failure = match record.into_resolution() {
         meerkat_mob::DeliveryTerminalResolution::Receipt {
@@ -1498,25 +1644,11 @@ async fn deliver_receipt(
         // abandoned before a run began), or a resolution this build does not
         // know: the turn did not survive.
         _ => {
-            return deliver(
-                delivery,
-                owner,
-                mob_id,
-                job,
-                restart_interrupted(mob_id, child),
-            )
-            .await;
+            return deliver(delivery, owner, mob_id, job, interrupted()).await;
         }
     };
     if receipt_failure(&failure, &terminal) == ReceiptFailure::RestartCaused {
-        return deliver(
-            delivery,
-            owner,
-            mob_id,
-            job,
-            restart_interrupted(mob_id, child),
-        )
-        .await;
+        return deliver(delivery, owner, mob_id, job, interrupted()).await;
     }
     let mut completion = ForkOffCompletion::empty(
         child.to_string(),
@@ -1757,32 +1889,60 @@ async fn committed_completion(
         let meerkat_core::Message::SystemNotice(notice) = message else {
             return None;
         };
-        notice.blocks.iter().find_map(|block| match block {
-            meerkat_core::types::SystemNoticeBlock::BackgroundJob {
-                job_id: recorded,
-                display_name: Some(tool),
-                status,
-                detail,
-                persisted: true,
-                ..
-            } if recorded == &job.job_id && tool == TOOL_FORK_OFF => {
-                let detail = detail.as_deref();
-                let names_another_child = detail
-                    .and_then(|detail| serde_json::from_str::<CommittedChild>(detail).ok())
-                    .is_some_and(|recorded| recorded.names_another_child(mob_id, child));
-                if names_another_child {
-                    return None;
-                }
-                Some(CommittedCompletion {
-                    status: *status,
-                    outcome: detail
-                        .and_then(|detail| serde_json::from_str::<CommittedOutcome>(detail).ok())
-                        .map(|committed| committed.status),
-                })
-            }
-            _ => None,
-        })
+        notice
+            .blocks
+            .iter()
+            .find_map(|block| completion_in_block(block, mob_id, child, job))
     })
+}
+
+/// `child`'s completion record for its job carried by an admitted completion
+/// input that is still pending (see
+/// [`crate::detached_delivery::admitted_completion_notice_blocks`]), read as
+/// [`committed_completion`] reads the committed one. `None` once the input's
+/// payload is retired.
+fn pending_completion(
+    admitted: &meerkat_runtime::input_state::StoredInputState,
+    mob_id: &MobId,
+    child: &AgentIdentity,
+    job: &ForkJobRecord,
+) -> Option<CommittedCompletion> {
+    crate::detached_delivery::admitted_completion_notice_blocks(admitted)
+        .find_map(|block| completion_in_block(block, mob_id, child, job))
+}
+
+/// The completion record `block` carries for `child`'s job, when it is one.
+fn completion_in_block(
+    block: &meerkat_core::types::SystemNoticeBlock,
+    mob_id: &MobId,
+    child: &AgentIdentity,
+    job: &ForkJobRecord,
+) -> Option<CommittedCompletion> {
+    match block {
+        meerkat_core::types::SystemNoticeBlock::BackgroundJob {
+            job_id: recorded,
+            display_name: Some(tool),
+            status,
+            detail,
+            persisted: true,
+            ..
+        } if recorded == &job.job_id && tool == TOOL_FORK_OFF => {
+            let detail = detail.as_deref();
+            let names_another_child = detail
+                .and_then(|detail| serde_json::from_str::<CommittedChild>(detail).ok())
+                .is_some_and(|recorded| recorded.names_another_child(mob_id, child));
+            if names_another_child {
+                return None;
+            }
+            Some(CommittedCompletion {
+                status: *status,
+                outcome: detail
+                    .and_then(|detail| serde_json::from_str::<CommittedOutcome>(detail).ok())
+                    .map(|committed| committed.status),
+            })
+        }
+        _ => None,
+    }
 }
 
 async fn deliver(
@@ -1867,8 +2027,9 @@ mod tests {
         CommittedChild, CommittedCompletion, ForkRelinkAction, ForkRelinkReport,
         MAX_INCONCLUSIVE_CEILING_READS, MAX_OWNER_REVIVAL_WAITS, ProgressVerdict, ReceiptFailure,
         UNOBSERVED_RETRY_INITIAL_INTERVAL, UNOBSERVED_RETRY_MAX_INTERVAL, UnobservedBackoff,
-        ceiling_receipt, commit_observation, from_runtime, in_flight_step, now_ms, receipt_failure,
-        redeliver_each, within_limit,
+        ceiling_receipt, commit_observation, from_runtime, in_flight_step, now_ms,
+        past_limit_ceiling_receipt, pending_completion, receipt_failure, redeliver_each,
+        within_limit,
     };
     use crate::agent_tools::RestartInterruptedReason;
     use crate::detached_delivery::OwnerRevivalDeferral;
@@ -2357,7 +2518,9 @@ mod tests {
                     attempt_count: 1,
                     cause,
                 })),
-                CeilingReceipt::Absent
+                CeilingReceipt::Absent {
+                    pending_input: Some(_)
+                }
             ));
         }
         for cause in [
@@ -2368,7 +2531,9 @@ mod tests {
             assert!(
                 matches!(
                     ceiling_receipt(Ok(DeliveryTerminalWait::Unknown { cause })),
-                    CeilingReceipt::Absent
+                    CeilingReceipt::Absent {
+                        pending_input: None
+                    }
                 ),
                 "{cause:?}"
             );
@@ -2430,6 +2595,130 @@ mod tests {
     /// identity, or a member ref of another mob or identity; a detail that
     /// names no child (a field missing, or a member ref that does not decode)
     /// excludes no one (review: a job id is not unique across children).
+    /// #1227 (d): the last receipt read at the ceiling can end just past an
+    /// opt-in `max_run`. Past the limit only a completed turn wins, and the
+    /// completed receipt that read found is that turn: it is kept, not
+    /// discarded for a second read that may say nothing (which handed an
+    /// already-completed job `max_run_elapsed`). Every other reading yields
+    /// to the limit, and before the limit a reading is left as it is.
+    #[test]
+    fn a_completed_receipt_from_the_last_ceiling_read_wins_over_a_passed_limit() {
+        let completed = |record: &&str| *record == "completed";
+        assert!(matches!(
+            past_limit_ceiling_receipt(CeilingReceipt::Terminal("completed"), true, completed),
+            CeilingReceipt::Terminal("completed")
+        ));
+        let pending = meerkat_core::lifecycle::InputId::new();
+        for reading in [
+            CeilingReceipt::Terminal("failed"),
+            CeilingReceipt::Absent {
+                pending_input: Some(pending.clone()),
+            },
+            CeilingReceipt::Absent {
+                pending_input: None,
+            },
+            CeilingReceipt::Inconclusive("the read failed".to_string()),
+        ] {
+            assert!(matches!(
+                past_limit_ceiling_receipt(reading, true, completed),
+                CeilingReceipt::LimitDecides
+            ));
+        }
+        assert!(matches!(
+            past_limit_ceiling_receipt(CeilingReceipt::Terminal("failed"), false, completed),
+            CeilingReceipt::Terminal("failed")
+        ));
+        assert!(matches!(
+            past_limit_ceiling_receipt(
+                CeilingReceipt::<&str>::Absent {
+                    pending_input: Some(pending.clone()),
+                },
+                false,
+                completed,
+            ),
+            CeilingReceipt::Absent { pending_input: Some(id) } if id == pending
+        ));
+    }
+
+    /// #1227 (a): an admitted completion input that is still pending carries
+    /// the delivered outcome in its retained payload. That typed outcome is
+    /// what the re-link's entry reads while the owner has not committed the
+    /// record (a crash between admission and retirement), so a `failed` or
+    /// `max_run_elapsed` outcome retires its child and `restart_interrupted`
+    /// keeps it seated; another child's record and a retired payload say
+    /// nothing.
+    #[test]
+    fn a_pending_admitted_completion_carries_its_typed_outcome() {
+        use crate::agent_tools::TOOL_FORK_OFF;
+        use meerkat_core::event::BackgroundJobTerminalStatus;
+
+        let (mob, child) = (MobId::from("mob-a"), AgentIdentity::from("child-a"));
+        let job = meerkat_mob::ForkJobRecord {
+            job_id: "job-a".to_string(),
+            owner_session_id: meerkat_core::SessionId::new(),
+            started_at_ms: 0,
+            max_run_ms: None,
+            prefix_message_count: 0,
+            result_label: "fork_off_result".to_string(),
+            max_text_bytes: 1024,
+            turn_delivery: None,
+        };
+        let admitted = |status: BackgroundJobTerminalStatus, detail: serde_json::Value| {
+            let notice = crate::detached_delivery::detached_completion_notice(
+                TOOL_FORK_OFF,
+                &job.job_id,
+                status,
+                &detail,
+            )
+            .expect("encode the completion record");
+            let input = meerkat_runtime::PromptInput::detached_job_completed(
+                crate::detached_delivery::detached_completion_key(TOOL_FORK_OFF, &job.job_id),
+                notice,
+            );
+            let mut state = meerkat_runtime::input_state::StoredInputState::new_accepted(
+                input.header.id.clone(),
+            );
+            state.state.persisted_input = Some(meerkat_runtime::Input::Prompt(input));
+            state
+        };
+        for (status, outcome, retires) in [
+            (BackgroundJobTerminalStatus::Failed, "failed", true),
+            (
+                BackgroundJobTerminalStatus::Terminated,
+                "max_run_elapsed",
+                true,
+            ),
+            (
+                BackgroundJobTerminalStatus::Failed,
+                "restart_interrupted",
+                false,
+            ),
+            (BackgroundJobTerminalStatus::Completed, "completed", false),
+        ] {
+            let pending = admitted(
+                status,
+                serde_json::json!({ "agent_identity": "child-a", "status": outcome }),
+            );
+            assert_eq!(
+                pending_completion(&pending, &mob, &child, &job)
+                    .map(|completion| completion.retires_child()),
+                Some(retires),
+                "{outcome}"
+            );
+        }
+        let other_child = admitted(
+            BackgroundJobTerminalStatus::Failed,
+            serde_json::json!({ "agent_identity": "child-b", "status": "failed" }),
+        );
+        assert!(pending_completion(&other_child, &mob, &child, &job).is_none());
+        let mut retired_payload = admitted(
+            BackgroundJobTerminalStatus::Failed,
+            serde_json::json!({ "agent_identity": "child-a", "status": "failed" }),
+        );
+        retired_payload.state.persisted_input = None;
+        assert!(pending_completion(&retired_payload, &mob, &child, &job).is_none());
+    }
+
     #[test]
     fn a_committed_record_is_matched_to_its_child_by_typed_fields() {
         let (mob, child) = (MobId::from("mob-a"), AgentIdentity::from("child-a"));

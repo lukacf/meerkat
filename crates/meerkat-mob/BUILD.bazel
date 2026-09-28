@@ -73,7 +73,6 @@ rust_library(
         "openai-live",
         "runtime-adapter",
         "schema",
-        "test-support",
     ],
     edition = "2024",
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [

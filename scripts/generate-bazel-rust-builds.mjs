@@ -258,14 +258,30 @@ function publicCoreCrateFeatures(key, pkg) {
   return [...features].sort();
 }
 
+// Crates whose production rust_library targets strip the `test-support`
+// feature. Cargo enables it only through dev-dependencies, so a release build
+// never compiles its test-only hooks; the unified feature set here would
+// otherwise compile them into every production target. Their generated test
+// variants keep the full feature set (see `testVariantCrateFeaturesFor`).
+const productionTestSupportStrippedKeys = new Set(["meerkat-runtime", "meerkat-mcp", "meerkat-mob"]);
+
 function rustLibraryCrateFeaturesFor(key, pkg) {
   const features = new Set(
     key === "meerkat-core" ? publicCoreCrateFeatures(key, pkg) : crateFeaturesFor(key, pkg),
   );
-  if (key === "meerkat-runtime" || key === "meerkat-mcp") {
+  if (productionTestSupportStrippedKeys.has(key)) {
     features.delete("test-support");
   }
   return [...features].sort();
+}
+
+// Features of a generated `_test_support` / `_with_runtime_test_support`
+// library variant: the full set for a crate whose production library strips
+// `test-support`, the production set otherwise.
+function testVariantCrateFeaturesFor(key, pkg) {
+  return testSupportSeedKeys.has(key) || productionTestSupportStrippedKeys.has(key)
+    ? crateFeaturesFor(key, pkg)
+    : rustLibraryCrateFeaturesFor(key, pkg);
 }
 
 const runtimePackage = byName.get("meerkat-runtime") ?? null;
@@ -2052,7 +2068,7 @@ for (const pkg of localPackages.values()) {
         }
         if (line.startsWith("    crate_features = ")) {
           return `    crate_features = ${
-            listExpr(testSupportSeedKeys.has(key) ? crateFeaturesFor(key, pkg) : rustLibraryCrateFeaturesFor(key, pkg))
+            listExpr(testVariantCrateFeaturesFor(key, pkg))
           },`;
         }
         if (line === `    visibility = ${rustTargetVisibility(key)},`) {
@@ -2130,7 +2146,7 @@ for (const pkg of localPackages.values()) {
           }
           if (line.startsWith("    crate_features = ")) {
             return `    crate_features = ${
-              listExpr(testSupportSeedKeys.has(key) ? crateFeaturesFor(key, pkg) : rustLibraryCrateFeaturesFor(key, pkg))
+              listExpr(testVariantCrateFeaturesFor(key, pkg))
             },`;
           }
           if (line === `    deps = ${internalDepsExpr},`) {

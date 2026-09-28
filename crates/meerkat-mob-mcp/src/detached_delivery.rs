@@ -120,26 +120,47 @@ pub(crate) fn detached_completion_key(tool: &str, job_id: &str) -> String {
     format!("{tool}:{job_id}")
 }
 
-/// Whether job `job_id`'s completion was already admitted to its owner,
-/// read from the runtime's durable input index (never live state). A job
-/// with an admitted completion is over. `false` when there is no durable
+/// Job `job_id`'s completion input, when it was already admitted to its
+/// owner, read from the runtime's durable input index (never live state). A
+/// job with an admitted completion is over. `None` when there is no durable
 /// evidence, including on a store-less runtime.
-pub(crate) async fn detached_completion_admitted(
+///
+/// While the input is pending, its retained payload
+/// (`state.persisted_input`) carries the admitted record; once the owner's
+/// commit retires that payload, the record is in the owner's transcript.
+pub(crate) async fn admitted_detached_completion(
     runtime: &meerkat_runtime::MeerkatMachine,
     owner_session_id: &SessionId,
     tool: &str,
     job_id: &str,
-) -> bool {
+) -> Option<meerkat_runtime::input_state::StoredInputState> {
     use meerkat_runtime::SessionServiceRuntimeExt as _;
-    matches!(
-        runtime
-            .durable_input_state_by_idempotency_key(
-                owner_session_id,
-                &detached_completion_key(tool, job_id),
-            )
-            .await,
-        Ok(Some(_))
-    )
+    runtime
+        .durable_input_state_by_idempotency_key(
+            owner_session_id,
+            &detached_completion_key(tool, job_id),
+        )
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The completion record an admitted completion input carries in its
+/// retained payload: the `BackgroundJob` notice blocks of its typed append.
+/// Empty once the payload is retired.
+pub(crate) fn admitted_completion_notice_blocks(
+    admitted: &meerkat_runtime::input_state::StoredInputState,
+) -> impl Iterator<Item = &meerkat_core::types::SystemNoticeBlock> {
+    let appends = match admitted.state.persisted_input.as_ref() {
+        Some(meerkat_runtime::Input::Prompt(prompt)) => prompt.typed_turn_appends.as_slice(),
+        _ => &[],
+    };
+    appends.iter().flat_map(|append| match &append.content {
+        meerkat_core::lifecycle::run_primitive::CoreRenderable::SystemNotice { blocks, .. } => {
+            blocks.as_slice()
+        }
+        _ => &[],
+    })
 }
 
 /// The durable completion record for one job.

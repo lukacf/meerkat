@@ -2427,6 +2427,98 @@ async fn a_failed_turn_deduplicated_against_restart_interrupted_keeps_its_child_
     fixture.teardown().await;
 }
 
+/// #1227 (a): a crash can land after a retiring outcome's completion is
+/// admitted to the forker and before its child is retired. The admitted input
+/// is durable, but the forker's run has not committed the record into its
+/// transcript yet, so the committed record alone says nothing. The re-link
+/// reads the outcome the pending input carries and retires the child. The
+/// forker's run is held before its terminal commit by a typed barrier, which
+/// is exactly the state that crash leaves on restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_outcome_admitted_but_not_yet_committed_retires_its_child() {
+    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let runtime = relink_runtime(&fixture).expect("runtime-backed fixture");
+    let name = "admitted-uncommitted-child";
+    let child = AgentIdentity::from(name);
+    let job_id = format!("job-{name}");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec(name),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    assert!(matches!(
+        run.outcome().await,
+        Some(ForkChildRunOutcome::Completed(_))
+    ));
+    let (commit_entered, release_commit) =
+        runtime.arm_runtime_loop_before_terminal_commit_test_hook(owner.clone());
+    meerkat_mob_mcp::detached_delivery::deliver_detached_completion_to_member(
+        &runtime,
+        &handle,
+        &AgentIdentity::from("forker"),
+        &owner,
+        "fork_off",
+        &job_id,
+        meerkat_core::event::BackgroundJobTerminalStatus::Failed,
+        serde_json::json!({ "agent_identity": name, "status": "failed" }),
+    )
+    .await
+    .expect("admit the retiring outcome");
+    commit_entered
+        .await
+        .expect("the forker's run takes the completion up and reaches its commit");
+    assert_eq!(
+        completion_records(&fixture, &owner, &job_id).await,
+        0,
+        "the record is admitted but not committed"
+    );
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+
+    let action = meerkat_mob_mcp::fork_relink::relink_child(
+        fixture.state.session_service(),
+        &relink_delivery(&fixture),
+        &fixture.source_mob_id(),
+        &handle,
+        &child,
+        &job,
+    )
+    .await;
+    assert_eq!(action, ForkRelinkAction::AlreadyDelivered);
+    assert!(
+        handle.get_member(&child).await.unwrap().is_none(),
+        "the admitted outcome retires the child before its record is committed"
+    );
+    release_commit
+        .send(())
+        .expect("the forker's commit was still held");
+    await_completion_record(&fixture, &owner, &job_id).await;
+    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
+    fixture.teardown().await;
+}
+
 /// Fork child `name` for job `job-{name}` and let its turn complete; admit a
 /// completion record for that job to the forker (`notice` status, `detail`
 /// its detail), as if delivered before a crash that skipped the retirement
@@ -2632,12 +2724,17 @@ async fn relink_waits_while_a_finished_turn_s_run_input_awaits_its_boundary() {
     fixture.teardown().await;
 }
 
-/// The typed arm at the ceiling: a finished turn whose run input never
-/// reaches its boundary. The runtime keeps answering `true` (machine
-/// evidence, not a timeout), so past the ceiling the re-link delivers
-/// `restart_interrupted` with the typed reason `commit_never_landed`.
+/// #1227 (b): at the ceiling the job turn's input can read not terminal while
+/// it stays admitted in the child's runtime: here its run finished and is
+/// held before its terminal commit. A `restart_interrupted` fixed on that
+/// reading is contradicted as soon as the run answers the input. The re-link
+/// fences the exact input first (it settles that input, then the job's
+/// outcome is its terminal), so it fixes nothing before the fence, and the
+/// run that answers the input before the fence cancels anything wins. Every
+/// step is ordered by typed barriers: the held commit, the fence's gate and
+/// the receipt.
 #[tokio::test(flavor = "multi_thread")]
-async fn relink_names_commit_never_landed_when_a_run_input_never_reaches_its_boundary() {
+async fn a_ceiling_outcome_is_fixed_only_after_the_job_input_is_fenced() {
     let gate = TurnGate::new();
     let fixture = held_child_fixture(&gate);
     fixture.seed_source_mob(&["forker"]).await;
@@ -2647,58 +2744,103 @@ async fn relink_names_commit_never_landed_when_a_run_input_never_reaches_its_bou
         .handle_for(&fixture.source_mob_id())
         .await
         .unwrap();
-    let job_id = "job-input-never-consumed";
+    let job_id = "job-fenced-at-the-ceiling";
     let (child, child_session) = fork_held_child(
         &fixture,
         &handle,
         &gate,
-        "input-never-consumed-child",
+        "fenced-at-the-ceiling-child",
         job_id,
         &owner,
     )
     .await;
     let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
         .expect("the service derives its runtime");
-    let (entered, release) =
+    let (commit_entered, release_commit) =
         runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
     gate.open();
-    entered.await.expect("the finished turn reaches its commit");
-
+    commit_entered
+        .await
+        .expect("the finished turn reaches its commit");
     let job = handle
         .roster()
         .await
         .get_by_identity(&child)
         .and_then(|entry| entry.fork_job.clone())
         .expect("durable fork job record");
-    let ceiling = Duration::from_secs(2);
-    let started = tokio::time::Instant::now();
-    let action = tokio::time::timeout(
-        Duration::from_secs(60),
-        meerkat_mob_mcp::fork_relink::relink_child_within(
-            fixture.state.session_service(),
-            &relink_delivery(&fixture),
-            &fixture.source_mob_id(),
-            &handle,
-            &child,
-            &job,
-            ceiling,
+    let turn_delivery = job.turn_delivery.clone().expect("receipt-anchored job");
+
+    // A zero ceiling: the first idle reading decides.
+    let (fence_entered, release_fence) =
+        meerkat_mob::MobHandle::arm_delivery_input_settle_test_gate(child.clone());
+    let mut relink = tokio::spawn({
+        let service = fixture.state.session_service();
+        let delivery = relink_delivery(&fixture);
+        let mob_id = fixture.source_mob_id();
+        let handle = handle.clone();
+        let child = child.clone();
+        async move {
+            meerkat_mob_mcp::fork_relink::relink_child_within(
+                service,
+                &delivery,
+                &mob_id,
+                &handle,
+                &child,
+                &job,
+                Duration::ZERO,
+            )
+            .await
+        }
+    });
+    tokio::select! {
+        action = &mut relink => panic!(
+            "the re-link fixed the job's outcome while its input was still admitted: {action:?}"
         ),
-    )
-    .await
-    .expect("the ceiling bounds the wait");
-    assert_eq!(action, ForkRelinkAction::Delivered);
-    let waited = started.elapsed();
+        entered = fence_entered => entered.expect("the re-link fences the job input"),
+    }
+    assert_eq!(
+        completion_records(&fixture, &owner, job_id).await,
+        0,
+        "nothing is delivered before the fence"
+    );
+
+    // The held run answers the input before the fence cancels anything.
+    release_commit
+        .send(())
+        .expect("the finished turn's commit was still held");
+    let spec = meerkat_mob::BoundedResultSpec::new("fork_off_result".to_string(), 16 * 1024)
+        .expect("bounded result spec");
+    let answered = handle
+        .wait_bounded_work_for_identity_with_delivery_identity(
+            &child,
+            &turn_delivery,
+            &spec,
+            meerkat_core::time_compat::Instant::now() + Duration::from_secs(30),
+        )
+        .await
+        .expect("read the job turn's receipt");
+    assert!(
+        matches!(
+            answered.work(),
+            meerkat_mob::DeliveryTerminalWait::Terminal(record)
+                if matches!(
+                    record.resolution(),
+                    meerkat_mob::DeliveryTerminalResolution::Receipt { result: Ok(_), .. }
+                )
+        ),
+        "the released run answered the job input: {answered:?}"
+    );
+    release_fence.send(()).expect("the fence was still held");
+
+    assert_eq!(relink.await.unwrap(), ForkRelinkAction::Delivered);
     await_completion_record(&fixture, &owner, job_id).await;
-    let record = completion_record_text(&fixture, &owner, job_id).await;
-    assert!(
-        record.contains("restart_interrupted") && record.contains("commit_never_landed"),
-        "an input that never reaches its boundary settles as restart_interrupted, typed: {record}"
+    assert_eq!(completion_records(&fixture, &owner, job_id).await, 1);
+    let outcome = completion_record_outcome(&fixture, &owner, job_id).await;
+    assert_eq!(
+        outcome["status"], "completed",
+        "the outcome is the fenced input's terminal: {outcome}"
     );
-    assert!(
-        waited >= ceiling,
-        "the re-link kept watching until the ceiling (waited {waited:?})"
-    );
-    let _ = release.send(());
+    assert_eq!(outcome["bounded_result"]["text"], CHILD_REPLY, "{outcome}");
     fixture.teardown().await;
 }
 

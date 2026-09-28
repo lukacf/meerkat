@@ -308,6 +308,129 @@ impl super::MobHandle {
             work,
         })
     }
+
+    /// Settle the runtime input a caller-identified delivery to a local
+    /// member was admitted as, then read the delivery's terminal.
+    ///
+    /// `input_id` is the exact input a [`DeliveryTerminalWait::NotTerminal`]
+    /// reading of this delivery named. Unless it already has a terminal, it is
+    /// cancelled in the member's runtime: a queued input is abandoned, and a
+    /// staged or applied one is cancelled through its exact run, never through
+    /// the member's ambient current run, so no later work is touched. A run
+    /// that answers the input first wins, and its terminal is the one read.
+    /// The read is [`Self::wait_bounded_work_for_identity_with_delivery_identity`]
+    /// by `deadline`.
+    ///
+    /// This fences a delivery before its caller commits an outcome for it:
+    /// once the report carries a terminal, no run can answer the input any
+    /// more. A report without one (the member's runtime no longer holds the
+    /// input live, or the read ended first) settled nothing.
+    pub async fn settle_delivery_input_for_identity(
+        &self,
+        identity: &AgentIdentity,
+        delivery_identity: &crate::store::MobDeliveryIdentity,
+        input_id: &InputId,
+        result_spec: &BoundedResultSpec,
+        deadline: meerkat_core::time_compat::Instant,
+    ) -> Result<DeliveryTerminalWaitReport, DeliveryTerminalWaitError> {
+        delivery_identity
+            .validate()
+            .map_err(DeliveryTerminalWaitError::InvalidDeliveryIdentity)?;
+        if self.member_placement_present(identity) {
+            return Err(DeliveryTerminalWaitError::RemotelyHostedMember {
+                identity: identity.clone(),
+            });
+        }
+        let runtime = self
+            .runtime_adapter
+            .as_ref()
+            .ok_or(DeliveryTerminalWaitError::RuntimeAdapterUnavailable)?;
+        let member = self
+            .durable_bounded_member_state(identity)
+            .await
+            .map_err(DeliveryTerminalWaitError::MemberState)?;
+        let Some(session_id) = member.session_id().cloned() else {
+            return Ok(DeliveryTerminalWaitReport {
+                member: Some(member),
+                work: DeliveryTerminalWait::Unknown {
+                    cause: DeliveryUnknownCause::MemberHasNoSession,
+                },
+            });
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        run_delivery_input_settle_test_gate(identity).await;
+        runtime
+            .cancel_input_if_present(&session_id, input_id, "delivery settled by its observer")
+            .await
+            .map_err(DeliveryTerminalWaitError::RuntimeRead)?;
+        self.wait_bounded_work_for_identity_with_delivery_identity(
+            identity,
+            delivery_identity,
+            result_spec,
+            deadline,
+        )
+        .await
+    }
+
+    /// Pause the next [`Self::settle_delivery_input_for_identity`] of
+    /// `identity`, through any handle in this process, after it resolved the
+    /// member's session and before it cancels anything. The first receiver
+    /// resolves when a settle reaches the gate; sending on (or dropping) the
+    /// returned sender lets it go on. Exposed only by test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_delivery_input_settle_test_gate(
+        identity: AgentIdentity,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        let mut gate = DELIVERY_INPUT_SETTLE_TEST_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            gate.is_none(),
+            "delivery input settle test gate already armed"
+        );
+        *gate = Some((identity, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+}
+
+/// One-shot gate a test arms to hold a delivery input settle (see
+/// [`super::MobHandle::arm_delivery_input_settle_test_gate`]).
+#[cfg(all(feature = "runtime-adapter", any(test, feature = "test-support")))]
+type DeliveryInputSettleTestGate = (
+    AgentIdentity,
+    crate::tokio::sync::oneshot::Sender<()>,
+    crate::tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(all(feature = "runtime-adapter", any(test, feature = "test-support")))]
+static DELIVERY_INPUT_SETTLE_TEST_GATE: std::sync::Mutex<Option<DeliveryInputSettleTestGate>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(feature = "runtime-adapter", any(test, feature = "test-support")))]
+async fn run_delivery_input_settle_test_gate(identity: &AgentIdentity) {
+    let armed = {
+        let mut gate = DELIVERY_INPUT_SETTLE_TEST_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if gate
+            .as_ref()
+            .is_some_and(|(armed_identity, _, _)| armed_identity == identity)
+        {
+            gate.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, entered_tx, release_rx)) = armed {
+        let _ = entered_tx.send(());
+        let _ = release_rx.await;
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]

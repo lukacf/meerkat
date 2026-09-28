@@ -3494,6 +3494,9 @@ struct UnmeasuredSegmentSeal {
     /// The provider turn continues in a new segment after this one, so the
     /// release must hand back exactly one generated continuation.
     continues_turn: bool,
+    /// The release committed canonically; only consuming the generated
+    /// output may remain. Its speech is never retracted or re-applied.
+    applied: bool,
 }
 
 impl UnmeasuredSegmentSeal {
@@ -3512,6 +3515,7 @@ impl UnmeasuredSegmentSeal {
             stop_reason: pending.stop_reason,
             usage: pending.usage.clone(),
             continues_turn,
+            applied: false,
         }
     }
 
@@ -3806,14 +3810,21 @@ impl ExperimentalGptLiveDeferredAdapter {
 
     /// Abandon every sealed segment still awaiting release (a bounded
     /// terminal attempt failed) and retract its captions.
-    fn abandon_unmeasured_seals(&self) {
-        let abandoned: Vec<UnmeasuredSegmentSeal> = self
-            .unmeasured_seals
+    /// Take every sealed segment still awaiting release, oldest first.
+    fn take_unmeasured_seals(&self) -> Vec<UnmeasuredSegmentSeal> {
+        self.unmeasured_seals
             .lock()
             .map(|mut seals| seals.drain(..).collect())
-            .unwrap_or_default();
-        for seal in abandoned {
-            self.retract_captions(&seal.item_id);
+            .unwrap_or_default()
+    }
+
+    /// Record that the oldest seal's release committed canonically, so a
+    /// later retry only consumes its output and never retracts its speech.
+    fn mark_unmeasured_seal_applied(&self, item_id: &str) {
+        if let Ok(mut seals) = self.unmeasured_seals.lock()
+            && let Some(seal) = seals.front_mut().filter(|seal| seal.item_id == item_id)
+        {
+            seal.applied = true;
         }
     }
 
@@ -6308,7 +6319,7 @@ async fn release_unmeasured_segments(
     adapter: &ExperimentalGptLiveDeferredAdapter,
 ) -> Result<(), String> {
     while let Some(seal) = adapter.next_unmeasured_seal()? {
-        let release = release_unmeasured_segment(activation, binding, &seal).await?;
+        let release = release_unmeasured_segment(activation, binding, adapter, &seal).await?;
         adapter.complete_unmeasured_seal(&seal.item_id)?;
         if release == UnmeasuredSegmentRelease::Abandoned {
             adapter.retract_captions(&seal.item_id);
@@ -6333,6 +6344,7 @@ enum UnmeasuredSegmentRelease {
 async fn release_unmeasured_segment(
     activation: &PreparedExperimentalGptLiveActivation,
     binding: &ProviderWebrtcBinding,
+    adapter: &ExperimentalGptLiveDeferredAdapter,
     seal: &UnmeasuredSegmentSeal,
 ) -> Result<UnmeasuredSegmentRelease, String> {
     let runtime = &activation.runtime;
@@ -6345,6 +6357,11 @@ async fn release_unmeasured_segment(
         .as_deref()
         .and_then(|output_id| runtime.live_assistant_output_handle(output_id))
     else {
+        if seal.applied {
+            // The speech committed; the output it would consume was retired
+            // meanwhile (a close, a rebinding). Nothing is left to do.
+            return Ok(UnmeasuredSegmentRelease::Committed);
+        }
         // The segment's output was never admitted (its start was deferred
         // behind a member turn while the channel closed, and the close
         // retires that custody), so no canonical target can hold its speech.
@@ -6359,46 +6376,31 @@ async fn release_unmeasured_segment(
     {
         return Err("unmeasured segment does not match its generated output target".to_string());
     }
-    let release = seal.release_observation(handle.interaction_id());
-    let defer = |release: LiveAdapterObservation| async move {
-        match activation
+    if !seal.applied {
+        let release = seal.release_observation(handle.interaction_id());
+        let settled = match activation
             .live_adapter_host
-            .defer_projection_after_close(binding.channel_id(), release)
+            .apply_observation(binding.channel_id(), &release)
             .await
         {
-            Ok(()) => UnmeasuredSegmentRelease::Deferred,
-            Err(error) => {
-                tracing::warn!(
-                    target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
-                    channel = %binding.channel_id(),
-                    %error,
-                    "unmeasured segment release could not be deferred to the close; it is dropped"
-                );
-                UnmeasuredSegmentRelease::Abandoned
-            }
+            Ok(settled) => settled,
+            // The close released this channel's projections from the member
+            // turn's boundary. The release replays idempotently, so the
+            // close's deferred settlement applies it once the boundary frees;
+            // its output is retired with the channel.
+            Err(meerkat_live::LiveAdapterHostError::ProjectionError(
+                meerkat_live::LiveProjectionError::SessionBusy(_),
+            )) => return Ok(defer_unmeasured_release(activation, binding, release).await),
+            Err(error) => return Err(error.to_string()),
+        };
+        if !matches!(
+            settled,
+            meerkat_live::ObservationOutcome::PlaybackTerminalSettled { ref item_id, .. }
+                if item_id == &seal.item_id
+        ) {
+            return Err("unmeasured segment release did not settle".to_string());
         }
-    };
-    let settled = match activation
-        .live_adapter_host
-        .apply_observation(binding.channel_id(), &release)
-        .await
-    {
-        Ok(settled) => settled,
-        // The close released this channel's projections from the member
-        // turn's boundary. The release replays idempotently, so the close's
-        // deferred settlement applies it once the boundary frees; its output
-        // is retired with the channel.
-        Err(meerkat_live::LiveAdapterHostError::ProjectionError(
-            meerkat_live::LiveProjectionError::SessionBusy(_),
-        )) => return Ok(defer(release).await),
-        Err(error) => return Err(error.to_string()),
-    };
-    if !matches!(
-        settled,
-        meerkat_live::ObservationOutcome::PlaybackTerminalSettled { ref item_id, .. }
-            if item_id == &seal.item_id
-    ) {
-        return Err("unmeasured segment release did not settle".to_string());
+        adapter.mark_unmeasured_seal_applied(&seal.item_id);
     }
     if seal.continues_turn {
         let next = runtime
@@ -6429,16 +6431,51 @@ async fn release_unmeasured_segment(
     Ok(UnmeasuredSegmentRelease::Committed)
 }
 
-/// Release the seals a close, EOF, or terminal observation left, bounded:
-/// a failed or stalled release abandons the remaining seals (retracting
-/// their captions) so the terminal is still reported.
+/// Hand one release to the channel's close, whose deferred settlement
+/// applies it once the member turn's boundary frees and before it settles
+/// leftover playback.
+async fn defer_unmeasured_release(
+    activation: &PreparedExperimentalGptLiveActivation,
+    binding: &ProviderWebrtcBinding,
+    release: LiveAdapterObservation,
+) -> UnmeasuredSegmentRelease {
+    match activation
+        .live_adapter_host
+        .defer_projection_after_close(binding.channel_id(), release)
+        .await
+    {
+        Ok(()) => UnmeasuredSegmentRelease::Deferred,
+        Err(error) => {
+            tracing::warn!(
+                target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                channel = %binding.channel_id(),
+                %error,
+                "unmeasured segment release could not be deferred to the close; it is dropped"
+            );
+            UnmeasuredSegmentRelease::Abandoned
+        }
+    }
+}
+
+/// How long a stream end without an owner close waits for its sealed
+/// segments to release before handing them to the channel's close.
+#[cfg(not(test))]
+const UNMEASURED_TERMINAL_RELEASE_BOUND: std::time::Duration = LIVE_CLOSE_DRAIN_WAIT_SLICE;
+#[cfg(test)]
+const UNMEASURED_TERMINAL_RELEASE_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Release the seals an EOF without an owner close or a terminal observation
+/// left, bounded, so the stream end is always reported. Seals that did not
+/// release in time (a member turn holds the session boundary, or the release
+/// failed) are handed to the channel's close, which the stream end triggers,
+/// instead of being dropped.
 async fn release_unmeasured_segments_before_terminal(
     activation: &PreparedExperimentalGptLiveActivation,
     binding: &ProviderWebrtcBinding,
     adapter: &ExperimentalGptLiveDeferredAdapter,
 ) {
     let released = tokio::time::timeout(
-        LIVE_CLOSE_DRAIN_WAIT_SLICE,
+        UNMEASURED_TERMINAL_RELEASE_BOUND,
         release_unmeasured_segments(activation, binding, adapter),
     )
     .await;
@@ -6450,9 +6487,32 @@ async fn release_unmeasured_segments_before_terminal(
     tracing::warn!(
         channel = %binding.channel_id(),
         error = %failure,
-        "unmeasured speech sealed at the stream end could not be released; the terminal is reported without it"
+        "unmeasured speech sealed at the stream end is handed to the channel close"
     );
-    adapter.abandon_unmeasured_seals();
+    for seal in adapter.take_unmeasured_seals() {
+        if seal.applied {
+            // Committed already; its output is retired with the channel.
+            continue;
+        }
+        let handle = seal
+            .output_id
+            .as_deref()
+            .and_then(|output_id| activation.runtime.live_assistant_output_handle(output_id));
+        let release = match handle {
+            Some(handle) => {
+                defer_unmeasured_release(
+                    activation,
+                    binding,
+                    seal.release_observation(handle.interaction_id()),
+                )
+                .await
+            }
+            None => UnmeasuredSegmentRelease::Abandoned,
+        };
+        if release == UnmeasuredSegmentRelease::Abandoned {
+            adapter.retract_captions(&seal.item_id);
+        }
+    }
 }
 
 fn spawn_sideband_actors(
@@ -12958,14 +13018,21 @@ mod tests {
             adapter.seal_open_unmeasured_segments(),
             "the seal still awaits release and nothing new is sealed"
         );
-        // A bounded terminal release that fails abandons the seal and
-        // retracts the captions no committed row will replace.
-        adapter.abandon_unmeasured_seals();
+        assert!(!seal.applied);
+        // Once the release commits, the seal records it: a retry only
+        // consumes the output and never retracts committed speech.
+        adapter.mark_unmeasured_seal_applied(&seal.item_id);
+        let taken = adapter.take_unmeasured_seals();
+        assert!(
+            matches!(taken.as_slice(), [taken] if taken.applied && taken.item_id == seal.item_id)
+        );
         assert!(!adapter.has_unmeasured_seals());
         assert!(
             !adapter.seal_open_unmeasured_segments(),
             "nothing is left to seal"
         );
+        // A segment that cannot commit retracts its captions.
+        adapter.retract_captions(&seal.item_id);
         let retractions = captions.retractions();
         assert_eq!(retractions.len(), 1);
         assert_eq!(retractions[0].item_id(), seal.item_id);
@@ -14359,6 +14426,86 @@ mod tests {
         run_shipping_close_matrix(Some(true)).await;
     }
 
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    async fn wait_for_admitted_unmeasured_output(
+        service: &Arc<crate::PersistentSessionService<crate::FactoryAgentBuilder>>,
+        captions: &RecordingCaptionSink,
+        session_id: &meerkat_core::SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let session = service
+                    .load_authoritative_session(session_id)
+                    .await
+                    .expect("read admitted target")
+                    .expect("session");
+                if !captions.captions().is_empty()
+                    && session
+                        .live_assistant_playback_target_for_channel(channel_id)
+                        .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the open segment's output is admitted");
+    }
+
+    async fn wait_for_unmeasured_seal(adapter: &ExperimentalGptLiveDeferredAdapter) {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !adapter.has_unmeasured_seals() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the typed boundary seals the open segment");
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    async fn assert_eventually_one_unmeasured_row(
+        service: &Arc<crate::PersistentSessionService<crate::FactoryAgentBuilder>>,
+        session_id: &meerkat_core::SessionId,
+        expected: &str,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let rows = unmeasured_rows(
+                    &service
+                        .load_authoritative_session(session_id)
+                        .await
+                        .expect("read committed speech")
+                        .expect("session"),
+                );
+                if !rows.is_empty() {
+                    assert_eq!(
+                        rows.iter()
+                            .map(|(text, _)| text.as_str())
+                            .collect::<Vec<_>>(),
+                        [expected],
+                        "the sealed speech commits exactly once"
+                    );
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the sealed speech commits");
+    }
+
     /// A typed row lands mid-turn: the provider keeps speaking while the
     /// canonical typed turn commits and is mirrored to the provider, whose
     /// acknowledgement is a typed between-speech boundary. The open segment
@@ -14564,6 +14711,8 @@ mod tests {
             ProviderManaged,
             UnmeasuredBoundaryBusyClose,
             UnmeasuredEofReleaseFailure,
+            UnmeasuredMemberTurnEndsMidClose,
+            UnmeasuredEofDuringMemberTurn,
             SnapshotCut,
             PrefixCut,
             UnmeasuredCut,
@@ -14597,6 +14746,8 @@ mod tests {
             ExitKind::ProviderManaged,
             ExitKind::UnmeasuredBoundaryBusyClose,
             ExitKind::UnmeasuredEofReleaseFailure,
+            ExitKind::UnmeasuredMemberTurnEndsMidClose,
+            ExitKind::UnmeasuredEofDuringMemberTurn,
             ExitKind::SnapshotCut,
             ExitKind::PrefixCut,
             ExitKind::UnmeasuredCut,
@@ -14747,6 +14898,8 @@ mod tests {
                     | ExitKind::ProviderManaged
                     | ExitKind::UnmeasuredBoundaryBusyClose
                     | ExitKind::UnmeasuredEofReleaseFailure
+                    | ExitKind::UnmeasuredMemberTurnEndsMidClose
+                    | ExitKind::UnmeasuredEofDuringMemberTurn
                     | ExitKind::PrefixCut
                     | ExitKind::UnmeasuredCut
                     | ExitKind::UnmeasuredRetry
@@ -14758,6 +14911,8 @@ mod tests {
                 ExitKind::ProviderManaged
                     | ExitKind::UnmeasuredBoundaryBusyClose
                     | ExitKind::UnmeasuredEofReleaseFailure
+                    | ExitKind::UnmeasuredMemberTurnEndsMidClose
+                    | ExitKind::UnmeasuredEofDuringMemberTurn
                     | ExitKind::ContextFirstTyped
                     | ExitKind::ContextFirstPeer
             ) {
@@ -15430,6 +15585,8 @@ mod tests {
                     | ExitKind::ProviderManaged
                     | ExitKind::UnmeasuredBoundaryBusyClose
                     | ExitKind::UnmeasuredEofReleaseFailure
+                    | ExitKind::UnmeasuredMemberTurnEndsMidClose
+                    | ExitKind::UnmeasuredEofDuringMemberTurn
                     | ExitKind::PrefixCut
                     | ExitKind::UnmeasuredCut
                     | ExitKind::UnmeasuredRetry
@@ -15955,6 +16112,129 @@ mod tests {
                     .expect("close pending replacement");
                 continue;
             }
+            if matches!(
+                exit,
+                ExitKind::UnmeasuredMemberTurnEndsMidClose
+                    | ExitKind::UnmeasuredEofDuringMemberTurn
+            ) {
+                wait_for_admitted_unmeasured_output(&service, &captions, &session_id, &channel_id)
+                    .await;
+                let boundary = service
+                    .acquire_runtime_turn_finalization_guard(&session_id)
+                    .await;
+                if matches!(exit, ExitKind::UnmeasuredMemberTurnEndsMidClose) {
+                    // A delegation seals the open segment; its release parks
+                    // behind the member turn.
+                    let delegating_user = LiveSidebandTurnRef::__from_provider_observation(
+                        binding.channel_id(),
+                        format!("mid-close-user-{ordinal}"),
+                        format!("private-mid-close-user-{ordinal}"),
+                    )
+                    .expect("delegating user turn");
+                    sideband.push(LiveSidebandObservation::new(
+                        binding.clone(),
+                        LiveSidebandObservationKind::DelegationRequested {
+                            turn: delegating_user,
+                            delegation: LiveSidebandDelegationRef::__from_provider_observation(
+                                format!("mid-close-delegation-{ordinal}"),
+                                format!("private-mid-close-delegation-{ordinal}"),
+                            )
+                            .expect("fixture delegation identity"),
+                            final_transcript: format!("matrix user {ordinal}"),
+                            request_transcript: format!("matrix user {ordinal}"),
+                            assistant_context: "First spoken checkpoint.".to_string(),
+                        },
+                    ));
+                    wait_for_unmeasured_seal(&adapter).await;
+                    // The close lifts the member-turn wait (as the explicit
+                    // close does before its physical close): the parked
+                    // release returns Busy and is deferred to the close.
+                    service.release_live_projection_turn_boundary_waiters(&session_id, &channel_id);
+                    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                        while adapter.has_unmeasured_seals() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("the parked release is deferred to the close");
+                    // The member turn ends before the close settles: the
+                    // close's own settlement would find the boundary free and
+                    // settle the target with no text. It must take the
+                    // deferred path, which applies the release first.
+                    drop(boundary);
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        member_host.close_live_channel(Some(authority.as_ref()), &channel_id),
+                    )
+                    .await
+                    .expect("close converges")
+                    .expect("close commits with the deferred release");
+                } else {
+                    // The provider hangs up while a member turn holds the
+                    // boundary and no owner close is running: the bounded
+                    // release cannot land, so it is handed to the channel
+                    // close the stream end triggers, not dropped.
+                    sideband.close().await.expect("inject remote EOF");
+                    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                        loop {
+                            let drain = adapter.drain.lock().expect("drain custody").clone();
+                            let drain = drain.expect("bound drain");
+                            if drain
+                                .projection
+                                .lock()
+                                .is_ok_and(|receipt| receipt.is_some())
+                            {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("the stream end is reported despite the member turn");
+                    assert!(!adapter.has_unmeasured_seals());
+                    assert!(
+                        unmeasured_rows(
+                            &service
+                                .load_authoritative_session(&session_id)
+                                .await
+                                .expect("read deferred speech")
+                                .expect("session")
+                        )
+                        .is_empty(),
+                        "the speech waits for the member turn"
+                    );
+                    let cleanup_host = Arc::clone(&member_host);
+                    let cleanup_authority = Arc::clone(&authority);
+                    let cleanup_channel = channel_id.clone();
+                    let receipt = opened.pending_receipt().to_string();
+                    let cleanup = tokio::spawn(async move {
+                        cleanup_host
+                            .close_experimental_live_pending_channel(
+                                cleanup_authority.as_ref(),
+                                &cleanup_channel,
+                                &receipt,
+                            )
+                            .await
+                    });
+                    drop(boundary);
+                    tokio::time::timeout(std::time::Duration::from_secs(10), cleanup)
+                        .await
+                        .expect("cleanup after the stream end is bounded")
+                        .expect("cleanup task")
+                        .expect("exact local cleanup after the stream end");
+                }
+                assert_eventually_one_unmeasured_row(
+                    &service,
+                    &session_id,
+                    "First spoken checkpoint.",
+                )
+                .await;
+                assert!(
+                    captions.retractions().is_empty(),
+                    "committed speech is never retracted"
+                );
+                continue;
+            }
             if matches!(exit, ExitKind::UnmeasuredEofReleaseFailure) {
                 tokio::time::timeout(std::time::Duration::from_secs(3), async {
                     loop {
@@ -15976,8 +16256,9 @@ mod tests {
                 .await
                 .expect("the open segment's output is admitted");
                 // The provider hangs up with no owner close while speech is
-                // open, and the one bounded release attempt fails before its
-                // commit. The stream end must still be reported.
+                // open, and the bounded release attempt fails before its
+                // commit. The stream end must still be reported, and the
+                // speech is handed to the channel close instead of dropped.
                 live_adapter_host
                     .__fail_next_projection_for_test(channel_id.clone(), false)
                     .await;
@@ -16004,28 +16285,7 @@ mod tests {
                 })
                 .await
                 .expect("a failed release does not suppress the stream-end receipt");
-                assert!(
-                    unmeasured_rows(
-                        &service
-                            .load_authoritative_session(&session_id)
-                            .await
-                            .expect("read abandoned release")
-                            .expect("session")
-                    )
-                    .is_empty(),
-                    "the failed release committed nothing"
-                );
-                assert_eq!(
-                    captions
-                        .retractions()
-                        .iter()
-                        .map(|retraction| retraction.item_id().to_string())
-                        .collect::<Vec<_>>(),
-                    [ExperimentalGptLiveDeferredAdapter::local_item_id(
-                        &assistant_turn
-                    )],
-                    "the abandoned segment's captions are retracted"
-                );
+                assert!(!adapter.has_unmeasured_seals());
                 assert_eq!(
                     tokio::time::timeout(
                         std::time::Duration::from_secs(5),
@@ -16039,6 +16299,16 @@ mod tests {
                     .expect("cleanup after the reported stream end is bounded")
                     .expect("the reported stream end allows exact local cleanup"),
                     meerkat_contracts::LiveCloseStatus::Closed,
+                );
+                assert_eventually_one_unmeasured_row(
+                    &service,
+                    &session_id,
+                    "First spoken checkpoint.",
+                )
+                .await;
+                assert!(
+                    captions.retractions().is_empty(),
+                    "speech handed to the close is not retracted"
                 );
                 continue;
             }
@@ -16090,7 +16360,10 @@ mod tests {
                         assistant_context: "First spoken checkpoint.".to_string(),
                     },
                 ));
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                // The boundary sealed the segment; with the member turn
+                // holding the boundary and no close yet, its release can
+                // neither commit nor leave the queue.
+                wait_for_unmeasured_seal(&adapter).await;
                 assert!(
                     unmeasured_rows(
                         &service
@@ -16922,6 +17195,8 @@ mod tests {
                 ExitKind::ProviderManaged
                 | ExitKind::UnmeasuredBoundaryBusyClose
                 | ExitKind::UnmeasuredEofReleaseFailure
+                | ExitKind::UnmeasuredMemberTurnEndsMidClose
+                | ExitKind::UnmeasuredEofDuringMemberTurn
                 | ExitKind::PrefixCut
                 | ExitKind::UnmeasuredCut
                 | ExitKind::UnmeasuredRetry

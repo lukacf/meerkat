@@ -1044,13 +1044,23 @@ mod orchestrator {
                         tokio::time::sleep(super::LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY).await;
                         break;
                     }
-                    Ok(outcome) => {
+                    Ok(Ok(outcome)) => {
                         tracing::info!(
                             target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
                             channel = %channel_id,
                             ?observation,
                             ?outcome,
-                            "deferred live transcript projection applied before the close settlement"
+                            "deferred live projection applied before the close settlement"
+                        );
+                        transcript_first.pop_front();
+                    }
+                    Ok(Err(error)) => {
+                        tracing::info!(
+                            target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                            channel = %channel_id,
+                            ?observation,
+                            %error,
+                            "deferred live projection was refused after the close"
                         );
                         transcript_first.pop_front();
                     }
@@ -3897,6 +3907,14 @@ mod orchestrator {
             // in flight (the member's turn boundary was held). They follow the
             // playback settlement to the boundary on the owned task below.
             let deferred_projections = host.take_deferred_projections(channel_id).await;
+            // A deferred provider-managed unmeasured release carries observed
+            // speech. The close's own settlement would resolve its still
+            // active target as Unmeasured with no text if the member turn
+            // ended meanwhile, so such a close always takes the deferred
+            // path, which applies the release first and then settles.
+            let transcript_deferred = deferred_projections
+                .iter()
+                .any(is_unmeasured_playback_release);
             let deferred_host = host.owned_handle();
             let service = Arc::clone(self.service);
             let runtime = Arc::clone(self.runtime_adapter);
@@ -3914,7 +3932,8 @@ mod orchestrator {
                     // or a fork holding the boundary) is never waited for: the
                     // settlement is deferred to the turn boundary and the
                     // close proceeds.
-                    let settlement_deferred = match meerkat_live::traced_live_close_step(
+                    let settlement_deferred = transcript_deferred
+                        || match meerkat_live::traced_live_close_step(
                         Some(&channel),
                         "settlement",
                         service.resolve_live_assistant_playback_on_channel_close(

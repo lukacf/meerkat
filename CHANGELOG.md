@@ -150,9 +150,10 @@ them.
   was committed, mirrored, and acknowledged) now lands after that row, at the
   acknowledgement, instead of before it; speech after the acknowledgement
   follows in its own row. A segment sealed while a member turn holds the
-  session boundary during close is applied by the close's deferred
-  settlement before leftover playback is settled, so the close no longer
-  loses it; the close does not wait for the member turn.
+  session boundary during a close or at a remote stream end is handed to the
+  channel close, whose deferred settlement applies it before settling
+  leftover playback (even when the member turn ends mid-close), so the
+  speech is kept; the close does not wait for the member turn.
 - Playback snapshot rows (`ProviderManagedUnmeasured` and
   `CallerConfirmedSnapshots` alike) now carry a `realtime_origin` naming
   their channel and provider item even when no live context observation

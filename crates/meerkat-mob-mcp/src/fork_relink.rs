@@ -2648,6 +2648,7 @@ mod tests {
     /// keeps it seated; another child's record and a retired payload say
     /// nothing.
     #[test]
+    #[allow(clippy::expect_used)]
     fn a_pending_admitted_completion_carries_its_typed_outcome() {
         use crate::agent_tools::TOOL_FORK_OFF;
         use meerkat_core::event::BackgroundJobTerminalStatus;

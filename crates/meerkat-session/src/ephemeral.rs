@@ -1390,23 +1390,43 @@ enum SessionCommand {
 
 impl SessionCommand {
     /// Conservatively advance actor-owned transcript generation for every
-    /// command except the three body/authority observations themselves.
+    /// command except the explicitly listed non-mutating ones: the
+    /// body/authority observations themselves, the live-bridge operations
+    /// that never commit to the canonical document, the terminal
+    /// publications, and the read-only snapshot/diagnostic commands whose
+    /// handlers only borrow the agent immutably (`&self`) in both the running
+    /// and the draining actor loop.
     ///
-    /// Over-advancing on a read-only diagnostic is safe (a later conditional
-    /// export retries). The default-mutating shape is intentional: a newly
-    /// added command cannot silently create an ABA hole by forgetting to opt
-    /// into generation advancement.
+    /// Read-only commands must not advance: an optimistic reader
+    /// (`PersistentSessionService::read`) observes the generation, reads, and
+    /// re-observes, retrying on any change. A status poller issuing
+    /// `ExecutionSnapshot` faster than one read iteration used to invalidate
+    /// every iteration and starve a staged run's start indefinitely (#1226).
+    ///
+    /// The default-mutating shape is intentional: a newly added command
+    /// cannot silently create an ABA hole by forgetting to opt into
+    /// generation advancement. Only add a command to the non-advancing arms
+    /// after verifying its handler cannot mutate transcript or authority
+    /// state.
     fn advances_transcript_authority_generation(&self) -> bool {
-        !matches!(
-            self,
+        match self {
             Self::StartLiveBridgeOperation { .. }
-                | Self::ValidateLiveBridgeMemberEligibility { .. }
-                | Self::ExportSession { .. }
-                | Self::ObserveSessionTranscriptAuthority { .. }
-                | Self::ExportSessionIfTranscriptAuthority { .. }
-                | Self::PublishBoundaryAppendsDiscarded { .. }
-                | Self::PublishRuntimeInteractionTerminals { .. }
-        )
+            | Self::ValidateLiveBridgeMemberEligibility { .. }
+            | Self::ExportSession { .. }
+            | Self::ObserveSessionTranscriptAuthority { .. }
+            | Self::ExportSessionIfTranscriptAuthority { .. }
+            | Self::PublishBoundaryAppendsDiscarded { .. }
+            | Self::PublishRuntimeInteractionTerminals { .. }
+            // Read-only snapshots and lookups (#1226).
+            | Self::ExecutionSnapshot { .. }
+            | Self::ToolScopeSnapshot { .. }
+            | Self::VisibleToolDefs { .. }
+            | Self::ExternalToolSurfaceSnapshot { .. }
+            | Self::ResolveLiveAssistantPlaybackTarget { .. } => false,
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            Self::ClassifyCallbackResultIngress { .. } => false,
+            _ => true,
+        }
     }
 }
 

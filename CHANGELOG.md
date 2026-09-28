@@ -35,6 +35,23 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Status polling no longer starves a staged run's start (#1226). Read-only
+  session commands (`ExecutionSnapshot`, `ToolScopeSnapshot`,
+  `VisibleToolDefs`, `ExternalToolSurfaceSnapshot`,
+  `ResolveLiveAssistantPlaybackTarget`, `ClassifyCallbackResultIngress`) no
+  longer advance the session actor's transcript-authority generation. Each
+  `member_status` / `inspect_identity` poll sends an `ExecutionSnapshot`, and
+  that used to invalidate every iteration of the optimistic
+  `PersistentSessionService::read` on the run-start path (the WorkGraph
+  attention overlay), so a poller faster than one read iteration held the run
+  at "staged run has not begun executing" until polling stopped. Mutating
+  commands still advance the generation. The optimistic retry loops in `read`
+  and live-session authority classification now yield on every retry, back off
+  (capped at 32 ms) after 64 consecutive invalidations, and log one WARN
+  naming the session and the retry count instead of spinning silently.
+
 ## [0.8.47] - 2026-09-28
 
 ### Breaking

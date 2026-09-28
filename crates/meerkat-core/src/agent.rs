@@ -2642,6 +2642,10 @@ where
     /// True once the current run's public `RunCompleted` event has been
     /// emitted. Extraction may continue afterward as a separate post-run phase.
     pub(crate) run_completed_event_emitted: bool,
+    /// True once the current run's public `RunFailed` event has been
+    /// delivered. A hard interrupt that drops the run future after this point
+    /// must not publish a second terminal for the same run.
+    pub(crate) run_failed_event_emitted: std::sync::atomic::AtomicBool,
     /// The committed assistant message whose text the current run's result
     /// repeats, referenced by `RunCompleted`. Set by the terminal commit and
     /// by `build_result`; reset at every run entry. Run-local, never

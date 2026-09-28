@@ -947,6 +947,137 @@ mod tests {
             .expect("recovered actor cleanup");
     }
 
+    /// Holds its first provider request open until the run future is dropped.
+    struct BlockingFirstRequestClient {
+        inner: meerkat_client::TestClient,
+        calls: std::sync::atomic::AtomicUsize,
+        started: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_client::LlmClient for BlockingFirstRequestClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<meerkat_client::LlmEvent, meerkat_client::LlmError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.started.notify_one();
+            if call == 0 {
+                Box::pin(futures::stream::pending())
+            } else {
+                self.inner.stream(request)
+            }
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            self.inner.provider()
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            self.inner.health_check().await
+        }
+    }
+
+    #[tokio::test]
+    async fn hard_interrupt_of_runtime_backed_run_publishes_cancelled_run_failed() {
+        use futures::StreamExt as _;
+
+        let client = Arc::new(BlockingFirstRequestClient {
+            inner: meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            started: tokio::sync::Notify::new(),
+        });
+        let factory =
+            AgentFactory::new(std::env::temp_dir().join("meerkat-runtime-hard-interrupt-tests"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(client.clone());
+        let service = Arc::new(EphemeralSessionService::new(builder, 4));
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let created = materialize_ephemeral_runtime_session(&service, &machine, request(), false)
+            .await
+            .expect("materialize");
+        let id = created.session_id;
+        let mut events = service
+            .subscribe_session_events(&id)
+            .await
+            .expect("session event stream");
+
+        let turn = tokio::spawn({
+            let machine = machine.clone();
+            let id = id.clone();
+            async move { run_ephemeral_runtime_turn(&machine, &id, "block".into(), None).await }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.started.notified(),
+        )
+        .await
+        .expect("the runtime-backed run must reach its provider request");
+        interrupt_ephemeral_runtime_session(&machine, &id)
+            .await
+            .expect("hard interrupt of the live run");
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), turn)
+            .await
+            .expect("interrupted turn must finish")
+            .expect("turn task")
+            .expect("admitted prompt");
+        assert!(
+            matches!(outcome, CompletionOutcome::Cancelled),
+            "unexpected outcome: {outcome:?}"
+        );
+
+        let (started_run, failed) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let mut started_run = None;
+                while let Some(envelope) = events.next().await {
+                    match envelope.payload {
+                        AgentEvent::RunStarted { identity, .. } => started_run = identity.run_id,
+                        AgentEvent::RunFailed {
+                            identity,
+                            error_report,
+                            ..
+                        } => return (started_run, Some((identity, error_report))),
+                        AgentEvent::RunCompleted { .. } => {
+                            panic!("a hard-interrupted run must not complete")
+                        }
+                        _ => {}
+                    }
+                }
+                (started_run, None)
+            })
+            .await
+            .expect("the dropped run must publish its terminal on the session stream");
+        let started_run = started_run.expect("the interrupted run published RunStarted");
+        let (identity, error_report) =
+            failed.expect("the dropped run must publish RunFailed before the stream closes");
+        assert_eq!(
+            error_report.class,
+            meerkat_core::event::AgentErrorClass::Cancelled
+        );
+        assert_eq!(identity.run_id, Some(started_run));
+
+        // The session recovers for an ordinary follow-up turn.
+        let result = run_ephemeral_runtime_turn(&machine, &id, "after".into(), None)
+            .await
+            .expect("follow-up admission");
+        ephemeral_runtime_completion_result(result).expect("follow-up completes");
+        machine.unregister_session(&id).await.expect("cleanup");
+    }
+
     #[tokio::test]
     async fn concurrent_direct_turns_share_runtime_admission() {
         let (service, machine) = service();

@@ -1835,6 +1835,16 @@ where
         error: &AgentError,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
+        let event = self.run_failed_event(error);
+        let _ = crate::event_tap::tap_emit(&self.event_tap, event_tx, event).await;
+        // Recorded only once the send resolved: a hard interrupt that drops
+        // the run future mid-send left no terminal on the stream, so
+        // `cancel_dropped_run` must still publish one.
+        self.run_failed_event_emitted
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn run_failed_event(&self, error: &AgentError) -> AgentEvent {
         let error_report = crate::event::AgentErrorReport::from_agent_error(error);
         let terminal_cause_kind = match error {
             AgentError::TerminalFailure { cause_kind, .. }
@@ -1860,17 +1870,12 @@ where
                 }
             },
         };
-        let _ = crate::event_tap::tap_emit(
-            &self.event_tap,
-            event_tx,
-            AgentEvent::RunFailed {
-                session_id: self.session.id().clone(),
-                identity: self.live_run_identity(),
-                error_report,
-                terminal_cause_kind,
-            },
-        )
-        .await;
+        AgentEvent::RunFailed {
+            session_id: self.session.id().clone(),
+            identity: self.live_run_identity(),
+            error_report,
+            terminal_cause_kind,
+        }
     }
 
     async fn handle_run_failure(
@@ -2095,6 +2100,7 @@ where
         let saved_terminal_error_metadata = self.terminal_error_metadata.take();
         let saved_run_completed_hooks_applied = self.run_completed_hooks_applied;
         let saved_run_completed_event_emitted = self.run_completed_event_emitted;
+        let saved_run_failed_event_emitted = *self.run_failed_event_emitted.get_mut();
         let saved_run_result_assistant_message = self.run_result_assistant_message.take();
         let saved_extraction_state = std::mem::take(&mut self.extraction_state);
         let saved_pending_callback_async_ops = self.pending_callback_async_ops.take();
@@ -2185,6 +2191,7 @@ where
         self.terminal_error_metadata = saved_terminal_error_metadata;
         self.run_completed_hooks_applied = saved_run_completed_hooks_applied;
         self.run_completed_event_emitted = saved_run_completed_event_emitted;
+        *self.run_failed_event_emitted.get_mut() = saved_run_failed_event_emitted;
         self.run_result_assistant_message = saved_run_result_assistant_message;
         self.extraction_state = saved_extraction_state;
         self.pending_callback_async_ops = saved_pending_callback_async_ops;
@@ -2378,6 +2385,7 @@ where
         self.terminal_error_metadata = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
+        *self.run_failed_event_emitted.get_mut() = false;
         self.run_result_assistant_message = None;
         self.clear_staged_model_routing_handoff();
 
@@ -2630,6 +2638,7 @@ where
         self.terminal_error_metadata = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
+        *self.run_failed_event_emitted.get_mut() = false;
         self.run_result_assistant_message = None;
         self.clear_staged_model_routing_handoff();
 
@@ -2703,17 +2712,54 @@ where
     }
 
     /// Cancel a run after its execution future has been dropped.
+    ///
+    /// Discards the run's terminal event; surfaces that stream run events use
+    /// [`Agent::cancel_dropped_run`] instead.
     pub fn cancel(&mut self) {
+        let _ = self.cancel_dropped_run();
+    }
+
+    /// Cancel a run after its execution future has been dropped and return
+    /// the run's canonical terminal event.
+    ///
+    /// A hard interrupt drops the run future before it reaches
+    /// `handle_run_failure`, so a run that published `RunStarted` would end
+    /// without a terminal. When a run had started and has published neither
+    /// `RunCompleted` nor `RunFailed`, this returns `RunFailed` with the
+    /// `cancelled` error class. The event has already been offered to the
+    /// event tap; the caller publishes it on the run's event stream after the
+    /// events the dropped future had queued.
+    pub fn cancel_dropped_run(&mut self) -> Option<AgentEvent> {
+        self.runtime_terminal_failure_witness = None;
         if let Err(error) = self.observe_dropped_run_cancellation() {
             tracing::warn!(%error, "generated authority rejected dropped-run cancellation");
         }
+        let terminal = self.dropped_run_terminal_event();
+        // The execution stamp and run identity belong to the dropped run. The
+        // cancel inputs read the turn phase through the stamp gate and the
+        // terminal event carries the run identity, so both are cleared last.
+        self.clear_runtime_execution_kind();
+        if let Some(event) = terminal.as_ref() {
+            crate::event_tap::tap_try_send(&self.event_tap, event);
+        }
+        terminal
+    }
+
+    fn dropped_run_terminal_event(&self) -> Option<AgentEvent> {
+        if self.runtime_started_run_id.is_none()
+            || self.run_completed_event_emitted
+            || self
+                .run_failed_event_emitted
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        Some(self.run_failed_event(&AgentError::Cancelled))
     }
 
     fn observe_dropped_run_cancellation(&mut self) -> Result<(), AgentError> {
         use crate::turn_execution_authority::TurnExecutionInput;
 
-        self.clear_runtime_execution_kind();
-        self.runtime_terminal_failure_witness = None;
         let snapshot = self
             .turn_state_handle
             .as_deref()
@@ -2950,6 +2996,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             terminal_error_metadata: None,
             run_completed_hooks_applied: false,
             run_completed_event_emitted: false,
+            run_failed_event_emitted: std::sync::atomic::AtomicBool::new(false),
             run_result_assistant_message: None,
             silent_comms_intents: self.silent_comms_intents.clone(),
             ops_lifecycle: None,

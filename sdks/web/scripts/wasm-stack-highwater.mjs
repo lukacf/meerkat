@@ -52,6 +52,16 @@ export function turnStackBudget(build) {
   return { enforced: false, budget: null, label };
 }
 
+/**
+ * The least high-water a real turn can leave. A turn at the release build
+ * reaches about 133 KB below the resting pointer (at opt-level 0, about
+ * 1.46 MB); a probe that reads less than this floor is not measuring the
+ * memory the turn ran on (a different memory, or a stack that was never
+ * painted), and would pass any budget. Enforced for every build, budgeted or
+ * not.
+ */
+export const TURN_STACK_FLOOR_BYTES = 16 * 1024;
+
 const PAINT = 0xa5;
 // Bytes just below the resting stack pointer are left unpainted: the next
 // call into the module writes its first frame there at once.
@@ -63,8 +73,23 @@ function freeStack(stack) {
   return { base: top - stack.stackBytes, top };
 }
 
-/** Paint the free stack of `stack` in `memory` (a `WebAssembly.Memory`). */
+/**
+ * Paint the free stack of `stack` in `memory` (a `WebAssembly.Memory`).
+ *
+ * Only a stack-first module (wasm-ld's `--stack-first`, which the packed
+ * runtime has; scripts/wasm-stack.mjs reads the layout) is painted. In a data-first module the stack starts at the end of the
+ * last active data segment, but wasm-ld emits no data segment for
+ * zero-initialised statics, so `.bss` can sit inside what looks like free
+ * stack: painting it would corrupt live statics. That layout is refused.
+ */
 export function paintIdleStack(memory, stack) {
+  if (stack.layout !== "stack-first") {
+    throw new Error(
+      `cannot paint a ${stack.layout ?? "unknown-layout"} wasm stack: only a stack-first ` +
+        "module's free stack is known not to overlap zero-initialised statics (.bss), " +
+        "which have no data segment to bound them",
+    );
+  }
   const { base, top } = freeStack(stack);
   new Uint8Array(memory.buffer).fill(PAINT, base, top - TOP_MARGIN);
 }
@@ -82,6 +107,21 @@ export function stackHighWater(memory, stack) {
     }
   }
   return 0;
+}
+
+/**
+ * Throws when `highWater` is below {@link TURN_STACK_FLOOR_BYTES}: the probe
+ * did not observe the turn, so no budget check on it means anything.
+ */
+export function assertStackProbeObservedTurn(highWater, label = "turn", floor = TURN_STACK_FLOOR_BYTES) {
+  if (highWater < floor) {
+    throw new Error(
+      `${label}: shadow-stack high-water ${highWater} bytes is below the ${floor}-byte floor ` +
+        "any real turn reaches; the probe is not measuring the memory the turn ran on " +
+        "(see scripts/wasm-stack-highwater.mjs)",
+    );
+  }
+  return highWater;
 }
 
 /**

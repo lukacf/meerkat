@@ -473,7 +473,7 @@ async fn a_stalled_member_lifecycle_read_returns_by_the_deadline() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unknown_delivery_reports_typed_unknown_by_deadline_and_for_retired_members() {
-    let fixture = Fixture::new().await;
+    let mut fixture = Fixture::new().await;
     let never_sent = delivery("terminal-never-sent");
 
     let started = std::time::Instant::now();
@@ -526,6 +526,9 @@ async fn unknown_delivery_reports_typed_unknown_by_deadline_and_for_retired_memb
         Err(DeliveryTerminalWaitError::InvalidDeliveryIdentity(_))
     ));
 
+    // Retiring the member disposes of its session, which the fixture's open
+    // live context channel (with live support) would refuse.
+    fixture.close_channel().await;
     tokio::time::timeout(
         WAIT,
         fixture.handle.retire(fixture.entry.agent_identity.clone()),

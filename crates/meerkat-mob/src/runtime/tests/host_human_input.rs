@@ -444,8 +444,13 @@ impl Fixture {
             .collect()
     }
 
-    #[cfg(feature = "openai-live")]
+    /// Close the live context channel the fixture opened (with live
+    /// support; nothing is open otherwise). The fixture composes no
+    /// transport-neutral live cleanup host, so disposing of the member
+    /// (retire, shutdown) while the channel is open is refused as a
+    /// composition error: close it first.
     async fn close_channel(&mut self) {
+        #[cfg(feature = "openai-live")]
         if let Some(binding) = self.binding.take() {
             self.service
                 .runtime_adapter()
@@ -458,10 +463,7 @@ impl Fixture {
 
     async fn finish(mut self) {
         self.client.release();
-        #[cfg(feature = "openai-live")]
         self.close_channel().await;
-        #[cfg(not(feature = "openai-live"))]
-        let _ = &mut self;
         tokio::time::timeout(WAIT, self.handle.shutdown())
             .await
             .expect("mob shutdown finishes")

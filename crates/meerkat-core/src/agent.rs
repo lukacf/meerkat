@@ -1999,6 +1999,20 @@ pub trait CommsRuntime: Send + Sync {
         None
     }
 
+    /// Release this runtime's published in-process participant route now,
+    /// instead of when the last owner drops the runtime.
+    ///
+    /// A live participant name is never displaced, so an owner that retires a
+    /// generation and then builds a successor under the same name in this
+    /// process must release it first: the runtime can outlive retirement in
+    /// any task still holding it. Release is generation-exact (it can only
+    /// remove the route this runtime published, never a successor's) and
+    /// idempotent with `Drop`. Returns whether this call removed a route. The
+    /// default is for runtimes that publish no in-process route.
+    fn retire_inproc_route(&self) -> bool {
+        false
+    }
+
     /// Runtime-local advertised comms address, if available.
     ///
     /// This is the canonical address the runtime expects peers to use when

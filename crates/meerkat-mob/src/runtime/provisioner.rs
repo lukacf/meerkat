@@ -2404,6 +2404,39 @@ impl MemberSessionDisposalArc {
         session_id: &SessionId,
         deadline: Instant,
     ) -> Result<MemberSessionDisposalVerdict, SessionError> {
+        // The member's comms runtime can outlive its archived session: any
+        // task still holding it keeps its inproc participant route published
+        // until that task drops it. A successor for the same identity (respawn,
+        // or retire then spawn) registers under the same participant name, and
+        // registration never displaces a live route. Capture the exact
+        // generation now and release it explicitly once the archive verdict is
+        // in, so disposal completes only after the retired generation gave up
+        // its name. Release is generation-exact and idempotent with `Drop`.
+        let retiring_comms = self.session_service.comms_runtime(session_id).await;
+        let verdict = self.dispose_until_inner(session_id, deadline).await?;
+        if matches!(
+            verdict,
+            MemberSessionDisposalVerdict::Archived
+                | MemberSessionDisposalVerdict::ArchivedWithRecoveredOpsRetired
+                | MemberSessionDisposalVerdict::AlreadyArchived
+        ) && let Some(comms) = retiring_comms
+            && comms.retire_inproc_route()
+        {
+            tracing::debug!(
+                %session_id,
+                "released the archived member session's inproc participant route"
+            );
+        }
+        // A host-owned session stays live in its host's service, so its
+        // runtime and route are the host's to keep.
+        Ok(verdict)
+    }
+
+    async fn dispose_until_inner(
+        &self,
+        session_id: &SessionId,
+        deadline: Instant,
+    ) -> Result<MemberSessionDisposalVerdict, SessionError> {
         match self
             .archive_with_authority_then_unregister_until(session_id, deadline)
             .await

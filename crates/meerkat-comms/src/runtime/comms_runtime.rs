@@ -757,6 +757,10 @@ impl CoreCommsRuntime for CommsRuntime {
         self.inbox_notify.clone()
     }
 
+    fn retire_inproc_route(&self) -> bool {
+        CommsRuntime::retire_inproc_route(self)
+    }
+
     fn peer_id(&self) -> Option<PeerId> {
         Some(self.peer_id)
     }

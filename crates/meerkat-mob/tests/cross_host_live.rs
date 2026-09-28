@@ -1433,6 +1433,50 @@ async fn stop_drains_inflight_live_control_before_closing_the_channel() {
     );
 }
 
+/// #1232: the predecessor's comms runtime can outlive its retirement. Any task
+/// that still holds an `Arc` to it (the member's comms drain, a detached
+/// cleanup) keeps its inproc route published until that task drops it, and the
+/// successor registers under the same participant name. Holding one here makes
+/// that BuildBuddy timing deterministic: respawn must release the retired
+/// generation's route itself instead of relying on the last owner's `Drop`.
+#[tokio::test(flavor = "multi_thread")]
+async fn respawn_releases_the_predecessor_route_while_a_stale_owner_still_holds_its_runtime() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let gateway = Arc::new(LifecycleBarrierMemberLiveHost::default());
+    let controlling =
+        lifecycle_live_fixture("xhl-respawn-route-release", Arc::clone(&gateway)).await;
+    let member = identity("lifecycle-live");
+    let predecessor_session = controlling.member_session_id(&member).await;
+    let stale_owner = controlling.member_comms_runtime(&predecessor_session).await;
+
+    let receipt = controlling
+        .handle
+        .respawn(member.clone(), None)
+        .await
+        .expect("respawn replaces the member while a stale owner holds the predecessor runtime");
+    assert_eq!(receipt.identity, member);
+    let successor_session = controlling.member_session_id(&member).await;
+    assert_ne!(predecessor_session, successor_session);
+    let successor = controlling.member_comms_runtime(&successor_session).await;
+    assert_eq!(
+        successor.comms_name(),
+        stale_owner.comms_name(),
+        "the successor claims the predecessor's participant name"
+    );
+
+    assert!(
+        !stale_owner.retire_inproc_route(),
+        "respawn already released the retired generation's route"
+    );
+    // The retired generation's final drop is generation-exact and must not
+    // unpublish the successor that now holds the name.
+    drop(stale_owner);
+    assert!(
+        successor.retire_inproc_route(),
+        "the successor's route survives the predecessor's final drop"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn respawn_replaces_live_channel_and_fences_delayed_predecessor_control() {
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;

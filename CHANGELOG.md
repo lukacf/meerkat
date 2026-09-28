@@ -37,6 +37,7 @@ them.
 
 ### Breaking
 
+
 - `meerkat_mob::MemberReloadDisposition` gains the variant `Reattached`
   (appended last, so existing discriminants do not move); exhaustive matches
   must handle it. `MobHandle::reload_member_registration` returns it when a
@@ -58,8 +59,38 @@ them.
   `MobHandle::reload_member_registration` no longer reports `NotDegraded` for
   a durability-ready registration without a committed executor attachment. It
   repairs that registration and reports `Reattached` (#1248).
+- Behavior-only: the owned-member tools (`mob_check_member` /
+  `mob_retire_member` on the agent surface, `member_status` /
+  `retire_member` / `force_cancel_member` on the in-mob operator surface) now
+  return a typed not-found error for a target with no roster entry, for every
+  caller, before the ownership admission (#1234). The error is
+  `ToolError::ExecutionFailedWithData` (wire `"error": "execution_failed"`)
+  with `data = {"kind": "member_retired" | "member_not_found", "mob_id",
+  "member_id", "retryable": false}`: `member_retired` when the mob's event log
+  records the member's retirement after its last spawn, `member_not_found`
+  otherwise. Callers without manage scope previously got `access_denied` for
+  such a target; a manage-scope `mob_retire_member` on an absent member
+  previously returned `{"ok": true}`. `access_denied` now only ever means a
+  present member the caller does not own.
+
+- A member left with a runtime registration but no committed executor
+  attachment after the execution-start bound teardown can be reloaded again
+  (#1248). The runtime-loop watcher observes its owned unregister once and
+  never retries a failed saga, so a failure in post-stop service cleanup left
+  the registration in generated `Draining` with no owner. Reload read
+  durability and answered `NotDegraded`, while dispatch read the attachment
+  and failed with "has no committed runtime attachment". Both now read
+  `RuntimeSessionAttachmentState`. The stranded shape is the typed
+  `Detached { unregister: Failed }` fact, and dispatch refuses it typed.
+  Reload reports `NotDegraded` only for `Attached`. For `Detached` it starts
+  or joins the exact registration's unregister (an explicit caller supersedes
+  the retained failure) and awaits the coordinator's typed result, with no
+  timer or retry loop. It then runs the explicit-resume discard, revives the
+  SAME session, and returns `Reattached` once a committed attachment exists.
+  `NotCurrent` still means no registration for the session.
 
 ### Added
+
 
 - `meerkat_runtime::RuntimeSessionAttachmentState` (`Unregistered`,
   `Attached`, `ReloadRequired { registration, attachment }`,
@@ -74,10 +105,26 @@ them.
 - `meerkat_runtime::RuntimeSessionUnregisterObserver::wait_for_result`
   awaits the exact unregister coordinator's terminal result. Dropping it
   never cancels the machine-owned teardown (#1248).
+- `meerkat_mob::MobHandle::resolve_owned_member_target_admission`, with
+  `meerkat_mob::OwnedMemberTargetAdmission` (`Allowed`, `Denied`,
+  `Absent(MemberTargetAbsence)`) and `meerkat_mob::MemberTargetAbsence`
+  (`NotFound`, `Retired`, `kind()`, `to_tool_error`). Target presence is read
+  from the roster, and a durable retirement record from the mob's event log,
+  before the ownership admission runs (#1234).
 
 ### Fixed
 
 
+
+- `MobHandle::subscribe_mob_events` returns only once the router is
+  subscribed to every member it starts with (local session streams and
+  placed members' pump taps). Those subscriptions used to be made inside the
+  router's spawned task, racing the caller: a caller that subscribed and then
+  drove a member turn could see nothing of it, because the turn finished
+  before its member's stream was subscribed. This failed the v0.8.48 release
+  run (`cross_host_events::mob_wide_stream_includes_remote_members`, "0
+  item(s) so far"). A barrier-held member subscription now pins the
+  ordering.
 - The e2e harness's interrupt handling is deterministic (#1243, #1229). The
   handler now holds the lane-command registry from the moment it reads it
   through `process::exit`, and commands spawn and register under that same
@@ -125,49 +172,6 @@ them.
   always rejects it), and managed-store readiness follows the AuthMachine's
   read-only credential-use classification, so a lease that needs a refresh
   or a re-login reads as `NeedsReauth` instead of ready (#1246).
-
-### Added
-
-
-- `meerkat_mob::MobHandle::resolve_owned_member_target_admission`, with
-  `meerkat_mob::OwnedMemberTargetAdmission` (`Allowed`, `Denied`,
-  `Absent(MemberTargetAbsence)`) and `meerkat_mob::MemberTargetAbsence`
-  (`NotFound`, `Retired`, `kind()`, `to_tool_error`). Target presence is read
-  from the roster, and a durable retirement record from the mob's event log,
-  before the ownership admission runs (#1234).
-
-### Breaking
-
-
-- Behavior-only: the owned-member tools (`mob_check_member` /
-  `mob_retire_member` on the agent surface, `member_status` /
-  `retire_member` / `force_cancel_member` on the in-mob operator surface) now
-  return a typed not-found error for a target with no roster entry, for every
-  caller, before the ownership admission (#1234). The error is
-  `ToolError::ExecutionFailedWithData` (wire `"error": "execution_failed"`)
-  with `data = {"kind": "member_retired" | "member_not_found", "mob_id",
-  "member_id", "retryable": false}`: `member_retired` when the mob's event log
-  records the member's retirement after its last spawn, `member_not_found`
-  otherwise. Callers without manage scope previously got `access_denied` for
-  such a target; a manage-scope `mob_retire_member` on an absent member
-  previously returned `{"ok": true}`. `access_denied` now only ever means a
-  present member the caller does not own.
-
-- A member left with a runtime registration but no committed executor
-  attachment after the execution-start bound teardown can be reloaded again
-  (#1248). The runtime-loop watcher observes its owned unregister once and
-  never retries a failed saga, so a failure in post-stop service cleanup left
-  the registration in generated `Draining` with no owner. Reload read
-  durability and answered `NotDegraded`, while dispatch read the attachment
-  and failed with "has no committed runtime attachment". Both now read
-  `RuntimeSessionAttachmentState`. The stranded shape is the typed
-  `Detached { unregister: Failed }` fact, and dispatch refuses it typed.
-  Reload reports `NotDegraded` only for `Attached`. For `Detached` it starts
-  or joins the exact registration's unregister (an explicit caller supersedes
-  the retained failure) and awaits the coordinator's typed result, with no
-  timer or retry loop. It then runs the explicit-resume discard, revives the
-  SAME session, and returns `Reattached` once a committed attachment exists.
-  `NotCurrent` still means no registration for the session.
 
 ## [0.8.48] - 2026-09-28
 

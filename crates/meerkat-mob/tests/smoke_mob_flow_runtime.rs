@@ -142,7 +142,7 @@ fn flow_runtime_smoke_gemini_default_tracks_catalog() {
         meerkat_models::default_model(meerkat_core::Provider::Gemini)
             .expect("Gemini must have a catalog default model")
     );
-    assert_eq!(default_gemini_flow_smoke_model(), "gemini-3.5-flash");
+    assert_eq!(default_gemini_flow_smoke_model(), "gemini-3.8-flash");
 }
 
 #[derive(Clone, Debug)]

@@ -2024,6 +2024,9 @@ struct MockSessionService {
     discard_actor_failures_remaining: AtomicU64,
     /// Session IDs for which `subscribe_session_events` must return an error.
     subscribe_fail_sessions: RwLock<HashSet<SessionId>>,
+    /// Holds the next event subscription of a session until released.
+    session_event_subscribe_barriers: RwLock<HashMap<SessionId, Arc<TestRuntimeControlBarrier>>>,
+    session_event_subscribe_started: tokio::sync::Notify,
     /// Session IDs for which `read()`/`list()` should report `is_active=true`.
     ///
     /// Mirrors real SessionService semantics: `is_active` tracks in-flight
@@ -2170,6 +2173,8 @@ impl MockSessionService {
             flow_turn_overlays: RwLock::new(Vec::new()),
             discard_actor_failures_remaining: AtomicU64::new(0),
             subscribe_fail_sessions: RwLock::new(HashSet::new()),
+            session_event_subscribe_barriers: RwLock::new(HashMap::new()),
+            session_event_subscribe_started: tokio::sync::Notify::new(),
             active_sessions: RwLock::new(HashSet::new()),
             runtime_boundary_acknowledgements: RwLock::new(Vec::new()),
         }
@@ -2829,6 +2834,25 @@ impl MockSessionService {
 
     fn execution_snapshot_calls(&self) -> u64 {
         self.execution_snapshot_calls.load(Ordering::Relaxed)
+    }
+
+    /// Hold the next event subscription of `session_id` until the returned
+    /// barrier is released.
+    async fn install_session_event_subscribe_barrier(
+        &self,
+        session_id: SessionId,
+    ) -> Arc<TestRuntimeControlBarrier> {
+        let barrier = Arc::new(TestRuntimeControlBarrier::new());
+        self.session_event_subscribe_barriers
+            .write()
+            .await
+            .insert(session_id, Arc::clone(&barrier));
+        barrier
+    }
+
+    /// Resolves once a subscription held by a barrier has started.
+    async fn wait_for_session_event_subscribe(&self) {
+        self.session_event_subscribe_started.notified().await;
     }
 
     fn session_read_calls(&self) -> u64 {
@@ -4715,6 +4739,15 @@ impl MobSessionService for MockSessionService {
             return Err(meerkat_core::StreamError::NotFound(format!(
                 "session {session_id}"
             )));
+        }
+        let barrier = self
+            .session_event_subscribe_barriers
+            .write()
+            .await
+            .remove(session_id);
+        if let Some(barrier) = barrier {
+            self.session_event_subscribe_started.notify_one();
+            barrier.wait_for_release().await;
         }
         Ok(Box::pin(
             futures::stream::empty::<EventEnvelope<AgentEvent>>(),
@@ -62225,6 +62258,53 @@ fn test_abandoned_observation_allowlist_excludes_phase_and_mutations() {
         .is_abandoned_observation(),
         "mutations must survive caller cancellation"
     );
+}
+
+/// `subscribe_mob_events` returns only once the router is subscribed to
+/// every member it starts with. A caller that subscribes and then drives a
+/// member turn must see that turn: when the router subscribed inside its
+/// spawned task, a fast turn could finish before the member's stream was
+/// subscribed and never reach the merged stream (the v0.8.48 release-run
+/// failure of `cross_host_events::mob_wide_stream_includes_remote_members`).
+/// The member's subscription is held by a barrier: the call must still be
+/// pending once that subscription has started, and complete after release.
+#[tokio::test]
+async fn test_subscribe_mob_events_subscribes_members_before_returning() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let session_id = handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("router-member"),
+            None,
+        )
+        .await
+        .expect("spawn member")
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+    let subscribe = service
+        .install_session_event_subscribe_barrier(session_id)
+        .await;
+    let subscribing = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.subscribe_mob_events().await }
+    });
+    service.wait_for_session_event_subscribe().await;
+    // Let the subscribing task run to wherever it can get without the held
+    // subscription (a current-thread runtime runs every other ready task
+    // before this one resumes).
+    tokio::task::yield_now().await;
+    assert!(
+        !subscribing.is_finished(),
+        "subscribe_mob_events returned while a member's event subscription was still pending"
+    );
+    subscribe.release_all();
+    let router = subscribing
+        .await
+        .expect("subscribe task")
+        .expect("mob-wide subscription");
+    drop(router);
+    handle.shutdown().await.expect("shutdown test mob");
 }
 
 #[tokio::test]

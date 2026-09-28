@@ -6,6 +6,8 @@
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
+    pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
 
@@ -24,6 +26,11 @@ pub use resolve::{resolve_repositories, resolve_repositories_with_roots};
 #[cfg(not(target_arch = "wasm32"))]
 pub use source::FilesystemSkillSource;
 pub use source::{CompositeSkillSource, EmbeddedSkillSource, InMemorySkillSource, NamedSource};
+
+/// Retain this owner's capability registration in optimized archive linking.
+#[doc(hidden)]
+#[inline(never)]
+pub fn link_embedded_registrations() {}
 
 pub const SKILLS_CAPABILITY_DISABLED_DESCRIPTION: &str = "config.skills.enabled is false";
 

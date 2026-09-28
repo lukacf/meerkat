@@ -1169,7 +1169,10 @@ pub struct CoreApplyOutput {
     pub terminal: Option<CoreApplyTerminal>,
 }
 
-/// Durable receipt for one exact interaction-terminal publication.
+/// Receipt for one exact interaction-terminal publication committed by the
+/// session's event journal. Retention follows the runtime persistence profile:
+/// persistent journals survive restart; in-memory journals live with their
+/// owning actor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreInteractionTerminalPublicationReceipt {
     interaction_id: InteractionId,
@@ -1181,7 +1184,7 @@ impl CoreInteractionTerminalPublicationReceipt {
     pub fn try_new(event: &AgentEvent, terminal_seq: u64) -> Result<Self, CoreExecutorError> {
         if terminal_seq == 0 {
             return Err(CoreExecutorError::Internal(
-                "interaction terminal durable sequence must be non-zero".to_string(),
+                "interaction terminal publication sequence must be non-zero".to_string(),
             ));
         }
         let interaction_id = match event {
@@ -1797,11 +1800,12 @@ pub trait CoreExecutor: Send + Sync {
     /// Optional endpoint for realizing committed cross-run handoffs before the
     /// next input is dequeued.
     ///
-    /// Returning `None` is the correct answer for every executor that cannot
-    /// own durable cross-run state — standalone, ephemeral, and WASM surfaces
-    /// included. It is an ownership declaration, not a stub: such an executor
-    /// also never advertises the tool that stages the handoff, so there is
-    /// nothing committed for it to miss.
+    /// Returning `None` declares that this executor has no durable cross-run
+    /// handoff host. This includes explicit standalone executors and the
+    /// canonical browser runtime's in-memory executor. Such an executor also
+    /// never advertises the tool that stages the handoff, so there is nothing
+    /// committed for it to miss. Runtime bindings alone do not supply durable
+    /// handoff realization.
     fn pre_dequeue_handle(&self) -> Option<Arc<dyn CoreExecutorPreDequeueHandle>> {
         None
     }

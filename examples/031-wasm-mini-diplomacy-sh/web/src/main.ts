@@ -123,7 +123,7 @@ const runner = new CampaignRunner<MatchSession>(
     for (const id of [...current.factions.map(f => f.mobId), current.narratorMobId].filter((id): id is string => id !== null)) {
       await runtime.mob_lifecycle(id, "destroy");
     }
-    runtime.destroy_runtime();
+    await runtime.destroy_runtime();
     current.running = false;
     session = null;
     setSessionRef(null);
@@ -356,7 +356,7 @@ async function createMatch(): Promise<MatchSession | null> {
       initConfig.openai_base_url = `${proxy.proxyUrl}/openai`;
       initConfig.gemini_base_url = `${proxy.proxyUrl}/gemini`;
     }
-    mod.init_runtime_from_config(JSON.stringify(initConfig));
+    await mod.init_runtime_from_config(JSON.stringify(initConfig));
 
     const factions: FactionMob[] = [];
     const subs: MatchSession["subs"] = [];
@@ -428,7 +428,7 @@ async function createMatch(): Promise<MatchSession | null> {
 
     return session;
   } catch (e) {
-    runtime?.destroy_runtime();
+    await runtime?.destroy_runtime();
     session = null;
     setSessionRef(null);
     setBadge("Error"); setStatus(`Failed: ${e instanceof Error ? e.message : String(e)}`);

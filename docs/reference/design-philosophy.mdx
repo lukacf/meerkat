@@ -126,10 +126,13 @@ Runtime-backed and standalone execution are different contracts:
 
 | Mode | Use |
 | --- | --- |
-| `SessionOwned(bindings)` | Runtime-backed surfaces with machine-owned handles and recovery semantics. |
-| `StandaloneEphemeral` | Tests, browser runtime, and narrow embeddings without durable runtime services. |
+| `SessionOwned(bindings)` | CLI, server, and Web/WASM surfaces with machine-owned admission, lifecycle, and handles. Persistence and restart recovery depend on the runtime profile. |
+| `StandaloneEphemeral` | Tests and explicit Rust embeddings without runtime services. |
 
-Do not silently fall back from runtime-backed behavior to standalone behavior.
+Browser sessions use `SessionOwned` with the canonical in-memory runtime.
+Their typed capability profile excludes durable persistence and execution
+after page teardown. Do not silently fall back from runtime-backed behavior
+to standalone behavior.
 
 ### Make Generated Surfaces Checkable
 

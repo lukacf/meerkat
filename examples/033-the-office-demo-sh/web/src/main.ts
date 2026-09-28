@@ -483,7 +483,7 @@ async function teardownOffice(): Promise<void> {
   } catch (error) {
     errors.push(`Destroy mob: ${String(error)}`);
   } finally {
-    runtime?.destroy_runtime();
+    await runtime?.destroy_runtime();
     mobId = null;
     epoch++;
     resetEventState();
@@ -590,7 +590,7 @@ async function startOffice(): Promise<void> {
       initConfig.gemini_base_url = `${proxy.proxyUrl}/gemini`;
     }
     // Init runtime before registering JS tools.
-    mod.init_runtime_from_config(JSON.stringify(initConfig));
+    await mod.init_runtime_from_config(JSON.stringify(initConfig));
 
     // Register fire-and-forget JS tools after init, before creating the mob.
     setStatus("Registering tools...");

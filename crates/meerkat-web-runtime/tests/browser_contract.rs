@@ -4,9 +4,9 @@
 use js_sys::Function;
 use meerkat_contracts::WireRunResult;
 use meerkat_web_runtime::{
-    append_system_context, clear_tool_callbacks, create_session_simple, destroy_session,
-    get_session_state, init_runtime_from_config, inspect_mobpack, poll_events, register_js_tool,
-    register_tool_callback, start_turn,
+    append_system_context, clear_tool_callbacks, create_session_simple, destroy_runtime,
+    destroy_session, get_session_state, init_runtime_from_config, inspect_mobpack, poll_events,
+    register_js_tool, register_tool_callback, start_turn,
 };
 use serde_json::{Value, json};
 use wasm_bindgen::JsValue;
@@ -16,6 +16,24 @@ use wasm_bindgen_test::wasm_bindgen_test;
 // suite ("only configured to run in node.js") while still exiting 0 — the
 // browser lane must actually execute these assertions.
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+#[wasm_bindgen_test(async)]
+async fn member_status_deadline_includes_preliminary_execution_snapshot_wait() {
+    let observed = meerkat_mob::member_status_deadline_after_snapshot_wait_for_test().await;
+    assert_eq!(
+        observed.preview_unavailable,
+        Some(meerkat_mob::MemberPreviewUnavailable::ObservationDeadline),
+        "the snapshot wait must consume the same deadline as the view read: {observed:?}"
+    );
+    assert_eq!(observed.output_preview, None);
+    assert_eq!(observed.tokens_used, 0);
+    assert_eq!(observed.snapshot_calls, 1);
+    assert_eq!(observed.status_view_calls, 1);
+    assert_eq!(observed.reads_before_drain, 1);
+    assert!(observed.retained_drain);
+    assert!(observed.drain_published);
+    assert_eq!(observed.reads_after_drain, 0);
+}
 
 fn parse_js_error(value: JsValue) -> Value {
     let raw = value.as_string().expect("error string");
@@ -119,13 +137,16 @@ version = "0.1.0"
 
 #[wasm_bindgen_test(async)]
 async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_tools_and_events() {
+    destroy_runtime(None)
+        .await
+        .expect("clean runtime before bootstrap assertion");
     let not_initialized = create_session_simple(
         &json!({
-            "model": "claude-sonnet-4-5",
-            "api_key": "sk-test"
+            "model": "claude-sonnet-4-5"
         })
         .to_string(),
     )
+    .await
     .expect_err("session creation should require runtime bootstrap");
     assert_eq!(parse_js_error(not_initialized)["code"], "not_initialized");
 
@@ -168,10 +189,12 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
         init_runtime_from_config(
             &json!({
                 "anthropic_api_key": "sk-test",
+                "anthropic_base_url": "https://example.test/anthropic",
                 "model": "claude-sonnet-4-5"
             })
             .to_string(),
         )
+        .await
         .expect("init runtime"),
     );
     assert_eq!(init["status"], "initialized");
@@ -208,13 +231,11 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
 
     let handle = create_session_simple(
         &json!({
-            "model": "claude-sonnet-4-5",
-            "api_key": "sk-test",
-            "base_url": "https://example.test/anthropic",
-            "anthropic_base_url": "https://example.test/anthropic"
+            "model": "claude-sonnet-4-5"
         })
         .to_string(),
     )
+    .await
     .expect("create direct session façade");
 
     let staged = parse_js_result(
@@ -230,17 +251,20 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
         .await
         .expect("append system context"),
     );
-    assert_eq!(staged["handle"], handle);
+    assert!(staged.get("handle").is_none());
     assert_eq!(staged["status"], "applied");
 
-    let before: Value =
-        serde_json::from_str(&get_session_state(handle).expect("session state before turn"))
-            .expect("state json");
+    let before: Value = serde_json::from_str(
+        &get_session_state(handle)
+            .await
+            .expect("session state before turn"),
+    )
+    .expect("state json");
     let session_id = before["session_id"]
         .as_str()
         .expect("runtime-backed session id")
         .to_string();
-    assert_eq!(before["handle"], handle);
+    assert!(before.get("handle").is_none());
     assert_ne!(session_id, handle.to_string());
     assert!(
         before.get("run_counter").is_none(),
@@ -250,6 +274,7 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
     let turn_raw = start_turn(
         handle,
         &json!({ "text": "Use the echo_browser tool, then answer." }).to_string(),
+        None,
     )
     .await
     .expect("start turn")
@@ -285,9 +310,12 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
     );
     assert!(items.iter().any(|item| item["type"] == "text_complete"));
 
-    let after: Value =
-        serde_json::from_str(&get_session_state(handle).expect("session state after turn"))
-            .expect("state json");
+    let after: Value = serde_json::from_str(
+        &get_session_state(handle)
+            .await
+            .expect("session state after turn"),
+    )
+    .expect("state json");
     assert_eq!(after["session_id"], session_id);
     assert!(
         after["message_count"].as_u64().unwrap_or_default()
@@ -299,13 +327,14 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
     );
 
     clear_tool_callbacks();
-    destroy_session(handle).expect("destroy session");
+    destroy_session(handle).await.expect("destroy session");
 
     // A destroyed handle is retired, not left as an addressable archived
     // projection: every subsequent call on it fails closed with the typed
     // invalid_session_handle code (mirrors the host-lane pin
     // `destroy_session_retires_handle_and_fails_closed`).
     let stale_state = get_session_state(handle)
+        .await
         .expect_err("destroyed handle must fail closed, not return archived state");
     assert_eq!(
         parse_js_error(stale_state)["code"],
@@ -315,6 +344,7 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
     let stale_turn = start_turn(
         handle,
         &json!({ "text": "stale handles must not restart archived sessions" }).to_string(),
+        None,
     )
     .await
     .expect_err("stale handle turn must fail through the retired-handle authority");
@@ -339,6 +369,7 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
     let stale_poll =
         poll_events(handle).expect_err("stale handle poll must fail through the retired handle");
     assert_eq!(parse_js_error(stale_poll)["code"], "invalid_session_handle");
+    destroy_runtime(None).await.expect("destroy runtime");
 }
 
 #[wasm_bindgen_test(async)]
@@ -347,43 +378,48 @@ async fn browser_contract_rejects_untagged_raw_string_prompts_fail_closed() {
         init_runtime_from_config(
             &json!({
                 "anthropic_api_key": "sk-test",
+                "anthropic_base_url": "https://example.test/anthropic",
                 "model": "claude-sonnet-4-5"
             })
             .to_string(),
         )
+        .await
         .expect("init runtime"),
     );
     assert_eq!(init["status"], "initialized");
 
     let handle = create_session_simple(
         &json!({
-            "model": "claude-sonnet-4-5",
-            "api_key": "sk-test"
+            "model": "claude-sonnet-4-5"
         })
         .to_string(),
     )
+    .await
     .expect("create direct session façade");
 
     // K19: prompts are the tagged `WirePromptInput` contract shape. A bare
     // untagged string is rejected fail-closed, never shape-sniffed into text.
-    let rejected = start_turn(handle, "hello world")
+    let rejected = start_turn(handle, "hello world", None)
         .await
         .expect_err("untagged raw-string prompt must fail closed");
     assert_eq!(parse_js_error(rejected)["code"], "INVALID_PARAMS");
 
-    destroy_session(handle).expect("destroy session");
+    destroy_session(handle).await.expect("destroy session");
+    destroy_runtime(None).await.expect("destroy runtime");
 }
 
-#[wasm_bindgen_test]
-fn browser_contract_rejects_unknown_direct_session_handles_as_invalid_references() {
+#[wasm_bindgen_test(async)]
+async fn browser_contract_rejects_unknown_direct_session_handles_as_invalid_references() {
     let init = parse_js_result(
         init_runtime_from_config(
             &json!({
                 "anthropic_api_key": "sk-test",
+                "anthropic_base_url": "https://example.test/anthropic",
                 "model": "claude-sonnet-4-5"
             })
             .to_string(),
         )
+        .await
         .expect("init runtime"),
     );
     assert_eq!(init["status"], "initialized");
@@ -391,12 +427,17 @@ fn browser_contract_rejects_unknown_direct_session_handles_as_invalid_references
     let bogus_handle = u32::MAX - 7;
 
     for error in [
-        get_session_state(bogus_handle).expect_err("state must reject an unknown local handle"),
+        get_session_state(bogus_handle)
+            .await
+            .expect_err("state must reject an unknown local handle"),
         poll_events(bogus_handle).expect_err("poll must reject an unknown local handle"),
-        destroy_session(bogus_handle).expect_err("destroy must reject an unknown local handle"),
+        destroy_session(bogus_handle)
+            .await
+            .expect_err("destroy must reject an unknown local handle"),
     ] {
         assert_eq!(parse_js_error(error)["code"], "invalid_session_handle");
     }
+    destroy_runtime(None).await.expect("destroy runtime");
 }
 
 #[wasm_bindgen_test]
@@ -404,12 +445,14 @@ fn browser_contract_rejects_forbidden_browser_capabilities_before_session_creati
     let blocked = inspect_mobpack(&build_mobpack(&["shell"]))
         .expect_err("forbidden browser capability should be rejected");
     let error = parse_js_error(blocked);
-    assert_eq!(error["code"], "invalid_mobpack");
-    assert!(
-        error["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("forbidden capability 'shell'")),
-        "unexpected invalid_mobpack payload: {error}"
+    assert_eq!(error["code"], "CAPABILITY_UNAVAILABLE");
+    assert_eq!(
+        error["data"],
+        json!({
+            "profile": "browser",
+            "capability": "shell",
+            "clearing_action": "use_host_process_runtime"
+        })
     );
 
     let allowed = inspect_mobpack(&build_mobpack(&[])).expect("safe mobpack should inspect");

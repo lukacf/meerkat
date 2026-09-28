@@ -26,6 +26,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 meerkat-contracts = { workspace = true }
+meerkat-runtime = { workspace = true }
 meerkat-core = { workspace = true, features = ["jsonschema"] }
 meerkat-models = { workspace = true }
 # Direct dep needed for `ExternalAuthResolverHandle` trait + `ValidatedBinding`

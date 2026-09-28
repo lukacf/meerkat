@@ -81,12 +81,12 @@ export interface AppendSystemContextOptions {
 }
 
 /** Result of appending an ordinary durable System message. */
-export interface AppendSystemContextResult {
-  handle: number;
-  status: 'applied' | 'duplicate';
-}
+export type { InjectSystemContextResult as AppendSystemContextResult } from './generated/session.js';
 
-export type { SessionState, WireRunResult } from './generated/session.js';
+export type {
+  SessionState, WireRunResult, WireTurnInputOptions, RuntimeProfileCapability, RuntimeProfileRefusal,
+  RuntimeProfileClearingAction, RuntimeProfileId,
+} from './generated/session.js';
 
 /** Result of appending an ordinary durable System message to a mob member session. */
 export interface MobAppendSystemContextResult {
@@ -119,16 +119,12 @@ export interface MobRespawnResult {
  * Result of a turn execution.
  *
  * The wire truth is the generated {@link WireRunResult} twin (the same
- * envelope RPC's `turn/start` returns); this SDK type only adds the
- * backward-compatible `response` alias for the canonical `text`. The
+ * envelope RPC's `turn/start` returns). The
  * runtime-owned terminal class is carried by `terminal_cause_kind`; there is
  * no fabricated in-band `status` string. Agent-level faults reject the
  * underlying promise instead of resolving with a synthetic failure payload.
  */
-export type TurnResult = import('./generated/session.js').WireRunResult & {
-  /** Backward-compatible alias for the canonical `text`. */
-  response: string;
-};
+export type TurnResult = import('./generated/session.js').WireRunResult;
 
 export type {
   AgentEvent,

@@ -11,6 +11,7 @@ use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity};
 use meerkat_core::image_content::{MissingBlobBehavior, hydrate_deferred_turn_state};
 use meerkat_core::lifecycle::core_executor::{
     BoundSessionCommit, CoreApplyOutput, CoreApplyTerminal,
+    CoreInteractionTerminalPublicationReceipt,
 };
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
@@ -1217,6 +1218,11 @@ enum SessionCommand {
             >,
         >,
     },
+    PublishRuntimeInteractionTerminals {
+        expected_actor: LiveSessionActorWitness,
+        events: Vec<AgentEvent>,
+        reply_tx: oneshot::Sender<Result<Vec<CoreInteractionTerminalPublicationReceipt>, SessionError>>,
+    },
     PublishBoundaryAppendsDiscarded {
         expected_actor: LiveSessionActorWitness,
         discarded: meerkat_core::event::BoundaryAppendsDiscarded,
@@ -1399,6 +1405,7 @@ impl SessionCommand {
                 | Self::ObserveSessionTranscriptAuthority { .. }
                 | Self::ExportSessionIfTranscriptAuthority { .. }
                 | Self::PublishBoundaryAppendsDiscarded { .. }
+                | Self::PublishRuntimeInteractionTerminals { .. }
         )
     }
 }
@@ -1823,6 +1830,9 @@ pub struct SessionAgentTurnInput {
     pub handling_mode: meerkat_core::types::HandlingMode,
     pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
     pub typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
+    /// Runtime-admitted model request context. The core projector applies it
+    /// for this turn only; it never becomes canonical session transcript.
+    pub request_contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
     pub transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
     pub execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
 }
@@ -1999,6 +2009,11 @@ pub trait SessionAgent: Send {
                 "injected context is not supported by this session agent".to_string(),
             ));
         }
+        if !input.request_contexts.is_empty() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "transient turn context is not supported by this session agent".to_string(),
+            ));
+        }
         self.run_with_events(input.prompt, event_tx).await
     }
 
@@ -2009,11 +2024,17 @@ pub trait SessionAgent: Send {
         &mut self,
         transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
         _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        request_contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         if transcript_identity.is_some() {
             return Err(meerkat_core::error::AgentError::ConfigError(
                 "transcript identity requires a runtime-backed surface".to_string(),
+            ));
+        }
+        if !request_contexts.is_empty() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "transient turn context is not supported by this session agent".to_string(),
             ));
         }
         Err(meerkat_core::error::AgentError::ConfigError(
@@ -2125,9 +2146,9 @@ pub trait SessionAgent: Send {
     /// observes canonical session-truth advancement as a typed effect
     /// instead of polling a watch channel.
     ///
-    /// Standalone agents (WASM, ephemeral tests) return `None`; the task
-    /// then skips the emit and the typed effect simply never fires —
-    /// which is correct, there is nothing to refresh on those paths.
+    /// Explicit standalone agents and tests without runtime bindings return
+    /// `None`; the task has no runtime context observer to notify. Browser
+    /// agents use `SessionOwned` bindings and expose the canonical handle.
     fn session_context_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::handles::SessionContextHandle>> {
@@ -2958,6 +2979,28 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .await
             .get(id)
             .is_some_and(|handle| !handle.command_tx.is_closed())
+    }
+
+    /// Observe whether the actor-owned Session document is export-visible.
+    ///
+    /// The live registry is the sole owner of ephemeral export visibility:
+    /// creation installs an entry and archive/removal removes it. Archived
+    /// summary views are deliberately excluded, matching `export_session`.
+    /// This observation holds the same registry lock as export but does not
+    /// queue an actor command behind an in-flight turn. A retained entry whose
+    /// actor exited remains a fault, rather than fabricated absence. The
+    /// result is not a lease on this actor or authority over its metadata.
+    pub async fn export_session_visible(&self, id: &SessionId) -> Result<bool, SessionError> {
+        let sessions = self.sessions.read().await;
+        let Some(handle) = sessions.get(id) else {
+            return Ok(false);
+        };
+        if handle.command_tx.is_closed() {
+            return Err(SessionError::Agent(AgentError::InternalError(
+                "Session task has exited".to_string(),
+            )));
+        }
+        Ok(true)
     }
 
     /// Abort the registered actor task for `id` while leaving its registry
@@ -3826,6 +3869,43 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         if let Some(state) = state {
             state.discard_uncommitted_durable_deliveries(run_id);
         }
+    }
+
+    /// Publish machine-produced interaction terminals into the exact actor's
+    /// in-memory event journal. The journal has the same lifetime as the actor
+    /// and owns atomic exact publication/replay; it does not promise storage
+    /// after process or page teardown.
+    pub async fn publish_runtime_interaction_terminals_for_actor(
+        &self,
+        witness: &LiveSessionActorWitness,
+        events: &[AgentEvent],
+    ) -> Result<Vec<CoreInteractionTerminalPublicationReceipt>, SessionError> {
+        let command_tx = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .get(witness.session_id())
+                .filter(|handle| {
+                    witness.is_handle(handle) && witness.is_live() && !handle.command_tx.is_closed()
+                })
+                .map(|handle| handle.command_tx.clone())
+                .ok_or_else(|| SessionError::NotFound {
+                    id: witness.session_id().clone(),
+                })?
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::PublishRuntimeInteractionTerminals {
+                expected_actor: witness.clone(),
+                events: events.to_vec(),
+                reply_tx,
+            })
+            .await
+            .map_err(|_| SessionError::NotFound {
+                id: witness.session_id().clone(),
+            })?;
+        reply_rx.await.map_err(|_| SessionError::NotFound {
+            id: witness.session_id().clone(),
+        })?
     }
 
     /// Publish an exact interaction-terminal batch only to the actor named by
@@ -6241,6 +6321,173 @@ fn stamp_event_envelope(
     EventEnvelope::new_with_source(source.clone(), *next_seq, None, event)
 }
 
+/// Exact publication journal for an ephemeral session actor. It stores
+/// machine-produced terminals without deriving or changing their meaning.
+#[derive(Default)]
+struct RuntimeInteractionTerminalJournal {
+    rows: HashMap<meerkat_core::InteractionId, CoreInteractionTerminalPublicationReceipt>,
+}
+
+impl RuntimeInteractionTerminalJournal {
+    /// Validate the entire batch before advancing the actor sequencer or
+    /// recording a row. Identical retries return the original receipts and
+    /// never rebroadcast terminal events.
+    fn append_exact_batch(
+        &mut self,
+        next_seq: &mut u64,
+        events: Vec<AgentEvent>,
+    ) -> Result<
+        (
+            Vec<CoreInteractionTerminalPublicationReceipt>,
+            Vec<EventEnvelope<AgentEvent>>,
+        ),
+        SessionError,
+    > {
+        let mut identities = std::collections::HashSet::with_capacity(events.len());
+        let mut receipts = Vec::with_capacity(events.len());
+        let mut inserted = Vec::new();
+        let mut candidate_seq = *next_seq;
+        let mut replay_tail = None;
+        for event in events {
+            // The typed receipt constructor validates the event family and
+            // binds its canonical identity and payload digest.
+            let candidate = CoreInteractionTerminalPublicationReceipt::try_new(&event, 1)
+                .map_err(runtime_terminal_publication_error)?;
+            if !identities.insert(candidate.interaction_id()) {
+                return Err(runtime_terminal_publication_error(
+                    "an interaction occurs more than once in one terminal batch",
+                ));
+            }
+            if let Some(existing) = self.rows.get(&candidate.interaction_id()) {
+                if existing.payload_digest() != candidate.payload_digest() {
+                    return Err(runtime_terminal_publication_error(
+                        "interaction terminal replay conflicts with the published payload",
+                    ));
+                }
+                if !inserted.is_empty()
+                    || replay_tail.is_some_and(|tail: u64| {
+                        tail.checked_add(1) != Some(existing.terminal_seq())
+                    })
+                {
+                    return Err(runtime_terminal_publication_error(
+                        "interaction terminal replay must be a contiguous batch prefix",
+                    ));
+                }
+                replay_tail = Some(existing.terminal_seq());
+                receipts.push(existing.clone());
+                continue;
+            }
+            candidate_seq = candidate_seq.checked_add(1).ok_or_else(|| {
+                runtime_terminal_publication_error("session event sequence overflow")
+            })?;
+            let receipt = CoreInteractionTerminalPublicationReceipt::try_new(&event, candidate_seq)
+                .map_err(runtime_terminal_publication_error)?;
+            inserted.push(EventEnvelope::new_with_source(
+                EventSourceIdentity::interaction(receipt.interaction_id()),
+                candidate_seq,
+                None,
+                event,
+            ));
+            receipts.push(receipt);
+        }
+        for receipt in &receipts {
+            self.rows.insert(receipt.interaction_id(), receipt.clone());
+        }
+        *next_seq = candidate_seq;
+        Ok((receipts, inserted))
+    }
+}
+
+fn runtime_terminal_publication_error(error: impl std::fmt::Display) -> SessionError {
+    SessionError::Agent(AgentError::InternalError(error.to_string()))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod runtime_interaction_terminal_journal_tests {
+    use super::*;
+
+    fn terminal(id: meerkat_core::InteractionId, text: &str) -> AgentEvent {
+        AgentEvent::InteractionComplete {
+            interaction_id: id,
+            result: text.to_owned(),
+            structured_output: None,
+        }
+    }
+
+    #[test]
+    fn exact_batch_replays_receipts_without_advancing_or_rebroadcasting() {
+        let mut journal = RuntimeInteractionTerminalJournal::default();
+        let mut seq = 7;
+        let first = terminal(meerkat_core::InteractionId::new(), "first");
+        let second = terminal(meerkat_core::InteractionId::new(), "second");
+        let events = vec![first, second];
+        let (published, envelopes) = journal
+            .append_exact_batch(&mut seq, events.clone())
+            .unwrap();
+        assert_eq!(seq, 9);
+        assert_eq!(envelopes.len(), 2);
+        for (receipt, envelope) in published.iter().zip(&envelopes) {
+            assert_eq!(receipt.terminal_seq(), envelope.seq);
+            assert_eq!(
+                envelope.source,
+                EventSourceIdentity::interaction(receipt.interaction_id())
+            );
+        }
+        let (replayed, envelopes) = journal.append_exact_batch(&mut seq, events).unwrap();
+        assert_eq!(published, replayed);
+        assert!(envelopes.is_empty());
+        assert_eq!(seq, 9);
+    }
+
+    #[test]
+    fn conflicting_duplicate_nonterminal_and_nonprefix_batches_commit_nothing() {
+        let mut journal = RuntimeInteractionTerminalJournal::default();
+        let mut seq = 0;
+        let prior_id = meerkat_core::InteractionId::new();
+        let prior = terminal(prior_id, "prior");
+        journal
+            .append_exact_batch(&mut seq, vec![prior.clone()])
+            .unwrap();
+        let next = terminal(meerkat_core::InteractionId::new(), "next");
+        for invalid in [
+            vec![next.clone(), terminal(prior_id, "conflicting")],
+            vec![next.clone(), next.clone()],
+            vec![
+                next.clone(),
+                AgentEvent::TextDelta {
+                    delta: "invalid".to_owned(),
+                    assistant_message_id: None,
+                },
+            ],
+            vec![next.clone(), prior.clone()],
+        ] {
+            assert!(journal.append_exact_batch(&mut seq, invalid).is_err());
+            assert_eq!(seq, 1);
+            assert_eq!(journal.rows.len(), 1);
+        }
+        let (receipts, envelopes) = journal
+            .append_exact_batch(&mut seq, vec![prior, next])
+            .unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(seq, 2);
+    }
+
+    #[test]
+    fn sequence_overflow_commits_no_partial_terminal_batch() {
+        let mut journal = RuntimeInteractionTerminalJournal::default();
+        let mut seq = u64::MAX - 1;
+        let events = vec![
+            terminal(meerkat_core::InteractionId::new(), "first"),
+            terminal(meerkat_core::InteractionId::new(), "second"),
+        ];
+        assert!(journal.append_exact_batch(&mut seq, events).is_err());
+        assert_eq!(seq, u64::MAX - 1);
+        assert!(journal.rows.is_empty());
+    }
+}
+
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 async fn publish_interaction_terminal_batch(
     session_id: &SessionId,
@@ -6625,6 +6872,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::PublishBoundaryAppendsDiscarded { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(SessionError::Agent(AgentError::Cancelled)));
             }
+            SessionCommand::PublishRuntimeInteractionTerminals { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(SessionError::Agent(AgentError::Cancelled)));
+            }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
             }
@@ -6811,6 +7061,7 @@ async fn session_task<A: SessionAgent>(
     control: SessionTaskControl,
 ) {
     let mut next_seq: u64 = 0;
+    let mut runtime_interaction_terminals = RuntimeInteractionTerminalJournal::default();
     // Lives on the SessionTask incarnation, not inside replaceable Session
     // state. Durable sync and compaction rollback therefore cannot recreate a
     // previously observed generation under the same actor witness.
@@ -7015,6 +7266,17 @@ async fn session_task<A: SessionAgent>(
                 let transcript_identity = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.transcript_message_identity());
+                let request_contexts = metadata
+                    .as_ref()
+                    .map(|metadata| {
+                        metadata
+                            .transient_turn_context
+                            .iter()
+                            .chain(metadata.transient_turn_context_appends.iter())
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 // `active_admission` is held for the whole turn. On any
                 // pre-run failure path below it simply drops at the end of
                 // this arm: the final lease release settles staged-restore
@@ -7394,6 +7656,7 @@ async fn session_task<A: SessionAgent>(
                                     handling_mode,
                                     render_metadata,
                                     typed_turn_appends,
+                                    request_contexts,
                                     transcript_identity,
                                     execution_kind,
                                 },
@@ -7404,6 +7667,7 @@ async fn session_task<A: SessionAgent>(
                             Box::pin(agent.run_pending_with_events(
                                 transcript_identity,
                                 execution_kind,
+                                request_contexts,
                                 agent_event_tx.clone(),
                             ))
                         }
@@ -7687,6 +7951,30 @@ async fn session_task<A: SessionAgent>(
                         control.publish_session_event(event).await;
                     }
                     Ok(())
+                };
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::PublishRuntimeInteractionTerminals {
+                expected_actor,
+                events,
+                reply_tx,
+            } => {
+                let result = if !expected_actor.same_incarnation(&control.actor_witness)
+                    || !expected_actor.is_live()
+                {
+                    Err(SessionError::NotFound {
+                        id: expected_actor.session_id().clone(),
+                    })
+                } else {
+                    match runtime_interaction_terminals.append_exact_batch(&mut next_seq, events) {
+                        Ok((receipts, inserted)) => {
+                            for envelope in inserted {
+                                control.publish_session_event(envelope).await;
+                            }
+                            Ok(receipts)
+                        }
+                        Err(error) => Err(error),
+                    }
                 };
                 let _ = reply_tx.send(result);
             }
@@ -8392,6 +8680,194 @@ mod runtime_turn_metadata_tests {
                 Arc::clone(handle) as Arc<dyn meerkat_core::handles::SessionContextHandle>
             })
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn export_visibility_preserves_archive_absence_and_exited_actor_faults() {
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references: Arc::new(Mutex::new(Vec::new())),
+                observed_context_texts: Arc::new(Mutex::new(Vec::new())),
+                run_context_counts: Arc::new(Mutex::new(Vec::new())),
+                fail_flow_overlay_set: false,
+                session_context_handle: None,
+            },
+            2,
+        );
+        let request = || CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "metadata-probe-model".to_owned(),
+            prompt: "".into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: None,
+            labels: None,
+        };
+        let unknown = SessionId::new();
+        assert!(
+            !service
+                .export_session_visible(&unknown)
+                .await
+                .expect("absent visibility")
+        );
+        assert!(matches!(
+            service.export_session(&unknown).await,
+            Err(SessionError::NotFound { .. })
+        ));
+        let archived = service
+            .create_session(request())
+            .await
+            .expect("create archived probe")
+            .session_id;
+        assert!(
+            service
+                .export_session_visible(&archived)
+                .await
+                .expect("live visibility")
+        );
+        assert_eq!(
+            service
+                .export_session(&archived)
+                .await
+                .expect("live export")
+                .id(),
+            &archived
+        );
+        service.archive(&archived).await.expect("archive probe");
+        service
+            .read(&archived)
+            .await
+            .expect("archived summary remains readable");
+        assert!(
+            !service
+                .export_session_visible(&archived)
+                .await
+                .expect("archived export visibility")
+        );
+        assert!(matches!(
+            service.export_session(&archived).await,
+            Err(SessionError::NotFound { .. })
+        ));
+        let exited = service
+            .create_session(request())
+            .await
+            .expect("create exit probe")
+            .session_id;
+        assert!(
+            service
+                .abort_live_session_actor_task_for_test(&exited)
+                .await
+        );
+        assert!(!service.live_session_actor_registered(&exited).await);
+        assert!(matches!(
+            service.export_session_visible(&exited).await,
+            Err(SessionError::Agent(AgentError::InternalError(_)))
+        ));
+        assert!(matches!(
+            service.export_session(&exited).await,
+            Err(SessionError::Agent(AgentError::InternalError(_)))
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn runtime_terminal_publication_targets_exact_actor_and_replays_once() {
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references: Arc::new(Mutex::new(Vec::new())),
+                observed_context_texts: Arc::new(Mutex::new(Vec::new())),
+                run_context_counts: Arc::new(Mutex::new(Vec::new())),
+                fail_flow_overlay_set: false,
+                session_context_handle: None,
+            },
+            1,
+        );
+        let create_request = |resume_session| CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "metadata-probe-model".to_owned(),
+            prompt: "".into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                resume_session,
+                ..Default::default()
+            }),
+            labels: None,
+        };
+        let created = service.create_session(create_request(None)).await.unwrap();
+        let witness = service
+            .live_session_actor_witness(&created.session_id)
+            .await
+            .unwrap();
+        let mut events = service
+            .subscribe_session_events_raw(&created.session_id)
+            .await
+            .unwrap();
+        let interaction_id = meerkat_core::InteractionId::new();
+        let terminal = AgentEvent::InteractionComplete {
+            interaction_id,
+            result: "committed".to_owned(),
+            structured_output: None,
+        };
+        let first = service
+            .publish_runtime_interaction_terminals_for_actor(
+                &witness,
+                std::slice::from_ref(&terminal),
+            )
+            .await
+            .unwrap();
+        let second = service
+            .publish_runtime_interaction_terminals_for_actor(
+                &witness,
+                std::slice::from_ref(&terminal),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        let event = events.try_recv().unwrap();
+        assert_eq!(
+            event.source,
+            EventSourceIdentity::interaction(interaction_id)
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "replay must not broadcast twice"
+        );
+
+        service
+            .discard_live_session(&created.session_id)
+            .await
+            .unwrap();
+        let replacement = meerkat_core::Session::with_id(created.session_id.clone());
+        service
+            .create_session(create_request(Some(replacement)))
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .publish_runtime_interaction_terminals_for_actor(&witness, &[terminal])
+                .await,
+            Err(SessionError::NotFound { .. }),
+        ));
+        let mut replacement_events = service
+            .subscribe_session_events_raw(&created.session_id)
+            .await
+            .unwrap();
+        assert!(
+            replacement_events.try_recv().is_err(),
+            "predecessor publication must not reach successor actor"
+        );
+        service
+            .discard_live_session(&created.session_id)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -9393,6 +9869,7 @@ mod injected_context_turn_tests {
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     render_metadata: None,
                     typed_turn_appends: Vec::new(),
+                    request_contexts: Vec::new(),
                     transcript_identity: None,
                     execution_kind: None,
                 },
@@ -9411,6 +9888,39 @@ mod injected_context_turn_tests {
                 .is_empty(),
             "the run must not start after the fail-closed rejection"
         );
+    }
+
+    #[tokio::test]
+    async fn default_turn_entry_rejects_unsupported_transient_context() {
+        let observed_turns = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = DefaultGuardAgent(InjectedContextProbeAgent {
+            session_id: SessionId::new(),
+            session: meerkat_core::Session::new(),
+            identity: probe_llm_identity("default-guard"),
+            observed_turns: Arc::clone(&observed_turns),
+            transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
+        });
+        let context = meerkat_core::lifecycle::TurnRequestContext::new("request-only facts")
+            .expect("valid request context");
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let err = agent
+            .run_turn_with_events(
+                SessionAgentTurnInput {
+                    prompt: ContentInput::Text("prompt".to_string()),
+                    injected_context: Vec::new(),
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    render_metadata: None,
+                    typed_turn_appends: Vec::new(),
+                    request_contexts: vec![context],
+                    transcript_identity: None,
+                    execution_kind: None,
+                },
+                event_tx,
+            )
+            .await
+            .expect_err("unsupported request context must fail before the provider runs");
+        assert!(matches!(err, AgentError::ConfigError(_)));
+        assert!(observed_turns.lock().expect("observed turns").is_empty());
     }
 }
 

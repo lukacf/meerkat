@@ -35,6 +35,50 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- On WASM, crate `tokio::time` re-exports now use the shared
+  `meerkat_core::time_compat::wasm` types, including `Sleep`, `Timeout`,
+  `Elapsed`, and `Interval`. Callers naming the previous dependency's concrete
+  types must use the shared adapter types. Native Tokio types are unchanged.
+- `MobMachineSignal` gains `ResolveRecreatedMemberSessionSucceeded` for exact
+  runtime binding after a nonpersistent member session is recreated. Exhaustive
+  signal matches must handle the new generated completion.
+- `MeerkatMachine::set_composition_signal_dispatcher` is removed. Each mob's
+  exact `PreparedSessionMaterialization` now installs its reverse signal
+  endpoint before routed inputs can bind the runtime-session registration. `MeerkatConsumerSurface::new`,
+  `MeerkatConsumerSurface::pinned`, and `wired_binding_from_runtime_adapter`
+  require a `MeerkatCompositionSignalDispatcher` argument. Callers must compose
+  both directions together; shared runtimes keep separate endpoints per member.
+- Browser direct sessions now use the canonical `MeerkatMachine` runtime.
+  The WASM exports `init_runtime`, `init_runtime_from_config`, `create_session`,
+  `create_session_simple`, `get_session_state`, `destroy_session`, and
+  `destroy_runtime` are async. `start_turn` accepts an optional third argument
+  containing canonical runtime turn metadata. Callers must await lifecycle
+  operations; direct `keep_alive` sessions now support runtime peer ingress.
+  Initialization returns an opaque `runtime_handle`; `destroy_runtime` accepts
+  that optional handle for exact instance teardown. Session and bootstrap
+  configuration reject unknown fields instead of silently ignoring them.
+- In `@rkat/web`, `MeerkatRuntime.createSession`, `MeerkatRuntime.destroy`,
+  `Session.getState`, `Session.destroy`, and the `Session.sessionId` getter
+  return promises. `Session.isDestroyed` and `TurnResult.response` are removed.
+  `SessionState` projects canonical `WireSessionInfo`, without browser handle,
+  mob identity, or usage fields. `AppendSystemContextResult` exposes only the
+  canonical `status`. Use `Session.interrupt` for runtime cancellation and
+  `Session.wirePeer` for direct in-process peer trust.
+- `meerkat_core::SessionError` gains `CapabilityUnavailable(RuntimeProfileRefusal)`
+  and `meerkat::BuildAgentError` gains `RuntimeProfile(RuntimeProfileRefusal)`.
+  Exhaustive matches must handle the typed browser capability refusal.
+
+- `meerkat_session::SessionAgentTurnInput` gains `request_contexts`, and
+  `SessionAgent::run_pending_with_events` gains the same request-context
+  argument to forward request-only context into the agent.
+  Struct literals must supply it; custom session agents must handle contexts
+  explicitly instead of dropping them.
+
+- `meerkat_contracts::MobSpawnManyFailedResult` gains optional `code`, preserving
+  canonical error codes alongside structured remediation data in batch results.
+
 ### Changed
 
 - The `@rkat/web` wasm runtime is built at opt-level `"s"` instead of `0`
@@ -57,7 +101,33 @@ them.
   generated machine catalog then made rustc's optimizer run out of memory,
   since fixed by chunking the catalog.
 
+- Browser direct and mob sessions share runtime admission, keepalive, comms
+  drain, terminal publication, cancellation, and teardown. Browser exclusions
+  are enforced by the shared capability profile before the requested work
+  executes. File-backed mob skills and flow schemas return typed refusals;
+  schema callers can provide inline JSON instead.
+
 ### Fixed
+
+- Compiled component-owned skill and capability registrations survive optimized
+  WASM archive linking, preserving canonical skill resolution across repeated
+  runtime initialization.
+- Mob Stop and Shutdown observe ephemeral session visibility without waiting
+  for a busy agent to export its transcript. Cancellation requests no longer
+  queue behind those exports; terminal stop still waits for acknowledged drain.
+  Stop also retries the owner's retained pending cleanup while a current turn
+  is still busy, matching Shutdown's existing retry behavior.
+- The Office renders archived decision text neutrally instead of inferring an
+  approval verdict from its wording. Record bullets and knowledge graph fonts
+  render correctly in the browser. Graph, Records and Log keep a readable,
+  scrollable viewport in narrow windows.
+- Shared WASM timers release their JavaScript handles when sleeps or timeouts
+  finish or are canceled. Completed runtime work no longer retains discarded
+  deadline timers, and the packed Web SDK smoke test exits naturally.
+- Flow cancellation preserves an already committed terminal outcome. A late
+  cancellation after natural failure repairs the existing terminal event and
+  drains its task trackers without attempting to rewrite Failed as Canceled
+  or closing the mob actor.
 
 - The release doctor's dispatch-binding check covers more of the ways a
   future edit could let a publishing run bind the wrong ref. It now refuses:

@@ -1718,6 +1718,7 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverPlacedCarrierCleanup { obligation: PlacedCarrierCleanupObligation },
             ClassifyMemberLiveMaterialization { agent_identity: AgentIdentity, observation: Enum<MemberLiveMaterializationObservationKind>, reason: String },
             ResolveMemberRevivalSucceeded { agent_identity: AgentIdentity },
+            ResolveRecreatedMemberSessionSucceeded { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, bridge_session_id: SessionId },
             ResolveMemberRevivalFailed { agent_identity: AgentIdentity, reason: String },
             AdmitDestroyCleanup,
             AdmitDestroyStorageFinalizing,
@@ -12303,6 +12304,38 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_revival_pending.remove(agent_identity);
             }
+            to Running
+            emit RequestRuntimeBinding {
+                agent_identity: agent_identity,
+                agent_runtime_id: self.identity_to_runtime.get_cloned(agent_identity).get("value"),
+                fence_token: self.identity_runtime_fence_tokens.get_copied(agent_identity).get("value"),
+                generation: self.identity_runtime_generations.get_copied(agent_identity),
+                session_id: self.member_session_bindings.get_cloned(agent_identity).get("value")
+            }
+        }
+
+        // An explicitly nonpersistent service recreates a missing actor with a
+        // fresh session. Successful provisioning is an observation, not durable
+        // snapshot revival. Only this exact current local incarnation may ask
+        // the consumer to bind its already-prepared resources. No new serving
+        // or membership fact is inferred from the receipt.
+        transition ResolveRecreatedMemberSessionSucceededRunningLocal {
+            on signal ResolveRecreatedMemberSessionSucceeded { agent_identity, agent_runtime_id, fence_token, generation, bridge_session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
+            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) == true }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "retirement_not_pending" { self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == false }
+            guard "identity_fence_matches" { self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token) }
+            guard "runtime_fence_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "generation_matches" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "session_binding_matches" { self.member_session_bindings.get_cloned(agent_identity) == Some(bridge_session_id) }
+            guard "not_broken" { self.member_restore_failures.contains_key(agent_identity) == false }
+            guard "revival_not_pending" { self.member_revival_pending.contains(agent_identity) == false }
+            guard "no_explicit_resume_work" { self.explicit_resume_member_work.contains_key(agent_identity) == false }
+            update {}
             to Running
             emit RequestRuntimeBinding {
                 agent_identity: agent_identity,

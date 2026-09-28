@@ -143,6 +143,10 @@ pub enum SessionError {
         data: serde_json::Value,
     },
 
+    /// The selected runtime composition excludes a requested capability.
+    #[error(transparent)]
+    CapabilityUnavailable(#[from] crate::runtime_profile::RuntimeProfileRefusal),
+
     /// The requested operation is not supported by this session service.
     #[error("unsupported: {0}")]
     Unsupported(String),
@@ -369,12 +373,14 @@ impl SessionError {
             Self::ExternalWriteFenceBackoff { .. } => "SESSION_EXTERNAL_WRITE_FENCE_BACKOFF",
             Self::Agent(_) => "AGENT_ERROR",
             Self::FailedWithData { .. } => "SESSION_ERROR",
+            Self::CapabilityUnavailable(_) => "CAPABILITY_UNAVAILABLE",
         }
     }
 
     pub fn structured_data(&self) -> Option<serde_json::Value> {
         match self {
             Self::FailedWithData { data, .. } => Some(data.clone()),
+            Self::CapabilityUnavailable(refusal) => serde_json::to_value(refusal.data).ok(),
             Self::DurableTailHeldForRecovery { id } => {
                 Some(self.durable_resume_hold_data(DurableResumeHold::TailHeldForRecovery, id))
             }
@@ -886,10 +892,11 @@ pub struct SessionBuildOptions {
     /// Runtime build mode — determines how the factory resolves the ops lifecycle
     /// registry and completion feed.
     ///
-    /// - `SessionOwned(bindings)`: runtime-backed build with epoch-owned
-    ///   bindings. Factory validates `bindings.session_id == session.id()`.
-    /// - `StandaloneEphemeral`: factory creates local-only ephemeral bindings.
-    ///   Suitable for WASM, tests, embedded, and standalone surfaces.
+    /// - `SessionOwned(bindings)`: runtime-backed build, including Web/WASM,
+    ///   with epoch-owned bindings. Factory validates
+    ///   `bindings.session_id == session.id()`.
+    /// - `StandaloneEphemeral`: factory creates local-only ephemeral bindings
+    ///   for tests and explicit standalone Rust embeddings.
     pub runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode,
     /// Runtime-stamped metadata for an eager first turn.
     ///

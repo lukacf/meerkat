@@ -209,9 +209,9 @@ meerkat-mob-adaptive → Transitional re-export of the mob-owned adaptive module
 
 **Agent construction:** All surfaces use `AgentFactory::build_agent()` for centralized prompt assembly, provider resolution, tool dispatcher setup, comms wiring, and hook resolution. Zero `AgentBuilder::new()` calls in surface crates.
 
-**Runtime build mode:** All runtime-backed surfaces use `MeerkatMachine::prepare_bindings(session_id)` to obtain `SessionRuntimeBindings`, then pass `RuntimeBuildMode::SessionOwned(bindings)` via `SessionBuildOptions.runtime_build_mode`. Standalone/test/WASM surfaces use `RuntimeBuildMode::StandaloneEphemeral` (the default).
+**Runtime build mode:** All runtime-backed surfaces, including Web/WASM, use `MeerkatMachine::prepare_bindings(session_id)` to obtain `SessionRuntimeBindings`, then pass `RuntimeBuildMode::SessionOwned(bindings)` via `SessionBuildOptions.runtime_build_mode`. Explicit standalone Rust embeddings and tests may use `RuntimeBuildMode::StandaloneEphemeral` (the default).
 
-**Session lifecycle:** Runtime-backed product surfaces (CLI, REST, MCP Server, JSON-RPC, and their process-backed Python/TypeScript clients) route through `SessionService` for create/turn/interrupt/read/list/archive. `FactoryAgentBuilder` bridges `AgentFactory` into the `SessionAgentBuilder` trait. Embedded Rust and WASM can construct standalone agents directly through `AgentFactory`; per-request service build data is passed in-band via `CreateSessionRequest.build` / `SessionBuildOptions`.
+**Session lifecycle:** Runtime-backed product surfaces (CLI, REST, MCP Server, JSON-RPC, Web/WASM, and their process-backed Python/TypeScript clients) route through `SessionService` for create/turn/interrupt/read/list/archive. `FactoryAgentBuilder` bridges `AgentFactory` into the `SessionAgentBuilder` trait. Explicit standalone Rust embeddings can construct agents directly through `AgentFactory`; per-request service build data is passed in-band via `CreateSessionRequest.build` / `SessionBuildOptions`. Browser limits are typed capability exclusions on this shared runtime path.
 
 **Capability matrix:** See `docs/reference/capability-matrix.mdx` for build profiles, error codes, and feature behavior. See `docs/reference/session-contracts.mdx` for concurrency, durability, and compaction semantics.
 
@@ -625,7 +625,7 @@ See `docs/reference/design-philosophy.mdx` for the full treatment with code exam
 
 - **Infrastructure, not application** — the agent loop is a composable primitive with no opinions about prompts, tools, or output
 - **Trait contracts own the architecture** - `meerkat-core` defines foundational contracts (`AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `Compactor`, `MemoryStore`, `HookEngine`, `SkillEngine`/`SkillSource`); feature crates define their domain stores and implementations
-- **Runtime-backed surfaces are interchangeable skins** - CLI, REST, RPC, and MCP Server route through `SessionService` to `AgentFactory::build_agent()`; embedded Rust and WASM may deliberately compose standalone agents directly
+- **Runtime-backed surfaces are interchangeable skins** - CLI, REST, RPC, MCP Server, and Web/WASM route through `SessionService` to `AgentFactory::build_agent()`; explicit standalone Rust embeddings may compose agents directly
 - **Composition over configuration** — optional components (`CommsRuntime`, `HookEngine`, `Compactor`, `MemoryStore`) are `Option<Arc<dyn Trait>>`, not feature-flagged defaults
 - **Sessions are first-class, persistence is optional** - `EphemeralSessionService` and the checkpoint-free, store-backed `PersistentSessionService` share the same `SessionService` trait; durable event projection is separate optional derived audit/replay state
 - **Errors separate mechanism from policy** — typed three-tier errors (`ToolError` → `AgentError` → `SessionError`) with stable `error_code()` for wire formats; the loop retries, callers decide to resume or abort

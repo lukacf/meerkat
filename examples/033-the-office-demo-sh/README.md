@@ -78,7 +78,13 @@ repo-local `sdks/web` package, or from an installed `@rkat/web` package, into
 
 The approval popup is a demo protocol implemented with a JavaScript tool and
 agent instructions. It is not a security or authorization boundary. Archive
-records also live only in browser memory and disappear on page reload.
+decision outcomes are displayed as written by the archivist, without inferred
+approval verdicts. Records live only in browser memory and disappear on page reload.
+Pause requests cooperative cancellation at agent boundaries and waits for the
+runtime to drain before showing **STOPPED**; an outstanding provider response
+or the current turn's tool batch can still delay that drain. The runtime retries
+retained pending cleanup until those turns finish or its existing stop deadline
+is reached; the UI stays **STOPPING** while it waits.
 The static Boss-mode policy is included in every initial role skill, before the
 first turn. Startup does not append it as a later System message; support for
 mid-conversation System messages depends on the selected model.
@@ -104,7 +110,9 @@ npm run test:offline
 The tests run Playwright's bundled headless Chromium (install it once with
 `npx --prefix web playwright install chromium`; `CHROME_BIN` overrides the
 binary, and `CHROME_SANDBOX=1` keeps the Chromium sandbox on), actual compiled
-TypeScript/DOM handlers and real Cytoscape. The separate `test:offline` lane
+TypeScript/DOM handlers and real Cytoscape. The 20 regression groups include
+Graph, Records and Log geometry and scrolling at 650x735 and 1280x900.
+The separate `test:offline` lane
 requires a healthy built-page WASM bootstrap, stop/admission and resume.
 It also verifies the unchanged admin policy in all ten initial role skills and
 in each role's actual initial provider request.

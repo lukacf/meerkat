@@ -72,15 +72,11 @@ use crate::meerkat_machine::{MeerkatMachine, dsl as mm_dsl};
 /// non-reentrant per-session mutation gate the routed dispatch already
 /// holds.
 ///
-/// What that means for stale writers on THIS lane: because the epoch is
-/// self-supplied from the entry, the machine's exact-epoch guard compares the
-/// entry against itself and cannot fence a stale mob-originated placement. The
-/// fence here is the placement triple plus the fence token - `session_id`,
-/// `agent_runtime_id`, `generation` and `fence_token` all come from the
-/// producer and are all matched by the machine. The epoch guard fences
-/// callers that STATE an epoch (every direct, non-routed producer does), which
-/// is why `resolve_routed_entry_runtime_epoch` fills only an absent value and
-/// a stated-but-stale epoch is still refused.
+/// The exact materialization claim installs this surface's reverse endpoint
+/// before any placement route is admitted. A routed input cannot acquire that
+/// endpoint: an old composition is refused both while a same-ID replacement is
+/// unbound and after its new materializer installs a different endpoint. The
+/// generated placement triple and fence guards still own placement meaning.
 ///
 /// [mmi]: crate::meerkat_machine::dsl::MeerkatMachineInput
 pub struct MeerkatConsumerSurface {
@@ -90,6 +86,7 @@ pub struct MeerkatConsumerSurface {
     /// applied against that session and the surface refuses variants whose
     /// projected `session_id` disagrees.
     pinned_session: Option<SessionId>,
+    signal_dispatcher: Option<MeerkatCompositionSignalDispatcher>,
 }
 
 /// Producer-side signal source sum for MeerkatMachine lifecycle effects
@@ -228,10 +225,24 @@ impl std::fmt::Debug for MeerkatConsumerSurface {
 impl MeerkatConsumerSurface {
     /// Build a consumer surface backed by the given machine. The surface
     /// resolves each routed input's target session from projected fields.
-    pub fn new(machine: Arc<MeerkatMachine>) -> Self {
+    pub fn new(
+        machine: Arc<MeerkatMachine>,
+        dispatcher: MeerkatCompositionSignalDispatcher,
+    ) -> Self {
         Self {
             machine,
             pinned_session: None,
+            signal_dispatcher: Some(dispatcher),
+        }
+    }
+
+    /// Unobserved composition fixture for testing input projection in isolation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unobserved_for_test(machine: Arc<MeerkatMachine>) -> Self {
+        Self {
+            machine,
+            pinned_session: None,
+            signal_dispatcher: None,
         }
     }
 
@@ -239,10 +250,25 @@ impl MeerkatConsumerSurface {
     /// inputs are applied against this session; variants that carry a
     /// `session_id` are additionally checked for agreement and refused on
     /// mismatch.
-    pub fn pinned(machine: Arc<MeerkatMachine>, session_id: SessionId) -> Self {
+    pub fn pinned(
+        machine: Arc<MeerkatMachine>,
+        session_id: SessionId,
+        dispatcher: MeerkatCompositionSignalDispatcher,
+    ) -> Self {
         Self {
             machine,
             pinned_session: Some(session_id),
+            signal_dispatcher: Some(dispatcher),
+        }
+    }
+
+    /// Pinned unobserved fixture for isolated route projection tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pinned_unobserved_for_test(machine: Arc<MeerkatMachine>, session_id: SessionId) -> Self {
+        Self {
+            machine,
+            pinned_session: Some(session_id),
+            signal_dispatcher: None,
         }
     }
 
@@ -429,7 +455,11 @@ impl ConsumerSurface for MeerkatConsumerSurface {
         // `dsl_guard_rejected`) crosses the seam verbatim instead of being
         // collapsed under one generic projection code.
         self.machine
-            .apply_routed_meerkat_input(&session_id, input)
+            .apply_routed_meerkat_input_with_signal_dispatcher(
+                &session_id,
+                input,
+                self.signal_dispatcher.as_ref(),
+            )
             .await
             .map_err(|refusal| {
                 crate::composition::ConsumerError::new(refusal.error_code, refusal.message)
@@ -656,30 +686,33 @@ mod tests {
             let route_started = Arc::clone(&route_started);
             async move {
                 route_started.notify_one();
-                MeerkatConsumerSurface::pinned(Arc::clone(&machine), session_id.clone())
-                    .apply_routed_input(
-                        iv("PrepareBindings"),
-                        vec![
-                            (
-                                fld("agent_runtime_id"),
-                                OwnedFieldValue::Str(replacement_runtime_id.into()),
-                            ),
-                            (
-                                fld("fence_token"),
-                                OwnedFieldValue::U64(replacement_fence_token),
-                            ),
-                            (
-                                fld("generation"),
-                                OwnedFieldValue::U64(replacement_generation),
-                            ),
-                            (
-                                fld("session_id"),
-                                OwnedFieldValue::Str(session_id.to_string()),
-                            ),
-                        ],
-                    )
-                    .await
-                    .expect("routed successor binding is admitted at Attached");
+                MeerkatConsumerSurface::pinned_unobserved_for_test(
+                    Arc::clone(&machine),
+                    session_id.clone(),
+                )
+                .apply_routed_input(
+                    iv("PrepareBindings"),
+                    vec![
+                        (
+                            fld("agent_runtime_id"),
+                            OwnedFieldValue::Str(replacement_runtime_id.into()),
+                        ),
+                        (
+                            fld("fence_token"),
+                            OwnedFieldValue::U64(replacement_fence_token),
+                        ),
+                        (
+                            fld("generation"),
+                            OwnedFieldValue::U64(replacement_generation),
+                        ),
+                        (
+                            fld("session_id"),
+                            OwnedFieldValue::Str(session_id.to_string()),
+                        ),
+                    ],
+                )
+                .await
+                .expect("routed successor binding is admitted at Attached");
             }
         });
         tokio::time::timeout(std::time::Duration::from_secs(2), route_started.notified())
@@ -857,7 +890,7 @@ mod tests {
     #[tokio::test]
     async fn routed_seam_binding_and_ingest_preserve_the_entry_runtime_epoch() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
-        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let surface = MeerkatConsumerSurface::unobserved_for_test(Arc::clone(&machine));
         let session_id = sid("00000000-0000-0000-0000-000000000042");
         machine
             .register_session(session_id.clone())
@@ -950,7 +983,7 @@ mod tests {
         let machine = Arc::new(MeerkatMachine::persistent_without_blobs(
             store as Arc<dyn crate::store::RuntimeStore>,
         ));
-        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let surface = MeerkatConsumerSurface::unobserved_for_test(Arc::clone(&machine));
         let session_id = sid("00000000-0000-0000-0000-000000000043");
         let bindings = machine
             .prepare_local_session_bindings(session_id.clone())
@@ -1032,7 +1065,7 @@ mod tests {
     #[tokio::test]
     async fn routed_ingest_stating_a_stale_runtime_epoch_is_still_refused() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
-        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let surface = MeerkatConsumerSurface::unobserved_for_test(Arc::clone(&machine));
         let session_id = SessionId::new();
         machine
             .register_session(session_id.clone())
@@ -1061,7 +1094,7 @@ mod tests {
     #[tokio::test]
     async fn prepare_bindings_requires_all_three_fields() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
-        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let surface = MeerkatConsumerSurface::unobserved_for_test(Arc::clone(&machine));
         let err = surface
             .apply_routed_input(
                 iv("PrepareBindings"),
@@ -1088,7 +1121,8 @@ mod tests {
         // not session resolution.
         let pinned =
             SessionId::parse("00000000-0000-0000-0000-000000000001").expect("uuid literal");
-        let surface = MeerkatConsumerSurface::pinned(Arc::clone(&machine), pinned);
+        let surface =
+            MeerkatConsumerSurface::pinned_unobserved_for_test(Arc::clone(&machine), pinned);
         let err = surface
             .apply_routed_input(iv("Recycle"), vec![])
             .await
@@ -1108,7 +1142,10 @@ mod tests {
             .register_session(session_id.clone())
             .await
             .expect("register session");
-        let surface = MeerkatConsumerSurface::pinned(Arc::clone(&machine), session_id.clone());
+        let surface = MeerkatConsumerSurface::pinned_unobserved_for_test(
+            Arc::clone(&machine),
+            session_id.clone(),
+        );
 
         // Ingest before any runtime binding: the generated machine rejects
         // the transition; the typed discriminant must survive verbatim.
@@ -1146,7 +1183,7 @@ mod tests {
     #[tokio::test]
     async fn unpinned_surface_requires_projected_session_id_for_retire() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
-        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let surface = MeerkatConsumerSurface::unobserved_for_test(Arc::clone(&machine));
         // Retire has no fields in the schema; an unpinned surface
         // therefore cannot resolve a session and must refuse rather
         // than pick arbitrarily.
@@ -1162,7 +1199,8 @@ mod tests {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let pinned =
             SessionId::parse("00000000-0000-0000-0000-000000000001").expect("uuid literal");
-        let surface = MeerkatConsumerSurface::pinned(Arc::clone(&machine), pinned);
+        let surface =
+            MeerkatConsumerSurface::pinned_unobserved_for_test(Arc::clone(&machine), pinned);
         let err = surface
             .apply_routed_input(
                 iv("PrepareBindings"),
@@ -1187,7 +1225,7 @@ mod tests {
     #[tokio::test]
     async fn ingest_prefers_projected_session_id() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
-        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let surface = MeerkatConsumerSurface::unobserved_for_test(Arc::clone(&machine));
         let session_id = sid("00000000-0000-0000-0000-000000000001");
         machine
             .register_session(session_id.clone())
@@ -1220,7 +1258,7 @@ mod tests {
     #[tokio::test]
     async fn ingest_requires_projected_session_id() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
-        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let surface = MeerkatConsumerSurface::unobserved_for_test(Arc::clone(&machine));
         let session_id = sid("00000000-0000-0000-0000-000000000001");
         machine
             .register_session(session_id.clone())
@@ -1250,7 +1288,7 @@ mod tests {
     #[tokio::test]
     async fn ingest_without_matching_generated_binding_is_refused() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
-        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let surface = MeerkatConsumerSurface::unobserved_for_test(Arc::clone(&machine));
         let session_id = sid("00000000-0000-0000-0000-000000000001");
         machine
             .register_session(session_id.clone())
@@ -1284,10 +1322,15 @@ mod tests {
     #[derive(Default)]
     struct RecordingSignalSurface {
         log: tokio::sync::Mutex<Vec<(SignalVariantId, Vec<(FieldId, OwnedFieldValue)>)>>,
+        closed: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait]
     impl SignalConsumerSurface for RecordingSignalSurface {
+        fn transport_is_closed(&self) -> Option<bool> {
+            Some(self.closed.load(std::sync::atomic::Ordering::Acquire))
+        }
+
         fn instance_id(&self) -> &MachineInstanceId {
             static ID: OnceLock<MachineInstanceId> = OnceLock::new();
             ID.get_or_init(|| MachineInstanceId::parse("mob").expect("canonical instance id"))
@@ -1301,6 +1344,645 @@ mod tests {
             self.log.lock().await.push((variant, projected_fields));
             Ok(())
         }
+    }
+
+    fn recording_dispatcher(
+        surface: Arc<RecordingSignalSurface>,
+    ) -> MeerkatCompositionSignalDispatcher {
+        let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
+        let table = RouteTable::from_schema(&schema).expect("catalog routes");
+        Arc::new(CatalogCompositionSignalDispatcher::new(schema.name, table).with_consumer(surface))
+    }
+
+    async fn prepare_composed_session(
+        machine: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        dispatcher: &MeerkatCompositionSignalDispatcher,
+    ) -> PreparedSessionMaterialization {
+        let prepared = machine
+            .prepare_local_session_materialization_with_mode(
+                session_id.clone(),
+                crate::LocalSessionMaterializationMode::Ordinary,
+            )
+            .await
+            .expect("prepare exact composition materialization");
+        prepared
+            .install_composition_signal_dispatcher(Arc::clone(dispatcher))
+            .await
+            .expect("install exact materializer endpoint");
+        prepared
+    }
+
+    async fn bind_composed_session(
+        machine: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        dispatcher: &MeerkatCompositionSignalDispatcher,
+        runtime_name: &str,
+    ) {
+        MeerkatConsumerSurface::pinned(
+            Arc::clone(machine),
+            session_id.clone(),
+            Arc::clone(dispatcher),
+        )
+        .apply_routed_input(
+            iv("PrepareBindings"),
+            composed_binding_fields(session_id, runtime_name),
+        )
+        .await
+        .expect("composed runtime binding");
+    }
+
+    #[tokio::test]
+    async fn composition_recovery_requires_exact_binding_and_closed_prior_receiver() {
+        use std::sync::atomic::Ordering;
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session = SessionId::new();
+        let old = Arc::new(RecordingSignalSurface::default());
+        let old_dispatcher = recording_dispatcher(old.clone());
+        machine
+            .register_session(session.clone())
+            .await
+            .expect("cold registration");
+        let mut prepared = machine
+            .prepare_local_session_materialization(session.clone())
+            .await
+            .expect("exact recovery claim");
+        prepared
+            .commit_unbound_composition_endpoint(old_dispatcher.clone())
+            .await
+            .expect("commit delivery custody");
+        bind_composed_session(&machine, &session, &old_dispatcher, "recovered-runtime").await;
+        let witness = machine
+            .current_session_registration_witness(&session)
+            .await
+            .expect("exact registration");
+        let new = Arc::new(RecordingSignalSurface::default());
+        let new_dispatcher = recording_dispatcher(new.clone());
+        let recover = |dispatcher: MeerkatCompositionSignalDispatcher, runtime: &str| {
+            let runtime = mm_dsl::AgentRuntimeId::from(runtime);
+            machine.recover_composition_signal_dispatcher(
+                &witness,
+                runtime,
+                mm_dsl::FenceToken::from(19),
+                Some(mm_dsl::Generation::from(0)),
+                dispatcher,
+            )
+        };
+        assert!(
+            recover(new_dispatcher.clone(), "recovered-runtime")
+                .await
+                .is_err(),
+            "live old actor keeps custody"
+        );
+        old.closed.store(true, Ordering::Release);
+        assert!(
+            recover(new_dispatcher.clone(), "foreign-runtime")
+                .await
+                .is_err(),
+            "tuple remains authoritative"
+        );
+        let cancelled = Arc::new(RecordingSignalSurface::default());
+        cancelled.closed.store(true, Ordering::Release);
+        assert!(
+            recover(recording_dispatcher(cancelled), "recovered-runtime")
+                .await
+                .is_err(),
+            "cancelled incoming actor cannot claim"
+        );
+        assert!(
+            recover(new_dispatcher.clone(), "recovered-runtime")
+                .await
+                .expect("closed actor recovery")
+        );
+        assert!(
+            recover(old_dispatcher.clone(), "recovered-runtime")
+                .await
+                .is_err(),
+            "old actor cannot reclaim successor"
+        );
+        let old_consumer =
+            MeerkatConsumerSurface::pinned(machine.clone(), session.clone(), old_dispatcher);
+        let retire_fields = vec![(fld("session_id"), OwnedFieldValue::Str(session.to_string()))];
+        let refusal = old_consumer
+            .apply_routed_input(iv("Retire"), retire_fields.clone())
+            .await
+            .expect_err("old endpoint cannot retire recovered binding");
+        assert_eq!(refusal.error_code(), "composition_endpoint_conflict");
+        let refusal = old_consumer
+            .apply_routed_input(
+                iv("PrepareBindings"),
+                composed_binding_fields(&session, "recovered-runtime"),
+            )
+            .await
+            .expect_err("old endpoint cannot prepare recovered binding");
+        assert_eq!(refusal.error_code(), "composition_endpoint_conflict");
+        assert!(
+            recover(new_dispatcher.clone(), "foreign-runtime")
+                .await
+                .is_err(),
+            "same endpoint still requires exact generated tuple"
+        );
+        let new_consumer =
+            MeerkatConsumerSurface::pinned(machine.clone(), session.clone(), new_dispatcher);
+        new_consumer
+            .apply_routed_input(iv("Retire"), retire_fields)
+            .await
+            .expect("recovered retire");
+        assert_eq!(
+            new.log.lock().await.len(),
+            1,
+            "retired signal reaches recovered actor"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn reload_successor_preserves_delivery_custody_without_inheriting_old_receipts() {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let machine = Arc::new(MeerkatMachine::persistent_without_blobs(store));
+        let session = SessionId::new();
+        let signals = Arc::new(RecordingSignalSurface::default());
+        let dispatcher = recording_dispatcher(signals.clone());
+        let mut prepared = prepare_composed_session(&machine, &session, &dispatcher).await;
+        bind_composed_session(&machine, &session, &dispatcher, "reload-member").await;
+        crate::begin_session_runtime_actor_materialization(prepared.bindings())
+            .expect("claim composed actor construction")
+            .commit()
+            .expect("record composed actor construction");
+        let EnsureRuntimeExecutorAttachment::Pending(attachment) = prepared
+            .ensure_executor_attachment(|_| Box::new(NoopExecutor))
+            .await
+            .expect("attach exact composed runtime")
+        else {
+            panic!("fresh prepared runtime must create its attachment");
+        };
+        attachment.commit().await.expect("commit composed runtime");
+        let predecessor = machine
+            .current_session_registration_witness(&session)
+            .await
+            .expect("exact predecessor");
+        assert!(
+            machine
+                .force_session_durability_reload_required_for_test(&session)
+                .await
+        );
+        crate::SessionServiceRuntimeExt::accept_input(
+            machine.as_ref(),
+            &session,
+            crate::Input::Prompt(crate::PromptInput::new("start degraded teardown", None)),
+        )
+        .await
+        .expect_err("degraded admission starts exact runtime teardown");
+        let (published, release) = machine
+            .arm_reload_required_discard_after_successor_publication_test_hook(session.clone());
+        let waiter = tokio::spawn({
+            let machine = machine.clone();
+            let predecessor = predecessor.clone();
+            async move {
+                machine
+                    .recover_or_discard_reload_required_registration_if_current(&predecessor)
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), published)
+            .await
+            .expect("reload reaches exact successor publication")
+            .expect("publication owner remains alive");
+        let successor = machine
+            .current_session_registration_witness(&session)
+            .await
+            .expect("exact cold successor");
+        assert_ne!(successor, predecessor);
+        {
+            let sessions = machine.sessions.read().await;
+            let entry = sessions.get(&session).expect("successor entry");
+            assert!(
+                entry
+                    .composition_signal_dispatcher
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &dispatcher)),
+                "atomic reload must retain the exact composition receiver"
+            );
+            assert_eq!(entry.composition_materialization_claim_id, None);
+            let authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(authority.state().active_runtime_id.is_none());
+            assert!(authority.state().active_fence_token.is_none());
+            assert!(authority.state().active_runtime_generation.is_none());
+        }
+        waiter.abort();
+        let _ = waiter.await;
+        release
+            .send(())
+            .expect("release owned reload after cancellation");
+        let retire = mm_dsl::MeerkatMachineInput::Retire {
+            session_id: mm_dsl::SessionId::from_domain(&session),
+        };
+        let stale = {
+            let _gate = machine
+                .lock_current_durability_ready_session_mutation_gate(&session)
+                .await
+                .expect("successor mutation boundary");
+            machine
+                .apply_routed_session_dsl_input(
+                    &session,
+                    retire.clone(),
+                    &predecessor,
+                    Some(&dispatcher),
+                    "pre-reload receipt",
+                )
+                .await
+                .expect_err("same endpoint does not authorize a predecessor receipt")
+        };
+        assert_eq!(stale.error_code, "composition_registration_replaced");
+        let foreign = recording_dispatcher(Arc::new(RecordingSignalSurface::default()));
+        let refusal = machine
+            .apply_routed_meerkat_input_with_signal_dispatcher(
+                &session,
+                retire.clone(),
+                Some(&foreign),
+            )
+            .await
+            .expect_err("another composition cannot capture the cold successor");
+        assert_eq!(refusal.error_code, "composition_endpoint_conflict");
+        machine
+            .apply_routed_meerkat_input_with_signal_dispatcher(&session, retire, Some(&dispatcher))
+            .await
+            .expect("current composition can retire its exact cold successor");
+        assert_eq!(
+            machine
+                .recover_or_discard_reload_required_registration_if_current(&predecessor)
+                .await
+                .expect("stale reload retry is inert"),
+            crate::ReloadRequiredRegistrationDisposition::NotCurrent
+        );
+        assert_eq!(
+            machine.current_session_registration_witness(&session).await,
+            Some(successor),
+            "stale cleanup cannot replace the retired successor"
+        );
+    }
+
+    #[tokio::test]
+    async fn unbound_composition_recovery_keeps_exclusive_prepared_custody() {
+        use std::sync::atomic::Ordering;
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session = SessionId::new();
+        machine
+            .register_session(session.clone())
+            .await
+            .expect("cold registration");
+        let witness = machine
+            .current_session_registration_witness(&session)
+            .await
+            .expect("registration");
+        let first = Arc::new(RecordingSignalSurface::default());
+        let first_dispatcher = recording_dispatcher(first.clone());
+        assert!(
+            !machine
+                .recover_composition_signal_dispatcher(
+                    &witness,
+                    mm_dsl::AgentRuntimeId::from("unbound"),
+                    mm_dsl::FenceToken::from(1),
+                    Some(mm_dsl::Generation::from(0)),
+                    first_dispatcher.clone(),
+                )
+                .await
+                .expect("unbound requires prepared claim")
+        );
+        let mut prepared = machine
+            .prepare_local_session_materialization_for_registration(witness.clone())
+            .await
+            .expect("exact prepare");
+        prepared
+            .commit_unbound_composition_endpoint(first_dispatcher)
+            .await
+            .expect("commit endpoint");
+        let second = recording_dispatcher(Arc::new(RecordingSignalSurface::default()));
+        let mut competing = machine
+            .prepare_local_session_materialization_for_registration(witness.clone())
+            .await
+            .expect("unserved claim");
+        assert!(
+            competing
+                .commit_unbound_composition_endpoint(second.clone())
+                .await
+                .is_err(),
+            "open recovery endpoint cannot be stolen"
+        );
+        competing
+            .rollback_now()
+            .await
+            .expect("release failed competing claim");
+        first.closed.store(true, Ordering::Release);
+        let mut retry = machine
+            .prepare_local_session_materialization_for_registration(witness.clone())
+            .await
+            .expect("cancelled actor retry");
+        retry
+            .commit_unbound_composition_endpoint(second)
+            .await
+            .expect("commit retried endpoint");
+        machine
+            .unregister_session_registration_until_terminal_if_current(&witness)
+            .await
+            .expect("remove exact registration");
+        machine
+            .register_session(session)
+            .await
+            .expect("replacement registration");
+        assert!(
+            machine
+                .prepare_local_session_materialization_for_registration(witness)
+                .await
+                .is_err(),
+            "old recovery witness cannot touch replacement"
+        );
+    }
+
+    #[tokio::test]
+    async fn unbound_composition_recovery_rechecks_tuple_before_endpoint_installation() {
+        use std::sync::atomic::Ordering;
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session = SessionId::new();
+        machine
+            .register_session(session.clone())
+            .await
+            .expect("cold registration");
+        let bindings = machine
+            .prepare_local_session_bindings(session.clone())
+            .await
+            .expect("bindings");
+        let witness = machine
+            .session_registration_witness_for_bindings(&bindings)
+            .await
+            .expect("exact bindings witness");
+        let old_dispatcher = recording_dispatcher(Arc::new(RecordingSignalSurface::default()));
+        assert!(
+            !machine
+                .recover_composition_signal_dispatcher(
+                    &witness,
+                    mm_dsl::AgentRuntimeId::from("old-runtime"),
+                    mm_dsl::FenceToken::from(19),
+                    Some(mm_dsl::Generation::from(0)),
+                    old_dispatcher.clone(),
+                )
+                .await
+                .expect("initially unbound")
+        );
+
+        let replacement = Arc::new(RecordingSignalSurface::default());
+        let replacement_dispatcher = recording_dispatcher(replacement.clone());
+        let mut competing = machine
+            .prepare_local_session_materialization_for_registration(witness.clone())
+            .await
+            .expect("competing preparation");
+        competing
+            .commit_unbound_composition_endpoint(replacement_dispatcher.clone())
+            .await
+            .expect("competing endpoint");
+        bind_composed_session(
+            &machine,
+            &session,
+            &replacement_dispatcher,
+            "replacement-runtime",
+        )
+        .await;
+        replacement.closed.store(true, Ordering::Release);
+
+        let mut stale = machine
+            .prepare_local_session_materialization_for_registration(witness)
+            .await
+            .expect("same registration claim");
+        stale
+            .commit_unbound_composition_endpoint(old_dispatcher.clone())
+            .await
+            .expect_err("changed tuple refuses before endpoint mutation");
+        stale.rollback_now().await.expect("release stale claim");
+        let refusal =
+            MeerkatConsumerSurface::pinned(machine.clone(), session.clone(), old_dispatcher)
+                .apply_routed_input(
+                    iv("Retire"),
+                    vec![(fld("session_id"), OwnedFieldValue::Str(session.to_string()))],
+                )
+                .await
+                .expect_err("stale recovery has no custody");
+        assert_eq!(refusal.error_code(), "composition_endpoint_conflict");
+        assert_eq!(
+            machine
+                .session_dsl_state(&session)
+                .await
+                .expect("state")
+                .active_runtime_id,
+            Some(mm_dsl::AgentRuntimeId::from("replacement-runtime"))
+        );
+        // A failure must preserve the predecessor endpoint, including its
+        // ability to authorize a later exact closed-receiver handoff.
+        let current = machine
+            .current_session_registration_witness(&session)
+            .await
+            .expect("current witness");
+        assert!(
+            machine
+                .recover_composition_signal_dispatcher(
+                    &current,
+                    mm_dsl::AgentRuntimeId::from("replacement-runtime"),
+                    mm_dsl::FenceToken::from(19),
+                    Some(mm_dsl::Generation::from(0)),
+                    recording_dispatcher(Arc::new(RecordingSignalSurface::default())),
+                )
+                .await
+                .expect("preserved predecessor proves later handoff")
+        );
+    }
+
+    fn composed_binding_fields(
+        session_id: &SessionId,
+        runtime_name: &str,
+    ) -> Vec<(FieldId, OwnedFieldValue)> {
+        vec![
+            (
+                fld("agent_runtime_id"),
+                OwnedFieldValue::Str(runtime_name.into()),
+            ),
+            (fld("fence_token"), OwnedFieldValue::U64(19)),
+            (fld("generation"), OwnedFieldValue::U64(0)),
+            (
+                fld("session_id"),
+                OwnedFieldValue::Str(session_id.to_string()),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn shared_machine_routes_signals_to_exact_composition_registration() {
+        use crate::traits::RuntimeControlPlane;
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let a = SessionId::new();
+        let b = SessionId::new();
+        let direct = SessionId::new();
+        let a_surface = Arc::new(RecordingSignalSurface::default());
+        let b_surface = Arc::new(RecordingSignalSurface::default());
+        let a_dispatcher = recording_dispatcher(a_surface.clone());
+        let b_dispatcher = recording_dispatcher(b_surface.clone());
+        let _a_prepared = prepare_composed_session(&machine, &a, &a_dispatcher).await;
+        let _b_prepared = prepare_composed_session(&machine, &b, &b_dispatcher).await;
+        bind_composed_session(&machine, &a, &a_dispatcher, "member-a:0").await;
+        bind_composed_session(&machine, &b, &b_dispatcher, "member-b:0").await;
+        machine
+            .prepare_bindings(direct.clone())
+            .await
+            .expect("prepare direct session");
+        RuntimeControlPlane::retire(machine.as_ref(), &MeerkatMachine::logical_runtime_id(&b))
+            .await
+            .expect("retire B");
+        RuntimeControlPlane::destroy(machine.as_ref(), &MeerkatMachine::logical_runtime_id(&b))
+            .await
+            .expect("destroy B");
+        RuntimeControlPlane::retire(machine.as_ref(), &MeerkatMachine::logical_runtime_id(&a))
+            .await
+            .expect("retire A after B");
+        RuntimeControlPlane::destroy(machine.as_ref(), &MeerkatMachine::logical_runtime_id(&a))
+            .await
+            .expect("destroy A after B");
+        RuntimeControlPlane::destroy(
+            machine.as_ref(),
+            &MeerkatMachine::logical_runtime_id(&direct),
+        )
+        .await
+        .expect("destroy direct session");
+        for (surface, runtime_name) in [(&a_surface, "member-a:0"), (&b_surface, "member-b:0")] {
+            let log = surface.log.lock().await;
+            let variants: Vec<_> = log.iter().map(|(variant, _)| variant.as_str()).collect();
+            assert_eq!(
+                variants,
+                [
+                    "ObserveRuntimeReady",
+                    "ObserveRuntimeRetired",
+                    "ObserveRuntimeDestroyed"
+                ]
+            );
+            assert!(
+                log.iter()
+                    .all(|(_, fields)| fields.iter().any(|(id, value)| {
+                        id == &seam_facts::fields::agent_runtime_id()
+                            && matches!(value, OwnedFieldValue::Str(value) if value == runtime_name)
+                    })),
+                "composition received another registration's lifecycle signal"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn staged_signal_keeps_old_endpoint_across_same_id_replacement() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let id = SessionId::new();
+        let old_surface = Arc::new(RecordingSignalSurface::default());
+        let new_surface = Arc::new(RecordingSignalSurface::default());
+        let old_dispatcher = recording_dispatcher(old_surface.clone());
+        let new_dispatcher = recording_dispatcher(new_surface.clone());
+        let old_prepared = prepare_composed_session(&machine, &id, &old_dispatcher).await;
+        let old_consumer =
+            MeerkatConsumerSurface::new(Arc::clone(&machine), Arc::clone(&old_dispatcher));
+        bind_composed_session(&machine, &id, &old_dispatcher, "old:0").await;
+        let staged = machine
+            .stage_session_dsl_transition(
+                &id,
+                mm_dsl::MeerkatMachineInput::Retire {
+                    session_id: mm_dsl::SessionId(id.to_string()),
+                },
+                "test old retirement commit",
+            )
+            .await
+            .expect("stage old retirement");
+        machine
+            .unregister_session(&id)
+            .await
+            .expect("remove old registration");
+        machine
+            .register_session(id.clone())
+            .await
+            .expect("register replacement");
+        let error = old_consumer
+            .apply_routed_input(iv("PrepareBindings"), composed_binding_fields(&id, "old:0"))
+            .await
+            .expect_err("old first-arrival binding cannot claim blank replacement");
+        assert_eq!(error.error_code(), "composition_endpoint_unbound");
+        assert_eq!(
+            machine
+                .session_dsl_state(&id)
+                .await
+                .unwrap()
+                .active_runtime_id,
+            None
+        );
+        old_prepared
+            .install_composition_signal_dispatcher(Arc::clone(&old_dispatcher))
+            .await
+            .expect_err("stale exact materializer cannot claim replacement either");
+        let _new_prepared = prepare_composed_session(&machine, &id, &new_dispatcher).await;
+        bind_composed_session(&machine, &id, &new_dispatcher, "replacement:0").await;
+        machine
+            .commit_session_dsl_transition(&id, staged, "test delayed retirement dispatch")
+            .await
+            .expect("dispatch captured old endpoint");
+        assert_eq!(old_surface.log.lock().await.len(), 2);
+        assert_eq!(
+            new_surface.log.lock().await.len(),
+            1,
+            "delayed old signal must not enter replacement composition"
+        );
+        let error = machine
+            .apply_routed_meerkat_input_with_signal_dispatcher(
+                &id,
+                mm_dsl::MeerkatMachineInput::Retire {
+                    session_id: mm_dsl::SessionId(id.to_string()),
+                },
+                Some(&old_dispatcher),
+            )
+            .await
+            .expect_err("stale composition must not retire replacement");
+        assert_eq!(error.error_code, "composition_endpoint_conflict");
+        assert_eq!(new_surface.log.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_composition_materialization_releases_only_its_endpoint() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let id = SessionId::new();
+        machine
+            .register_session(id.clone())
+            .await
+            .expect("preexisting entry");
+        let old_surface = Arc::new(RecordingSignalSurface::default());
+        let old_dispatcher = recording_dispatcher(Arc::clone(&old_surface));
+        let mut old_prepared = prepare_composed_session(&machine, &id, &old_dispatcher).await;
+        assert!(
+            !old_prepared
+                .rollback_now()
+                .await
+                .expect("abort exact prepared attempt")
+        );
+        let old_consumer =
+            MeerkatConsumerSurface::new(Arc::clone(&machine), Arc::clone(&old_dispatcher));
+        let error = old_consumer
+            .apply_routed_input(iv("PrepareBindings"), composed_binding_fields(&id, "old:0"))
+            .await
+            .expect_err("aborted materializer cannot retain composition custody");
+        assert_eq!(error.error_code(), "composition_endpoint_unbound");
+        assert!(old_surface.log.lock().await.is_empty());
+        let new_surface = Arc::new(RecordingSignalSurface::default());
+        let new_dispatcher = recording_dispatcher(Arc::clone(&new_surface));
+        let _new_prepared = prepare_composed_session(&machine, &id, &new_dispatcher).await;
+        bind_composed_session(&machine, &id, &new_dispatcher, "new:0").await;
+        assert_eq!(new_surface.log.lock().await.len(), 1);
+        old_prepared
+            .rollback_now()
+            .await
+            .expect("completed old rollback is inert");
+        assert_eq!(new_surface.log.lock().await.len(), 1);
     }
 
     #[tokio::test]
@@ -1318,7 +2000,13 @@ mod tests {
         let dispatcher: CatalogCompositionSignalDispatcher<MeerkatSeamSignal> =
             CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
                 .with_consumer(signal_surface.clone());
-        machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register test signal session");
+        machine
+            .set_session_composition_signal_dispatcher_for_test(&session_id, Arc::new(dispatcher))
+            .await;
 
         machine
             .apply_routed_meerkat_input(
@@ -1445,7 +2133,13 @@ mod tests {
         let dispatcher: CatalogCompositionSignalDispatcher<MeerkatSeamSignal> =
             CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
                 .with_consumer(signal_surface.clone());
-        machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register test signal session");
+        machine
+            .set_session_composition_signal_dispatcher_for_test(&session_id, Arc::new(dispatcher))
+            .await;
 
         let bindings = machine
             .prepare_local_session_bindings(session_id.clone())
@@ -1585,7 +2279,13 @@ mod tests {
         let dispatcher: CatalogCompositionSignalDispatcher<MeerkatSeamSignal> =
             CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
                 .with_consumer(signal_surface.clone());
-        machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register test signal session");
+        machine
+            .set_session_composition_signal_dispatcher_for_test(&session_id, Arc::new(dispatcher))
+            .await;
 
         machine
             .prepare_local_session_bindings(session_id.clone())
@@ -1838,7 +2538,13 @@ mod tests {
         let dispatcher: CatalogCompositionSignalDispatcher<MeerkatSeamSignal> =
             CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
                 .with_consumer(signal_surface.clone());
-        machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register test signal session");
+        machine
+            .set_session_composition_signal_dispatcher_for_test(&session_id, Arc::new(dispatcher))
+            .await;
 
         machine
             .prepare_local_session_bindings(session_id.clone())
@@ -2143,7 +2849,13 @@ mod tests {
         let dispatcher: CatalogCompositionSignalDispatcher<MeerkatSeamSignal> =
             CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
                 .with_consumer(signal_surface.clone());
-        machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register test signal session");
+        machine
+            .set_session_composition_signal_dispatcher_for_test(&session_id, Arc::new(dispatcher))
+            .await;
 
         machine
             .prepare_bindings(session_id.clone())
@@ -2181,7 +2893,13 @@ mod tests {
         let dispatcher: CatalogCompositionSignalDispatcher<MeerkatSeamSignal> =
             CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
                 .with_consumer(signal_surface.clone());
-        machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("register test signal session");
+        machine
+            .set_session_composition_signal_dispatcher_for_test(&session_id, Arc::new(dispatcher))
+            .await;
 
         machine
             .apply_routed_meerkat_input(

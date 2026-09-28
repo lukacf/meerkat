@@ -290,7 +290,7 @@ test("Diplomacy real modules, typed event ingress and offline current WASM", { t
         };
         let sub;
         try {
-          wasm.init_runtime_from_config(JSON.stringify({ anthropic_api_key: "synthetic-unused", anthropic_base_url: "http://127.0.0.1:1/anthropic", model: "claude-sonnet-4-6" }));
+          await wasm.init_runtime_from_config(JSON.stringify({ anthropic_api_key: "synthetic-unused", anthropic_base_url: "http://127.0.0.1:1/anthropic", model: "claude-sonnet-4-6" }));
           for (const team of ["france", "prussia", "russia"]) {
             const definition = buildFactionDefinition(team, "claude-sonnet-4-6");
             for (const skill of Object.values(definition.skills)) {
@@ -320,7 +320,7 @@ test("Diplomacy real modules, typed event ingress and offline current WASM", { t
           return { version: wasm.runtime_version(), events, errors, warnings, intercepted };
         } finally {
           if (sub) wasm.close_subscription(sub);
-          wasm.destroy_runtime();
+          await wasm.destroy_runtime();
           window.fetch = originalFetch;
         }
       }, repo);

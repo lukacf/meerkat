@@ -8,6 +8,7 @@ use super::SessionError;
 /// JSON-RPC error code for a `SessionError`.
 pub fn jsonrpc_code(err: &SessionError) -> i64 {
     match err {
+        SessionError::CapabilityUnavailable(_) => -32020,
         SessionError::NotFound { .. } => -32001,
         SessionError::Busy { .. } => -32002,
         SessionError::PersistenceDisabled => -32003,
@@ -37,7 +38,8 @@ pub fn http_status(err: &SessionError) -> u16 {
         | SessionError::WholeBlobAuditedEndpointDivergence { .. }
         | SessionError::ExternalWriteFenceConflict { .. }
         | SessionError::ExternalWriteFenceBackoff { .. } => 409,
-        SessionError::PersistenceDisabled
+        SessionError::CapabilityUnavailable(_)
+        | SessionError::PersistenceDisabled
         | SessionError::CompactionDisabled
         | SessionError::Unsupported(_) => 501,
         SessionError::Store(_) | SessionError::Agent(_) | SessionError::FailedWithData { .. } => {

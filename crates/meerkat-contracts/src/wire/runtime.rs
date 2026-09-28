@@ -1537,6 +1537,35 @@ where
     }
 }
 
+/// Public turn input intent, separate from internal execution authority.
+///
+/// Skill identities use the same structured keys as the skill engine. Runtime
+/// compositions validate their source capabilities before admitting the input.
+/// Provider, tool-overlay, and response-terminal authority is not accepted by
+/// this ingress contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireTurnInputOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handling_mode: Option<crate::wire::mob::WireHandlingMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+}
+
+impl From<WireTurnInputOptions> for meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+    fn from(value: WireTurnInputOptions) -> Self {
+        Self {
+            handling_mode: value.handling_mode.map(Into::into),
+            transient_turn_context: value.transient_turn_context,
+            skill_references: value.skill_references,
+            ..Self::default()
+        }
+    }
+}
+
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].
 ///
 /// The per-turn seam between control plane and core is fully typed —
@@ -1699,6 +1728,45 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             // or forge it through turn-metadata wire payloads.
             directed_interaction_ids: Vec::new(),
             transcript_identity: Default::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod turn_input_options_tests {
+    use super::WireTurnInputOptions;
+    use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+    use meerkat_core::skills::{SkillKey, SkillName};
+
+    #[test]
+    fn public_turn_options_preserve_structured_skills_and_transient_context() {
+        let skill = SkillKey::builtin(SkillName::parse("task-workflow").expect("valid skill"));
+        let options: WireTurnInputOptions = serde_json::from_value(serde_json::json!({
+            "skill_references": [skill],
+            "transient_turn_context": "exact host context",
+        }))
+        .expect("public typed intent");
+        let metadata = RuntimeTurnMetadata::from(options);
+        assert_eq!(metadata.skill_references, Some(vec![skill]));
+        assert_eq!(
+            metadata.transient_turn_context.expect("context").as_str(),
+            "exact host context"
+        );
+        assert!(metadata.execution_kind.is_none());
+        assert!(metadata.peer_response_terminal_apply_intent.is_none());
+    }
+
+    #[test]
+    fn public_turn_options_reject_legacy_skills_and_internal_authority() {
+        for request in [
+            serde_json::json!({ "skill_references": ["task-workflow"] }),
+            serde_json::json!({ "execution_kind": "resume_pending" }),
+            serde_json::json!({ "peer_response_terminal_apply_intent": "append_content_and_run" }),
+            serde_json::json!({ "provider": "anthropic" }),
+            serde_json::json!({ "turn_tool_overlay": {} }),
+        ] {
+            assert!(serde_json::from_value::<WireTurnInputOptions>(request).is_err());
         }
     }
 }

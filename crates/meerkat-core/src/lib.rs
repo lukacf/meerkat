@@ -5,15 +5,22 @@
 //! own the canonical config-store, config-runtime, path-layout, and maintenance
 //! fence primitives, so this crate is not a blanket no-I/O layer.
 
-// On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
-// All internal code uses `tokio::` paths — the alias makes them resolve
-// to tokio_with_wasm on wasm32 and real tokio on native.
-// On wasm32, provide a `tokio` module that re-exports tokio_with_wasm's
-// API. All internal `tokio::*` paths resolve through this on wasm32,
-// and through the real tokio crate on native.
+// All WASM Tokio users share these host adapters. Time and cooperative yields
+// own cancellable JavaScript resources here; spawning retains the upstream scheduler.
+// Native code continues to resolve the real Tokio crate.
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
+    pub use crate::time_compat::wasm as time;
     pub use tokio_with_wasm::alias::*;
+
+    pub mod task {
+        pub use tokio_with_wasm::alias::task::*;
+
+        /// Cooperatively yields through an owned, cancellable host timer.
+        pub async fn yield_now() {
+            crate::time_compat::wasm::sleep(crate::time_compat::Duration::ZERO).await;
+        }
+    }
 }
 
 pub mod agent;
@@ -76,6 +83,7 @@ pub mod realtime_transcript_sidecar;
 pub mod retry;
 pub mod runtime_bootstrap;
 pub mod runtime_epoch;
+pub mod runtime_profile;
 pub mod schema;
 pub mod self_hosted_binding;
 pub mod service;

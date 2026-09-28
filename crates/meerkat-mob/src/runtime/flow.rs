@@ -2075,12 +2075,7 @@ impl FlowEngine {
         let authority_input = input.authority_input(&run_id);
         for attempt in 0..5u32 {
             let run = self.run_snapshot(&run_id).await?;
-            if mob_machine_run_status_is_terminal(&run_id, &run.status)?
-                && !matches!(
-                    (&target, &run.status),
-                    (TerminalizationTarget::Canceled { .. }, MobRunStatus::Failed)
-                )
-            {
+            if mob_machine_run_status_is_terminal(&run_id, &run.status)? {
                 return self
                     .repair_persisted_terminalization(run_id, flow_id, target)
                     .await;
@@ -2538,10 +2533,18 @@ async fn validate_schema_ref(
                 }
             })?;
             #[cfg(target_arch = "wasm32")]
-            return Err(MobError::SchemaValidation {
-                step_id: step_id.clone(),
-                message: format!("file-based schema ref '{name}' is not supported on wasm32"),
-            });
+            {
+                let _ = name;
+                return meerkat_contracts::capability::BrowserRuntimeProfile
+                    .require(
+                        meerkat_contracts::capability::RuntimeProfileCapability::FileSchemaResolution,
+                    )
+                    .map_err(|refusal| {
+                        MobError::SessionError(meerkat_core::SessionError::CapabilityUnavailable(
+                            refusal,
+                        ))
+                    });
+            }
             #[cfg(not(target_arch = "wasm32"))]
             {
                 serde_json::from_str(&raw).map_err(|error| MobError::SchemaValidation {

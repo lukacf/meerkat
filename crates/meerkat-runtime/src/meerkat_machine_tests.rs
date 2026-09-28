@@ -1697,8 +1697,9 @@ async fn registered_runtime_epoch_id(
         .expect("registration installs the entry runtime epoch")
 }
 
-fn install_recording_meerkat_signal_dispatcher(
+async fn install_recording_meerkat_signal_dispatcher(
     machine: &MeerkatMachine,
+    session_id: &SessionId,
 ) -> Arc<RecordingMeerkatSignalSurface> {
     let signal_surface = Arc::new(RecordingMeerkatSignalSurface::default());
     let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
@@ -1707,11 +1708,16 @@ fn install_recording_meerkat_signal_dispatcher(
         crate::meerkat_machine::composition::MeerkatSeamSignal,
     > = crate::composition::CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
         .with_consumer(signal_surface.clone());
-    machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+    machine
+        .set_session_composition_signal_dispatcher_for_test(session_id, Arc::new(dispatcher))
+        .await;
     signal_surface
 }
 
-fn install_rejecting_meerkat_signal_dispatcher(machine: &MeerkatMachine) {
+async fn install_rejecting_meerkat_signal_dispatcher(
+    machine: &MeerkatMachine,
+    session_id: &SessionId,
+) {
     let signal_surface = Arc::new(RejectingMeerkatSignalSurface);
     let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
     let table = crate::composition::RouteTable::from_schema(&schema).expect("catalog routes");
@@ -1719,7 +1725,9 @@ fn install_rejecting_meerkat_signal_dispatcher(machine: &MeerkatMachine) {
         crate::meerkat_machine::composition::MeerkatSeamSignal,
     > = crate::composition::CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
         .with_consumer(signal_surface);
-    machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+    machine
+        .set_session_composition_signal_dispatcher_for_test(session_id, Arc::new(dispatcher))
+        .await;
 }
 
 async fn assert_no_runtime_binding(machine: &MeerkatMachine, session_id: &SessionId) {
@@ -1745,7 +1753,7 @@ async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_a
         .register_session(session_id.clone())
         .await
         .expect("register session");
-    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine, &session_id).await;
 
     let registered_epoch = registered_runtime_epoch_id(&machine, &session_id).await;
     let previous_snapshot = machine
@@ -1797,7 +1805,7 @@ async fn provisional_dsl_rollback_after_shell_failure_leaks_no_routed_signal_or_
         .register_session(session_id.clone())
         .await
         .expect("register session");
-    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine, &session_id).await;
 
     let registered_epoch = registered_runtime_epoch_id(&machine, &session_id).await;
     let previous_snapshot = machine
@@ -1827,7 +1835,7 @@ async fn authoritative_dsl_apply_preserves_committed_state_when_effect_dispatch_
         .register_session(session_id.clone())
         .await
         .expect("register session");
-    install_rejecting_meerkat_signal_dispatcher(&machine);
+    install_rejecting_meerkat_signal_dispatcher(&machine, &session_id).await;
 
     let registered_epoch = registered_runtime_epoch_id(&machine, &session_id).await;
     let err = match machine
@@ -1865,7 +1873,7 @@ async fn unregister_teardown_emits_no_routed_seam_signal() {
         .register_session(session_id.clone())
         .await
         .expect("register session");
-    install_rejecting_meerkat_signal_dispatcher(&machine);
+    install_rejecting_meerkat_signal_dispatcher(&machine, &session_id).await;
 
     machine
         .unregister_session(&session_id)
@@ -1912,7 +1920,7 @@ async fn destroy_keeps_committed_dsl_state_when_runtime_destroyed_signal_dispatc
         .prepare_bindings(session_id.clone())
         .await
         .expect("prepare bindings before destroy");
-    install_rejecting_meerkat_signal_dispatcher(&machine);
+    install_rejecting_meerkat_signal_dispatcher(&machine, &session_id).await;
 
     let runtime_id = runtime_id_for_session(&session_id);
     let err = crate::traits::RuntimeControlPlane::destroy(&machine, &runtime_id)
@@ -1945,7 +1953,7 @@ async fn persistent_retire_signal_failure_cold_recovery_normalizes_dead_process_
         .prepare_bindings(session_id.clone())
         .await
         .expect("prepare runtime binding before retire");
-    install_rejecting_meerkat_signal_dispatcher(&machine);
+    install_rejecting_meerkat_signal_dispatcher(&machine, &session_id).await;
 
     let runtime_id = runtime_id_for_session(&session_id);
     let expected_runtime_id = runtime_id.to_string();
@@ -2011,7 +2019,11 @@ async fn persistent_retire_signal_failure_cold_recovery_normalizes_dead_process_
 async fn prepare_bindings_dispatches_runtime_bound_after_shell_commit() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
-    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register test session");
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine, &session_id).await;
 
     let bindings = machine
         .prepare_bindings(session_id.clone())
@@ -2037,7 +2049,7 @@ async fn rejected_provisional_dsl_transition_emits_no_routed_signal_or_state() {
         .register_session(session_id.clone())
         .await
         .expect("register session");
-    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine, &session_id).await;
 
     let err = machine
         .stage_session_dsl_input(

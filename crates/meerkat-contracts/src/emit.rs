@@ -52,9 +52,16 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     // Wire types (contracts-owned types only — types embedding core types
     // without JsonSchema use serde for serialization but not for schema generation)
     let wire_types = serde_json::json!({
+        "RuntimeProfileCapability": schema_for!(crate::capability::RuntimeProfileCapability),
+        "RuntimeProfileId": schema_for!(crate::capability::RuntimeProfileId),
+        "RuntimeProfileClearingAction": schema_for!(crate::capability::RuntimeProfileClearingAction),
+        "RuntimeProfileRefusalCode": schema_for!(crate::capability::RuntimeProfileRefusalCode),
+        "RuntimeProfileRefusalData": schema_for!(crate::capability::RuntimeProfileRefusalData),
+        "RuntimeProfileRefusal": schema_for!(crate::capability::RuntimeProfileRefusal),
         "WireUsage": schema_for!(crate::wire::WireUsage),
         "ContractVersion": schema_for!(crate::version::ContractVersion),
         "WireRunResult": schema_for!(crate::wire::WireRunResult),
+        "WireTurnInputOptions": schema_for!(crate::wire::runtime::WireTurnInputOptions),
         "WireCallbackPending": schema_for!(crate::wire::WireCallbackPending),
         "WirePendingToolCall": schema_for!(crate::wire::WirePendingToolCall),
         "WireCallbackPendingStatus": schema_for!(crate::wire::WireCallbackPendingStatus),

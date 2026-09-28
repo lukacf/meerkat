@@ -1127,6 +1127,12 @@ impl MeerkatMachine {
                         .await
                         .map_err(RuntimeControlPlaneError::Internal)?;
 
+                    let signal_dispatcher = self
+                        .sessions
+                        .read()
+                        .await
+                        .get(&session_id)
+                        .and_then(|entry| entry.composition_signal_dispatcher.clone());
                     let mut drv = driver.lock().await;
                     let reason = "runtime destroyed";
                     let completion_input_ids = drv.as_driver().active_input_ids();
@@ -1151,7 +1157,10 @@ impl MeerkatMachine {
                         "Destroy",
                     );
                     let staged_dsl = match staged_dsl {
-                        Ok(staged) => staged,
+                        Ok(mut staged) => {
+                            staged.signal_dispatcher = signal_dispatcher;
+                            staged
+                        }
                         Err(reason) => {
                             drv.rollback_prepared_destroy_lifecycle(prepared_destroy.lifecycle);
                             drv.rollback_prepared_runless_interaction_terminal_outboxes(

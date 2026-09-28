@@ -1119,6 +1119,7 @@ struct StagedSessionDslInput {
     previous_snapshot: dsl::MeerkatMachineAuthoritySnapshot,
     committed_snapshot: dsl::MeerkatMachineAuthoritySnapshot,
     effects: DslTransitionEffects,
+    signal_dispatcher: Option<composition::MeerkatCompositionSignalDispatcher>,
 }
 
 impl StagedSessionDslInput {
@@ -1500,6 +1501,14 @@ struct RuntimeSessionEntry {
     /// could fall out of sync across a registration/unregistration
     /// boundary.
     drain_slot: CommsDrainSlot,
+    /// Reverse composition endpoint installed by the exact materialization
+    /// claim on this registration. Direct sessions have no mob consumer.
+    /// Exact degraded reload preserves delivery custody on its unbound cold
+    /// successor. Ordinary removal drops it; effect batches retain their
+    /// captured endpoint across awaits instead of looking up a successor.
+    composition_signal_dispatcher: Option<composition::MeerkatCompositionSignalDispatcher>,
+    /// Exact installer custody for failed materialization compensation.
+    composition_materialization_claim_id: Option<uuid::Uuid>,
 }
 
 /// Fully recovered persistent session entry that has not yet been published
@@ -3515,6 +3524,142 @@ impl PreparedSessionMaterialization {
         RuntimeCleanupTaskSpawner {
             inner: self.cleanup_spawner.clone(),
         }
+    }
+
+    /// Install the reverse composition endpoint using this exact exclusive
+    /// materialization claim. Routed placement inputs cannot acquire endpoint
+    /// custody: an old consumer must never claim a same-ID replacement entry.
+    /// This is mechanical delivery custody, not a placement or readiness verdict.
+    pub async fn install_composition_signal_dispatcher(
+        &self,
+        dispatcher: composition::MeerkatCompositionSignalDispatcher,
+    ) -> Result<(), RuntimeDriverError> {
+        let _mutation_guard = self
+            .machine
+            .lock_current_durability_ready_session_mutation_gate(self.session_id())
+            .await?;
+        let authority = crate::validated_session_runtime_bindings_authority(&self.bindings)
+            .map_err(|error| RuntimeDriverError::StaleAuthority {
+                reason: error.to_string(),
+            })?;
+        let mut sessions = self.machine.sessions.write().await;
+        let entry = sessions.get_mut(self.session_id()).ok_or_else(|| {
+            RuntimeDriverError::StaleAuthority {
+                reason: "composition materialization registration disappeared".to_string(),
+            }
+        })?;
+        if !self.armed
+            || entry.epoch_id != *self.bindings.epoch_id()
+            || !Arc::ptr_eq(&entry.materialization_claim_state, &self.claim_state)
+            || !Arc::ptr_eq(&entry.dsl_authority, &authority.dsl_authority)
+            || !Arc::ptr_eq(&entry.handle_teardown_gate, &authority.teardown_gate)
+            || entry.physical_attachment_is_live()
+            || !self
+                .claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .exact_claim_is(
+                    self.claim_id,
+                    &[
+                        crate::RuntimeActorMaterializationClaimPhase::Prepared,
+                        crate::RuntimeActorMaterializationClaimPhase::Staged,
+                    ],
+                )
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition endpoint requires the exact unserved materialization claim"
+                    .to_string(),
+            });
+        }
+        if let Some(error) = entry.dsl_mutation_blocked_by_unregister(self.session_id()) {
+            return Err(error);
+        }
+        if entry
+            .composition_signal_dispatcher
+            .as_ref()
+            .is_some_and(|current| {
+                !Arc::ptr_eq(current, &dispatcher) && current.transport_is_closed() != Some(true)
+            })
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "prepared composition cannot replace an open or unknown delivery owner"
+                    .into(),
+            });
+        }
+        entry.composition_signal_dispatcher = Some(dispatcher);
+        entry.composition_materialization_claim_id = Some(self.claim_id);
+        Ok(())
+    }
+
+    /// Consume an exact preparation claim for an unbound recovery endpoint.
+    /// Generated binding absence is checked in the same critical section as
+    /// installation, so a concurrent placement cannot change the target.
+    pub async fn commit_unbound_composition_endpoint(
+        &mut self,
+        dispatcher: composition::MeerkatCompositionSignalDispatcher,
+    ) -> Result<(), RuntimeDriverError> {
+        let _guard = self
+            .machine
+            .lock_current_durability_ready_session_mutation_gate(self.session_id())
+            .await?;
+        let authority = crate::validated_session_runtime_bindings_authority(&self.bindings)
+            .map_err(|error| RuntimeDriverError::StaleAuthority {
+                reason: error.to_string(),
+            })?;
+        let mut sessions = self.machine.sessions.write().await;
+        let entry = sessions.get_mut(self.session_id()).ok_or_else(|| {
+            RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery registration disappeared".into(),
+            }
+        })?;
+        if let Some(error) = entry.dsl_mutation_blocked_by_unregister(self.session_id()) {
+            return Err(error);
+        }
+        // Synchronous actor materialization also takes DSL before claim.
+        let dsl = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut claim = entry
+            .materialization_claim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = dsl.state();
+        if !self.armed
+            || entry.epoch_id != *self.bindings.epoch_id()
+            || !Arc::ptr_eq(&entry.materialization_claim_state, &self.claim_state)
+            || !Arc::ptr_eq(&entry.dsl_authority, &authority.dsl_authority)
+            || !Arc::ptr_eq(&entry.handle_teardown_gate, &authority.teardown_gate)
+            || entry.physical_attachment_is_live()
+            || entry.provisional_materialization_claim_id.is_some()
+            || state.active_runtime_id.is_some()
+            || state.active_fence_token.is_some()
+            || state.active_runtime_generation.is_some()
+            || dispatcher.transport_is_closed() != Some(false)
+            || entry
+                .composition_signal_dispatcher
+                .as_ref()
+                .is_some_and(|current| {
+                    !Arc::ptr_eq(current, &dispatcher)
+                        && current.transport_is_closed() != Some(true)
+                })
+            || !claim.exact_claim_is(
+                self.claim_id,
+                &[crate::RuntimeActorMaterializationClaimPhase::Prepared],
+            )
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery requires its exact unbound prepared claim and delivery custody".into(),
+            });
+        }
+        entry.composition_signal_dispatcher = Some(dispatcher);
+        entry.composition_materialization_claim_id = None;
+        claim.current = None;
+        claim.phase = crate::RuntimeActorMaterializationClaimPhase::Vacant;
+        claim.rollback_registration_available = false;
+        claim.changed.notify_waiters();
+        self.armed = false;
+        Ok(())
     }
 
     /// Whether this lease still owns the exact process-local materialization
@@ -5979,7 +6124,10 @@ impl MeerkatMachine {
         dispatch_failure: CommittedEffectDispatchFailure,
     ) -> Result<(), String> {
         if let Err(error) = self
-            .dispatch_routed_signals_from_effects(&staged.effects)
+            .dispatch_routed_signals_from_effects(
+                staged.signal_dispatcher.as_ref(),
+                &staged.effects,
+            )
             .await
         {
             let CommittedEffectDispatchFailure::PreserveCommittedDslState = dispatch_failure;
@@ -5992,21 +6140,16 @@ impl MeerkatMachine {
 
     async fn dispatch_routed_signals_from_effects(
         &self,
+        dispatcher: Option<&composition::MeerkatCompositionSignalDispatcher>,
         effects: &[dsl::MeerkatMachineEffect],
     ) -> Result<(), String> {
-        let dispatcher = {
-            self.composition_signal_dispatcher
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        };
         let Some(dispatcher) = dispatcher else {
             return Ok(());
         };
 
         for effect in effects {
             if let Some(signal) = composition::lift_routed_signal(effect) {
-                composition::dispatch_routed_signal(&dispatcher, signal).await?;
+                composition::dispatch_routed_signal(dispatcher, signal).await?;
             }
         }
         Ok(())
@@ -7851,11 +7994,6 @@ pub struct MeerkatMachineShared {
     /// it for their lifetime; the registry is scoped to this `MeerkatMachine`
     /// instance, so tests / multi-runtime processes get clean isolation.
     session_claims: Arc<crate::handles::RuntimeSessionClaimRegistry>,
-    /// Optional typed signal dispatcher for MeerkatMachine lifecycle
-    /// effects routed by `meerkat_mob_seam` into MobMachine observation
-    /// signals.
-    composition_signal_dispatcher:
-        StdRwLock<Option<composition::MeerkatCompositionSignalDispatcher>>,
     /// One-shot deterministic fault for the materializer's executor-attach
     /// publication window. Test-support only; production builds compile the
     /// post-ensure hook to a no-op and carry no field.
@@ -9249,7 +9387,6 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_unbound_rejection_authority: live_unbound_rejection_authority(),
                 session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
-                composition_signal_dispatcher: StdRwLock::new(None),
                 #[cfg(feature = "test-support")]
                 test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "test-support")]
@@ -9339,7 +9476,6 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_unbound_rejection_authority: live_unbound_rejection_authority(),
                 session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
-                composition_signal_dispatcher: StdRwLock::new(None),
                 #[cfg(feature = "test-support")]
                 test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "test-support")]
@@ -9429,7 +9565,6 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_unbound_rejection_authority: live_unbound_rejection_authority(),
                 session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
-                composition_signal_dispatcher: StdRwLock::new(None),
                 #[cfg(feature = "test-support")]
                 test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "test-support")]
@@ -9580,17 +9715,24 @@ impl MeerkatMachine {
         Arc::clone(&self.session_claims) as Arc<dyn meerkat_core::handles::SessionClaimHandle>
     }
 
-    /// Attach the typed composition signal dispatcher used for
-    /// MeerkatMachine -> MobMachine lifecycle observation routes.
-    pub fn set_composition_signal_dispatcher(
+    /// Install an exact-registration signal endpoint for fault-injection tests.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::expect_used)]
+    pub async fn set_session_composition_signal_dispatcher_for_test(
         &self,
+        session_id: &SessionId,
         dispatcher: composition::MeerkatCompositionSignalDispatcher,
     ) {
-        let mut slot = self
-            .composition_signal_dispatcher
+        let _gate = self
+            .lock_current_session_mutation_gate(session_id)
+            .await
+            .expect("test signal endpoint requires an existing registration");
+        self.sessions
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *slot = Some(dispatcher);
+            .await
+            .get_mut(session_id)
+            .expect("test registration remains current under its mutation gate")
+            .composition_signal_dispatcher = Some(dispatcher);
     }
 
     /// Apply a routed-input variant delivered by the `meerkat_mob_seam`
@@ -9603,11 +9745,142 @@ impl MeerkatMachine {
     /// session lookup + DSL-lock-scoped apply. A typed transition error
     /// from the kernel is surfaced as a `String` so the dispatcher can
     /// map it onto `DispatchRefusal::ConsumerRefused`.
+    #[cfg(test)]
     pub(crate) async fn apply_routed_meerkat_input(
         &self,
         session_id: &SessionId,
         input: dsl::MeerkatMachineInput,
     ) -> Result<(), dsl_authority::DslTransitionRefusal> {
+        self.apply_routed_meerkat_input_with_signal_dispatcher(session_id, input, None)
+            .await
+    }
+
+    /// Transfer delivery custody for an exact recovered member binding after
+    /// its old composition actor has permanently closed. A cold unbound entry
+    /// returns false and still requires an exclusive Prepared claim.
+    pub async fn recover_composition_signal_dispatcher(
+        &self,
+        registration: &RuntimeSessionRegistrationWitness,
+        runtime_id: dsl::AgentRuntimeId,
+        fence: dsl::FenceToken,
+        generation: Option<dsl::Generation>,
+        dispatcher: composition::MeerkatCompositionSignalDispatcher,
+    ) -> Result<bool, RuntimeDriverError> {
+        let session_id = registration.session_id();
+        let _guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let mut sessions = self.sessions.write().await;
+        let entry =
+            sessions
+                .get_mut(session_id)
+                .ok_or_else(|| RuntimeDriverError::StaleAuthority {
+                    reason: "composition recovery registration disappeared".into(),
+                })?;
+        if !registration.belongs_to(self)
+            || !registration.matches_entry(entry)
+            || registration.epoch_id() != &entry.epoch_id
+            || dispatcher.transport_is_closed() != Some(false)
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery requires its current registration and open receiver"
+                    .into(),
+            });
+        }
+        if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
+            return Err(error);
+        }
+        // Actor materialization takes the generated authority before its
+        // process claim even outside M. Keep the same order here.
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let claim = entry
+            .materialization_claim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(
+            claim.phase,
+            crate::RuntimeActorMaterializationClaimPhase::Vacant
+                | crate::RuntimeActorMaterializationClaimPhase::RetainedActor
+        ) {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery cannot take an unfinished materialization claim"
+                    .into(),
+            });
+        }
+        let state = authority.state();
+        if state.active_runtime_id.is_none()
+            && state.active_fence_token.is_none()
+            && state.active_runtime_generation.is_none()
+        {
+            if entry.physical_attachment_is_live()
+                || entry.provisional_materialization_claim_id.is_some()
+                || entry
+                    .composition_signal_dispatcher
+                    .as_ref()
+                    .is_some_and(|endpoint| {
+                        !Arc::ptr_eq(endpoint, &dispatcher)
+                            && endpoint.transport_is_closed() != Some(true)
+                    })
+            {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: "unbound composition recovery has existing physical custody".into(),
+                });
+            }
+            return Ok(false);
+        }
+        if state.active_runtime_id.as_ref() != Some(&runtime_id)
+            || state.active_fence_token != Some(fence)
+            || state.active_runtime_generation != generation
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery does not match the generated member binding".into(),
+            });
+        }
+        if entry
+            .composition_signal_dispatcher
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &dispatcher))
+        {
+            return Ok(true);
+        }
+        if entry
+            .composition_signal_dispatcher
+            .as_ref()
+            .is_none_or(|current| current.transport_is_closed() != Some(true))
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition recovery requires proof the previous receiver is closed"
+                    .into(),
+            });
+        }
+        drop(authority);
+        drop(claim);
+        entry.composition_signal_dispatcher = Some(dispatcher);
+        entry.composition_materialization_claim_id = None;
+        Ok(true)
+    }
+
+    pub(crate) async fn apply_routed_meerkat_input_with_signal_dispatcher(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        signal_dispatcher: Option<&composition::MeerkatCompositionSignalDispatcher>,
+    ) -> Result<(), dsl_authority::DslTransitionRefusal> {
+        let registration = self
+            .current_session_registration_witness(session_id)
+            .await
+            .ok_or_else(|| {
+                dsl_authority::DslTransitionRefusal::other(
+                    "routed_session_not_durability_ready",
+                    format!(
+                        "session `{session_id}` cannot accept routed input until its persistent runtime is cold reloaded: {}",
+                        RuntimeDriverError::NotReady { state: RuntimeState::Destroyed }
+                    ),
+                )
+            })?;
         let _gate_guard = self
             .lock_current_durability_ready_session_mutation_gate(session_id)
             .await
@@ -9620,9 +9893,15 @@ impl MeerkatMachine {
                     ),
                 )
             })?;
-        self.apply_routed_session_dsl_input(session_id, input, "RoutedMeerkatInput")
-            .await
-            .map(|_| ())
+        self.apply_routed_session_dsl_input(
+            session_id,
+            input,
+            &registration,
+            signal_dispatcher,
+            "RoutedMeerkatInput",
+        )
+        .await
+        .map(|_| ())
     }
 
     #[cfg(test)]

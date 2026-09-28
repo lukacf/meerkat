@@ -8956,8 +8956,7 @@
             "description": "A mob member's runtime registration is durability-degraded and\nrefuses ordinary work until an explicit registration-authorized cold\nreload replaces it (`MobError::MemberReloadRequired`). Deliberately\nits own code rather than [`Self::SessionBusy`]: the condition never\nclears on its own, so ordinary busy/backoff retry is never correct —\nonly the named `reload_member_registration` repair resolves it.",
             "type": "string"
           }
-        ],
-        "title": "ErrorCode"
+        ]
       },
       "EventEnvelope": {
         "description": "Canonical event envelope for stream transport and ordering.",

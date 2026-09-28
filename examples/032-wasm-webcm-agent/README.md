@@ -20,31 +20,14 @@ implement, and review code in a sandboxed Linux VM — no backend required.
 - **wasm-pack** (used by the repo-local `sdks/web` WASM build step)
 - At least one API key: **Anthropic**, **OpenAI**, or **Gemini** (all three for full multi-provider demo)
 
-## Current-runtime compatibility prerequisite
-
-The checked-in `web/src/mob.ts` shares
-`provider_params: { reasoning_effort: "low" }` across all four profiles. Current
-`mob_create` rejects this removed flat parameter shape as `invalid_definition`,
-before member creation. Rebuilding the runtime does not repair that definition.
-
-Before trying the quick start, manually remove the optional `provider_params`
-entry from that shared profile base as the minimal workaround. A full typed
-migration is separate example-code work and must respect each selected provider,
-including the Anthropic/Gemini fallbacks; do not apply an OpenAI-specific tag
-to every profile. **Boot VM & Start** cannot complete mob startup with the
-unchanged definition. The workaround addresses this ingress blocker, not a
-guarantee that every VM/provider workflow succeeds.
-
 ## Quick start
-
-After applying the compatibility workaround above:
 
 ```bash
 cd examples/032-wasm-webcm-agent
 ./examples.sh
 # Open http://127.0.0.1:4032
 # Enter API keys (pre-filled from env if ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY are set)
-# Click "Boot VM & Start" after correcting the shared profile parameters
+# Click "Boot VM & Start"
 ```
 
 The script downloads the WebCM RISC-V emulator (~30 MB), rebuilds the current
@@ -65,7 +48,7 @@ Browser Tab
 │   ├── Coder → gpt-5.3-codex
 │   └── Reviewer → gemini-3.5-flash
 ├── meerkat-web-runtime (Rust WASM)
-│   ├── EphemeralSessionService + AgentFactory
+│   ├── EphemeralSessionService + canonical MeerkatMachine (in-memory) + AgentFactory
 │   ├── JsToolDispatcher → WebCM tool callbacks
 │   ├── Comms (send_message/peers) for inter-agent messaging
 │   └── Event subscriptions exposed as pollable `StreamRef` handles
@@ -93,8 +76,8 @@ User message
 Each step is a separate turn. Agents end their turn after sending a message,
 and the in-memory autonomous host loop re-admits them when replies arrive. No
 application polling is required to wake agents. The UI does poll each event
-subscription to render incremental output. This is a standalone browser
-runtime; page reload clears its session and mob state.
+subscription to render incremental output. Browser sessions use the canonical
+runtime with in-memory storage; page reload clears session and mob state.
 Agent instructions discover canonical `peer_id` values with `peers`; labels are
 for display only. Tool cards track call IDs independently, and rendered Markdown
 is sanitized before insertion.

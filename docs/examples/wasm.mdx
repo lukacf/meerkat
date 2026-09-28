@@ -4,7 +4,7 @@ description: "Browser deployment with the meerkat-web-runtime embedded surface."
 icon: "globe"
 ---
 
-The WASM runtime compiles the Meerkat agent stack to wasm32 for browser deployment. It routes through the same `AgentFactory::build_agent()` pipeline as the native surfaces, but intentionally uses standalone in-memory session and mob state. It does not provide runtime-backed keep-alive recovery or cross-process persistence.
+The WASM surface compiles the Meerkat agent stack to wasm32 for browser deployment. Direct sessions and mob members share `MeerkatMachine`, which prepares `SessionOwned` bindings before `SessionService` calls `AgentFactory::build_agent()`. Input admission, keep-alive, comms drain, cancellation, and terminal outcomes follow the canonical runtime path. Browser storage is in memory, so page reload discards session and mob state.
 
 <Note>
 This page is intentionally browser/WASM-specific rather than a cross-surface tabbed page. Use [Examples: Mobpack](/examples/mobpack) first if you want the packaging/deployment path that usually leads into browser delivery.
@@ -75,7 +75,7 @@ signers for deployed packs. For a locally generated unsigned demo only, opt in
 explicitly with `mobpackTrust: { policy: "permissive" }`.
 
 `initFromMobpack()` verifies the archive and makes its skills available to
-standalone sessions. It does not create a mob or expose the complete packed
+direct sessions. It does not create a mob or expose the complete packed
 definition. A host that wants the declared topology must separately load a
 `MobDefinition`, call `createMob()`, and spawn its members as shown below.
 
@@ -93,13 +93,56 @@ const runtime = await MeerkatRuntime.init(wasm, {
 ## Create session and run turn
 
 ```typescript
-const session = runtime.createSession({
+const session = await runtime.createSession({
   model: "claude-sonnet-4-6",
 });
 
 const result = await session.turn("Hello");
 console.log(result.text);
+
+const state = await session.getState();
+console.log(state.session_id);
+await session.destroy();
 ```
+
+Creation, state reads, interruption, and teardown await the runtime owner.
+Use `await session.interrupt()` to cancel active work, and
+`await runtime.destroy()` to shut down the runtime. A direct session can set
+`keepAlive: true` with a `commsName` to accept runtime-admitted peer work between
+turns. Keep-alive lasts while the page and runtime remain alive.
+
+Install trust between direct sessions through the same runtime peer authority
+used by mobs. Each call installs trust in one direction:
+
+```typescript
+const coordinator = await runtime.createSession({
+  model: "claude-sonnet-4-6", commsName: "coordinator", keepAlive: true,
+});
+const worker = await runtime.createSession({
+  model: "claude-sonnet-4-6", commsName: "worker", keepAlive: true,
+});
+await coordinator.wirePeer(worker);
+await worker.wirePeer(coordinator);
+await coordinator.turn("Ask worker to check the task and report back.");
+```
+
+`session.turn(prompt, { transientTurnContext: "Current host facts" })` attaches
+request-only context to the runtime input. It is visible to that turn's model
+requests and does not become transcript history.
+
+Select embedded skills with their canonical structured identities:
+
+```typescript
+await session.turn("Plan the task and record its steps.", {
+  skillReferences: [{
+    source_uuid: "00000000-0000-4b11-8111-000000000001",
+    skill_name: "task-workflow",
+  }],
+});
+```
+
+External skill sources return `CAPABILITY_UNAVAILABLE` with capability
+`runtime_skills` and clearing action `use_skill_runtime` before turn admission.
 
 <Warning>
 Stock `MeerkatRuntime.init()` and `initFromMobpack()` only synthesize
@@ -226,7 +269,7 @@ comms tools available to agents during their turns (`send_message`,
 |----------|-----------|---------------|
 | **Agent loop** | Full agent state machine, streaming, budget | -- |
 | **Providers** | Anthropic, OpenAI, Gemini (browser fetch) | -- |
-| **Sessions** | Ephemeral sessions | Persistent sessions (filesystem) |
+| **Sessions** | Canonical runtime sessions with in-memory storage | Storage beyond page lifetime and execution after page teardown |
 | **Mobs** | In-memory orchestration, helpers/forks, flows, lifecycle | Cross-process recovery and persistent mob stores |
 | **Comms** | In-process (`inproc`) transport | TCP, UDS, network transports |
 | **Tools** | Custom JS callbacks, task/datetime, and in-process comms tools | Shell, filesystem-mutating, and agent-internal mob-management tools |
@@ -235,6 +278,14 @@ comms tools available to agents during their turns (`send_message`,
 | **Compaction** | Automatic session context compaction at configured/model-aware thresholds | No additional manual compaction API in `@rkat/web` |
 | **Scheduling** | -- | Durable schedule driver and stores |
 | **Other** | Helper/fork delegation inside browser mobs | MCP client and cross-process runtime recovery |
+
+Excluded requests fail with `CAPABILITY_UNAVAILABLE`. The error's `data`
+contains the profile, capability, and a typed `clearing_action`, such as
+`use_host_process_runtime` or `use_local_member_placement`. These decisions
+come from the shared capability profile and apply to direct and mob builds.
+File-backed mob skills use the `runtime_skills` refusal. Flow schemas that name
+a file use `file_schema_resolution` with `use_inline_schema`; provide a JSON
+schema object encoded in `expected_schema_ref` to run that flow in the browser.
 
 ## Next step
 

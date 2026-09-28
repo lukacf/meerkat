@@ -295,7 +295,8 @@ impl From<meerkat_core::SessionError> for WireError {
                 meerkat_core::AgentError::SkillResolutionFailed { .. },
             ) => ErrorCode::SkillResolutionFailed,
             meerkat_core::SessionError::Agent(_) => ErrorCode::AgentError,
-            meerkat_core::SessionError::PersistenceDisabled
+            meerkat_core::SessionError::CapabilityUnavailable(_)
+            | meerkat_core::SessionError::PersistenceDisabled
             | meerkat_core::SessionError::CompactionDisabled
             | meerkat_core::SessionError::Unsupported(_) => ErrorCode::CapabilityUnavailable,
             meerkat_core::SessionError::DurableTailHeldForRecovery { .. }

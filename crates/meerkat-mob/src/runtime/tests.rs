@@ -5247,6 +5247,12 @@ impl MobSessionService for MockSessionService {
     }
 }
 
+#[derive(Default)]
+struct TerminalAppendGate {
+    appended: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
 struct FaultInjectedMobEventStore {
     events: RwLock<Vec<MobEvent>>,
     event_tx: tokio::sync::broadcast::Sender<MobEvent>,
@@ -5259,6 +5265,9 @@ struct FaultInjectedMobEventStore {
     fail_clear: AtomicBool,
     poll_calls: AtomicU64,
     replay_calls: AtomicU64,
+    terminal_append_gate: RwLock<Option<Arc<TerminalAppendGate>>>,
+    terminal_repair_attempts: RwLock<Vec<MobEventKind>>,
+    terminal_repair_attempted: tokio::sync::Notify,
     stall_replay: AtomicBool,
     replay_released: tokio::sync::Notify,
 }
@@ -5359,6 +5368,9 @@ impl FaultInjectedMobEventStore {
             fail_clear: AtomicBool::new(false),
             poll_calls: AtomicU64::new(0),
             replay_calls: AtomicU64::new(0),
+            terminal_append_gate: RwLock::new(None),
+            terminal_repair_attempts: RwLock::new(Vec::new()),
+            terminal_repair_attempted: tokio::sync::Notify::new(),
             stall_replay: AtomicBool::new(false),
             replay_released: tokio::sync::Notify::new(),
         }
@@ -5622,6 +5634,13 @@ impl MobEventStore for FaultInjectedMobEventStore {
         events.push(stored.clone());
         drop(events);
         let _ = self.event_tx.send(stored.clone());
+        if terminal_event_identity(&stored.kind).is_some() {
+            let gate = self.terminal_append_gate.read().await.clone();
+            if let Some(gate) = gate {
+                gate.appended.notify_one();
+                gate.release.notified().await;
+            }
+        }
         if self
             .fail_after_append_on_kind
             .read()
@@ -5639,6 +5658,11 @@ impl MobEventStore for FaultInjectedMobEventStore {
         &self,
         event: NewMobEvent,
     ) -> Result<Option<MobEvent>, MobStoreError> {
+        self.terminal_repair_attempts
+            .write()
+            .await
+            .push(event.kind.clone());
+        self.terminal_repair_attempted.notify_one();
         let Some((run_id, flow_id)) = terminal_event_identity(&event.kind) else {
             return Err(MobStoreError::Internal(
                 "append_terminal_event_if_absent requires a terminal flow event".to_string(),
@@ -12154,6 +12178,105 @@ async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> M
 
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
+async fn test_persistent_shutdown_visibility_preserves_authority_archive_and_metadata_faults() {
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let service = meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        4,
+        session_store.clone(),
+        runtime_store.clone(),
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    );
+    let session = Session::new();
+    let id = session.id().clone();
+    assert!(
+        !service
+            .session_projection_visible(&id)
+            .await
+            .expect("absent document"),
+        "missing runtime authority must remain absent"
+    );
+    session_store
+        .save(&session)
+        .await
+        .expect("seed compatibility projection");
+    assert!(
+        !service
+            .session_projection_visible(&id)
+            .await
+            .expect("projection-only document"),
+        "SessionStore projection cannot establish runtime-owned visibility"
+    );
+    runtime_store
+        .commit_session_snapshot(
+            &meerkat_runtime::LogicalRuntimeId::for_session(&id),
+            meerkat_runtime::SerializedSessionSnapshot {
+                session_snapshot: serde_json::to_vec(&session).unwrap().into(),
+            },
+        )
+        .await
+        .expect("seed committed runtime document");
+    assert!(
+        service
+            .session_projection_visible(&id)
+            .await
+            .expect("committed document")
+    );
+    let mut archived = Session::new();
+    archived
+        .set_lifecycle_terminal(meerkat_core::SessionLifecycleTerminal::Archived)
+        .expect("seed owner-issued archive terminal");
+    let archived_id = archived.id().clone();
+    runtime_store
+        .commit_session_snapshot(
+            &meerkat_runtime::LogicalRuntimeId::for_session(&archived_id),
+            meerkat_runtime::SerializedSessionSnapshot {
+                session_snapshot: serde_json::to_vec(&archived).unwrap().into(),
+            },
+        )
+        .await
+        .expect("seed archived runtime document");
+    assert!(
+        !service
+            .session_projection_visible(&archived_id)
+            .await
+            .expect("archived document"),
+        "an archive-owned document remains hidden by the default metadata seam"
+    );
+    let corrupt = Session::new();
+    let corrupt_id = corrupt.id().clone();
+    let mut corrupt_wire = serde_json::to_value(&corrupt).unwrap();
+    corrupt_wire["metadata"][meerkat_core::session::SESSION_METADATA_KEY] =
+        serde_json::json!("invalid-typed-session-metadata");
+    runtime_store
+        .commit_session_snapshot(
+            &meerkat_runtime::LogicalRuntimeId::for_session(&corrupt_id),
+            meerkat_runtime::SerializedSessionSnapshot {
+                session_snapshot: serde_json::to_vec(&corrupt_wire).unwrap().into(),
+            },
+        )
+        .await
+        .expect("seed valid envelope with malformed session metadata");
+    let metadata_error = service
+        .load_persisted_session_metadata(&corrupt_id)
+        .await
+        .expect_err("typed metadata must fail closed");
+    let visibility_error = service
+        .session_projection_visible(&corrupt_id)
+        .await
+        .expect_err("default visibility must preserve metadata faults");
+    assert!(
+        metadata_error
+            .to_string()
+            .contains("durable metadata failed typed restore")
+    );
+    assert_eq!(visibility_error.to_string(), metadata_error.to_string());
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
 async fn test_persistent_resume_classifies_lifecycle_only_session_as_absent() {
     let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
     let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
@@ -14371,6 +14494,61 @@ async fn test_destroy_detaches_mob_owned_session_ingress_before_runtime_destroy(
         matches!(owner, meerkat_runtime::PeerIngressOwner::Unattached),
         "destroy must leave no mob-owned ingress after the generated detach acknowledgement, got {owner:?}"
     );
+}
+
+#[tokio::test]
+async fn test_shared_runtime_two_mobs_destroy_without_cross_delivered_signals() {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let first = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "shared-machine-first"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create first mob");
+    let second = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "shared-machine-second"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create second mob");
+    let mut sessions = Vec::new();
+    for (mob, member) in [(&first, "first-worker"), (&second, "second-worker")] {
+        let mut spec = SpawnMemberSpec::new("worker", member);
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        mob.spawn_spec(spec)
+            .await
+            .expect("spawn member on shared machine");
+        sessions.push(
+            mob.resolve_bridge_session_id(&AgentIdentity::from(member))
+                .await
+                .expect("member session"),
+        );
+    }
+    let direct = SessionId::new();
+    adapter
+        .prepare_bindings(direct.clone())
+        .await
+        .expect("prepare unrelated direct session");
+    second.destroy().await.expect("destroy latest-created mob");
+    assert!(adapter.contains_session(&sessions[0]).await);
+    first
+        .destroy()
+        .await
+        .expect("destroy first mob after latest queue closes");
+    for session in sessions {
+        assert!(!adapter.contains_session(&session).await);
+    }
+    meerkat_runtime::RuntimeControlPlane::destroy(
+        adapter.as_ref(),
+        &meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&direct),
+    )
+    .await
+    .expect("direct destruction must not target either closed mob queue");
 }
 
 #[tokio::test]
@@ -16606,6 +16784,102 @@ async fn test_stopped_retire_detaches_mob_owned_session_ingress() {
             meerkat_runtime::PeerIngressOwner::Unattached
         ),
         "retire from Stopped should detach mob-owned peer ingress"
+    );
+}
+
+#[tokio::test]
+async fn test_stopped_cold_restart_accepts_first_member_retirement() {
+    assert_stopped_cold_restart_accepts_first_cleanup(false).await;
+}
+
+#[tokio::test]
+async fn test_stopped_cold_restart_accepts_destroy_before_member_retirement() {
+    assert_stopped_cold_restart_accepts_first_cleanup(true).await;
+}
+
+async fn assert_stopped_cold_restart_accepts_first_cleanup(destroy: bool) {
+    let definition = with_unique_mob_id(sample_definition(), "stopped-cold-first-cleanup");
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob before stopped cold cleanup");
+    let identity = AgentIdentity::from("stopped-cold-worker");
+    let mut spec = SpawnMemberSpec::new("worker", identity.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn stopped cold worker");
+    let session = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("local worker session");
+    handle.stop().await.expect("persist stopped lifecycle");
+    handle.shutdown().await.expect("close stopped actor");
+    assert!(
+        events
+            .replay_all()
+            .await
+            .expect("replay durable stopped lifecycle")
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MobStopped)),
+        "the fixture must contain a durable Stop before cold recovery"
+    );
+    assert!(
+        events
+            .replay_all()
+            .await
+            .expect("replay before first cleanup")
+            .iter()
+            .all(|event| !matches!(event.kind, MobEventKind::MemberRetirementStarted { .. })),
+        "this fixture must not have pending retirement authority before cold recovery"
+    );
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("reconstruct stopped mob without semantic resume");
+    assert_eq!(resumed.status().await.unwrap(), MobState::Stopped);
+    if destroy {
+        resumed.destroy().await.expect("destroy cold stopped mob");
+        assert_eq!(resumed.status().await.unwrap(), MobState::Destroyed);
+    } else {
+        resumed
+            .retire(identity.clone())
+            .await
+            .expect("retire first member after stopped cold restart");
+        assert_eq!(resumed.status().await.unwrap(), MobState::Stopped);
+        assert!(resumed.get_member(&identity).await.unwrap().is_none());
+        assert_eq!(
+            events
+                .replay_all()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(
+                    &event.kind,
+                    MobEventKind::MemberRetired { agent_identity, .. } if agent_identity == &identity
+                ))
+                .count(),
+            1
+        );
+    }
+    assert!(
+        !adapter
+            .archive_runtime_residue_present(&session)
+            .await
+            .unwrap(),
+        "completed cleanup must leave no member runtime residue"
     );
 }
 
@@ -40450,6 +40724,11 @@ async fn test_retire_session_owned_member_completes_disposal_on_archive_authorit
         !adapter.contains_session(&session_id).await,
         "idempotent host-owned disposal retry must leave the runtime unregistered"
     );
+    assert_eq!(
+        service.archive_call_count(&session_id).await,
+        0,
+        "host-owned disposal and its absent-runtime retry must not call the archive authority"
+    );
 
     assert_eq!(
         meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
@@ -40458,6 +40737,40 @@ async fn test_retire_session_owned_member_completes_disposal_on_archive_authorit
         Some(meerkat_runtime::RuntimeState::Retired),
         "the runtime lifecycle must be durably retired even though the archive authority had no record"
     );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_retire_absent_unowned_session_preserves_host_disposal_without_archive() {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let provisioner =
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()), None);
+    let session_id = SessionId::new();
+    let member = MemberRef::from_bridge_session_id(session_id.clone());
+    assert!(
+        !service
+            .session_known_to_archive_authority(&session_id)
+            .await
+            .unwrap(),
+        "the fixture must have no locally owned durable session"
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            provisioner.retire_member(&member).await.unwrap(),
+            crate::machines::mob_machine::MemberSessionDisposal::RuntimeReleasedOnlyHostOwned,
+            "absence must preserve the archive authority's unowned verdict across retries"
+        );
+        assert_eq!(service.archive_call_count(&session_id).await, 0);
+        assert!(!adapter.contains_session(&session_id).await);
+        assert!(
+            !service
+                .session_known_to_archive_authority(&session_id)
+                .await
+                .unwrap(),
+            "cleanup must not create a new local archive marker for an unowned session"
+        );
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -42952,10 +43265,19 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
         table,
     )
     .with_consumer(signal_surface.clone());
-    adapter.set_composition_signal_dispatcher(Arc::new(dispatcher));
     let provisioner = super::provisioner::SessionBackend::new(service, Some(adapter.clone()), None);
     let bridge_session = Session::new();
     let bridge_session_id = bridge_session.id().clone();
+    adapter
+        .register_session(bridge_session_id.clone())
+        .await
+        .expect("register test signal session");
+    adapter
+        .set_session_composition_signal_dispatcher_for_test(
+            &bridge_session_id,
+            Arc::new(dispatcher),
+        )
+        .await;
 
     provisioner
         .provision_member(super::provisioner::ProvisionMemberRequest {
@@ -48117,6 +48439,236 @@ fn test_supervisor_private_trust_realizes_generated_publish_obligation() {
 }
 
 #[tokio::test]
+async fn test_cancel_cleanup_preserves_natural_failure_with_live_trackers() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let gate = Arc::new(TerminalAppendGate::default());
+    *events.terminal_append_gate.write().await = Some(gate.clone());
+    let (handle, service) = create_test_mob_with_events(
+        sample_definition_with_single_step_flow(60_000, 8),
+        events.clone(),
+    )
+    .await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_fail(true);
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+
+    tokio::time::timeout(Duration::from_secs(3), gate.appended.notified())
+        .await
+        .expect("natural failure reaches its committed terminal carrier");
+    let original_events = events.replay_all().await.expect("read committed events");
+    let original_terminal = original_events
+        .iter()
+        .find(|event| terminal_event_identity(&event.kind).is_some_and(|(id, _)| id == &run_id))
+        .expect("natural failure committed its carrier");
+    assert!(matches!(
+        &original_terminal.kind,
+        MobEventKind::FlowFailed { .. }
+    ));
+    let original_terminal_json = serde_json::to_value(original_terminal).expect("encode carrier");
+
+    // The actor is still inside the terminal store acknowledgement, so the
+    // original flow task cannot yet enqueue FlowFinished. Queue cancellation
+    // and an observation behind that commit before allowing it to return.
+    // FIFO then proves the cancellation coordinator owns the live trackers.
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    handle
+        .command_tx
+        .send(super::scope_gate::RoutedMobCommand {
+            authority: handle.command_authority.clone(),
+            cmd: super::state::MobCommand::CancelFlow {
+                run_id: run_id.clone(),
+                reply_tx: cancel_tx,
+            },
+        })
+        .await
+        .expect("queue cancel after terminal commit");
+    let (trackers_tx, trackers_rx) = tokio::sync::oneshot::channel();
+    handle
+        .command_tx
+        .send(super::scope_gate::RoutedMobCommand::internal(
+            super::state::MobCommand::FlowTrackerCounts {
+                reply_tx: trackers_tx,
+            },
+        ))
+        .await
+        .expect("queue cancellation tracker observation");
+    gate.release.notify_one();
+    cancel_rx
+        .await
+        .expect("cancel reply")
+        .expect("cancel admitted");
+    assert_eq!(trackers_rx.await.expect("tracker observation"), (1, 1));
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            () = events.terminal_repair_attempted.notified() => {}
+            () = handle.command_tx.closed() => {
+                panic!("cancellation cleanup fail-stopped an already Failed run with a committed carrier");
+            }
+        }
+    })
+    .await
+    .expect("cancellation cleanup must repair the existing terminal outcome");
+    let repairs = events.terminal_repair_attempts.read().await.clone();
+    assert!(repairs.iter().any(|kind| matches!(
+        kind,
+        MobEventKind::FlowFailed { run_id: id, .. } if id == &run_id
+    )));
+    assert!(
+        !repairs
+            .iter()
+            .any(|kind| matches!(kind, MobEventKind::FlowCanceled { .. }))
+    );
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if handle
+                .debug_flow_tracker_counts()
+                .await
+                .expect("actor remains responsive")
+                == (0, 0)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("flow trackers drain");
+    let terminal = handle
+        .flow_status(run_id.clone())
+        .await
+        .expect("actor still answers status")
+        .expect("run exists");
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    assert_eq!(handle.roster().await.len(), 1);
+    let final_events = events.replay_all().await.expect("read final events");
+    let terminal_events: Vec<_> = final_events
+        .iter()
+        .filter(|event| terminal_event_identity(&event.kind).is_some_and(|(id, _)| id == &run_id))
+        .map(|event| serde_json::to_value(event).expect("encode terminal carrier"))
+        .collect();
+    assert_eq!(terminal_events, vec![original_terminal_json]);
+    handle.shutdown().await.expect("shutdown mob");
+}
+
+#[tokio::test]
+async fn test_repeated_terminalization_preserves_failed_run_and_exact_carrier() {
+    assert_repeated_terminalization_preserves_failed_run(false).await;
+}
+
+#[tokio::test]
+async fn test_repeated_engine_terminalization_preserves_failed_run_and_exact_carrier() {
+    assert_repeated_terminalization_preserves_failed_run(true).await;
+}
+
+async fn assert_repeated_terminalization_preserves_failed_run(direct_engine: bool) {
+    use super::terminalization::{FlowFailureCause, TerminalizationOutcome, TerminalizationTarget};
+    use crate::run::{MobMachineFlowRunCommand, flow_run};
+
+    let definition = sample_definition();
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let run = authority_backed_empty_test_run("test-mob", "test-flow");
+    let run_id = run.run_id.clone();
+    let flow_id = FlowId::from("test-flow");
+    store.create_run(run).await.expect("create run");
+    let (handle, _) = create_test_mob_with_run_store(definition.clone(), store.clone()).await;
+    seed_test_run_in_mob_machine(&handle, &run_id).await;
+    handle
+        .commit_flow_run_command(
+            &run_id,
+            MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {}),
+            "test_failed_terminal_start",
+        )
+        .await
+        .expect("start run");
+    let cause = FlowFailureCause::from_step_error(&MobError::FlowTurnTimedOut);
+    assert_eq!(
+        handle
+            .commit_flow_terminalization(
+                run_id.clone(),
+                flow_id.clone(),
+                TerminalizationTarget::Failed {
+                    cause: cause.clone()
+                },
+                MobMachineFlowRunCommand::TerminalizeFailed(flow_run::inputs::TerminalizeFailed {}),
+                "test_failed_terminal_commit",
+            )
+            .await
+            .expect("commit failed"),
+        TerminalizationOutcome::Transitioned
+    );
+    let failed = store
+        .get_run(&run_id)
+        .await
+        .expect("load failed")
+        .expect("run exists");
+    let original_inputs = serialized_flow_authority_inputs(&failed);
+    let original_events = serde_json::to_value(handle.events().replay_all().await.expect("events"))
+        .expect("encode original events");
+    let engine = FlowEngine::new(
+        Arc::new(UnusedFlowTurnExecutor),
+        handle.clone(),
+        store.clone(),
+        handle.events.clone(),
+        Arc::new(super::topology::MobTopologyService::new(
+            definition.topology,
+        )),
+    );
+    // Exercise both actor mailbox and direct engine projection paths. Neither
+    // may treat a later cancel request as authority to rewrite Failed.
+    for _ in 0..2 {
+        let canceled = if direct_engine {
+            engine
+                .terminalize_canceled_with_machine_state(
+                    run_id.clone(),
+                    flow_id.clone(),
+                    handle.query_machine_state().await.expect("canonical state"),
+                )
+                .await
+        } else {
+            engine
+                .terminalize_canceled(run_id.clone(), flow_id.clone())
+                .await
+        };
+        assert_eq!(
+            canceled.expect("canceling a failed run is a no-op"),
+            TerminalizationOutcome::Noop
+        );
+        assert_eq!(
+            engine
+                .terminalize_failed(run_id.clone(), flow_id.clone(), cause.clone())
+                .await
+                .expect("repeat failure is a no-op"),
+            TerminalizationOutcome::Noop
+        );
+    }
+    let retained = handle
+        .flow_status(run_id)
+        .await
+        .expect("status remains available")
+        .expect("run exists");
+    assert_eq!(retained.status, MobRunStatus::Failed);
+    assert_eq!(serialized_flow_authority_inputs(&retained), original_inputs);
+    assert_eq!(
+        serde_json::to_value(handle.events().replay_all().await.expect("final events"))
+            .expect("encode events"),
+        original_events
+    );
+    handle.shutdown().await.expect("shutdown mob");
+}
+
+#[tokio::test]
 async fn test_cancel_flow_cooperative_path_finishes_before_fallback_window() {
     let (handle, service) = create_test_mob(sample_definition_with_two_step_flow(5_000)).await;
     handle
@@ -48146,6 +48698,74 @@ async fn test_cancel_flow_cooperative_path_finishes_before_fallback_window() {
         start.elapsed() < Duration::from_secs(2),
         "cooperative cancel path should finalize before fallback timeout window"
     );
+
+    let original_events = handle
+        .events()
+        .replay_all()
+        .await
+        .expect("events after cancel");
+    let original_terminal: Vec<_> = original_events
+        .iter()
+        .filter(|event| terminal_event_identity(&event.kind).is_some_and(|(id, _)| id == &run_id))
+        .collect();
+    assert_eq!(original_terminal.len(), 1);
+    assert!(matches!(
+        &original_terminal[0].kind,
+        MobEventKind::FlowCanceled {
+            cause: Some(crate::event::FlowCancelClass::CancelRequested),
+            ..
+        }
+    ));
+    let original_carrier =
+        serde_json::to_value(original_terminal[0]).expect("encode canceled carrier");
+    assert_eq!(
+        handle
+            .commit_flow_terminalization(
+                run_id.clone(),
+                FlowId::from("two_step"),
+                super::terminalization::TerminalizationTarget::Failed {
+                    cause: super::terminalization::FlowFailureCause::from_step_error(
+                        &MobError::FlowTurnTimedOut
+                    ),
+                },
+                crate::run::MobMachineFlowRunCommand::TerminalizeFailed(
+                    crate::run::flow_run::inputs::TerminalizeFailed {}
+                ),
+                "test_failure_after_cancel",
+            )
+            .await
+            .expect("failure cannot replace an already canceled run"),
+        super::terminalization::TerminalizationOutcome::Noop
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if handle
+                .debug_flow_tracker_counts()
+                .await
+                .expect("actor remains responsive")
+                == (0, 0)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancel trackers drain");
+    let retained = handle
+        .flow_status(run_id.clone())
+        .await
+        .expect("retained status")
+        .expect("run exists");
+    assert_eq!(retained.status, MobRunStatus::Canceled);
+    let final_events = handle.events().replay_all().await.expect("final events");
+    let terminal_carriers: Vec<_> = final_events
+        .iter()
+        .filter(|event| terminal_event_identity(&event.kind).is_some_and(|(id, _)| id == &run_id))
+        .map(|event| serde_json::to_value(event).expect("encode terminal carrier"))
+        .collect();
+    assert_eq!(terminal_carriers, vec![original_carrier]);
+    handle.shutdown().await.expect("shutdown mob");
 }
 
 #[tokio::test]
@@ -62659,7 +63279,7 @@ async fn test_ownerless_stale_runtime_binding_is_redriven_by_missing_live_dispat
         "delivery-time binding preparation must not fabricate an executor"
     );
 
-    meerkat_runtime::meerkat_machine::composition::MeerkatConsumerSurface::pinned(
+    meerkat_runtime::meerkat_machine::composition::MeerkatConsumerSurface::pinned_unobserved_for_test(
         Arc::clone(&adapter),
         bridge_session_id.clone(),
     )
@@ -64395,6 +65015,15 @@ async fn test_shutdown_skips_interrupt_for_host_owned_runtime_release_anchor() {
 
 #[tokio::test]
 async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
+    assert_retire_consumer_refusal_survives_cold_restart(false).await;
+}
+
+#[tokio::test]
+async fn test_retire_consumer_refusal_running_cold_restart_preserves_detached_binding() {
+    assert_retire_consumer_refusal_survives_cold_restart(true).await;
+}
+
+async fn assert_retire_consumer_refusal_survives_cold_restart(crash_restart: bool) {
     let service = Arc::new(MockSessionService::new());
     let adapter = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
@@ -64434,9 +65063,12 @@ async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
     );
     let after_refusal = events.replay_all().await.expect("replay refusal events");
     assert!(
-        after_refusal
-            .iter()
-            .any(|event| matches!(event.kind, MobEventKind::MemberRetirementStarted { .. }))
+        after_refusal.iter().any(|event| matches!(
+            &event.kind,
+            MobEventKind::MemberRetirementStarted { releasing: Some(releasing), .. }
+                if releasing == &session_id
+        )),
+        "the durable retirement must release this exact ordinary member binding"
     );
     assert!(
         after_refusal
@@ -64444,10 +65076,29 @@ async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
             .all(|event| !matches!(event.kind, MobEventKind::MemberRetired { .. }))
     );
 
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown refused actor before cold restart");
+    let expected_phase = if crash_restart {
+        crash_stop_and_release_routes(handle).await;
+        MobState::Running
+    } else {
+        handle
+            .stop()
+            .await
+            .expect("persist stopped lifecycle before cold restart");
+        handle
+            .shutdown()
+            .await
+            .expect("shutdown refused actor before cold restart");
+        assert!(
+            events
+                .replay_all()
+                .await
+                .expect("replay stopped retirement lifecycle")
+                .iter()
+                .any(|event| matches!(event.kind, MobEventKind::MobStopped)),
+            "stopped retry coverage requires a durable Stop journal"
+        );
+        MobState::Stopped
+    };
 
     // Repair the external runtime reachability that caused the first refusal.
     // Resume must derive RETIRE retry authority solely from the durable start
@@ -64478,6 +65129,20 @@ async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
             .any(|pending| pending.0 == session_id.to_string()),
         "cold replay must restore the exact pending runtime-retire correlation"
     );
+    assert!(
+        !recovered
+            .member_session_bindings
+            .contains_key(&crate::machines::mob_machine::AgentIdentity::from("w-1")),
+        "cleanup recovery must not restore the ordinary binding released by the durable retirement"
+    );
+    assert_eq!(
+        resumed
+            .status()
+            .await
+            .expect("query initial recovered lifecycle"),
+        expected_phase,
+        "cleanup delivery recovery must preserve the durable lifecycle phase"
+    );
 
     resumed
         .retire(AgentIdentity::from("w-1"))
@@ -64503,8 +65168,8 @@ async fn test_retire_consumer_refusal_survives_cold_restart_and_retries() {
 
     assert_eq!(
         resumed.status().await.expect("query recovered lifecycle"),
-        MobState::Stopped,
-        "graceful pre-restart shutdown is durable; retirement retry must not implicitly resume the mob"
+        expected_phase,
+        "retirement retry must preserve the durable lifecycle phase"
     );
 }
 
@@ -78816,6 +79481,327 @@ impl meerkat_client::LlmClient for HeadCanonicalQueueGateClient {
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
         Ok(())
     }
+}
+
+// The probe delegates to a real factory-built agent. Its only interception is
+// observing and forwarding the owner's exact cancel command, before releasing
+// the provider response. A mock SessionService would miss the actor-RPC cycle.
+#[cfg(feature = "runtime-adapter")]
+struct StopBoundaryProbeBuilder {
+    turn_states: Arc<Mutex<HashMap<SessionId, Arc<dyn meerkat_core::TurnStateHandle>>>>,
+    inner: meerkat::FactoryAgentBuilder,
+    cancelled: Arc<AtomicUsize>,
+    observed: tokio::sync::mpsc::UnboundedSender<meerkat_core::agent::CancelAfterBoundaryCommand>,
+}
+
+#[cfg(feature = "runtime-adapter")]
+struct StopBoundaryProbeAgent {
+    inner: meerkat::FactoryAgent,
+    cancelled: Arc<AtomicUsize>,
+    cancel_tx: meerkat_core::agent::CancelAfterBoundarySender,
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[async_trait]
+impl SessionAgentBuilder for StopBoundaryProbeBuilder {
+    type Agent = StopBoundaryProbeAgent;
+
+    async fn build_agent(
+        &self,
+        req: &CreateSessionRequest,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Result<Self::Agent, SessionError> {
+        let inner = self.inner.build_agent(req, event_tx).await?;
+        self.turn_states.lock().expect("turn states").insert(
+            inner.session_id(),
+            inner.turn_state_handle().expect("real turn owner"),
+        );
+        let actual_cancel = inner
+            .cancel_after_boundary_handle()
+            .expect("real cancel sender");
+        let (cancel_tx, mut cancel_rx) = tokio::sync::mpsc::unbounded_channel::<
+            meerkat_core::agent::CancelAfterBoundaryCommand,
+        >();
+        let observed = self.observed.clone();
+        tokio::spawn(async move {
+            while let Some(command) = cancel_rx.recv().await {
+                if actual_cancel.send(command.clone()).is_err() {
+                    break;
+                }
+                let _ = observed.send(command);
+            }
+        });
+        Ok(StopBoundaryProbeAgent {
+            inner,
+            cancelled: self.cancelled.clone(),
+            cancel_tx,
+        })
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[async_trait]
+impl SessionAgent for StopBoundaryProbeAgent {
+    async fn run_with_events(
+        &mut self,
+        prompt: ContentInput,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        self.inner.run_with_events(prompt, event_tx).await
+    }
+
+    async fn run_turn_with_events(
+        &mut self,
+        input: meerkat_session::ephemeral::SessionAgentTurnInput,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        let result = self.inner.run_turn_with_events(input, event_tx).await;
+        if matches!(result, Err(meerkat_core::error::AgentError::Cancelled)) {
+            self.cancelled.fetch_add(1, Ordering::SeqCst);
+        }
+        result
+    }
+
+    async fn run_pending_with_events(
+        &mut self,
+        transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
+        execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        request_contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        let result = self
+            .inner
+            .run_pending_with_events(
+                transcript_identity,
+                execution_kind,
+                request_contexts,
+                event_tx,
+            )
+            .await;
+        if matches!(result, Err(meerkat_core::error::AgentError::Cancelled)) {
+            self.cancelled.fetch_add(1, Ordering::SeqCst);
+        }
+        result
+    }
+
+    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
+        self.inner.set_skill_references(refs);
+    }
+    fn set_turn_tool_overlay(
+        &mut self,
+        overlay: Option<TurnToolOverlay>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.inner.set_turn_tool_overlay(overlay)
+    }
+    fn hot_swap_llm_identity(
+        &mut self,
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: SessionLlmIdentity,
+        policy: meerkat_core::SessionLlmRequestPolicy,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.inner.hot_swap_llm_identity(client, identity, policy)
+    }
+    fn cancel(&mut self) {
+        self.inner.cancel();
+    }
+    fn cancel_after_boundary_handle(
+        &self,
+    ) -> Option<meerkat_core::agent::CancelAfterBoundarySender> {
+        Some(self.cancel_tx.clone())
+    }
+    fn turn_state_handle(&self) -> Option<Arc<dyn meerkat_core::TurnStateHandle>> {
+        self.inner.turn_state_handle()
+    }
+    fn session_context_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::handles::SessionContextHandle>> {
+        self.inner.session_context_handle()
+    }
+    fn take_runtime_terminal_failure_witness(
+        &mut self,
+    ) -> Result<Option<meerkat_core::TurnErrorMetadata>, meerkat_core::error::AgentError> {
+        self.inner.take_runtime_terminal_failure_witness()
+    }
+    fn update_mob_tool_authority_context(
+        &mut self,
+        context: Option<meerkat_core::service::MobToolAuthorityContext>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.inner.update_mob_tool_authority_context(context)
+    }
+    fn visible_tool_defs(&self) -> Vec<meerkat_core::ToolDef> {
+        self.inner.visible_tool_defs()
+    }
+    fn session_id(&self) -> SessionId {
+        self.inner.session_id()
+    }
+    fn snapshot(&self) -> SessionSnapshot {
+        self.inner.snapshot()
+    }
+    fn session_clone(&self) -> Result<Session, meerkat_core::error::AgentError> {
+        self.inner.session_clone()
+    }
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot,
+        meerkat_core::error::AgentError,
+    > {
+        self.inner.session_transcript_authority()
+    }
+    fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
+        self.inner.durable_llm_identity()
+    }
+    fn observed_session_tail(&self) -> meerkat_core::pending_continuation::ObservedSessionTailKind {
+        self.inner.observed_session_tail()
+    }
+    fn update_keep_alive(&mut self, keep_alive: bool) {
+        self.inner.update_keep_alive(keep_alive);
+    }
+    fn transient_turn_context_state(&self) -> meerkat_core::TransientTurnContextStateHandle {
+        self.inner.transient_turn_context_state()
+    }
+    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+        self.inner.event_injector()
+    }
+    fn interaction_event_injector(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+        self.inner.interaction_event_injector()
+    }
+    fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        self.inner.comms_runtime()
+    }
+    fn observed_comms_sender(&self) -> Option<Arc<meerkat_core::ObservedCommsSender>> {
+        self.inner.observed_comms_sender()
+    }
+    fn tool_scope_snapshot(&self) -> Option<meerkat_core::ToolScopeSnapshot> {
+        self.inner.tool_scope_snapshot()
+    }
+    fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
+        self.inner.external_tool_surface_snapshot()
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_ephemeral_stop_delivers_boundary_cancel_before_busy_turns_finish() {
+    let temp = tempfile::TempDir::new().expect("stop probe roots");
+    let root = temp.path();
+    for directory in ["store", "user", "runtime", "project", "context"] {
+        std::fs::create_dir_all(root.join(directory)).expect("create isolated factory root");
+    }
+    let factory = meerkat::AgentFactory::new(root.join("store"))
+        .user_config_root(root.join("user"))
+        .runtime_root(root.join("runtime"))
+        .project_root(root.join("project"))
+        .context_root(root.join("context"))
+        .builtins(false)
+        .comms(true);
+    let (observed, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancelled = Arc::new(AtomicUsize::new(0));
+    let turn_states = Arc::new(Mutex::new(HashMap::new()));
+    let service = Arc::new(meerkat_session::EphemeralSessionService::new(
+        StopBoundaryProbeBuilder {
+            turn_states: turn_states.clone(),
+            inner: meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default()),
+            cancelled: cancelled.clone(),
+            observed,
+        },
+        16,
+    ));
+    let client = HeadCanonicalQueueGateClient::new();
+    let mut definition = with_unique_mob_id(sample_definition(), "ephemeral-stop-boundary");
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .unwrap()
+        .model = "gpt-5.5".to_string();
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_default_llm_client(Arc::new(client.clone()))
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create real ephemeral mob");
+    let mut sessions = Vec::new();
+    for name in ["first", "second"] {
+        sessions.push(
+            handle
+                .spawn(ProfileName::from("worker"), AgentIdentity::from(name), None)
+                .await
+                .expect("spawn autonomous member")
+                .bridge_session_id()
+                .unwrap()
+                .clone(),
+        );
+    }
+    client
+        .wait_for_request_count(2, "both real turns must block at the provider")
+        .await;
+    let expected_runs = turn_states
+        .lock()
+        .expect("turn states")
+        .values()
+        .map(|turn_state| turn_state.snapshot().active_run_id.expect("active run"))
+        .collect::<HashSet<_>>();
+    assert_eq!(expected_runs.len(), 2);
+    let mut stop = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.stop().await })
+    };
+    let commands = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut commands = HashSet::new();
+        while commands.len() != 2 {
+            let command = observed_rx
+                .recv()
+                .await
+                .expect("cancel observer remains open");
+            commands.insert(command.expected_run_id().clone());
+        }
+        commands
+    })
+    .await;
+    // Both local members can spend a two-second comms abort grace plus a
+    // one-second activity observation window before reporting retained pending
+    // cleanup. Keep the real provider blocked beyond both members' windows.
+    let stop_before_release = tokio::time::timeout(Duration::from_secs(8), &mut stop).await;
+    let stopped_before_release = stop_before_release.is_ok();
+    let cancelled_before_release = cancelled.load(Ordering::SeqCst);
+    // Release even on RED so the test leaves no indefinitely blocked actor.
+    client.release();
+    let stop_result = match stop_before_release {
+        Ok(result) => Ok(result),
+        Err(_) => tokio::time::timeout(Duration::from_secs(10), stop).await,
+    };
+    assert_eq!(
+        commands.expect(
+            "Stop must deliver exact boundary cancellation while member turns are still blocked"
+        ),
+        expected_runs
+    );
+    assert!(
+        !stopped_before_release,
+        "Stop must retry retained pending cleanup until the actual turn boundary: {stop_result:?}"
+    );
+    assert_eq!(
+        cancelled_before_release, 0,
+        "cooperative cancel must not hard-abort the provider"
+    );
+    stop_result
+        .expect("Stop drains after provider release")
+        .expect("stop task joins")
+        .expect("canonical Stop succeeds");
+    assert_eq!(
+        cancelled.load(Ordering::SeqCst),
+        2,
+        "both real agents reach their cancelled boundary"
+    );
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+    for id in &sessions {
+        assert!(!service.read(id).await.unwrap().state.is_active);
+    }
+    handle.shutdown().await.expect("release test mob runtime");
 }
 
 #[cfg(feature = "runtime-adapter")]

@@ -15,6 +15,11 @@ auth, approvals, scheduling, durable jobs, runtime delivery, and WorkGraph use
 their own authority machines. The agent loop itself stays a provider-neutral
 library primitive.
 
+Browser direct sessions and mob members share this runtime path. The browser
+profile limits storage to memory and execution to the page lifetime; it does
+not change session authority, admission, keep-alive, cancellation, or terminal
+classification.
+
 ## System Map
 
 ```mermaid
@@ -27,11 +32,10 @@ flowchart TD
     TS["TypeScript SDK"] --> RPC
     RUST["Rust SessionService API"] --> SERVICE["SessionService"]
     EMBEDDED["Embedded Rust AgentBuilder"] --> FACTORY
-    WEB["Web SDK / WASM"] --> EPHEMERAL["Standalone ephemeral runtime"]
+    WEB["Web SDK / WASM"] --> RUNTIME
 
     RUNTIME --> BINDINGS["SessionRuntimeBindings"]
     BINDINGS --> SERVICE
-    EPHEMERAL --> SERVICE
     SERVICE --> FACTORY["AgentFactory"]
     SERVICE -. optional .-> EVENTS["Derived audit event log + rebuildable projectors"]
     FACTORY --> AGENT["Agent loop"]

@@ -149,7 +149,7 @@ async function main(argv) {
       model: "claude-sonnet-4-5",
     });
     try {
-      const session = runtime.createSession({
+      const session = await runtime.createSession({
         model: "claude-sonnet-4-5",
         apiKey: "sk-test",
         anthropicBaseUrl: "https://example.test/anthropic",
@@ -178,7 +178,7 @@ async function main(argv) {
         );
       }
     } finally {
-      runtime.destroy();
+      await runtime.destroy();
     }
     console.log(`packed @rkat/web ran one turn end to end (${requests.length} provider request(s))`);
   } finally {
@@ -186,12 +186,7 @@ async function main(argv) {
   }
 }
 
-// Exit explicitly: the runtime's wasm leaves a ~120 s provider-timeout timer
-// scheduled after the turn, which would otherwise hold the process open.
-main(process.argv).then(
-  () => process.exit(0),
-  (error) => {
-    console.error(`packed @rkat/web smoke failed: ${error?.stack ?? error}`);
-    process.exit(1);
-  },
-);
+main(process.argv).catch((error) => {
+  console.error(`packed @rkat/web smoke failed: ${error?.stack ?? error}`);
+  process.exitCode = 1;
+});

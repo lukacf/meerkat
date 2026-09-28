@@ -145,10 +145,14 @@ timestamp). All three dispatch before runtime-scope resolution and reject
 
 ## Runtime-backed vs standalone
 
-- **Runtime-backed** (CLI, REST, `rkat-rpc`, `rkat-mcp`): keep-alive sessions, durable comms drain, completion-feed wakeups, recovery on restart. This is the default product path for daemons and long-running agents.
-- **Standalone / embedded** (Web SDK / WASM, in-process Rust SDK without a runtime, tests): in-memory substrate, no keep-alive, no cross-process recovery.
+- **Runtime-backed** (CLI, REST, `rkat-rpc`, `rkat-mcp`, Web SDK / WASM): `MeerkatMachine` owns input admission, keep-alive, comms drain, cancellation, and terminal classification. Persistent profiles also support recovery on restart.
+- **Browser profile**: direct sessions and mob members share the canonical runtime with in-memory storage and execution limited to the page lifetime. `BrowserRuntimeProfile` owns typed exclusions and their clearing actions. Direct `keepAlive: true` sessions with a `commsName` accept runtime-admitted peer work.
+- **Standalone Rust embeddings and tests**: explicit in-memory execution without runtime-owned keep-alive or cross-process recovery.
 
-The Rust SDK lets you pick: `RuntimeBuildMode::SessionOwned(bindings)` (runtime-backed) or `RuntimeBuildMode::StandaloneEphemeral` (default). Surfaces other than the Rust SDK make this choice for you.
+The Rust SDK lets you pick `RuntimeBuildMode::SessionOwned(bindings)` or
+`RuntimeBuildMode::StandaloneEphemeral` (the build-options default). Web/WASM
+always uses `SessionOwned`; the browser profile does not select a second
+session substrate.
 
 ## Managed remote and external mob members (advanced)
 
@@ -613,7 +617,10 @@ does not compile wasm32 itself.
 
 ### WASM runtime + Web SDK (browser embedded)
 
-`@rkat/web` runs the full meerkat agent stack — agent loop, all three providers via browser `fetch`, sessions, mob orchestration, inproc comms, embedded skills/hooks — inside the browser. It's a deployment *target* for mobpacks, not a protocol server: the host page provides config and drives interaction.
+`@rkat/web` exposes the canonical runtime inside the browser: agent execution,
+provider fetch transport, direct and mob sessions, in-process comms, and
+embedded skills. The host page supplies configuration and drives interaction;
+`BrowserRuntimeProfile` owns capability exclusions, including configured hooks.
 
 ```typescript
 import { MeerkatRuntime } from '@rkat/web';
@@ -651,7 +658,7 @@ registerExternalAuthResolver(wasm, async (authBinding) => {
   return { kind: 'inline_secret', secret: token, metadata: {} };
 });
 // withAuthBinding takes (authBinding, config) and returns a config with `authBinding` set.
-const session = runtime.createSession(withAuthBinding(authBinding, { model: 'claude-sonnet-4-6' }));
+const session = await runtime.createSession(withAuthBinding(authBinding, { model: 'claude-sonnet-4-6' }));
 ```
 
 Include `expires_at` and any required account/provider metadata in the lease
@@ -665,7 +672,11 @@ Per-session `apiKey` fields were removed; stock init uses
 `anthropicApiKey`/`openaiApiKey`/`geminiApiKey`, while an external resolver
 requires the host provisioning described above.
 
-Browser scope: filesystem, shell, MCP client (rmcp), and network comms (TCP/UDS) are excluded by browser limitations. Everything else is intentionally wasm32-equivalent. For wasm internals, build commands, and full export table, see the meerkat-wasm skill.
+Browser scope is defined by `BrowserRuntimeProfile::require`, not a surface
+allowlist. Requests for excluded capabilities return `CAPABILITY_UNAVAILABLE`
+with typed capability and clearing-action data. Storage remains in memory and
+execution ends with the page/runtime. For WASM internals, exact exclusions,
+build commands, and the export table, see the meerkat-wasm skill.
 
 ### Mob flows (DAG runtime)
 

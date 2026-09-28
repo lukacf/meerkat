@@ -1731,6 +1731,14 @@ pub trait MobProvisioner: Send + Sync {
         ops_registry: Arc<dyn OpsLifecycleRegistry>,
     ) -> Result<(), MobError>;
 
+    /// Process delivery endpoint owned by this provisioner's mob actor.
+    #[cfg(feature = "runtime-adapter")]
+    fn composition_signal_dispatcher(
+        &self,
+    ) -> Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher> {
+        None
+    }
+
     /// Settle the adapter-local operation binding of the session an explicit
     /// resume just repointed a member away from (its snapshot was lost and a
     /// persisted successor session was selected).
@@ -1908,6 +1916,8 @@ pub struct SessionBackend {
         Arc<StdMutex<HashMap<SessionId, ExplicitResumeAttachmentRetirement>>>,
     reload_registrations: Arc<Mutex<HashMap<SessionId, Arc<Mutex<ReloadRegistrationCustody>>>>>,
     reload_materialization_claim: Option<Arc<Mutex<Option<PreparedSessionMaterialization>>>>,
+    composition_signal_dispatcher:
+        Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher>,
     // DEC-P3H-5: the extracted disposal arc, sharing this backend's
     // `runtime_sessions` sidecar map. The backend delegates its disposal
     // verbs here (one implementation, two instance owners).
@@ -3690,10 +3700,11 @@ impl MemberSessionDisposalArc {
             // NotFound-with-registered-runtime escalation below stays fully
             // fail-closed for sessions the authority DOES own (a mid-archive
             // record loss is a genuine split-state, never tolerated).
-            if !archive_authority_owned
-                && let Some(adapter) = &self.runtime_adapter
-                && adapter.contains_session(session_id).await
-            {
+            // Ownership is unchanged when a prior cleanup already removed
+            // the registration, or a broken member has no remaining runtime.
+            // Keep the same disposal classification without asking an
+            // authority that does not own the record to create an archive.
+            if !archive_authority_owned && self.runtime_adapter.is_some() {
                 if recovered_ops_rebind.is_some() {
                     return Err(Self::runtime_archive_error(format!(
                         "durability-reload operation handoff for {session_id} cannot be downgraded to host-owned disposal"
@@ -4538,6 +4549,7 @@ impl SessionBackend {
             explicit_resume_retirements: Arc::new(StdMutex::new(HashMap::new())),
             reload_registrations: Arc::new(Mutex::new(HashMap::new())),
             reload_materialization_claim: None,
+            composition_signal_dispatcher: None,
             disposal,
             settlement_ledger: None,
         }
@@ -4709,7 +4721,7 @@ impl SessionBackend {
         session_id: SessionId,
         mode: meerkat_runtime::LocalSessionMaterializationMode,
     ) -> Result<PreparedSessionMaterialization, meerkat_runtime::RuntimeBindingsError> {
-        match self.reload_materialization_claim.as_ref() {
+        let prepared = match self.reload_materialization_claim.as_ref() {
             Some(slot) => slot.lock().await.take().ok_or_else(|| {
                 meerkat_runtime::RuntimeBindingsError::PrepareFailed(
                     session_id,
@@ -4721,7 +4733,19 @@ impl SessionBackend {
                     .prepare_local_session_materialization_with_mode(session_id, mode)
                     .await
             }
+        }?;
+        if let Some(dispatcher) = self.composition_signal_dispatcher.as_ref() {
+            prepared
+                .install_composition_signal_dispatcher(Arc::clone(dispatcher))
+                .await
+                .map_err(|error| {
+                    meerkat_runtime::RuntimeBindingsError::PrepareFailed(
+                        prepared.session_id().clone(),
+                        error.to_string(),
+                    )
+                })?;
         }
+        Ok(prepared)
     }
 
     async fn admit_direct_session_turn(
@@ -10521,6 +10545,11 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for SessionBackend {
+    fn composition_signal_dispatcher(
+        &self,
+    ) -> Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher> {
+        self.composition_signal_dispatcher.clone()
+    }
     async fn record_reload_publication(
         &self,
         member_ref: &MemberRef,
@@ -12559,6 +12588,14 @@ impl MultiBackendProvisioner {
         self.session.session_ops_adapter()
     }
 
+    pub(super) fn with_composition_signal_dispatcher(
+        mut self,
+        dispatcher: Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher>,
+    ) -> Self {
+        self.session.composition_signal_dispatcher = dispatcher;
+        self
+    }
+
     pub fn with_binding_persistence(
         mut self,
         mob_id: crate::MobId,
@@ -14045,6 +14082,11 @@ impl MultiBackendProvisioner {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for MultiBackendProvisioner {
+    fn composition_signal_dispatcher(
+        &self,
+    ) -> Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher> {
+        self.session.composition_signal_dispatcher.clone()
+    }
     async fn record_reload_publication(
         &self,
         member_ref: &MemberRef,

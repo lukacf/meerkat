@@ -6312,6 +6312,19 @@ impl FlowRunConfig {
             .get(&flow_id)
             .cloned()
             .ok_or_else(|| MobError::FlowNotFound(flow_id.clone()))?;
+        #[cfg(target_arch = "wasm32")]
+        if flow_spec.steps.values().any(|step| {
+            matches!(
+                step.expected_schema_ref,
+                Some(crate::definition::FlowSchemaRef::Named(_))
+            )
+        }) {
+            meerkat_contracts::capability::BrowserRuntimeProfile
+                .require(
+                    meerkat_contracts::capability::RuntimeProfileCapability::FileSchemaResolution,
+                )
+                .map_err(meerkat_core::SessionError::CapabilityUnavailable)?;
+        }
         let topology = definition.topology.clone();
         let orchestrator_role = definition
             .orchestrator

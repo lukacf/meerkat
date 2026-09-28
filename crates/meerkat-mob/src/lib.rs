@@ -48,28 +48,9 @@ pub use meerkat_atif as atif;
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
+    pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
-
-    pub mod time {
-        use std::future::Future;
-
-        pub use meerkat_core::time_compat::Instant;
-        pub use tokio_with_wasm::alias::time::*;
-
-        pub async fn timeout_at<F>(
-            deadline: Instant,
-            future: F,
-        ) -> Result<F::Output, tokio_with_wasm::alias::time::Elapsed>
-        where
-            F: Future,
-        {
-            tokio_with_wasm::alias::time::timeout(
-                deadline.saturating_duration_since(Instant::now()),
-                future,
-            )
-            .await
-        }
-    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -331,8 +312,9 @@ pub use runtime::{
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use runtime::{
-    IdentityRecoveryFailStopPoint, arm_identity_recovery_fail_stop_for_test,
-    member_operator_tool_defs_for_test,
+    IdentityRecoveryFailStopPoint, MemberStatusDeadlineTestObservation,
+    arm_identity_recovery_fail_stop_for_test, member_operator_tool_defs_for_test,
+    member_status_deadline_after_snapshot_wait_for_test,
 };
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};

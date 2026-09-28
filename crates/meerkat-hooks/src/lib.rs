@@ -3,8 +3,18 @@
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
 #[cfg(target_arch = "wasm32")]
 mod tokio {
+    pub use meerkat_core::time_compat::wasm as time;
+    // Keep one canonical task route in this private facade, even when unused.
+    #[allow(unused_imports)]
+    pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
+
+// Keep this anchor in the root module with the hook inventory
+// declarations so optimized linking retains their archive member.
+#[doc(hidden)]
+#[inline(never)]
+pub fn link_embedded_registrations() {}
 
 // Skill registration
 inventory::submit! {

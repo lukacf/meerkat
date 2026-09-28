@@ -31,6 +31,8 @@
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
+    pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
 
@@ -71,6 +73,14 @@ pub use meerkat_comms::agent::{CommsToolDispatcher, DynCommsToolDispatcher, NoOp
 pub use registry::validate_tool_def;
 pub use schema::{empty_object_schema, schema_for};
 pub use timeout::ToolTimeoutPolicy;
+
+/// Retain this owner's embedded skill and capability registrations at link time.
+///
+/// Keep the symbol out of line: optimized WASM otherwise discards the archive
+/// member containing the inventory constructors when every API use is inlined.
+#[doc(hidden)]
+#[inline(never)]
+pub fn link_embedded_registrations() {}
 
 // Capability registrations
 inventory::submit! {

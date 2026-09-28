@@ -60,6 +60,8 @@ for (const raw of events) {
       () => undefined,
       () => JSON.stringify([raw]),
       async () => '{}',
+      async () => {},
+      async () => {},
     );
     assert.deepEqual(session.pollEvents(), [raw]);
     assert.deepEqual(session.subscribe().poll(), [raw]);

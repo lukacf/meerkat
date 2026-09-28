@@ -21,10 +21,14 @@ rusqlite = { workspace = true }
 tokio_with_wasm = { workspace = true }
 ```
 
-**lib.rs** — tokio alias + module gating:
+**lib.rs** - tokio alias + module gating:
 ```rust
 #[cfg(target_arch = "wasm32")]
-pub mod tokio { pub use tokio_with_wasm::alias::*; }
+pub mod tokio {
+    pub use tokio_with_wasm::alias::*;
+    pub use meerkat_core::tokio::task;
+    pub use meerkat_core::time_compat::wasm as time;
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 mod filesystem_module;
@@ -40,31 +44,55 @@ mod filesystem_module;
 
 **Tokio imports** in wasm32-visible code — add `#[cfg(target_arch = "wasm32")] use crate::tokio;` then existing `use tokio::...` paths resolve through the alias.
 
+Use the shared core alias for WASM scheduling. Its time adapter owns the exact
+JavaScript timer handle and cancels it when the Rust future is dropped. Direct
+`tokio_with_wasm::alias::time` calls bypass that cleanup. The shared task alias
+also implements `yield_now` through the same cancellable timer. Native code continues
+to use Tokio. Lifecycle tests must exit naturally after teardown; forcing a
+successful Node exit hides retained timer resources.
+
 ## Override-First Resource Injection
 
-`AgentBuildConfig` has 4 override fields. When set, `build_agent()` uses them directly, skipping filesystem resolution. On wasm32, these are always set.
+Browser bootstrap composes `AgentFactory::minimal().builtins(true)` with
+`with_browser_runtime_profile()`. `FactoryAgentBuilder` injects the browser tool
+dispatcher and a `StoreAdapter` backed by `MemoryStore` into direct and mob
+builds. The shared profile validates requested capabilities before construction.
 
-| Field | Skips | wasm32 default |
-|-------|-------|---------------|
-| `tool_dispatcher_override` | Shell/file/project tool resolution | `CompositeDispatcher::new_wasm()` |
-| `session_store_override` | Feature-flag store creation | `StoreAdapter` backed by `meerkat_store::MemoryStore` |
-| `hook_engine_override` | Filesystem hook config | `None` |
-| `skill_engine_override` | Filesystem/git skill resolution | `None` |
+| Resource | Browser composition |
+|----------|---------------------|
+| Tool dispatcher | `CompositeDispatcher::new_wasm()` plus runtime-registered JS tools |
+| Session store | `StoreAdapter` backed by `meerkat_store::MemoryStore` |
+| Hooks | Configured entries and hook-engine overrides are excluded by the profile |
+| Skills | Factory-owned embedded sources; custom engines and repository discovery are excluded |
 
-`FactoryAgentBuilder` has `default_tool_dispatcher` and `default_session_store` — injected into ALL `build_agent()` calls including mob-spawned sessions.
+Embedded skill selection uses canonical `SkillKey` values. The profile permits
+the builtin source and rejects external sources with `CAPABILITY_UNAVAILABLE`.
+Resource injection does not bypass profile enforcement.
 
 ## Runtime mode on wasm32
 
-WASM is an embedded/standalone surface, not a runtime-backed one. When you are
-working on wasm session creation paths:
+WASM is a runtime-backed surface. Direct sessions and mob members share the
+cached `MeerkatMachine` adapter and use canonical `SessionOwned` bindings:
 
-- do not invent runtime-backed `SessionRuntimeBindings`
-- prefer explicit `RuntimeBuildMode::StandaloneEphemeral`
-- treat `prepare_bindings()` as a runtime-backed surface API, not a wasm default
+```text
+WASM -> MeerkatMachine -> prepared runtime bindings -> SessionOwned -> SessionService -> AgentFactory
+```
 
-This keeps the embedded contract honest: browser sessions use the in-memory
-substrate intentionally, not as an accidental fallback from a missing runtime
-binding.
+Use `meerkat::surface::materialize_ephemeral_runtime_session` for direct
+creation and the shared runtime turn, interrupt, and peer-wiring helpers for
+later operations. Keep exact registration custody through actor attachment and
+cancellation cleanup. Browser handle maps and subscriptions are private
+mechanics; they never determine admission, lifecycle, or terminality.
+
+`BrowserRuntimeProfile` in `meerkat-capabilities` owns browser limitations.
+In-memory storage and page-lifetime execution do not change runtime authority.
+Direct `keep_alive: true` sessions with `comms_name` support runtime peer ingress
+and comms drain. Never construct `StandaloneEphemeral` on this surface.
+
+Await bootstrap, session creation, state reads, interruption, and destruction.
+The SDK's `Session.sessionId` is also a promise. Turn results and session state
+project the generated canonical contracts; no browser-only status or identity
+fields belong in those results.
 
 ## `@rkat/web` npm Package
 
@@ -166,7 +194,7 @@ Notes:
 - `RuntimeConfig` uses `anthropicApiKey` / `anthropicBaseUrl`, `openaiApiKey` / `openaiBaseUrl`, and `geminiApiKey` / `geminiBaseUrl`. Raw WASM uses `anthropic_api_key` / `anthropic_base_url`, `openai_api_key` / `openai_base_url`, and `gemini_api_key` / `gemini_base_url`. Generic `apiKey` / `baseUrl` compatibility fields are deleted at both runtime and session boundaries; per-session credentials are not accepted.
 - Use `clearExternalAuthResolver(wasm)` from `@rkat/web`, or pass `JsValue::NULL` / `undefined` to the raw WASM export, to clear the registration.
 - `register_tool_callback` registers promise-returning JS callbacks. `register_js_tool` registration is synchronous, but dispatch reports pending detached host work, not completion. The host observes `ToolCallRequested`, performs the action, and reports any actual completion/result through a later session/mob message. Both registrations require initialized runtime state; prefer the instance methods after `MeerkatRuntime.init(...)`.
-- `destroy_runtime` clears subscriptions and the resolver and drops `RuntimeState`, invalidating its browser-local handles. Call it on host teardown; it does not certify durable cleanup or cancel already-dispatched external side effects.
+- Await `destroy_runtime(expected_handle?)` or `runtime.destroy()` for canonical session and mob teardown. The SDK passes the opaque bootstrap `runtime_handle` so stale wrappers cannot destroy a replacement runtime. Successful teardown clears subscriptions and the resolver, then drops `RuntimeState`; failures preserve cleanup authority for retry. This does not undo already-dispatched external host side effects.
 
 For repository smoke coverage, browser/WASM scenarios are owned by the Rust lane
 harness in `tests/integration/src/e2e_lanes.rs`. Prefer
@@ -180,12 +208,16 @@ lanes.
 
 ## Building
 
+From the repository root, build the SDK's WASM artifact through its checked
+build wrapper and the repository Cargo facade:
+
 ```bash
-RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
-  wasm-pack build meerkat-web-runtime --target web --out-dir <dir>
+CARGO="$PWD/scripts/repo-cargo" RUST_LANE_ID=wasm-sdk npm --prefix sdks/web run build:wasm
 ```
 
-**CRITICAL: `--out-dir` is relative to CRATE root (`meerkat-web-runtime/`), not workspace root.**
+The wrapper owns the wasm32 flags, build cache, and output lock. For custom
+`wasm-pack` work, the crate path is `crates/meerkat-web-runtime`; `--out-dir` is
+relative to that crate root, not the workspace root.
 
 **CRITICAL: wasm-pack creates a `.gitignore` with `*` inside the output directory.** Delete it before `npm publish` or add an `.npmignore` to the package — otherwise npm excludes the WASM binary.
 
@@ -202,14 +234,24 @@ BuildBuddy path exposes `scripts/buildbuddy-dev wasm-check` and
 2. **cargo clean scope**: `cargo clean -p <crate>` only cleans native. Use `rm -rf target/wasm32-unknown-unknown`.
 3. **cfg inside async_trait**: May not propagate. Move cfg-gated logic to standalone functions outside the impl.
 4. **Feature unioning**: Workspace `tokio = { features = ["full"] }` pulls mio which fails on wasm32. Each crate needs target-specific deps.
-5. **MobBuilder**: Requires `.allow_ephemeral_sessions(true)` for the embedded ephemeral substrate used in WASM.
+5. **MobBuilder**: Requires `.allow_ephemeral_sessions(true)` for the browser profile's in-memory session service. Members still receive `SessionOwned` bindings from the shared machine.
 6. **Flow output format**: Without `output_format` or `expected_schema_ref`, a step defaults to text. With a schema and no explicit format, it defaults to JSON; explicit `output_format` selects the format. Require JSON-compatible output for JSON steps rather than assuming every flow output is JSON.
 
 ## Subsystem Availability on wasm32
 
-Full: agent loop, LLM providers (browser fetch), sessions (ephemeral), comms (inproc), mob orchestration (in-memory), tools (task tools + `datetime` + comms/skill surfaces; no shell and no filesystem-mutating builtins), tool scoping (`ToolScope` + per-turn overlays), skills (embedded), hooks (in-process), config (in-memory), compaction, multimodal content (`ContentInput`/`ContentBlock` parsing at WASM bridge).
+Available: canonical session admission, keep-alive, cancellation, terminal
+publication, agent loop, provider fetch transport, in-process comms, local mob
+orchestration, browser tools and callbacks, tool scoping, embedded skills,
+in-memory config and storage, compaction, multimodal content, and request-only
+transient turn context.
 
-Excluded: shell tools, filesystem-mutating builtins such as `apply_patch`, filesystem persistence, MCP client (rmcp), network comms (TCP/UDS).
+`BrowserRuntimeProfile::require` is the availability authority. Its exclusions
+include durable persistence, execution after page teardown, host processes,
+configured hooks, runtime skill discovery, MCP clients, TCP/UDS comms, remote
+member placement, and services the browser composition does not install.
+Requests for excluded capabilities return `CAPABILITY_UNAVAILABLE` with typed
+`profile`, `capability`, and `clearing_action` data. Consult the profile rather
+than adding surface-local availability tables or refusal text.
 
 ## Key Files
 

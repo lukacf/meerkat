@@ -50,6 +50,8 @@ pub use workgraph_flow::{
 
 #[cfg(target_arch = "wasm32")]
 mod tokio {
+    pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
 
@@ -6124,9 +6126,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                                     ))
                                 }
                                 Err(error) => {
-                                    json!(MobSpawnManyResultEntry::failed_with_structured_data(
+                                    json!(MobSpawnManyResultEntry::failed_with_error_details(
                                         error.cause(),
                                         error.to_string(),
+                                        error.error().wire_error_code(),
                                         error.error().structured_data(),
                                     ))
                                 }
@@ -11516,6 +11519,15 @@ mod tests {
         assert_ne!(
             restored_bridge_session, respawned_bridge_session,
             "the explicitly nonpersistent session fixture must rotate its bridge session after a cold restart"
+        );
+
+        assert_eq!(
+            restored_state
+                .mob_status(&mob_id)
+                .await
+                .expect("restored mob status"),
+            MobState::Running,
+            "fresh session recreation must restore its generated runtime binding before admission"
         );
 
         let restored_schedule_store = Arc::new(

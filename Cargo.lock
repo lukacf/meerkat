@@ -3111,6 +3111,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "uuid",
+ "wasm-bindgen",
  "web-time",
 ]
 
@@ -3864,6 +3865,7 @@ dependencies = [
  "meerkat-mob-pack",
  "meerkat-models",
  "meerkat-providers",
+ "meerkat-runtime",
  "meerkat-session",
  "meerkat-store",
  "meerkat-tools",

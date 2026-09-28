@@ -75,6 +75,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "sdk-host",
             "unit",
             "wasm-check",
+            "wasm-timers",
         ],
         "{} should expose the changed-path Cargo lanes and the aggregating gate",
         ci_yml.display(),
@@ -153,6 +154,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "wasm-check",
         "sdk-host",
         "example-web",
+        "wasm-timers",
         "bazel-graph",
     ] {
         assert!(gate_needs.contains(&lane), "the CI gate must bind `{lane}`");
@@ -167,6 +169,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "require_ran \"Closure check\"",
         "require_ran \"Bazel graph check\"",
         "require_ran \"Example web suites\"",
+        "require_ran \"WASM timer ownership\"",
         "a build-relevant change produced no lanes",
         "neither a unit lane nor a deferred package list",
         "unit tests deferred to the push-to-main run",
@@ -198,6 +201,10 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "npx playwright install --with-deps chromium",
         "MEERKAT_WEB_WASM_OPT: \"0\"",
         "npm run test:offline",
+        "wasm-pack test --headless --chrome --release crates/meerkat-web-runtime --test browser_contract --test wasm_timers",
+        "wasm-pack test --node --release crates/meerkat-web-runtime --test wasm_timers_node",
+        "node --test tests/e2e_wasm_runtime.test.mjs tests/wasm_mob_comms.test.mjs",
+        "npm run test:packed",
     ] {
         assert!(ci.contains(lane), "PR CI must run `{lane}`");
     }

@@ -10,7 +10,19 @@ All semantic state mutations route through the DSL authority via `dsl_apply(inpu
 
 ## Runtime-backed build seam
 
-Runtime-backed surfaces (CLI, REST, RPC, MCP) obtain `SessionRuntimeBindings` from `MeerkatMachine::prepare_bindings(session_id)` and pass them through `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`. Standalone paths (WASM, tests, embedded) use `RuntimeBuildMode::StandaloneEphemeral`.
+Runtime-backed surfaces (CLI, REST, RPC, MCP, and Web/WASM) obtain canonical
+`SessionRuntimeBindings` from `MeerkatMachine` and pass them through
+`SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`.
+The shared browser direct-session helper,
+`meerkat::surface::materialize_ephemeral_runtime_session`, uses the exact
+prepared-materialization transaction around those bindings, actor attachment,
+peer ingress, and cancellation cleanup. Direct sessions and mob members use
+the same cached machine adapter. Explicit standalone Rust embeddings and tests
+may use `RuntimeBuildMode::StandaloneEphemeral`; the browser never does.
+
+The shared `BrowserRuntimeProfile` narrows capability reachability, including
+in-memory-only storage and page-lifetime execution. It does not narrow or
+replace runtime admission, keep-alive, comms drain, or terminal authority.
 
 `SessionRuntimeBindings` (in `crates/meerkat-core/src/runtime_epoch.rs`) is the
 epoch-local bundle. It carries identity, ops/completion state, the
@@ -268,15 +280,15 @@ CreateSessionRequest → SessionService::create_session() → RunResult
 ```
 
 Two implementations:
-- `EphemeralSessionService<B>` — in-memory substrate (WASM, testing, embedded Queue-only use)
-- `PersistentSessionService<B>` — durable substrate for runtime-backed product surfaces (CLI, RPC, REST, MCP; typically backed by sqlite or jsonl through `PersistenceBundle`)
+- `EphemeralSessionService<B>` - in-memory session service, used by the canonical browser runtime and by explicit standalone tests/embeddings. `SessionOwned` bindings provide runtime semantics; direct substrate calls remain Queue-only.
+- `PersistentSessionService<B>` - durable session service for persistent profiles, typically backed by SQLite or JSONL through `PersistenceBundle`.
 
 `FactoryAgentBuilder` bridges `AgentFactory` into `SessionAgentBuilder`.
 Embedded Rust may instead use the public facade `AgentBuilder` to compose an
 explicit standalone agent directly through `AgentFactory`; it is not a
 `SessionService` path.
 
-Usage rule: for runtime-backed surfaces, look for `prepare_bindings()` and `RuntimeBuildMode::SessionOwned(...)`. If code hand-rolls registration + registry extraction or leans on implicit standalone fallback, treat that as architectural drift.
+Usage rule: runtime-backed surfaces consume `SessionOwned` bindings through the shared materialization transaction or runtime binding helper. If code hand-rolls registration and registry extraction or leans on implicit standalone fallback, treat that as architectural drift.
 
 Resume metadata: `SessionTooling` is tri-state via `ToolCategoryOverride` (`Inherit`, `Enable`, `Disable`). Persist caller intent with `from_override()`, not resolved booleans, or resumed sessions freeze tool availability at the build-time capabilities.
 

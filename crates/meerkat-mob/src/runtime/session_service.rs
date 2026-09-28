@@ -1586,6 +1586,24 @@ pub trait MobSessionService:
             })
     }
 
+    /// Observe session-document visibility without requiring its contents.
+    ///
+    /// This is a raw backend observation for MobMachine's shutdown input, not
+    /// an archive verdict or permission to interrupt. The default preserves
+    /// the authoritative metadata seam, including archived filtering and
+    /// read faults. In-memory backends can answer from the registry owning
+    /// export visibility, without queuing a read behind the turn Stop must
+    /// cancel. Wrappers must forward a backend's nonblocking implementation.
+    async fn session_projection_visible(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        Ok(self
+            .load_persisted_session_metadata(session_id)
+            .await?
+            .is_some())
+    }
+
     /// Archive a mob-owned session through the strongest lifecycle authority
     /// this service exposes. Runtime-backed persistent services override this
     /// to require a concrete `MeerkatMachine` archive protocol before writing
@@ -2155,6 +2173,14 @@ where
         )
     }
 
+    async fn session_projection_visible(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::export_session_visible(self, session_id)
+            .await
+    }
+
     #[cfg(feature = "runtime-adapter")]
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         let key = std::ptr::from_ref(self) as usize;
@@ -2350,6 +2376,22 @@ where
     ) -> Result<bool, SessionError> {
         meerkat_session::EphemeralSessionService::<B>::discard_live_session_actor(self, witness)
             .await
+    }
+
+    async fn publish_interaction_terminals_for_actor(
+        &self,
+        actor_witness: &meerkat_session::LiveSessionActorWitness,
+        events: &[meerkat_core::event::AgentEvent],
+    ) -> Result<
+        Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+        SessionError,
+    > {
+        meerkat_session::EphemeralSessionService::<B>::publish_runtime_interaction_terminals_for_actor(
+            self,
+            actor_witness,
+            events,
+        )
+        .await
     }
 
     async fn discard_live_session_actor_after_durability_reload_required(

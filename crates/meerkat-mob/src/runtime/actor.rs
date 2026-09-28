@@ -409,9 +409,9 @@ fn identity_session_load_error_class(
     use meerkat_core::service::SessionError;
 
     match error {
-        SessionError::PersistenceDisabled | SessionError::Unsupported(_) => {
-            IdentitySessionLoadErrorClass::Malformed
-        }
+        SessionError::PersistenceDisabled
+        | SessionError::CapabilityUnavailable(_)
+        | SessionError::Unsupported(_) => IdentitySessionLoadErrorClass::Malformed,
         SessionError::Store(source) => match source.downcast_ref::<SessionStoreError>() {
             Some(SessionStoreError::Serialization(_) | SessionStoreError::Corrupted(_)) => {
                 IdentitySessionLoadErrorClass::Malformed
@@ -6559,6 +6559,7 @@ enum RestoredOperationBindingSeam {
 struct ResumeOperationBindingIo {
     adapter: Arc<meerkat_runtime::MeerkatMachine>,
     provisioner: Arc<dyn MobProvisioner>,
+    session_service: Arc<dyn MobSessionService>,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     mob_id: MobId,
 }
@@ -12518,9 +12519,13 @@ impl MobActor {
         super::state::MemberStatusSessionObservation,
         Option<MemberStatusViewReadDrain>,
     ) {
-        // One deadline bounds the whole observation, so its callers are
-        // answered even when a session read would not finish.
-        let mut deadline = std::pin::pin!(tokio::time::sleep(MEMBER_STATUS_OBSERVATION_DEADLINE));
+        // Capture the deadline before preliminary reads. WASM sleeps start
+        // on first poll, so a relative sleep polled only at the view select
+        // would grant those reads extra time outside the observation budget.
+        let mut deadline = std::pin::pin!(tokio::time::timeout_at(
+            tokio::time::Instant::now() + MEMBER_STATUS_OBSERVATION_DEADLINE,
+            std::future::pending::<()>(),
+        ));
         let mut observation = super::state::MemberStatusSessionObservation {
             output_preview: None,
             tokens_used: 0,
@@ -12581,7 +12586,7 @@ impl MobActor {
                         owner.publish(view.clone());
                         (view, None)
                     }
-                    () = deadline.as_mut() => (
+                    _ = deadline.as_mut() => (
                         deadline_reached(),
                         Some(MemberStatusViewReadDrain::new(owner, agent_identity, read)),
                     ),
@@ -12590,7 +12595,7 @@ impl MobActor {
             MemberStatusViewReadClaim::Joined(result) => tokio::select! {
                 biased;
                 view = member_status_lane::joined_member_status_view(result) => (view, None),
-                () = deadline.as_mut() => (deadline_reached(), None),
+                _ = deadline.as_mut() => (deadline_reached(), None),
             },
         };
         match view {
@@ -17336,9 +17341,8 @@ impl MobActor {
                     .await?;
                 let session_projection_visible = self
                     .session_service
-                    .load_persisted_session_metadata(session_id)
-                    .await?
-                    .is_some();
+                    .session_projection_visible(session_id)
+                    .await?;
                 #[cfg(feature = "runtime-adapter")]
                     let runtime_residue_present = match self.runtime_adapter.as_ref() {
                         Some(adapter) => adapter
@@ -18226,6 +18230,9 @@ impl MobActor {
             .filter(|entry| {
                 !broken_members.contains(&entry.agent_identity)
                     && !placed_members.contains(&entry.agent_identity)
+                    && !lifecycle.runtime_retire_pending_sessions.contains_key(
+                        &mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                    )
             })
             .map(|entry| MemberReadinessTarget {
                 entry: entry.clone(),
@@ -26652,6 +26659,15 @@ impl MobActor {
     /// phase drops the recovery frame before a deeply nested command handler
     /// is polled, without moving actor authority out of the serialized task.
     async fn prepare_actor_run(&mut self) -> bool {
+        if let Err(error) = self.restore_local_cleanup_composition_delivery().await {
+            tracing::error!(
+                mob_id = %self.definition.id,
+                error = %error,
+                "local cleanup delivery recovery failed before command admission"
+            );
+            self.quiesce_volatile_producers_after_fail_stop().await;
+            return false;
+        }
         if matches!(self.dsl_state(), MobState::Running) {
             if let Err(error) = self.restore_generated_member_operation_bindings().await {
                 tracing::error!(
@@ -26758,7 +26774,7 @@ impl MobActor {
             host_status_poll.tick().await;
             identity_reconcile_safety_scan.tick().await;
         }
-        // `tokio_with_wasm` intervals already wait one full period before
+        // The shared WASM interval waits one full period before
         // their first tick. Awaiting a startup tick on wasm would therefore
         // park the actor for the five-minute identity safety cadence.
         'actor: loop {
@@ -27385,6 +27401,20 @@ impl MobActor {
         let placed =
             super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity);
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+        if !placed
+            && self
+                .dsl_authority
+                .state()
+                .runtime_retire_pending_sessions
+                .contains_key(&mob_dsl::AgentRuntimeId::from_domain(
+                    &entry.agent_runtime_id,
+                ))
+        {
+            // Pending retirement owns cleanup custody independently of serving
+            // bindings. Ordinary cold or explicit resume must not undo its
+            // durable detach by reinstalling a member session binding.
+            return Ok(None);
+        }
         let (generated_owner_session_id, placed_operation) = if placed {
             let operation_id_text = self
                 .dsl_authority
@@ -27521,6 +27551,7 @@ impl MobActor {
             .map(|adapter| ResumeOperationBindingIo {
                 adapter: Arc::clone(adapter),
                 provisioner: Arc::clone(&self.provisioner),
+                session_service: Arc::clone(&self.session_service),
                 runtime_metadata: Arc::clone(&self.runtime_metadata),
                 mob_id: self.definition.id.clone(),
             })
@@ -27537,6 +27568,29 @@ impl MobActor {
             owner_session_id: generated_owner_session_id,
             placed_operation,
         } = plan;
+        let local_member_owner = placed_operation.is_none()
+            && entry.member_ref.bridge_session_id() == Some(&generated_owner_session_id);
+        // Operation restoration must not resurrect an absent local session.
+        // Broken cleanup and completed archive publication retain their exact
+        // MobMachine journal authority without a fabricated runtime residue.
+        if local_member_owner
+            && !io
+                .session_service
+                .has_live_session(&generated_owner_session_id)
+                .await?
+            && io
+                .session_service
+                .load_persisted_session(&generated_owner_session_id)
+                .await?
+                .is_none()
+            && !io
+                .adapter
+                .archive_runtime_residue_present(&generated_owner_session_id)
+                .await
+                .map_err(|error| MobError::Internal(error.to_string()))?
+        {
+            return Ok(());
+        }
         if let Some((operation_id, _, _)) = placed_operation.as_ref() {
             let carrier = io
                 .runtime_metadata
@@ -27584,6 +27638,9 @@ impl MobActor {
                 entry.agent_identity
             )));
         }
+        if local_member_owner {
+            Self::restore_composition_delivery(&io, &entry, &bindings).await?;
+        }
         if let Some((operation_id, display_name, recovery_expectation)) = placed_operation {
             io.provisioner
                 .bind_placed_member_owner_context_exact(
@@ -27617,6 +27674,155 @@ impl MobActor {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn restore_composition_delivery(
+        io: &ResumeOperationBindingIo,
+        entry: &RosterEntry,
+        bindings: &meerkat_core::SessionRuntimeBindings,
+    ) -> Result<(), MobError> {
+        let Some(dispatcher) = io.provisioner.composition_signal_dispatcher() else {
+            return Ok(());
+        };
+        let registration = io
+            .adapter
+            .session_registration_witness_for_bindings(bindings)
+            .await
+            .ok_or_else(|| {
+                MobError::Internal("restore composition registration disappeared".into())
+            })?;
+        let recovered = io
+            .adapter
+            .recover_composition_signal_dispatcher(
+                &registration,
+                meerkat_runtime::meerkat_machine::dsl::AgentRuntimeId::from(
+                    entry.agent_runtime_id.to_string(),
+                ),
+                meerkat_runtime::meerkat_machine::dsl::FenceToken::from(entry.fence_token.get()),
+                Some(meerkat_runtime::meerkat_machine::dsl::Generation::from(
+                    entry.generation.get(),
+                )),
+                dispatcher.clone(),
+            )
+            .await
+            .map_err(|error| MobError::Internal(format!("restore composition custody: {error}")))?;
+        if !recovered {
+            let mut prepared = io
+                .adapter
+                .prepare_local_session_materialization_for_registration(registration)
+                .await
+                .map_err(|error| {
+                    MobError::Internal(format!("prepare exact composition recovery: {error}"))
+                })?;
+            prepared
+                .commit_unbound_composition_endpoint(dispatcher)
+                .await
+                .map_err(|error| MobError::Internal(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Rehydrate delivery custody for pending retirement, and for existing
+    /// local members whose stopped/completed phase permits later cleanup.
+    /// This realizes existing generated tuples without recreating serving
+    /// bindings or resuming the mob.
+    #[cfg(feature = "runtime-adapter")]
+    async fn restore_local_cleanup_composition_delivery(&self) -> Result<(), MobError> {
+        let Some(io) = self.resume_operation_binding_io() else {
+            return Ok(());
+        };
+        let entries = self
+            .roster
+            .read()
+            .await
+            .list_all()
+            .cloned()
+            .collect::<Vec<_>>();
+        for entry in entries {
+            let identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+            let runtime = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+            let state = self.dsl_authority.state();
+            if state.member_placement.contains_key(&identity) {
+                continue;
+            }
+            let cleanup_session =
+                state
+                    .runtime_retire_pending_sessions
+                    .get(&runtime)
+                    .or_else(|| {
+                        matches!(self.dsl_state(), MobState::Stopped | MobState::Completed)
+                            .then(|| state.member_session_bindings.get(&identity))
+                            .flatten()
+                    });
+            let Some(cleanup_session) = cleanup_session else {
+                continue;
+            };
+            let Some(session) = entry.bridge_session_id() else {
+                return Err(MobError::Internal(
+                    "local cleanup authority has no session projection".into(),
+                ));
+            };
+            if state.identity_to_runtime.get(&identity) != Some(&runtime)
+                || state
+                    .identity_runtime_fence_tokens
+                    .get(&identity)
+                    .map(|value| value.0)
+                    != Some(entry.fence_token.get())
+                || state
+                    .identity_runtime_generations
+                    .get(&identity)
+                    .map(|value| value.0)
+                    != Some(entry.generation.get())
+                || cleanup_session != &mob_dsl::SessionId::from_domain(session)
+                || state
+                    .member_session_bindings
+                    .get(&identity)
+                    .is_some_and(|bound| bound != cleanup_session)
+            {
+                return Err(MobError::Internal(
+                    "local cleanup delivery tuple diverges from generated authority".into(),
+                ));
+            }
+            if !io.session_service.has_live_session(session).await?
+                && io
+                    .session_service
+                    .load_persisted_session(session)
+                    .await?
+                    .is_none()
+                && !io
+                    .adapter
+                    .archive_runtime_residue_present(session)
+                    .await
+                    .map_err(|error| MobError::Internal(error.to_string()))?
+            {
+                continue;
+            }
+            let bindings = io
+                .adapter
+                .prepare_local_session_bindings(session.clone())
+                .await
+                .map_err(|error| {
+                    MobError::Internal(format!("prepare local cleanup delivery: {error}"))
+                })?;
+            Self::restore_composition_delivery(&io, &entry, &bindings).await?;
+            // The generated member or pending retirement tuple identifies the
+            // same operation registry for a later archive's final transition.
+            // This creates no serving/runtime binding.
+            io.provisioner
+                .bind_member_owner_context(
+                    &entry.member_ref,
+                    session.clone(),
+                    Arc::clone(bindings.ops_lifecycle()),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "runtime-adapter"))]
+    async fn restore_local_cleanup_composition_delivery(&self) -> Result<(), MobError> {
         Ok(())
     }
 
@@ -53223,12 +53429,9 @@ impl MobActor {
             .get_run(&run_id)
             .await?
             .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
-        if crate::run::mob_machine_run_status_is_terminal(&run.run_id, &run.status)?
-            && !matches!(
-                (&target, &run.status),
-                (TerminalizationTarget::Canceled { .. }, MobRunStatus::Failed)
-            )
-        {
+        if crate::run::mob_machine_run_status_is_terminal(&run.run_id, &run.status)? {
+            // A late cancellation request cannot replace the machine-owned
+            // terminal winner. Repair only its matching durable carrier.
             let repaired = self
                 .flow_engine
                 .repair_persisted_terminalization(run_id, flow_id, target)

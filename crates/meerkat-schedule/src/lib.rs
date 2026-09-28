@@ -1,5 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
+    pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
 
@@ -91,6 +93,12 @@ pub const SCHEDULE_CAPABILITY_POLICY: meerkat_capabilities::FeatureCapabilityPol
 pub const fn schedule_capability_policy() -> meerkat_capabilities::FeatureCapabilityPolicy {
     SCHEDULE_CAPABILITY_POLICY
 }
+
+// Keep this anchor in the root module with the schedule inventory
+// declarations so optimized linking retains their archive member.
+#[doc(hidden)]
+#[inline(never)]
+pub fn link_embedded_registrations() {}
 
 inventory::submit! {
     meerkat_capabilities::CapabilityRegistration {

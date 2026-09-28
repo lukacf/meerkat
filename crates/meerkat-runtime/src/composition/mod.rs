@@ -408,6 +408,12 @@ pub trait SignalConsumerSurface: Send + Sync {
     /// Instance id this surface serves.
     fn instance_id(&self) -> &MachineInstanceId;
 
+    /// Exact process transport liveness, when the consumer owns such a proof.
+    /// Unknown consumers cannot authorize replacement of delivery custody.
+    fn transport_is_closed(&self) -> Option<bool> {
+        None
+    }
+
     /// Receive a typed routed signal.
     async fn receive_signal(
         &self,
@@ -479,6 +485,12 @@ pub trait CompositionSignalDispatcher: Send + Sync {
 
     /// Composition id this dispatcher owns.
     fn composition(&self) -> &CompositionId;
+
+    /// Whether every installed consumer transport is permanently closed.
+    /// This is delivery custody only, never a machine lifecycle observation.
+    fn transport_is_closed(&self) -> Option<bool> {
+        None
+    }
 
     /// Dispatch a routed signal. Returns [`SignalDispatchOutcome`] on
     /// success or a typed [`SignalDispatchRefusal`].
@@ -841,6 +853,15 @@ impl<S: ProducerSignal> CompositionSignalDispatcher for CatalogCompositionSignal
 
     fn composition(&self) -> &CompositionId {
         &self.composition
+    }
+
+    fn transport_is_closed(&self) -> Option<bool> {
+        if self.consumers.is_empty() {
+            return None;
+        }
+        self.consumers.values().try_fold(true, |closed, consumer| {
+            consumer.transport_is_closed().map(|next| closed && next)
+        })
     }
 
     async fn dispatch_signal(

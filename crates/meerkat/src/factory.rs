@@ -1157,6 +1157,9 @@ fn metadata_memory_override_for_realm(
 /// Errors that can occur when building an agent via [`AgentFactory::build_agent()`].
 #[derive(Debug, thiserror::Error)]
 pub enum BuildAgentError {
+    /// The selected runtime composition excludes an explicitly requested capability.
+    #[error(transparent)]
+    RuntimeProfile(#[from] meerkat_capabilities::RuntimeProfileRefusal),
     /// Cannot infer provider from the given model name.
     #[error("Cannot infer provider from model '{model}'")]
     UnknownProvider { model: String },
@@ -1747,7 +1750,6 @@ fn model_aware_default_max_tokens(
         .unwrap_or(meerkat_core::config::DEFAULT_MAX_TOKENS_PER_TURN)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn provider_web_search_enabled(config: &Config, provider: Provider) -> bool {
     match provider {
         Provider::Anthropic => config.provider_tools.anthropic.web_search,
@@ -2217,6 +2219,8 @@ fn open_provider_auth_persistence(
 /// Factory for creating agents with standard configuration.
 #[derive(Clone)]
 pub struct AgentFactory {
+    /// Capability policy applied to every agent built by this composition.
+    browser_runtime_profile: Option<meerkat_capabilities::BrowserRuntimeProfile>,
     pub store_path: PathBuf,
     /// Runtime root for realm-scoped artifacts (comms identity/trust, hook layers,
     /// skill caches). When unset, falls back to project_root or store_path.
@@ -3268,6 +3272,7 @@ impl AgentFactory {
     /// Filesystem-dependent methods are not available.
     pub fn minimal() -> Self {
         Self {
+            browser_runtime_profile: None,
             store_path: PathBuf::new(),
             runtime_root: None,
             project_root: None,
@@ -3296,6 +3301,94 @@ impl AgentFactory {
         }
     }
 
+    /// Select the browser capability profile for every direct and mob build.
+    pub fn with_browser_runtime_profile(mut self) -> Self {
+        self.browser_runtime_profile = Some(meerkat_capabilities::BrowserRuntimeProfile);
+        self
+    }
+
+    fn validate_runtime_profile(
+        &self,
+        build: &AgentBuildConfig,
+        config: &Config,
+    ) -> Result<(), BuildAgentError> {
+        use meerkat_capabilities::RuntimeProfileCapability as Capability;
+        let Some(profile) = self.browser_runtime_profile else {
+            return Ok(());
+        };
+        if build.override_shell.resolve(self.enable_shell) {
+            profile.require(Capability::Shell)?;
+        }
+        if !build.mcp_servers.is_empty() || !config.tools.mcp_servers.is_empty() {
+            profile.require(Capability::McpClient)?;
+        }
+        if build.hook_engine_override.is_some()
+            || !config.hooks.entries.is_empty()
+            || !build.hooks_override.entries.is_empty()
+        {
+            profile.require(Capability::Hooks)?;
+        }
+        #[cfg(feature = "skills")]
+        let custom_skill_source = self.skill_source.is_some();
+        #[cfg(not(feature = "skills"))]
+        let custom_skill_source = false;
+        if build.skill_engine_override.is_some()
+            || custom_skill_source
+            || !config.skills.repositories.is_empty()
+        {
+            profile.require(Capability::RuntimeSkills)?;
+        }
+        if let Some(skills) = &build.preload_skills {
+            profile.require_skill_references(skills)?;
+        }
+        if build
+            .preload_skills
+            .as_ref()
+            .is_some_and(|skills| !skills.is_empty())
+            && (!cfg!(feature = "skills") || !config.skills.enabled)
+        {
+            return Err(BuildAgentError::CapabilityUnavailable {
+                capability: "skills",
+                reason: "embedded skill preloads require enabled skill support".to_string(),
+            });
+        }
+        if build.override_schedule.resolve(self.enable_schedule) {
+            profile.require(Capability::Schedule)?;
+        }
+        if build.override_workgraph.resolve(self.enable_workgraph) {
+            profile.require(Capability::WorkGraph)?;
+        }
+        // Inspect the requested memory category before backend resolution can
+        // suppress it: an explicit unsupported request must not disappear.
+        if build.override_memory.resolve(self.enable_memory) {
+            profile.require(Capability::SemanticMemory)?;
+        }
+        if build.override_image_generation == ToolCategoryOverride::Enable
+            || build.image_generation_executor_override.is_some()
+            || build.image_generation_machine_override.is_some()
+        {
+            profile.require(Capability::ImageGeneration)?;
+        }
+        if build.web_search_executor_override.is_some() {
+            profile.require(Capability::FallbackWebSearch)?;
+        }
+        if matches!(
+            build.backend,
+            Some(
+                meerkat_core::RecoveryBackendKind::Jsonl
+                    | meerkat_core::RecoveryBackendKind::Sqlite
+            )
+        ) {
+            profile.require(Capability::DurablePersistence)?;
+        }
+        match config.comms.mode {
+            meerkat_core::config::CommsRuntimeMode::Inproc => {}
+            meerkat_core::config::CommsRuntimeMode::Tcp => profile.require(Capability::TcpComms)?,
+            meerkat_core::config::CommsRuntimeMode::Uds => profile.require(Capability::UdsComms)?,
+        }
+        Ok(())
+    }
+
     /// Create a new factory with the required session store path.
     ///
     /// The default file-backed TokenStore is attached when it opens cleanly.
@@ -3314,6 +3407,7 @@ impl AgentFactory {
             meerkat_providers::auth_store::TokenStoreBackend::default_auto(),
         );
         Self {
+            browser_runtime_profile: None,
             store_path: store_path.into(),
             runtime_root: None,
             project_root: None,
@@ -3666,11 +3760,18 @@ impl AgentFactory {
         &self,
         config: &Config,
     ) -> Result<Option<Arc<meerkat_core::skills::SkillRuntime>>, BuildAgentError> {
+        if let Some(profile) = self.browser_runtime_profile
+            && (self.skill_source.is_some() || !config.skills.repositories.is_empty())
+        {
+            profile.require(meerkat_capabilities::RuntimeProfileCapability::RuntimeSkills)?;
+        }
         let skill_source: Option<Arc<meerkat_skills::CompositeSkillSource>> =
             if self.skill_source.is_some() {
                 self.skill_source.clone()
             } else if !config.skills.enabled {
                 None
+            } else if self.browser_runtime_profile.is_some() {
+                Self::embedded_only_skill_source(&config.skills)?
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -3741,7 +3842,7 @@ impl AgentFactory {
     /// configuration, so a failing repository degrades locally to embedded
     /// skills instead of disabling the whole skill runtime. The source-identity
     /// registry is attached so canonical loads still resolve fail-closed.
-    #[cfg(all(feature = "skills", not(target_arch = "wasm32")))]
+    #[cfg(feature = "skills")]
     fn embedded_only_skill_source(
         skills_config: &meerkat_core::skills_config::SkillsConfig,
     ) -> Result<Option<Arc<meerkat_skills::CompositeSkillSource>>, BuildAgentError> {
@@ -5152,6 +5253,7 @@ impl AgentFactory {
         mut build_config: AgentBuildConfig,
         config: &Config,
     ) -> Result<DynAgent, BuildAgentError> {
+        self.validate_runtime_profile(&build_config, config)?;
         let mut effective_config;
         let config = if let Some(fallback) = &build_config.model_fallback {
             effective_config = config.clone();
@@ -5206,6 +5308,7 @@ impl AgentFactory {
         let explicit_mob_override =
             !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
         let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config)?;
+        self.validate_runtime_profile(&build_config, config)?;
         let mut session =
             build_config.resume_session.clone().unwrap_or_else(|| {
                 match &build_config.runtime_build_mode {
@@ -5311,6 +5414,15 @@ impl AgentFactory {
             .and_then(|metadata| metadata.self_hosted_server_id.clone());
         let (provider, resolved_self_hosted_server_id) =
             self.resolve_provider_from_registry(&registry, &build_config)?;
+        if let Some(profile) = self.browser_runtime_profile
+            && build_config.override_web_search == ToolCategoryOverride::Enable
+            && !(registry
+                .profile_for_provider(provider, &build_config.model)
+                .is_some_and(|model| model.supports_web_search)
+                && provider_web_search_enabled(config, provider))
+        {
+            profile.require(meerkat_capabilities::RuntimeProfileCapability::FallbackWebSearch)?;
+        }
         // Durable agent construction is the single fail-closed chokepoint for
         // release-stage admission. This check deliberately precedes client
         // overrides, binding selection, credential resolution, lease
@@ -5778,6 +5890,8 @@ impl AgentFactory {
                         self.skill_source.clone()
                     } else if !config.skills.enabled {
                         None
+                    } else if self.browser_runtime_profile.is_some() {
+                        Self::embedded_only_skill_source(&config.skills)?
                     } else {
                         #[cfg(not(target_arch = "wasm32"))]
                         {
@@ -6744,7 +6858,7 @@ impl AgentFactory {
                 #[cfg(not(target_arch = "wasm32"))]
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 #[cfg(target_arch = "wasm32")]
-                tokio_with_wasm::alias::time::sleep(std::time::Duration::from_millis(500)).await;
+                crate::tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         }
 
@@ -7730,6 +7844,274 @@ mod tests {
     };
     use std::collections::HashMap;
     use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn browser_profile_refuses_excluded_agent_build_requests_before_resources() {
+        use meerkat_capabilities::RuntimeProfileCapability as Capability;
+        use meerkat_capabilities::RuntimeProfileClearingAction as Action;
+        for (capability, action) in [
+            (Capability::Shell, Action::UseHostProcessRuntime),
+            (Capability::McpClient, Action::UseMcpRuntime),
+            (Capability::Hooks, Action::UseHookRuntime),
+            (Capability::RuntimeSkills, Action::UseSkillRuntime),
+            (Capability::Schedule, Action::UseScheduleRuntime),
+            (Capability::WorkGraph, Action::UseWorkGraphRuntime),
+            (Capability::SemanticMemory, Action::UseSemanticMemoryRuntime),
+            (
+                Capability::ImageGeneration,
+                Action::UseImageGenerationRuntime,
+            ),
+            (Capability::DurablePersistence, Action::UsePersistentRuntime),
+            (Capability::TcpComms, Action::UseInProcessComms),
+            (Capability::UdsComms, Action::UseInProcessComms),
+        ] {
+            let factory = AgentFactory::minimal().with_browser_runtime_profile();
+            let mut config = Config::default();
+            let mut build = AgentBuildConfig::new("profile-refusal-no-provider");
+            // A dispatcher override must never mask an explicit request.
+            build.tool_dispatcher_override = Some(Arc::new(meerkat_tools::EmptyToolDispatcher));
+            match capability {
+                Capability::Shell => build.override_shell = ToolCategoryOverride::Enable,
+                Capability::McpClient => {
+                    build.mcp_servers.push(meerkat_core::McpServerConfig::stdio(
+                        "excluded",
+                        "must-never-execute",
+                        Vec::new(),
+                        HashMap::new(),
+                    ));
+                }
+                Capability::Hooks => config.hooks.entries.push(Default::default()),
+                Capability::RuntimeSkills => config.skills.repositories.push(
+                    meerkat_core::skills_config::SkillRepositoryConfig {
+                        name: "excluded".into(),
+                        source_uuid: meerkat_core::skills::SourceUuid::from_uuid(
+                            uuid::Uuid::new_v4(),
+                        ),
+                        transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
+                            path: "/must-not-read".into(),
+                        },
+                    },
+                ),
+                Capability::Schedule => build.override_schedule = ToolCategoryOverride::Enable,
+                Capability::WorkGraph => build.override_workgraph = ToolCategoryOverride::Enable,
+                Capability::SemanticMemory => {
+                    build.override_memory = ToolCategoryOverride::Enable;
+                    build.backend = Some(meerkat_core::RecoveryBackendKind::Memory);
+                }
+                Capability::ImageGeneration => {
+                    build.override_image_generation = ToolCategoryOverride::Enable;
+                }
+                Capability::DurablePersistence => {
+                    build.backend = Some(meerkat_core::RecoveryBackendKind::Sqlite);
+                }
+                Capability::TcpComms => config.comms.mode = meerkat_core::CommsRuntimeMode::Tcp,
+                Capability::UdsComms => config.comms.mode = meerkat_core::CommsRuntimeMode::Uds,
+                _ => unreachable!(),
+            }
+            let error = match factory.build_agent(build, &config).await {
+                Ok(_) => panic!("excluded capability unexpectedly built"),
+                Err(error) => error,
+            };
+            let BuildAgentError::RuntimeProfile(refusal) = error else {
+                panic!("profile must reject before provider/resource resolution: {error}");
+            };
+            assert_eq!(refusal.data.capability, capability);
+            assert_eq!(refusal.data.clearing_action, action);
+            assert_eq!(
+                refusal.code,
+                meerkat_capabilities::RuntimeProfileRefusalCode::CapabilityUnavailable
+            );
+        }
+    }
+
+    #[test]
+    fn browser_profile_allows_canonical_in_memory_request_and_builtin_dispatcher() {
+        let factory = AgentFactory::minimal().with_browser_runtime_profile();
+        let config = Config::default();
+        let mut build = AgentBuildConfig::new("irrelevant");
+        build.override_builtins = ToolCategoryOverride::Enable;
+        build.backend = Some(meerkat_core::RecoveryBackendKind::Memory);
+        build.keep_alive = true;
+        build.comms_name = Some("browser-peer".into());
+        build.tool_dispatcher_override = Some(Arc::new(meerkat_tools::EmptyToolDispatcher));
+        factory.validate_runtime_profile(&build, &config).unwrap();
+    }
+
+    #[cfg(all(feature = "skills", feature = "comms"))]
+    #[tokio::test]
+    async fn browser_profile_loads_canonical_embedded_mob_skills_without_host_repositories() {
+        let factory = AgentFactory::minimal().with_browser_runtime_profile();
+        let config = Config::default();
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.llm_client_override = Some(Arc::new(NeverLlmClient));
+        build.comms_name = Some("embedded-browser-skills".into());
+        build.override_builtins = ToolCategoryOverride::Enable;
+        build.backend = Some(meerkat_core::RecoveryBackendKind::Memory);
+        build.preload_skills = Some(vec![
+            SkillKey::builtin(SkillName::parse("mob-communication").unwrap()),
+            SkillKey::builtin(SkillName::parse("task-workflow").unwrap()),
+        ]);
+        let expected_skills = build.preload_skills.clone();
+        let agent = factory.build_agent(build, &config).await.unwrap();
+        let prompt = match agent.session().messages().first() {
+            Some(meerkat_core::Message::System(message)) => &message.content,
+            other => panic!("expected system prompt, got {other:?}"),
+        };
+        assert!(
+            prompt.contains("Use comms for live coordination"),
+            "mob communication body must load"
+        );
+        assert!(
+            prompt.contains("Use builtin task tools for lightweight project work tracking"),
+            "task workflow body must load"
+        );
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .unwrap()
+                .tooling
+                .active_skills,
+            expected_skills
+        );
+
+        // The standalone runtime builder uses the same embedded source policy.
+        let runtime = AgentFactory::minimal()
+            .comms(true)
+            .builtins(true)
+            .with_browser_runtime_profile()
+            .build_skill_runtime(&config)
+            .await
+            .unwrap()
+            .unwrap();
+        let skills = runtime
+            .list_skills(&meerkat_core::skills::SkillFilter::default())
+            .await
+            .unwrap();
+        assert!(
+            skills.iter().any(|skill| skill.key
+                == SkillKey::builtin(SkillName::parse("mob-communication").unwrap()))
+        );
+    }
+
+    #[cfg(feature = "skills")]
+    #[tokio::test]
+    async fn browser_profile_refuses_custom_skill_sources_and_disabled_preloads() {
+        let mut config = Config::default();
+        let source = AgentFactory::embedded_only_skill_source(&config.skills)
+            .unwrap()
+            .unwrap();
+        let factory = AgentFactory::minimal()
+            .skill_source(source)
+            .with_browser_runtime_profile();
+        let error = match factory.build_skill_runtime(&config).await {
+            Ok(_) => panic!("custom skill source unexpectedly allowed"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, BuildAgentError::RuntimeProfile(refusal)
+            if refusal.data.capability == meerkat_capabilities::RuntimeProfileCapability::RuntimeSkills));
+        let build = AgentBuildConfig::new("irrelevant");
+        assert!(matches!(
+            factory.validate_runtime_profile(&build, &config),
+            Err(BuildAgentError::RuntimeProfile(_))
+        ));
+        config.skills.enabled = false;
+        let mut build = AgentBuildConfig::new("irrelevant");
+        build.preload_skills = Some(vec![SkillKey::builtin(
+            SkillName::parse("task-workflow").unwrap(),
+        )]);
+        assert!(matches!(
+            AgentFactory::minimal()
+                .with_browser_runtime_profile()
+                .validate_runtime_profile(&build, &config),
+            Err(BuildAgentError::CapabilityUnavailable {
+                capability: "skills",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn browser_profile_refuses_fallback_search_before_credential_resolution() {
+        for (model, native_search_enabled) in [("gpt-5.3-codex", true), ("gpt-6-astra", false)] {
+            let mut build = AgentBuildConfig::new(model);
+            build.override_web_search = ToolCategoryOverride::Enable;
+            let mut config = Config::default();
+            config.provider_tools.openai.web_search = native_search_enabled;
+            let error = match AgentFactory::minimal()
+                .with_browser_runtime_profile()
+                .build_agent(build, &config)
+                .await
+            {
+                Ok(_) => panic!("fallback search cannot be provisioned"),
+                Err(error) => error,
+            };
+            let BuildAgentError::RuntimeProfile(refusal) = error else {
+                panic!("profile must reject fallback search before credentials: {error}");
+            };
+            assert_eq!(
+                refusal.data.capability,
+                meerkat_capabilities::RuntimeProfileCapability::FallbackWebSearch
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_profile_refuses_excluded_capabilities_restored_from_session_metadata() {
+        use meerkat_capabilities::RuntimeProfileCapability as Capability;
+        for capability in [Capability::Shell, Capability::RuntimeSkills] {
+            let mut tooling = SessionTooling::default();
+            match capability {
+                Capability::Shell => tooling.shell = ToolCategoryOverride::Enable,
+                Capability::RuntimeSkills => {
+                    tooling.active_skills = Some(vec![meerkat_core::skills::SkillKey {
+                        source_uuid: meerkat_core::skills::SourceUuid::from_uuid(
+                            uuid::Uuid::new_v4(),
+                        ),
+                        skill_name: meerkat_core::skills::SkillName::parse("excluded").unwrap(),
+                    }]);
+                }
+                _ => unreachable!(),
+            }
+            let mut resumed = Session::new();
+            resumed
+                .set_session_metadata(SessionMetadata {
+                    model_fallback: None,
+                    schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                    model: "excluded-before-provider".into(),
+                    max_tokens: 1024,
+                    structured_output_retries: 0,
+                    provider: Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    tooling,
+                    keep_alive: false,
+                    comms_name: None,
+                    peer_meta: None,
+                    realm_id: None,
+                    instance_id: None,
+                    backend: None,
+                    config_generation: None,
+                    auth_binding: None,
+                    mob_member_binding: None,
+                })
+                .unwrap();
+            let mut build = AgentBuildConfig::new("excluded-before-provider");
+            build.resume_session = Some(resumed);
+            let error = match AgentFactory::minimal()
+                .with_browser_runtime_profile()
+                .build_agent(build, &Config::default())
+                .await
+            {
+                Ok(_) => panic!("excluded resumed capability unexpectedly built"),
+                Err(error) => error,
+            };
+            let BuildAgentError::RuntimeProfile(refusal) = error else {
+                panic!("restored capability must be checked before provider resolution: {error}");
+            };
+            assert_eq!(refusal.data.capability, capability);
+        }
+    }
 
     #[test]
     fn mob_member_current_session_schedule_resolver_persists_role_free_identity_target() {

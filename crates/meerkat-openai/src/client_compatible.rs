@@ -1,7 +1,7 @@
 //! OpenAI-compatible client for self-hosted endpoints.
 
 // The bounded post-finish read below is compiled for wasm32 too, and the wasm
-// glue behind `crate::tokio` (tokio_with_wasm) is what provides `time::timeout`
+// shared glue behind `crate::tokio` provides cancellable `time::timeout`
 // there. Native builds use the real tokio crate.
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;

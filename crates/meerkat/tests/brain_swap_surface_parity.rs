@@ -1,4 +1,4 @@
-//! Every runtime-backed surface must expose the SAME pre-dequeue handle.
+//! Every surface that supports durable model-routing handoffs uses the same pre-dequeue handle.
 //!
 //! This is a source-level pin on purpose. The failure it guards against is
 //! invisible at runtime: a surface that silently returns `None` from
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 const SHARED_HELPER: &str = "persistent_runtime_pre_dequeue_handle";
 const HOOK_FN: &str = "fn pre_dequeue_handle(";
 
-/// Every production `CoreExecutor` impl that is backed by the shared runtime.
+/// Production `CoreExecutor` implementations with durable handoff support.
 ///
 /// The RPC crate contributes two: the ordinary session executor and the
 /// mob-over-RPC executor. Both are runtime-backed, so both are listed.
@@ -35,8 +35,8 @@ const RUNTIME_BACKED_EXECUTOR_SOURCES: &[(&str, &str)] = &[
     ("crates/meerkat-mob/src/runtime/provisioner.rs", "mob"),
 ];
 
-/// Surfaces that deliberately do NOT realize handoffs, and must not pretend to.
-const NON_RUNTIME_BACKED_SOURCES: &[(&str, &str)] = &[
+/// Surfaces without a durable handoff host, regardless of runtime build mode.
+const WITHOUT_DURABLE_HANDOFF_SOURCES: &[(&str, &str)] = &[
     (
         "crates/meerkat-web-runtime/src/lib.rs",
         "wasm browser runtime",
@@ -193,13 +193,13 @@ fn the_registration_gate_consults_actual_host_availability() {
     );
 }
 
-/// Standalone and WASM surfaces neither realize handoffs nor advertise the tool
-/// that stages them. Omission here is the correct behaviour, and asserting it
-/// keeps a future "just wire it everywhere" change honest: those surfaces have
-/// no runtime loop to hook.
+/// Explicit standalone builders and the browser profile do not install a
+/// durable handoff realization host or advertise its staging tool. Browser
+/// sessions have a canonical runtime loop; that alone does not supply durable
+/// handoff support. This assertion preserves the capability distinction.
 #[test]
-fn non_runtime_backed_surfaces_omit_the_hook() {
-    for (relative, surface) in NON_RUNTIME_BACKED_SOURCES {
+fn surfaces_without_durable_handoff_omit_the_hook() {
+    for (relative, surface) in WITHOUT_DURABLE_HANDOFF_SOURCES {
         let source = read(relative);
         assert!(
             !source.contains(HOOK_FN),
@@ -207,7 +207,7 @@ fn non_runtime_backed_surfaces_omit_the_hook() {
         );
         assert!(
             !source.contains(SHARED_HELPER),
-            "{surface} ({relative}) must not reach the runtime-backed realization helper"
+            "{surface} ({relative}) must not reach the durable handoff realization helper"
         );
     }
 }
@@ -220,7 +220,7 @@ fn the_builtin_is_only_registered_through_the_gated_entry_point() {
     let mut offenders = Vec::new();
     for (relative, _) in RUNTIME_BACKED_EXECUTOR_SOURCES
         .iter()
-        .chain(NON_RUNTIME_BACKED_SOURCES.iter())
+        .chain(WITHOUT_DURABLE_HANDOFF_SOURCES.iter())
     {
         let source = read(relative);
         if source.contains("BrainSwapTool::new") {

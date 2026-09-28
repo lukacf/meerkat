@@ -5,6 +5,8 @@
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
+    pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
 
@@ -134,6 +136,7 @@ inventory::submit! {
 /// submissions. It deliberately carries no policy: the declarations and
 /// their bodies remain owned here.
 #[doc(hidden)]
+#[inline(never)]
 pub fn link_embedded_skill_registrations() {}
 
 /// Confirm keep-alive mode availability when this crate is linked.

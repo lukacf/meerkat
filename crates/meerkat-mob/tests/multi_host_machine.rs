@@ -4341,6 +4341,18 @@ fn placed_member_revival_leaves_the_runtime_binding_to_its_member_host() {
         SpawnPolicyRuntimeMode::TurnDriven,
     );
 
+    let before = authority.state().clone();
+    authority
+        .apply_signal(MobMachineSignal::ResolveRecreatedMemberSessionSucceeded {
+            agent_identity: identity("remote-revive"),
+            agent_runtime_id: runtime_id("remote-revive", 0),
+            fence_token: FenceToken(1),
+            generation: Generation(0),
+            bridge_session_id: session_id("member-host-session-remote-revive"),
+        })
+        .expect_err("local recreation completion cannot bind a member-host-owned runtime");
+    assert_eq!(authority.state(), &before);
+
     let authorized = authority
         .apply_signal(MobMachineSignal::ClassifyMemberLiveMaterialization {
             agent_identity: identity("remote-revive"),

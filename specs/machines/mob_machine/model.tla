@@ -9983,6 +9983,26 @@ ResolveMemberRevivalSucceededRunningLocal(agent_identity) ==
     /\ UnchangedFrame_8e3461267c170d31
 
 
+ResolveRecreatedMemberSessionSucceededRunningLocal(agent_identity, agent_runtime_id, fence_token, generation, bridge_session_id) ==
+    /\ phase = "Running"
+    /\ (placed_completion_lifecycle_quiescing = FALSE)
+    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
+    /\ ((IF (agent_identity \in DOMAIN identity_to_runtime) THEN Some((IF agent_identity \in DOMAIN identity_to_runtime THEN identity_to_runtime[agent_identity] ELSE "None")) ELSE None) = Some(agent_runtime_id))
+    /\ ((agent_runtime_id \in live_runtime_ids) = TRUE)
+    /\ ((IF (agent_runtime_id \in DOMAIN member_state_markers) THEN Some((IF agent_runtime_id \in DOMAIN member_state_markers THEN member_state_markers[agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
+    /\ ((agent_runtime_id \in DOMAIN runtime_retire_pending_sessions) = FALSE)
+    /\ ((IF (agent_identity \in DOMAIN identity_runtime_fence_tokens) THEN Some((IF agent_identity \in DOMAIN identity_runtime_fence_tokens THEN identity_runtime_fence_tokens[agent_identity] ELSE "None")) ELSE None) = Some(fence_token))
+    /\ ((IF (agent_runtime_id \in DOMAIN runtime_fence_tokens) THEN Some((IF agent_runtime_id \in DOMAIN runtime_fence_tokens THEN runtime_fence_tokens[agent_runtime_id] ELSE "None")) ELSE None) = Some(fence_token))
+    /\ ((IF (agent_identity \in DOMAIN identity_runtime_generations) THEN Some((IF agent_identity \in DOMAIN identity_runtime_generations THEN identity_runtime_generations[agent_identity] ELSE "None")) ELSE None) = Some(generation))
+    /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some((IF agent_identity \in DOMAIN member_session_bindings THEN member_session_bindings[agent_identity] ELSE "None")) ELSE None) = Some(bridge_session_id))
+    /\ ((agent_identity \in DOMAIN member_restore_failures) = FALSE)
+    /\ ((agent_identity \in member_revival_pending) = FALSE)
+    /\ ((agent_identity \in DOMAIN explicit_resume_member_work) = FALSE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_39df5aab33b261e3
+
+
 ResolveMemberRevivalSucceededRunningPlaced(agent_identity) ==
     /\ phase = "Running"
     /\ ((agent_identity \in member_revival_pending) = TRUE)
@@ -17855,6 +17875,7 @@ Next ==
     \/ \E agent_identity \in AgentIdentityValues : \E observation \in MemberLiveMaterializationObservationKindValues : \E reason \in StringValues : ClassifyMemberLiveMaterializationRevivable(agent_identity, observation, reason)
     \/ \E agent_identity \in AgentIdentityValues : \E observation \in MemberLiveMaterializationObservationKindValues : \E reason \in StringValues : ClassifyMemberLiveMaterializationTerminal(agent_identity, observation, reason)
     \/ \E agent_identity \in AgentIdentityValues : ResolveMemberRevivalSucceededRunningLocal(agent_identity)
+    \/ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E bridge_session_id \in SessionIdValues : ResolveRecreatedMemberSessionSucceededRunningLocal(agent_identity, agent_runtime_id, fence_token, generation, bridge_session_id)
     \/ \E agent_identity \in AgentIdentityValues : ResolveMemberRevivalSucceededRunningPlaced(agent_identity)
     \/ \E agent_identity \in AgentIdentityValues : \E reason \in StringValues : ResolveMemberRevivalFailedRunning(agent_identity, reason)
     \/ AdmitDestroyCleanup

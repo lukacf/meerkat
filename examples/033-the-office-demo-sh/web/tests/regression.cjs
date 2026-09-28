@@ -222,7 +222,7 @@ async function main() {
     assert(fs.existsSync(portFile), `Chromium at ${chromeBin} did not expose DevTools${chromeAlive() ? "" : ` (exited: code ${chrome.exitCode}, signal ${chrome.signalCode})`}: ${chromeStderr.trim()}`);
     const [port, socket] = fs.readFileSync(portFile, "utf8").split("\n");
     browser = await CDP.connect(`ws://127.0.0.1:${port}${socket}`);
-    async function page(route = "/fixture", provider = null) {
+    async function page(route = "/fixture", provider = null, viewport = { width: 1280, height: 900 }) {
       const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json();
       const p = await CDP.connect(target.webSocketDebuggerUrl);
       p.targetId = target.id;
@@ -260,7 +260,7 @@ async function main() {
       await p.send("Runtime.enable");
       await p.send("Network.enable");
       await p.send("Fetch.enable", { patterns: [{ urlPattern: "*" }] });
-      await p.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+      await p.send("Emulation.setDeviceMetricsOverride", { ...viewport, deviceScaleFactor: 1, mobile: false });
       await p.send("Page.navigate", { url: origin + route });
       for (let i = 0; i < 200; i++) {
         if (await p.eval('!!document.getElementById("startBigBtn")')) return p;
@@ -268,9 +268,14 @@ async function main() {
       }
       throw Error("Page failed to start");
     }
-    async function test(name, body) {
-      const p = await page();
+    async function test(name, body, { rejectWarnings = false, viewport } = {}) {
+      const p = await page("/fixture", null, viewport);
       await p.eval(`(async()=>{${body};check(trace.rejections.length===0,"Unhandled rejection");})()`);
+      if (rejectWarnings) {
+        assert.deepEqual(p.console.filter(entry => ["warning", "error"].includes(entry.type)), [],
+          `${name}: browser warnings/errors`);
+      }
+      for (const entry of p.console) if (entry.text.startsWith("RESPONSIVE_OFFICE_LAYOUT ")) console.log(entry.text);
       console.log("PASS", name);
       // Close through the browser connection: a page session's own
       // Page.close reply can be lost when the target tears down its socket
@@ -469,12 +474,81 @@ async function main() {
       click("tabGraph");check(mods.knowledge.inspectGraph().nodes().length===3,"Real graph nodes");
       mods.knowledge.upsertRecord({...record("case-a"),entities:[{name:"Team",type:"company"}],relationships:[{from:"Bob",to:"Team",type:"works_for"}]});
       check(mods.knowledge.inspectGraph().nodes().length===4&&mods.knowledge.inspectGraph().edges().length===2,"Real graph update");
+      check(mods.knowledge.inspectGraph().elements().every(element=>element.style("font-family")==="IBM Plex Mono, monospace"),"Graph font parsed for nodes and edges");
       click("tabLog");check(!mods.knowledge.isKBVisible()&&mods.knowledge.inspectGraph()===null,"Hidden state distinct");
       const before=document.getElementById("kbContent").innerHTML;
       mods.knowledge.upsertRecord(record("case-b","Hidden update"));
       check(mods.knowledge.inspectGraph()===null&&document.getElementById("kbContent").innerHTML===before,"No inactive rebuild");
       cabinet();check(document.getElementById("kbContent").textContent.includes("Hidden update"),"Cabinet opens current Records");
-    `);
+    `, { rejectWarnings: true });
+
+    await test("F10b archive outcomes remain neutral, escaped text", `
+      const outcomes=["approved","denied","pending","not approved","disapproved","accepted","approval granted","<img src=x onerror=alert(1)>"];
+      const action="Review <b>request</b>", by="Sage <archivist>";
+      click("tabCases");
+      mods.knowledge.upsertRecord({...record("neutral-decisions"),decisions:outcomes.map(outcome=>({action,outcome,by}))});
+      const content=document.getElementById("kbContent"), rows=[...content.querySelectorAll(".case-decision")];
+      check(rows.length===outcomes.length,"Every archived outcome is shown");
+      const neutralColor=getComputedStyle(content.querySelector(".case-summary")).color;
+      for(const [i,row] of rows.entries()){
+        check(row.className==="case-decision"&&getComputedStyle(row).color===neutralColor,"No inferred approval class or color");
+        check(row.textContent===action+" - "+outcomes[i]+" (by "+by+")","Archive text stays verbatim");
+        check(["none","normal"].includes(getComputedStyle(row,"::before").content),"No inferred decision glyph or literal Unicode escape");
+        check(row.childElementCount===0,"Archive text cannot inject markup");
+      }
+      const finding=document.createElement("div");finding.className="case-finding";finding.textContent="Stored finding";content.append(finding);
+      const marker=getComputedStyle(finding,"::before").content;
+      check(marker.includes(String.fromCodePoint(0x2022))&&!marker.includes("u2022"),"Finding marker is an actual CSS bullet");
+    `, { rejectWarnings: true });
+
+    for (const viewport of [{ width: 650, height: 735 }, { width: 1280, height: 900 }]) {
+      await test(`F10c responsive Graph, Records and Log remain usable at ${viewport.width}x${viewport.height}`, `
+        const f=fixture();await boot(f);
+        check(innerWidth===${viewport.width}&&innerHeight===${viewport.height},"Actual browser viewport");
+        const rect=selector=>{
+          const r=document.querySelector(selector).getBoundingClientRect();
+          return {x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,right:r.right};
+        };
+        const visiblePanel=(selector,label)=>{
+          const r=rect(selector),panel=rect(".log-panel"),controls=rect(".controls-panel");
+          check(r.width>=160&&r.height>=100,label+" needs a readable viewport: "+JSON.stringify(r));
+          check(r.x>=0&&r.right<=innerWidth&&r.y>=0&&r.bottom<=innerHeight,label+" stays within the viewport");
+          check(r.y>=panel.y&&r.bottom<=panel.bottom,label+" stays inside its panel");
+          check(controls.right<=panel.x||controls.bottom<=panel.y,"Controls and viewer do not overlap");
+          check(rect(".canvas-wrap").height>=150,"Office canvas retains usable space");
+          return rect(".bottom-panel");
+        };
+        click("tabGraph");
+        const empty=rect(".bottom-panel"),emptyGraph=rect("#graphWrap");
+        check(document.getElementById("graphWrap").textContent.includes("NO DATA YET"),"Empty graph stays visible");
+        for(let i=0;i<12;i++)mods.knowledge.upsertRecord({...record("responsive-"+i,"Long record "+i+" "+"details ".repeat(30)),entities:[{name:"Person "+i,type:"person"},{name:"Office",type:"company"}],relationships:[{from:"Person "+i,to:"Office",type:"works_for"}]});
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+        const graph=visiblePanel("#graphWrap","Populated graph");
+        check(emptyGraph.width>=160&&emptyGraph.height>=100,"Empty graph needs a readable viewport: "+JSON.stringify(emptyGraph));
+        const cy=mods.knowledge.inspectGraph();
+        check(cy.nodes().length===13&&cy.edges().length===12,"Actual Cytoscape graph rendered");
+        const canvases=[...document.querySelectorAll("#graphWrap canvas")];
+        check(canvases.length>0&&canvases.every(canvas=>canvas.getBoundingClientRect().height>=100),"Actual graph canvases have usable height");
+        check(Math.abs(graph.height-empty.height)<1,"Graph content cannot resize the bottom panel");
+        click("tabCases");
+        const records=visiblePanel("#kbContent","Records");
+        check(document.querySelectorAll(".filing-card").length===12,"Records loaded");
+        const content=document.getElementById("kbContent");
+        check(content.scrollHeight>content.clientHeight,"Long records scroll inside their viewport");
+        content.scrollTop=content.scrollHeight;
+        check(content.scrollTop>0,"Records can actually scroll");
+        click("tabLog");
+        document.getElementById("panelContent").innerHTML="<div>Log line</div>".repeat(80);
+        const log=visiblePanel("#panelContent","Log");
+        const logContent=document.getElementById("panelContent");
+        logContent.scrollTop=logContent.scrollHeight;
+        check(logContent.scrollTop>0,"Long log can scroll");
+        click("tabGraph");
+        const reopened=visiblePanel("#graphWrap","Reopened graph");
+        check([records,log,reopened].every(r=>Math.abs(r.height-graph.height)<1&&Math.abs(r.y-graph.y)<1),"Tabs keep a stable bottom panel");
+        console.log("RESPONSIVE_OFFICE_LAYOUT",JSON.stringify({viewport:{width:innerWidth,height:innerHeight},bottom:reopened,graph:rect("#graphWrap"),canvas:rect(".canvas-wrap")}));
+      `, { rejectWarnings: true, viewport });
+    }
 
     await test("F11/F13 chronological uncorrelated activity and actual controls", `
       const f=fixture();await boot(f);
@@ -491,7 +565,7 @@ async function main() {
       check(text.indexOf("Synthetic chat")<text.indexOf("Delayed reply"),"Chronological order");
       check(document.querySelectorAll(".scenario-btn").length===6&&["tabLog","tabCases","tabGraph","pauseBtn","startBtn"].every(visible),"Documented controls exist");
     `);
-    console.log("All 17 deterministic regression groups passed (actual TS/DOM; controlled runtime boundaries).");
+    console.log("All 20 deterministic regression groups passed (actual TS/DOM; controlled runtime boundaries).");
     return;
     }
 
@@ -507,7 +581,7 @@ async function main() {
     const lifecycle = await p.eval(`(async()=>{
       const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
       await wasm.default();
-      wasm.init_runtime_from_config(JSON.stringify({model:"claude-sonnet-4-6",anthropic_api_key:"synthetic-not-a-key"}));
+      await wasm.init_runtime_from_config(JSON.stringify({model:"claude-sonnet-4-6",anthropic_api_key:"synthetic-not-a-key"}));
       const id=String(await wasm.mob_create(JSON.stringify({id:"lifecycle-probe",profiles:{worker:{model:"claude-sonnet-4-6",runtime_mode:"autonomous_host",tools:{comms:true},external_addressable:true}},wiring:{},flows:{}})));
       const spawned=JSON.parse(await wasm.mob_spawn(id,JSON.stringify([{profile:"worker",agent_identity:"worker",runtime_mode:"autonomous_host"}])));
       const stop=JSON.parse(await wasm.mob_lifecycle(id,"stop"));
@@ -515,7 +589,7 @@ async function main() {
       let rejected=false;try{await wasm.mob_member_send(id,"worker",JSON.stringify({content:"Synthetic stopped-admission probe",handling_mode:"queue"}));}catch{rejected=true;}
       const resume=JSON.parse(await wasm.mob_lifecycle(id,"resume"));
       const resumedStatus=JSON.parse(await wasm.mob_status(id));
-      await wasm.mob_lifecycle(id,"destroy");wasm.destroy_runtime();
+      await wasm.mob_lifecycle(id,"destroy");await wasm.destroy_runtime();
       return {spawned:spawned[0].status,stop:stop.ok,stopped:stoppedStatus.status,rejected,resume:resume.ok,resumed:resumedStatus.status};
     })()`);
     assert.deepEqual(lifecycle, { spawned: "spawned", stop: true, stopped: "Stopped", rejected: true, resume: true, resumed: "Running" });
@@ -686,7 +760,7 @@ async function main() {
       const members=JSON.parse(await wasm.mob_list_members("the-office"));
       const subscriptions=[];
       for(const member of members){const handle=await wasm.mob_member_subscribe("the-office",member.agent_identity);wasm.close_subscription(handle);subscriptions.push(member.agent_identity);}
-      await wasm.mob_lifecycle("the-office","destroy");wasm.destroy_runtime();
+      await wasm.mob_lifecycle("the-office","destroy");await wasm.destroy_runtime();
       let destroyed=false;try{await wasm.mob_list_members("the-office");}catch{destroyed=true;}
       return {status:status.status,subscriptions:subscriptions.length,destroyed};
     })()`);

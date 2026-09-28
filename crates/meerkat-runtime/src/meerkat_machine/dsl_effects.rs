@@ -270,7 +270,10 @@ impl MeerkatMachine {
         if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
             return Err(error.to_string());
         }
-        Self::stage_dsl_transition_on_authority(&entry.dsl_authority, input, context)
+        let mut staged =
+            Self::stage_dsl_transition_on_authority(&entry.dsl_authority, input, context)?;
+        staged.signal_dispatcher = entry.composition_signal_dispatcher.clone();
+        Ok(staged)
     }
 
     pub(super) fn stage_dsl_transition_on_authority(
@@ -324,6 +327,7 @@ impl MeerkatMachine {
             previous_snapshot,
             committed_snapshot,
             effects,
+            signal_dispatcher: None,
         })
     }
 
@@ -381,7 +385,7 @@ impl MeerkatMachine {
 
     /// Typed variant for recovery-owned callers that must distinguish a
     /// temporarily unavailable session authority from a semantic refusal.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(feature = "live")]
     pub(super) async fn apply_session_dsl_input_typed(
         &self,
         session_id: &SessionId,
@@ -419,6 +423,7 @@ impl MeerkatMachine {
             );
             (previous_snapshot, effects)
         };
+        let signal_dispatcher = entry.composition_signal_dispatcher.clone();
         drop(sessions);
         // Terminal recording currently emits a local-only authority receipt.
         // This narrow test fault exercises the real typed post-commit error
@@ -434,7 +439,7 @@ impl MeerkatMachine {
                 ),
             });
         }
-        self.dispatch_routed_signals_from_effects(&effects)
+        self.dispatch_routed_signals_from_effects(signal_dispatcher.as_ref(), &effects)
             .await
             .map_err(|reason| RuntimeDriverError::RecoveryBackoff {
                 reason: format!(
@@ -479,8 +484,12 @@ impl MeerkatMachine {
             );
             (previous_snapshot, effects)
         };
+        let signal_dispatcher = entry.composition_signal_dispatcher.clone();
         drop(sessions);
-        if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
+        if let Err(error) = self
+            .dispatch_routed_signals_from_effects(signal_dispatcher.as_ref(), &effects)
+            .await
+        {
             let CommittedEffectDispatchFailure::PreserveCommittedDslState = dispatch_failure;
             return Err(format!(
                 "DSL authority ({context}): committed effect dispatch failed: {error}"
@@ -508,6 +517,8 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
         mut input: dsl::MeerkatMachineInput,
+        registration: &RuntimeSessionRegistrationWitness,
+        signal_dispatcher: Option<&composition::MeerkatCompositionSignalDispatcher>,
         context: &str,
     ) -> Result<
         (dsl::MeerkatMachineAuthoritySnapshot, DslTransitionEffects),
@@ -519,8 +530,8 @@ impl MeerkatMachine {
                 reason,
             ));
         }
-        let sessions = self.sessions.read().await;
-        let entry = sessions.get(session_id).ok_or_else(|| {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions.get_mut(session_id).ok_or_else(|| {
             dsl_authority::DslTransitionRefusal::other(
                 "session_authority_unavailable",
                 RuntimeDriverError::NotReady {
@@ -529,10 +540,37 @@ impl MeerkatMachine {
                 .to_string(),
             )
         })?;
+        if !registration.matches_entry(entry) || registration.epoch_id() != &entry.epoch_id {
+            return Err(dsl_authority::DslTransitionRefusal::other(
+                "composition_registration_replaced",
+                "routed input's exact runtime registration was replaced before admission"
+                    .to_string(),
+            ));
+        }
         if let Some(error) = entry.dsl_mutation_blocked_by_unregister(session_id) {
             return Err(dsl_authority::DslTransitionRefusal::other(
                 "unregister_finalization_pending",
                 error.to_string(),
+            ));
+        }
+        // The originating composition owns its reverse endpoint. An existing
+        // registration cannot be captured by another composition, including a
+        // stale actor with the same logical member/session names.
+        if let (Some(current), Some(incoming)) = (
+            entry.composition_signal_dispatcher.as_ref(),
+            signal_dispatcher,
+        ) && !Arc::ptr_eq(current, incoming)
+        {
+            return Err(dsl_authority::DslTransitionRefusal::other(
+                "composition_endpoint_conflict",
+                "session registration belongs to another composition endpoint".to_string(),
+            ));
+        }
+        if signal_dispatcher.is_some() && entry.composition_signal_dispatcher.is_none() {
+            return Err(dsl_authority::DslTransitionRefusal::other(
+                "composition_endpoint_unbound",
+                "routed input requires this registration's prepared composition endpoint"
+                    .to_string(),
             ));
         }
         Self::resolve_routed_entry_runtime_epoch(&mut input, &entry.epoch_id);
@@ -553,8 +591,12 @@ impl MeerkatMachine {
             );
             (previous_snapshot, effects)
         };
+        let signal_dispatcher = entry.composition_signal_dispatcher.clone();
         drop(sessions);
-        if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
+        if let Err(error) = self
+            .dispatch_routed_signals_from_effects(signal_dispatcher.as_ref(), &effects)
+            .await
+        {
             // CommittedEffectDispatchFailure::PreserveCommittedDslState
             // semantics: the committed DSL state is preserved; only the
             // dispatch fault is surfaced (typed).

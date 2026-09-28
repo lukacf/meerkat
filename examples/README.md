@@ -255,7 +255,7 @@ export GEMINI_API_KEY=...           # Optional (examples 021, 034, 035 live suit
 ## Architecture Overview
 
 ```text
-CLI / REST / JSON-RPC / MCP / Python / TypeScript
+CLI / REST / JSON-RPC / MCP / Python / TypeScript / Web/WASM
                        |
                        v
              runtime-backed session path
@@ -265,7 +265,7 @@ CLI / REST / JSON-RPC / MCP / Python / TypeScript
  realm-scoped stores: sessions, runtime, schedule, WorkGraph,
                   jobs, blobs, and artifacts
 
-Standalone Rust examples / browser WASM
+Standalone Rust examples
                        |
                        v
              explicit standalone path
@@ -273,8 +273,8 @@ Standalone Rust examples / browser WASM
 
 Both paths compose agents through `AgentFactory`, the model catalog, and auth
 bindings. Available tools, hooks, skills, memory, comms, mob, and compaction
-features vary by surface; the browser WASM runtime intentionally exposes a
-smaller in-memory subset. Persistent realms default to SQLite through
+features vary by surface; Web/WASM narrows the canonical runtime through typed
+capability exclusions, including in-memory persistence. Persistent realms default to SQLite through
 `RealmStorageProvider`. JSONL is an explicit inspectable backend; memory stores
 are for ephemeral/test usage.
 ```

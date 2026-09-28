@@ -1403,6 +1403,7 @@ export interface MobSpawnManySpawnedResult {
 
 export interface MobSpawnManyFailedResult {
   cause: MobSpawnManyFailureCause;
+  code?: unknown | null;
   message: string;
   structured_data?: unknown;
 }

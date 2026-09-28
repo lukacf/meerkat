@@ -28,14 +28,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{future::Future, pin::Pin, sync::Arc};
 
-#[cfg(not(target_arch = "wasm32"))]
-use ::tokio::{
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::{
     self,
     sync::{RwLock, oneshot},
 };
-#[cfg(target_arch = "wasm32")]
-use tokio_with_wasm::alias::{
-    self as tokio,
+#[cfg(not(target_arch = "wasm32"))]
+use ::tokio::{
+    self,
     sync::{RwLock, oneshot},
 };
 

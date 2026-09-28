@@ -16,7 +16,7 @@ function makeSubscriptionRuntime(overrides = {}) {
   return {
     default: async () => undefined,
     runtime_version: () => CURRENT_WASM_VERSION,
-    init_runtime_from_config: () => JSON.stringify({ status: 'initialized', model: 'claude-sonnet-4-5', providers: ['anthropic'] }),
+    init_runtime_from_config: () => JSON.stringify({ status: 'initialized', runtime_handle: 'mock-runtime-handle', model: 'claude-sonnet-4-5', providers: ['anthropic'] }),
     destroy_runtime: () => undefined,
     async mob_create(definitionJson) {
       return JSON.parse(definitionJson).id;
@@ -86,6 +86,8 @@ function makeDirectSession(pollEvents) {
     () => undefined,
     pollEvents,
     async () => '{}',
+    async () => {},
+    async () => {},
   );
 }
 
@@ -97,7 +99,7 @@ async function runtimeWithMobList(payload) {
         return CURRENT_WASM_VERSION;
       },
       init_runtime_from_config() {
-        return JSON.stringify({ status: 'initialized', model: 'claude-sonnet-4-5', providers: ['anthropic'] });
+        return JSON.stringify({ status: 'initialized', runtime_handle: 'mock-runtime-handle', model: 'claude-sonnet-4-5', providers: ['anthropic'] });
       },
       async mob_list() {
         return JSON.stringify(payload);
@@ -327,6 +329,26 @@ test('Mob.spawn preserves provider-auth data on typed failed rows', async () => 
       return true;
     },
   );
+});
+
+test('Mob.spawn preserves canonical capability code and remediation data', async () => {
+  const structuredData = {
+    profile: 'browser', capability: 'shell', clearing_action: 'use_host_process_runtime',
+  };
+  const mob = new Mob('mob-web-unit', {
+    async mob_spawn() {
+      return JSON.stringify([{ status: 'failed', result: {
+        cause: 'session_error', code: 'CAPABILITY_UNAVAILABLE',
+        message: 'the browser profile excludes host processes', structured_data: structuredData,
+      } }]);
+    },
+  });
+  await assert.rejects(() => mob.spawn([{ profile: 'worker', agent_identity: 'worker-1' }]), error => {
+    assert.ok(error instanceof MeerkatError);
+    assert.equal(error.code, 'CAPABILITY_UNAVAILABLE');
+    assert.deepEqual(error.data, structuredData);
+    return true;
+  });
 });
 
 test('Mob.subscribeMemberEvents projects canonical WASM EventEnvelope payloads', async () => {
@@ -588,11 +610,8 @@ test('Session destroy does not cache lifecycle state in the browser handle', asy
     () => {
       stateCalls += 1;
       return JSON.stringify({
-        handle: 11,
         session_id: 'session-web-unit',
-        mob_id: '',
         model: 'claude-sonnet-4-5',
-        usage: { input_tokens: 0, output_tokens: 0 },
         message_count: 0,
         is_active: false,
         last_assistant_text: null,
@@ -609,12 +628,14 @@ test('Session destroy does not cache lifecycle state in the browser handle', asy
       appendCalls += 1;
       throw new Error('SESSION_NOT_FOUND: session not found');
     },
+    async () => {},
+    async () => {},
   );
 
-  session.destroy();
+  await session.destroy();
 
   assert.equal(destroyCalls, 1);
-  assert.equal(session.getState().session_id, 'session-web-unit');
+  assert.equal((await session.getState()).session_id, 'session-web-unit');
   assert.equal(stateCalls, 1);
   assert.deepEqual(session.pollEvents(), [{ type: 'text_complete', text: 'from wasm' }]);
   assert.equal(pollCalls, 1);
@@ -624,7 +645,7 @@ test('Session destroy does not cache lifecycle state in the browser handle', asy
     /SESSION_NOT_FOUND|session not found/,
   );
   assert.equal(appendCalls, 1);
-  assert.throws(() => session.isDestroyed, /deprecated/i);
+  assert.equal("isDestroyed" in session, false);
 });
 
 test('MeerkatRuntime keeps a clean empty subscription poll as empty success', async () => {
@@ -634,7 +655,7 @@ test('MeerkatRuntime keeps a clean empty subscription poll as empty success', as
     const subscription = await mob.subscribeEvents();
     assert.deepEqual(subscription.poll(), []);
   } finally {
-    runtime.destroy();
+    await runtime.destroy();
   }
 });
 
@@ -649,7 +670,7 @@ test('MeerkatRuntime propagates subscription serialization failures', async () =
     const subscription = await mob.subscribeEvents();
     assert.throws(() => subscription.poll(), /serialize_error/);
   } finally {
-    runtime.destroy();
+    await runtime.destroy();
   }
 });
 
@@ -664,7 +685,7 @@ test('MeerkatRuntime rejects malformed subscription poll output', async () => {
     const subscription = await mob.subscribeEvents();
     assert.throws(() => subscription.poll(), /expected event array/);
   } finally {
-    runtime.destroy();
+    await runtime.destroy();
   }
 });
 
@@ -1271,6 +1292,8 @@ test('Session.turn forwards tagged block JSON to the WASM boundary', async () =>
     () => undefined,
     () => '[]',
     async () => '{}',
+    async () => {},
+    async () => {},
   );
 
   const blocks = [
@@ -1284,7 +1307,7 @@ test('Session.turn forwards tagged block JSON to the WASM boundary', async () =>
 
 // ── Row #215: destroyed/torn-down handles are classified by typed code ──────
 
-test('Session.destroy is idempotent on a retired handle via the typed code', () => {
+test('Session.destroy is idempotent on a retired handle via the typed code', async () => {
   let destroyAttempts = 0;
   // The runtime retires a destroyed handle and rejects a repeat destroy with
   // the typed invalid_session_handle envelope (a JSON string), like the real
@@ -1305,16 +1328,18 @@ test('Session.destroy is idempotent on a retired handle via the typed code', () 
     },
     () => '[]',
     async () => '{}',
+    async () => {},
+    async () => {},
   );
 
-  assert.doesNotThrow(() => session.destroy());
+  await assert.doesNotReject(() => session.destroy());
   // A repeat destroy of the retired handle is classified by the typed code
   // and treated as already-gone (idempotent), not re-thrown.
-  assert.doesNotThrow(() => session.destroy());
+  await assert.doesNotReject(() => session.destroy());
   assert.equal(destroyAttempts, 2);
 });
 
-test('Session.destroy re-throws non-already-gone typed errors', () => {
+test('Session.destroy re-throws non-already-gone typed errors', async () => {
   const busyEnvelope = JSON.stringify({
     code: 'SESSION_BUSY',
     message: 'session is busy',
@@ -1328,8 +1353,10 @@ test('Session.destroy re-throws non-already-gone typed errors', () => {
     },
     () => '[]',
     async () => '{}',
+    async () => {},
+    async () => {},
   );
-  assert.throws(() => session.destroy(), /SESSION_BUSY/);
+  await assert.rejects(() => session.destroy(), error => error.code === 'SESSION_BUSY');
 });
 
 test('Mob.listMembers rejects legacy profile aliases without canonical role', async () => {

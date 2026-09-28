@@ -507,7 +507,7 @@ function normalizeSpawnManyEntry(raw: unknown, mobId: string): SpawnResult {
   if (status === 'failed') {
     requireOnlyKeys(
       raw.result,
-      ['cause', 'message', 'structured_data'],
+      ['cause', 'message', 'code', 'structured_data'],
       'Invalid mob spawn response: malformed failed result payload',
     );
     const cause = raw.result.cause;
@@ -518,8 +518,12 @@ function normalizeSpawnManyEntry(raw: unknown, mobId: string): SpawnResult {
     if (typeof message !== 'string' || message.length === 0) {
       throw new Error('Invalid mob spawn response: failed result missing message');
     }
+    const code = raw.result.code;
+    if (code !== undefined && (typeof code !== 'string' || code.length === 0)) {
+      throw new Error('Invalid mob spawn response: failed result has invalid code');
+    }
     throw new MeerkatError(
-      'mob_spawn_failed',
+      code ?? 'mob_spawn_failed',
       `Mob spawn failed (${cause}): ${message}`,
       raw.result.structured_data,
     );

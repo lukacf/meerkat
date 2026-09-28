@@ -13,9 +13,9 @@ are the exact JS-visible identifiers in the Rust binding.
 
 | Export | Params | Returns | Notes |
 |--------|--------|---------|-------|
-| `init_runtime` | mobpack bytes, credentials JSON | init result JSON | Primary: mobpack-first bootstrap |
-| `init_runtime_from_config` | config JSON | init result JSON | Bare-bones bootstrap |
-| `destroy_runtime` | — | `()` | Tear down all runtime state (sessions, mob state, subscriptions) |
+| `init_runtime` | mobpack bytes, credentials JSON | `Promise<string>` | Trust-verified mobpack bootstrap; JSON result includes opaque `runtime_handle` |
+| `init_runtime_from_config` | config JSON | `Promise<string>` | Bootstrap without a mobpack; JSON result includes opaque `runtime_handle` |
+| `destroy_runtime` | optional expected runtime handle | `Promise<void>` | Await canonical teardown; a stale expected handle does not destroy a replacement runtime |
 | `runtime_version` | — | version string | Returns `CARGO_PKG_VERSION` for JS/WASM version validation |
 | `register_tool_callback` | name, description, schema JSON, callback | `()` | Register a promise-returning JS tool callback; requires initialized runtime state |
 | `register_js_tool` | name, description, schema JSON | `()` | Synchronous registration; dispatch reports pending detached host work, not completion; requires initialized runtime state |
@@ -32,13 +32,15 @@ completed.
 
 | Export | Params | Returns | Notes |
 |--------|--------|---------|-------|
-| `create_session` | mobpack bytes, config JSON | handle (u32) | Trust-verifies the pack, then creates a session through the shared `WasmStandaloneSessionService` |
-| `create_session_simple` | config JSON | handle (u32) | Same shared service; uses registered tools and any verified bootstrap pack's prompt |
-| `start_turn` | handle, prompt JSON string | RunResult JSON | async; tagged `{"text": ...}` or `{"blocks": [...]}` input (no third options arg) |
-| `append_system_context` | handle, request JSON | result JSON | async, append session system context |
-| `get_session_state` | handle | JSON | Session metadata |
-| `destroy_session` | handle | `()` | Remove session |
-| `poll_events` | handle | AgentEvent[] JSON | Drain buffered direct-session events |
+| `create_session` | mobpack bytes, config JSON | `Promise<number>` | Trust-verifies the pack, then materializes a canonical runtime-owned session and returns a local handle |
+| `create_session_simple` | config JSON | `Promise<number>` | Same shared runtime helper; uses registered tools and any verified bootstrap pack's prompt |
+| `start_turn` | handle, prompt JSON, optional options JSON | `Promise<string>` | Runtime admission and canonical `WireRunResult` JSON; prompt is tagged `{"text": ...}` or `{"blocks": [...]}` |
+| `append_system_context` | handle, request JSON | `Promise<string>` | Canonical `InjectSystemContextResult` JSON containing `status` |
+| `get_session_state` | handle | `Promise<string>` | Canonical `WireSessionInfo` JSON, including `session_id`; no browser handle, mob identity, or usage fields |
+| `interrupt_session` | handle | `Promise<void>` | Interrupt through the shared machine authority |
+| `session_wire_peer` | handle, peer handle | `Promise<void>` | Install directional in-process peer trust |
+| `destroy_session` | handle | `Promise<void>` | Retire the exact runtime registration; remove the handle only after cleanup succeeds |
+| `poll_events` | handle | AgentEvent[] JSON | Drain buffered canonical direct-session events |
 
 `config` for `create_session` / `create_session_simple` accepts an optional
 `auth_binding` that scopes credential resolution to a realm/binding through the
@@ -54,8 +56,25 @@ await wasm.start_turn(handle, JSON.stringify({ text: 'Hello' }));
 await wasm.start_turn(handle, JSON.stringify({ blocks: contentBlocks }));
 ```
 
-In contrast, `Session.turn('Hello')` and `Session.turn(contentBlocks)` perform
-that serialization in the SDK.
+`Session.turn('Hello')` and `Session.turn(contentBlocks)` perform that
+serialization in the SDK. The optional third raw argument is serialized
+`WireTurnInputOptions`, with `handling_mode`, `transient_turn_context`, and
+`skill_references`; the SDK exposes these as `handlingMode`,
+`transientTurnContext`, and `skillReferences`. Skill references are canonical
+`SkillKey` objects, never bare skill-name strings. Unknown options fail closed.
+
+```typescript
+await wasm.start_turn(handle, JSON.stringify({ text: 'Hello' }), JSON.stringify({
+  handling_mode: 'queue',
+  transient_turn_context: 'Host facts for this turn only.',
+}));
+```
+
+Successful turns return the generated `WireRunResult`, including
+`terminal_cause_kind`. Agent/runtime faults reject with typed error codes;
+there is no synthetic browser terminal-status payload. A retired direct handle
+fails with `invalid_session_handle`, and failed cleanup retains the handle for
+retry.
 
 ### Mob Lifecycle (delegates to MobMcpState)
 
@@ -187,13 +206,18 @@ Surface notes:
   "max_sessions": 64,
   "anthropic_base_url": "https://proxy.example.com/anthropic",
   "openai_base_url": "https://proxy.example.com/openai",
-  "gemini_base_url": "https://proxy.example.com/gemini"
+  "gemini_base_url": "https://proxy.example.com/gemini",
+  "required_capabilities": ["in_memory_persistence", "keep_alive", "comms"]
 }
 ```
 
 Raw `init_runtime` / `init_runtime_from_config` require at least one
 provider-specific key. Use a proxy sentinel such as `"proxy"` when the browser
 calls a server-side provider proxy that injects the real credential.
+`required_capabilities` is checked by the shared `BrowserRuntimeProfile`; the
+SDK field is `requiredCapabilities`. An excluded requirement rejects with
+`CAPABILITY_UNAVAILABLE` and typed `profile`, `capability`, and
+`clearing_action` data. Unknown bootstrap and session fields are rejected.
 
 ### SessionConfig
 
@@ -203,6 +227,7 @@ calls a server-side provider proxy that injects the real credential.
   "system_prompt": "You are helpful.",
   "max_tokens": 4096,
   "comms_name": "browser-agent",
+  "keep_alive": true,
   "labels": { "surface": "web" },
   "additional_instructions": ["Be concise."],
   "app_context": { "tenant": "team-alpha" }
@@ -214,51 +239,68 @@ bootstrap-populated realm config or an existing selected `auth_binding`.
 Omitting that selector uses the stock bootstrap's `global` bindings. External
 bindings require the custom composition described above.
 
-Direct Web sessions require explicit host-driven turns. Both
-`"keep_alive": true` and `"keep_alive": false` are rejected with
-`unsupported_session_option`; omit the field entirely. Mob
-`runtime_mode: "autonomous_host"` is a separate in-memory member-host path,
-not a direct-session keep-alive option.
+Direct Web sessions use host-submitted turns by default. Set `keep_alive: true`
+with `comms_name` to admit peer work between turns through the canonical runtime.
+The SDK names are `keepAlive` and `commsName`. Set up directional trust with
+`session_wire_peer(handle, peer_handle)` or `session.wirePeer(peer)`; establish
+both directions when both agents need to receive from each other. Keep-alive
+lasts while the page and runtime are alive. Mob `runtime_mode` selects member
+hosting behavior on that same runtime authority.
 
 ## State Architecture
 
-```
+The following is a structural outline; source types live in
+`crates/meerkat-web-runtime/src/lib.rs`:
+
+```text
 thread_local! {
-    RUNTIME_STATE: RefCell<Option<RuntimeState>>    // Shared service and handle map
-    SUBSCRIPTIONS: RefCell<SubscriptionRegistry>    // Event subscription handles
+    RUNTIME_STATE: RefCell<Option<RuntimeState>>
+    RUNTIME_LIFECYCLE: Arc<Mutex<()>>           // Serializes install/create/teardown
+    NEXT_SESSION_HANDLE: Cell<u32>            // Monotonic across runtime replacement
+    SUBSCRIPTIONS: RefCell<SubscriptionRegistry>
     EXTERNAL_AUTH_RESOLVER: RefCell<Option<Function>>
 }
 
-WasmStandaloneSessionService = EphemeralSessionService<FactoryAgentBuilder>
+WasmSessionService = EphemeralSessionService<FactoryAgentBuilder>
 
 RuntimeState {
-    mob_state: Arc<MobMcpState>,                         // All mob operations
-    session_service: Arc<WasmStandaloneSessionService>,  // Direct sessions and mob members
-    sessions: BTreeMap<u32, StandaloneHandleSession>,     // Browser-local handle map
-    next_handle: u32,
-    bootstrap_mobpack: Option<BootstrapMobpack>,          // Verified id + name + skills
-    mobpack_trust: MobpackTrustConfig,                    // Bootstrap trust policy/store
-    js_tools: Vec<JsToolEntry>,                          // wasm32 only
+    instance_handle: String,
+    mob_state: Arc<MobMcpState>,
+    machine: Arc<MeerkatMachine>,
+    session_service: Arc<WasmSessionService>,
+    sessions: BTreeMap<u32, HandleSession>,
+    bootstrap_mobpack: Option<BootstrapMobpack>,
+    mobpack_trust: MobpackTrustConfig,
+    js_tools: Vec<JsToolEntry>,                // wasm32 only
 }
 
-StandaloneHandleSession {
+HandleSession {
     session_id: SessionId,
-    mob_id: String,
+    registration: RuntimeSessionRegistrationWitness,
     event_rx: WasmSessionEventReceiver,
 }
 ```
 
-`MobMcpState::new(service, MobControlPrincipal::Owner)` wraps
-the shared `WasmStandaloneSessionService` as an embedded, single-owner
-substrate. Both direct handles and mob members use this
-`EphemeralSessionService<FactoryAgentBuilder>`, whose builder injects a
-`StoreAdapter` backed by `meerkat_store::MemoryStore`. A direct handle is not a
-separate directly owned agent or a native runtime-backed session.
+`MobMcpState::new(service, MobControlPrincipal::Owner)` and direct sessions share
+one `EphemeralSessionService<FactoryAgentBuilder>` and its cached
+`MeerkatMachine` adapter. The factory uses the browser capability profile and a
+`StoreAdapter` backed by `MemoryStore`. Storage lifetime does not select a
+second authority.
 
-`destroy_runtime` clears the subscription registry and external auth resolver,
-then drops `RuntimeState`, invalidating its browser-local handles. This is
-in-memory teardown, not a durable cleanup receipt or a guarantee that
-already-dispatched external host side effects have been cancelled.
+Direct creation lowers into the shared
+`meerkat::surface::materialize_ephemeral_runtime_session` transaction, which
+prepares runtime bindings, builds with `SessionOwned`, attaches the actor, and
+installs peer ingress while retaining exact cancellation cleanup custody.
+Turns and interruption lower into the shared runtime helpers. Local handles
+and event buffers resolve canonical identity and project events only.
+
+Await `destroy_runtime(expected_handle?)` for canonical session and mob
+teardown. The SDK passes its bootstrap `runtime_handle`, so an old wrapper
+cannot destroy a replacement runtime. Success clears subscriptions and the
+external auth resolver, then drops `RuntimeState`. A cleanup failure retains
+the remaining authority for retry. Page-lifetime storage and already-dispatched
+external host side effects do not become durable or reversible through this
+operation.
 
 ## Mob Spawn Spec Format
 
@@ -303,6 +345,9 @@ with optional `retirement_error`.
       "peer_description": "Executes tasks"
     }
   },
+  "skills": {
+    "research": { "source": "inline", "content": "Check evidence before making a plan." }
+  },
   "wiring": {
     "auto_wire_orchestrator": false,
     "role_wiring": [{ "a": "planner", "b": "operator" }]
@@ -318,7 +363,11 @@ with optional `retirement_error`.
 }
 ```
 
-Note: Profile has no `system_prompt` field — prompts are built from `skills` during agent construction.
+Profile has no `system_prompt` field. Profile `skills` names select inline
+content from the mob definition's `skills` table; verified mobpacks may also
+supply embedded prompt content. For per-turn embedded skill selection, use
+canonical `SkillKey` objects in `skillReferences`. These typed runtime skill
+identities are distinct from a mob definition's inline-content names.
 
 ## `@rkat/web` TypeScript API
 
@@ -350,14 +399,19 @@ sub.close();
 const mobWide = await mob.subscribeEvents();
 
 // Direct sessions
-const session = runtime.createSession({ model: 'claude-sonnet-4-6' });
-const result = await session.turn('Hello');
+const session = await runtime.createSession({ model: 'claude-sonnet-4-6' });
+const result = await session.turn('Hello', {
+  transientTurnContext: 'Host facts for this turn only.',
+});
+const state = await session.getState();
+const canonicalSessionId = await session.sessionId;
 const sessionEvents = session.subscribe();   // sync, returns EventSubscription<SessionEvent>
 sessionEvents.poll();
-session.destroy();
+await session.destroy();
+await runtime.destroy();
 ```
 
-### Key type changes (0.6)
+### Current API contracts
 
 - `Mob.subscribeMemberEvents(agentIdentity)` and `Mob.subscribeEvents()` are **async** (return `Promise<EventSubscription<T>>`); `mob.member(id).subscribe()` is the per-member shorthand
 - `EventSubscription<T>` is generic — `subscribeMemberEvents()` yields `MemberEventItem`, `subscribeEvents()` yields `AttributedEventItem`
@@ -367,4 +421,7 @@ session.destroy();
 - `MobMember` is identity-native and no longer exposes legacy bridge/session handle fields
 - `MobStatus` carries `mob_id` + `status` only; the deprecated `state` compatibility projection was deleted
 - Per-session `apiKey` / `baseUrl` fields were removed; use runtime init-time provider keys/proxy URLs. `registerExternalAuthResolver` plus `authBinding` requires the custom bootstrap described in the auth section.
-- Raw `start_turn` takes only `(handle, promptJson)`, where `promptJson` is `JSON.stringify({ text: 'Hello' })` or `JSON.stringify({ blocks: contentBlocks })`; there is no third options argument. SDK `Session.turn('Hello')` / `Session.turn(contentBlocks)` handles this encoding.
+- Raw `start_turn(handle, promptJson, optionsJson?)` accepts tagged `WirePromptInput` and optional `WireTurnInputOptions`. SDK `Session.turn(prompt, options?)` serializes both.
+- `MeerkatRuntime.createSession`, `MeerkatRuntime.destroy`, `Session.getState`, `Session.destroy`, and `Session.sessionId` return promises. `Session.interrupt` and `Session.wirePeer` also await runtime authority.
+- `SessionState` is generated from `WireSessionInfo`; `AppendSystemContextResult` exposes canonical `status` only. `TurnResult` is the generated `WireRunResult`, with no `response` alias or browser-only terminal status.
+- Direct `keepAlive` is supported with `commsName`. Browser exclusions carry `CAPABILITY_UNAVAILABLE` and a typed clearing action from the shared capability profile.

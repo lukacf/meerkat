@@ -12087,7 +12087,8 @@ impl MobHandle {
                 Err(
                     error @ (MobError::PlacedCompletionCleanupPending { .. }
                     | MobError::PlacedKickoffCleanupPending { .. }
-                    | MobError::AutonomousStopInterruptsPending { .. }),
+                    | MobError::AutonomousStopInterruptsPending { .. }
+                    | MobError::LifecycleOperationPending { .. }),
                 ) => {
                     if Instant::now() >= deadline {
                         return Err(error);

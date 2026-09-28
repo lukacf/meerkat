@@ -40,7 +40,7 @@ export function contentText(content: unknown): string {
 }
 
 export interface MobRuntime {
-  init_runtime_from_config(config_json: string): void;
+  init_runtime_from_config(config_json: string): Promise<unknown>;
   mob_create(definition_json: string): Promise<string>;
   mob_spawn(mob_id: string, specs_json: string): Promise<string>;
   mob_wire(mob_id: string, a: string, b: string): Promise<void>;
@@ -268,7 +268,7 @@ export class MobOrchestrator {
       config.gemini_base_url = `${proxyBaseUrl}/gemini`;
     }
 
-    this.runtime.init_runtime_from_config(JSON.stringify(config));
+    await this.runtime.init_runtime_from_config(JSON.stringify(config));
     if (afterRuntimeInit) {
       await afterRuntimeInit();
     }

@@ -714,6 +714,8 @@ test_suite(
         "//crates/meerkat-web-runtime:meerkat_web_runtime_unit_test",
         "//crates/meerkat-web-runtime:release_targets_test",
         "//crates/meerkat-web-runtime:wasm_external_resolver_test",
+        "//crates/meerkat-web-runtime:wasm_timers_node_test",
+        "//crates/meerkat-web-runtime:wasm_timers_test",
         "//crates/meerkat-workgraph:attention_contracts_test",
         "//crates/meerkat-workgraph:meerkat_workgraph_unit_test",
         "//crates/meerkat:agent_builder_policy_canary_test",

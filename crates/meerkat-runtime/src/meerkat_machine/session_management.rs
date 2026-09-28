@@ -2135,6 +2135,8 @@ impl MeerkatMachine {
             provisional_materialization_claim_id: None,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
+            composition_signal_dispatcher: None,
+            composition_materialization_claim_id: None,
         };
         Ok((runtime_id, session_entry))
     }
@@ -2317,6 +2319,8 @@ impl MeerkatMachine {
             provisional_materialization_claim_id: None,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
+            composition_signal_dispatcher: None,
+            composition_materialization_claim_id: None,
         };
         #[cfg(target_arch = "wasm32")]
         {
@@ -2532,6 +2536,8 @@ impl MeerkatMachine {
             provisional_materialization_claim_id: None,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
+            composition_signal_dispatcher: None,
+            composition_materialization_claim_id: None,
         };
         if let Some(rehydration_authority) = rehydration_authority {
             rehydration_authority.mark_ready().map_err(|required| {
@@ -3472,8 +3478,8 @@ impl MeerkatMachine {
             return Ok(false);
         };
         let (rollback_registration, provisional_cleanup_attachment_id) = {
-            let sessions = self.sessions.read().await;
-            let Some(entry) = sessions.get(session_id) else {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
                 return Ok(false);
             };
             if expected_epoch.is_some_and(|epoch| &entry.epoch_id != epoch)
@@ -3498,6 +3504,10 @@ impl MeerkatMachine {
                     return Ok(false);
                 }
                 state.phase = crate::RuntimeActorMaterializationClaimPhase::Aborting;
+            }
+            if entry.composition_materialization_claim_id == Some(claim_id) {
+                entry.composition_signal_dispatcher = None;
+                entry.composition_materialization_claim_id = None;
             }
             (
                 state.rollback_registration_available,
@@ -4302,6 +4312,8 @@ impl MeerkatMachine {
                         provisional_materialization_claim_id: None,
                         dsl_authority: Arc::clone(&dsl_authority),
                         drain_slot: CommsDrainSlot::new(),
+                        composition_signal_dispatcher: None,
+                        composition_materialization_claim_id: None,
                     },
                 );
                 let Some(entry) = sessions.get_mut(&session_id) else {
@@ -4958,6 +4970,33 @@ impl MeerkatMachine {
         Some(RuntimeSessionRegistrationWitness::new(
             Arc::downgrade(&self.shared),
             session_id.clone(),
+            entry.epoch_id.clone(),
+            Arc::downgrade(&entry.mutation_gate),
+        ))
+    }
+
+    /// Recover the exact current registration named by already issued
+    /// bindings. A later same-session entry cannot inherit this witness.
+    pub async fn session_registration_witness_for_bindings(
+        &self,
+        bindings: &meerkat_core::SessionRuntimeBindings,
+    ) -> Option<RuntimeSessionRegistrationWitness> {
+        let authority = crate::validated_session_runtime_bindings_authority(bindings).ok()?;
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(bindings.session_id())?;
+        if entry.epoch_id != *bindings.epoch_id()
+            || !Arc::ptr_eq(&entry.dsl_authority, &authority.dsl_authority)
+            || !Arc::ptr_eq(&entry.handle_teardown_gate, &authority.teardown_gate)
+            || !Arc::ptr_eq(
+                &entry.materialization_claim_state,
+                &authority.materialization_claim_state,
+            )
+        {
+            return None;
+        }
+        Some(RuntimeSessionRegistrationWitness::new(
+            Arc::downgrade(&self.shared),
+            bindings.session_id().clone(),
             entry.epoch_id.clone(),
             Arc::downgrade(&entry.mutation_gate),
         ))
@@ -5704,6 +5743,34 @@ impl MeerkatMachine {
                         witness.session_id()
                     ),
                 });
+            }
+            if let Some(dispatcher) = entry.composition_signal_dispatcher.as_ref() {
+                let recovered_authority = recovered_entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let recovered = recovered_authority.state();
+                if recovered.session_id.as_ref()
+                    != Some(&super::dsl::SessionId::from_domain(witness.session_id()))
+                    || recovered.active_runtime_id.is_some()
+                    || recovered.active_fence_token.is_some()
+                    || recovered.active_runtime_generation.is_some()
+                {
+                    return Err(RuntimeDriverError::RecoveryRepairBlocked {
+                        evidence_digest: None,
+                        reason: format!(
+                            "durability-reload composition custody for session {} requires an exact unbound cold successor",
+                            witness.session_id()
+                        ),
+                    });
+                }
+                // Cold recovery deliberately removes placement authority. At
+                // this exact predecessor-to-successor publication, preserve
+                // only its delivery endpoint so the existing composition can
+                // complete cleanup or prepare its next binding. Receipt-time
+                // registration witnesses still fence pre-reload inputs.
+                recovered_entry.composition_signal_dispatcher = Some(Arc::clone(dispatcher));
+                recovered_entry.composition_materialization_claim_id = None;
             }
             // The prepared candidate owns only the unstarted receiver until
             // every T/L/M witness has been revalidated. Starting the worker

@@ -914,9 +914,10 @@ pub async fn handle_spawn_many(
                             WireMemberRef::encode(mob_id.as_str(), &identity_str),
                         )
                     }
-                    Err(err) => MobSpawnManyResultEntry::failed_with_structured_data(
+                    Err(err) => MobSpawnManyResultEntry::failed_with_error_details(
                         err.cause(),
                         err.to_string(),
+                        err.error().wire_error_code(),
                         err.error().structured_data(),
                     ),
                 })

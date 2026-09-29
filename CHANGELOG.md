@@ -238,6 +238,16 @@ them.
   recovery returned `AlreadyAligned` over a stray row beyond the head that a
   direct `materialize_head` rejects. Recovery now fails closed on that row
   (`head_canonical_aligned_recovery_rejects_a_stray_row_beyond_the_head`).
+- A placed (host-owned) member now publishes its transport key (#1269).
+  Spawn projected only its host-acknowledged peer id, so
+  `get_member(..).transport_public_key()` was always `None` for a placed
+  member and MobKit's `member_peer_info` failed for it even right after
+  spawn. The key now comes from the same host-acknowledged endpoint at spawn
+  and is republished from the durable MobMachine endpoint after Running and
+  Stopped restarts. The roster fallback descriptor used by retirement and
+  dispose cleanup no longer synthesizes an `inproc://` address for a placed
+  member: it uses the durable endpoint with the member's real remote address
+  and key.
 - A member restored from a cleanly Stopped mob now publishes its preserved
   comms endpoint (#1262). After `MobStopped`, a restart through
   `MobBuilder::for_resume` and an explicit `MobHandle::resume()`, the member

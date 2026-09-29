@@ -11894,6 +11894,13 @@ impl MobActor {
         entry: &RosterEntry,
         context: &'static str,
     ) -> Result<Option<TrustedPeerDescriptor>, MobError> {
+        if super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity) {
+            // A placed member lives behind its host's transport, never at an
+            // `inproc://` address in this process. Its only endpoint authority
+            // is the durable host-acknowledged generation endpoint, which
+            // carries the real remote address and key (#1269).
+            return self.machine_member_peer_spec_for(&entry.agent_identity, context);
+        }
         let Some(peer_id) = entry.peer_id else {
             return Ok(None);
         };
@@ -33220,8 +33227,13 @@ impl MobActor {
                 session_origin,
                 agent_runtime_id,
                 is_replacing,
+                // The host-acknowledged member endpoint carries the member's
+                // own Ed25519 transport key: publish it exactly as a local
+                // member's live runtime key is published (#1269).
+                transport_public_key: Some(
+                    meerkat_comms::PubKey::new(member_peer_endpoint.pubkey).to_pubkey_string(),
+                ),
                 member_peer_endpoint: Some(member_peer_endpoint),
-                transport_public_key: None,
                 direct_member_fence: ctx.direct_member_fence.clone(),
             });
         }

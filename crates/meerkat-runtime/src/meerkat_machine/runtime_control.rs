@@ -857,8 +857,9 @@ mod live_context_mirror_tests {
             6,
             "one canonical turn per source input"
         );
+        let session = Arc::new(session);
         let committed =
-            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(session.clone())
                 .expect("committed session");
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -916,11 +917,14 @@ mod live_context_mirror_tests {
             assert!(records[4].1.contains("unmeasured companion"));
             assert!(records[4].1.contains("spoken_unmeasured"));
         }
+        // The typed correction waited behind the summary while the channel
+        // heard the newer spoken correction: voicing it now would make it
+        // the newest fact, so the generated edge sends it as a quiet replay.
         assert_eq!(
             *host.append_kinds.lock().expect("append kinds"),
             [
                 crate::live_execution::LiveContextAppendKind::HistoryBootstrap,
-                crate::live_execution::LiveContextAppendKind::Ordinary,
+                crate::live_execution::LiveContextAppendKind::CausalReassertion,
                 crate::live_execution::LiveContextAppendKind::CausalReassertion,
                 crate::live_execution::LiveContextAppendKind::CausalReassertion,
                 crate::live_execution::LiveContextAppendKind::CausalReassertion,
@@ -933,6 +937,35 @@ mod live_context_mirror_tests {
                 .expect("state")
                 .live_context_cursor_by_channel[channel_id.as_str()],
             6
+        );
+        // A typed row committed after the drain, with nothing newer heard on
+        // the channel, is conversational input the provider has not heard:
+        // it stays voiced.
+        let mut session = (*session).clone();
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("fresh typed follow-up"),
+        ));
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("committed follow-up");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &committed, "store-tail")
+            .await
+            .expect("queue follow-up");
+        machine
+            .wait_live_context_ready_for_results(&session_id, &channel_id)
+            .await
+            .expect("follow-up delivered");
+        assert_eq!(
+            host.append_kinds.lock().expect("append kinds").last(),
+            Some(&crate::live_execution::LiveContextAppendKind::Ordinary)
+        );
+        assert!(
+            host.appends
+                .lock()
+                .expect("records")
+                .last()
+                .is_some_and(|record| record.1.contains("fresh typed follow-up"))
         );
     }
 

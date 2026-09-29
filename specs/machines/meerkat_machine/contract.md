@@ -1045,7 +1045,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveContextBootstrapAckCutRecorded`(session_id: String, channel_id: String, lease_id: String, append_id: String, cut: u64)
 - `LiveContextDeliveryReadinessObserved`(session_id: String, channel_id: String, readiness: LiveContextDeliveryReadiness)
 - `LiveContextBootstrapAppendAuthorized`(session_id: String, channel_id: String, lease_id: String, append_id: String, content_digest: String, reserved_cursor: u64)
-- `LiveContextAppendAuthorized`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
+- `LiveContextAppendAuthorized`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64, superseded_by_heard_speech: Bool)
 - `LiveContextAppendDeferred`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
 - `LiveContextAppendAlreadyCovered`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
 - `LiveContextRowQueued`(session_id: String, channel_id: String, append_id: String, canonical_cursor: u64, disposition: LiveContextRowDisposition)
@@ -17645,6 +17645,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `cursor_edge_is_next`
   - `exact_canonical_outbox_head`
+  - `not_superseded_by_heard_speech`
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
@@ -17665,6 +17666,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `cursor_edge_is_next`
   - `exact_canonical_outbox_head`
+  - `not_superseded_by_heard_speech`
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
@@ -17685,6 +17687,67 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `cursor_edge_is_next`
   - `exact_canonical_outbox_head`
+  - `not_superseded_by_heard_speech`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Running`
+
+### `AuthorizeLiveContextAppendSupersededIdle`
+- From: `Idle`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `cursor_edge_is_next`
+  - `exact_canonical_outbox_head`
+  - `superseded_by_heard_speech`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveContextAppendSupersededAttached`
+- From: `Attached`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `cursor_edge_is_next`
+  - `exact_canonical_outbox_head`
+  - `superseded_by_heard_speech`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveContextAppendSupersededRunning`
+- From: `Running`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `cursor_edge_is_next`
+  - `exact_canonical_outbox_head`
+  - `superseded_by_heard_speech`
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`

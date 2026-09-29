@@ -18990,6 +18990,7 @@ pub mod effects {
         pub append_id: String,
         pub previous_cursor: u64,
         pub next_cursor: u64,
+        pub superseded_by_heard_speech: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveContextAppendDeferred {
@@ -21916,6 +21917,9 @@ pub enum TransitionId {
     AuthorizeLiveContextAppendIdle,
     AuthorizeLiveContextAppendAttached,
     AuthorizeLiveContextAppendRunning,
+    AuthorizeLiveContextAppendSupersededIdle,
+    AuthorizeLiveContextAppendSupersededAttached,
+    AuthorizeLiveContextAppendSupersededRunning,
     AuthorizeLiveContextAppendPendingReplayIdle,
     AuthorizeLiveContextAppendPendingReplayAttached,
     AuthorizeLiveContextAppendPendingReplayRunning,

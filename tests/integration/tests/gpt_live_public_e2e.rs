@@ -1719,6 +1719,30 @@ fn answer_transcript_text(events: &[Value], start: usize) -> String {
         .join("")
 }
 
+/// S99's reply to the exchange that began at `start`: every assistant
+/// transcript delta whose provider `start_ms` is no earlier than the
+/// question's first input delta.
+fn s99_answer_text(events: &[Value], start: usize) -> String {
+    let Some(question_start) = events[start..]
+        .iter()
+        .filter(|event| is_user_input(event))
+        .find_map(|event| event["start_ms"].as_f64())
+    else {
+        return String::new();
+    };
+    events[start..]
+        .iter()
+        .filter(|event| event["type"] == "session.output_transcript.delta")
+        .filter(|event| {
+            event["start_ms"]
+                .as_f64()
+                .is_some_and(|value| value >= question_start)
+        })
+        .filter_map(|event| event["delta"].as_str().or_else(|| event["text"].as_str()))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 fn output_transcript_text(events: &[Value], start: usize) -> String {
     events[start..]
         .iter()
@@ -2189,12 +2213,14 @@ async fn s99_native_exchange(
             !events[start..].iter().any(is_client_delegation),
             "history and correction exchanges must use native voice, not delegated text or TTS"
         );
-        // The answer is what the assistant says after the question. Queued
-        // context rows drained after the summary acknowledgement may be
-        // spoken while the question is still playing; that speech answers
-        // older rows, not this question, so it is excluded.
+        // The answer is what the assistant says from the question's onset.
+        // Every S99 question follows assistant quiet, and rows that waited
+        // behind the summary while newer speech was heard go out as quiet
+        // replays, so speech that starts at a pause inside the question
+        // (the provider may answer before the fixture's last words) answers
+        // this question.
         let text = user_start
-            .map(|_| answer_transcript_text(&events, start))
+            .map(|_| s99_answer_text(&events, start))
             .unwrap_or_default();
         let audio = live.peer.audio_evidence().await?;
         if matches_text(&text.to_lowercase()) && audio.has_decoded_speech_since(baseline) {
@@ -2205,7 +2231,7 @@ async fn s99_native_exchange(
                 audio,
             })?;
             println!("GPT_LIVE_PUBLIC_CONCURRENT_AUDIO fixture={fixture} evidence={audio:?}");
-            return Ok(answer_transcript_text(&live.peer.events().await?, start));
+            return Ok(s99_answer_text(&live.peer.events().await?, start));
         }
         if Instant::now() >= deadline {
             s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
@@ -2214,7 +2240,7 @@ async fn s99_native_exchange(
                 audio,
             })?;
             return Err(format!(
-                "S99 native exchange lacked fresh matching transcript/decoded speech; fixture={fixture} audio={audio:?}; {}",
+                "S99 native exchange lacked fresh matching transcript/decoded speech; fixture={fixture} answer={text:?} audio={audio:?}; {}",
                 live.peer.event_summary(&events[start..])
             ).into());
         }

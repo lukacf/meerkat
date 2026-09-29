@@ -5333,10 +5333,11 @@ impl ExperimentalGptLiveWebrtcTransport {
             .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
         let command = match kind {
             // A typed row is conversational input the provider has not heard.
-            // It is voiced as commentary: measured against gpt-live-1, the
-            // model keeps the user's later speech authoritative over a row
-            // it voiced itself, whereas the same row delivered as quiet
-            // knowledge became the newest user fact and displaced it.
+            // It is voiced as commentary. A typed row that waited behind a
+            // late summary while the channel heard newer speech arrives here
+            // as a CausalReassertion instead (generated edge
+            // AuthorizeLiveContextAppendSuperseded): voiced after that speech,
+            // gpt-live-1 made it the newest fact, 3/3 on 2026-09-29 (S99).
             meerkat_runtime::live_execution::LiveContextAppendKind::Ordinary => {
                 LiveSidebandCommand::append_session_context(sideband, text)
             }

@@ -162,6 +162,17 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   discriminants move). `MeerkatMachineState` and the kernel `State` gain the
   field `run_stop_requested: Option<RunId>`, so struct-literal users must add
   it.
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`): the effect
+  `MeerkatMachineEffect::LiveContextAppendAuthorized` (in both meerkat-runtime
+  and meerkat-machine-schema) and the kernel payload
+  `effects::LiveContextAppendAuthorized` gain the field
+  `superseded_by_heard_speech: bool`, so struct-literal users and exhaustive
+  field patterns must add it. The transitions
+  `AuthorizeLiveContextAppendSupersededIdle`,
+  `AuthorizeLiveContextAppendSupersededAttached` and
+  `AuthorizeLiveContextAppendSupersededRunning` are added
+  (`TransitionId::*` discriminants move).
 - Behaviour-only (not measured by the gate): the `RuntimeEvent`
   `InputLifecycleEvent::Abandoned` emitted by a staged-rollback abandonment
   now carries the reason the generated arm chose. Before, it was always
@@ -821,6 +832,15 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   after the model searched) sent an orphaned `server_tool_use`, which
   Anthropic refuses. The stored block keeps its `type`, and results recorded
   by earlier versions are recognised and replayed too.
+- GPT Live (public Live) no longer voices a typed row that waited behind a
+  late context summary while the call heard newer speech. Such a row now
+  goes out as a quiet replay in canonical order (generated edge
+  `AuthorizeLiveContextAppendSuperseded`), because voiced after the newer
+  speech the model took it as the newest fact (S99 answered "Violet" after
+  the user said "cobalt", 3/3). Replayed causal-tail rows carry the new
+  `meerkat::experimental_gpt_live::LIVE_CAUSAL_REPLAY_PREFIX` framing: sent
+  bare, the model answered each replayed turn again.
+
 - The ripgrep tombstone scans (`legacy-surface-gate`,
   `session-control-gate`, `deprecated-backend-gate`) now run in pull-request
   CI's always-on fmt-governance lane, after installing ripgrep, which the

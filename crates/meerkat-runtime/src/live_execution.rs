@@ -4395,7 +4395,11 @@ impl LiveContextAppendAuthority {
         )
         .map(|authority| {
             authority.map(|mut authority| {
-                authority.kind = if queued.is_causal_reassertion() {
+                // The generated edge reports a voiced row whose channel
+                // already heard newer speech; it travels as a quiet replay.
+                authority.kind = if queued.is_causal_reassertion()
+                    || authority.kind == LiveContextAppendKind::CausalReassertion
+                {
                     LiveContextAppendKind::CausalReassertion
                 } else {
                     LiveContextAppendKind::Ordinary
@@ -4418,6 +4422,7 @@ impl LiveContextAppendAuthority {
             append_id: effect_append_id,
             previous_cursor: effect_previous_cursor,
             next_cursor: effect_next_cursor,
+            superseded_by_heard_speech,
         } = effect
         else {
             return Ok(None);
@@ -4435,7 +4440,11 @@ impl LiveContextAppendAuthority {
             append_id: append_id.to_string(),
             previous_cursor,
             next_cursor,
-            kind: LiveContextAppendKind::Ordinary,
+            kind: if *superseded_by_heard_speech {
+                LiveContextAppendKind::CausalReassertion
+            } else {
+                LiveContextAppendKind::Ordinary
+            },
             provider_dispatch_consumed: Arc::new(AtomicBool::new(false)),
         }))
     }
@@ -5195,6 +5204,7 @@ mod tests {
             append_id: append_id.to_string(),
             previous_cursor,
             next_cursor,
+            superseded_by_heard_speech: false,
         }
     }
 

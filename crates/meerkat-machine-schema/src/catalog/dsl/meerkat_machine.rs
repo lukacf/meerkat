@@ -7558,6 +7558,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 append_id: String,
                 previous_cursor: u64,
                 next_cursor: u64,
+                // The row would be voiced (MirrorParentText) but the channel
+                // already heard newer speech while the row waited behind the
+                // late summary: it goes out as a quiet replay instead.
+                superseded_by_heard_speech: bool,
             },
             LiveContextAppendDeferred {
                 channel_id: String,
@@ -28940,6 +28944,18 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReplayRuntimeWork))
             }
+            // A voiced row that the channel's later live speech already
+            // superseded is authorized by AuthorizeLiveContextAppendSuperseded.
+            guard "not_superseded_by_heard_speech" {
+                !(self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::MirrorParentText)
+                && exists(later in self.live_context_queued_cursor_by_append.keys(),
+                    self.live_context_queued_session_by_append.get_cloned(later)
+                        == self.live_channel_session_by_channel.get_cloned(channel_id)
+                    && self.live_context_queued_cursor_by_append.get_copied(later).get("value") > next_cursor
+                    && self.live_context_queued_disposition_by_append.get_copied(later)
+                        == Some(LiveContextRowDisposition::ReassertCausalTail)))
+            }
             guard "channel_has_no_pending_append" {
                 !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
@@ -28995,7 +29011,99 @@ macro_rules! meerkat_catalog_machine_dsl {
                 channel_id: channel_id,
                 append_id: append_id,
                 previous_cursor: previous_cursor,
-                next_cursor: next_cursor
+                next_cursor: next_cursor,
+                superseded_by_heard_speech: false
+            }
+        }
+
+        transition AuthorizeLiveContextAppendSuperseded {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextAppend {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor
+            }
+            guard "append_present" { append_id != "" }
+            guard "bootstrap_is_acknowledged" {
+                !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "cursor_edge_is_next" {
+                self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
+                && next_cursor == previous_cursor + 1
+            }
+            guard "exact_canonical_outbox_head" {
+                self.live_context_queued_session_by_append.get_cloned(append_id)
+                    == self.live_channel_session_by_channel.get_cloned(channel_id)
+                && self.live_context_queued_cursor_by_append.get_copied(append_id) == Some(next_cursor)
+                && self.live_context_queued_append_by_cursor.get_cloned(next_cursor) == Some(append_id)
+                && self.live_context_queued_digest_by_append.contains_key(append_id)
+                && self.live_context_queued_commit_token_by_append.contains_key(append_id)
+                && (self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::MirrorParentText)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertCausalTail))
+            }
+            // A typed row held behind the late summary acknowledgement while
+            // the channel heard newer speech (a later queued causal-tail row)
+            // is stale when it finally reaches the provider. Voiced, it would
+            // become the newest fact and displace that speech (gpt-live-1,
+            // S99 2026-09-29): deliver it as a quiet replay in canonical order.
+            guard "superseded_by_heard_speech" {
+                self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::MirrorParentText)
+                && exists(later in self.live_context_queued_cursor_by_append.keys(),
+                    self.live_context_queued_session_by_append.get_cloned(later)
+                        == self.live_channel_session_by_channel.get_cloned(channel_id)
+                    && self.live_context_queued_cursor_by_append.get_copied(later).get("value") > next_cursor
+                    && self.live_context_queued_disposition_by_append.get_copied(later)
+                        == Some(LiveContextRowDisposition::ReassertCausalTail))
+            }
+            guard "channel_has_no_pending_append" {
+                !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            guard "channel_accepts_context_delivery" {
+                !self.live_revoked_execution_channels.contains(channel_id)
+            }
+            guard "safe_provider_turn_boundary" {
+                !self.live_provider_turn_by_channel.contains_key(channel_id)
+            }
+            guard "channel_has_no_recovery_obligation" {
+                !self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
+                && !self.live_result_recovery_replacement_by_channel.contains_key(channel_id)
+            }
+            guard "append_identity_is_fresh" {
+                !self.live_context_pending_channel_by_append.contains_key(append_id)
+                && !self.live_context_delivered_append_ids.contains(append_id)
+                && !self.live_context_ambiguous_no_retry.contains(append_id)
+            }
+            update {
+                self.live_context_queued_session_by_append.remove(append_id);
+                self.live_context_queued_cursor_by_append.remove(append_id);
+                self.live_context_queued_digest_by_append.remove(append_id);
+                self.live_context_queued_commit_token_by_append.remove(append_id);
+                self.live_context_queued_disposition_by_append.remove(append_id);
+                self.live_context_queued_append_by_cursor.remove(next_cursor);
+                self.live_context_pending_append_by_channel.insert(channel_id, append_id);
+                self.live_context_pending_channel_by_append.insert(append_id, channel_id);
+                self.live_context_pending_previous_cursor_by_append.insert(append_id, previous_cursor);
+                self.live_context_pending_next_cursor_by_append.insert(append_id, next_cursor);
+            }
+            to Idle
+            emit LiveContextAppendAuthorized {
+                channel_id: channel_id,
+                append_id: append_id,
+                previous_cursor: previous_cursor,
+                next_cursor: next_cursor,
+                superseded_by_heard_speech: true
             }
         }
 

@@ -4,7 +4,7 @@
 //!
 //! Pull-request CI (ci.yml) is Cargo-only on GitHub-hosted runners: the lanes
 //! are selected from the changed paths by scripts/ci-cargo-lanes.mjs, which
-//! fails closed, and the aggregate "CI gate" enforces a 20-minute
+//! fails closed, and the aggregate "CI gate" enforces a 25-minute
 //! push-to-terminal budget. Nightly owns the full workspace test lanes, the
 //! dense Mob topology stress, bounded TLC, and the whole BuildBuddy/Bazel
 //! graph; the release workflow re-runs that graph on the tag. The full
@@ -102,8 +102,24 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
     );
     assert!(ci.contains("name: Enforce push-to-terminal budget"));
     assert!(
-        ci.contains("CI_MAX_SECONDS: \"1200\""),
-        "the push-to-terminal budget is 1200 seconds from run creation"
+        ci.contains("CI_MAX_SECONDS: \"1500\""),
+        "the push-to-terminal budget is 1500 seconds"
+    );
+    // Each lane is timed from the start of the attempt it ran in: a re-run
+    // lane gets a fresh clock, a carried-over lane keeps its own attempt's
+    // clock, so re-running only the gate cannot launder an overrun. The run's
+    // fixed created_at would make every re-run fail.
+    assert!(
+        ci.contains("/attempts/{n}\"") && ci.contains("run_started_at"),
+        "the budget reads each attempt's start"
+    );
+    assert!(
+        !ci.contains("--jq .created_at"),
+        "the budget must not measure from the run's fixed creation time"
+    );
+    assert!(
+        ci.contains("slowest lane"),
+        "the budget reports the slowest lane"
     );
     assert!(
         ci.contains("format('pr-{0}', github.event.pull_request.number)"),

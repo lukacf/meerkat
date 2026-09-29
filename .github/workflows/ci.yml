@@ -1,7 +1,7 @@
 name: CI
 
 # Pull-request CI: Cargo only, on GitHub-hosted runners, sized to a
-# 20-minute push-to-terminal budget. The lanes are selected from the changed
+# 25-minute push-to-terminal budget. The lanes are selected from the changed
 # paths by scripts/ci-cargo-lanes.mjs, which fails closed: any change that can
 # alter what Cargo compiles yields at least one clippy lane and one unit lane,
 # and the aggregate gate asserts that those lanes ran.
@@ -27,8 +27,10 @@ name: CI
 #                     examples
 #   wasm-timers     - shared timer ownership in Chrome and Node, selected
 #                     with the web runtime suites
-#   gate            - "CI gate": fail-closed aggregate, 1200-second budget on
-#                     pull requests, schema-4 exact-tree attestation on main
+#   gate            - "CI gate": fail-closed aggregate, 1500-second
+#                     push-to-terminal budget on pull requests (per-attempt
+#                     lane clocks, slowest lane reported on every run),
+#                     schema-4 exact-tree attestation on main
 #
 # Push to main only (no wall-clock budget):
 #   main-unit (xN)  - nextest --lib --bins over the whole workspace in eight
@@ -109,8 +111,18 @@ env:
   # stayed cold; it now keeps only the cargo registry. Debuginfo is off
   # (above) so the objects stay small.
   SCCACHE_GCS_BUCKET_NAME: ${{ vars.MEERKAT_SCCACHE_GCS_BUCKET || 'meerkat-sccache-king-dnn-training-dev' }}
-  # Push-to-terminal budget in seconds, measured from workflow creation.
-  CI_MAX_SECONDS: "1200"
+  # Push-to-terminal budget in seconds: the latest lane terminal, each lane
+  # timed from the start of the run attempt it ran in (see the gate). It
+  # exists to catch runaway CI (aggregate drift, queueing, a lane that grows),
+  # not to police a single lane; every lane's own timeout-minutes does that.
+  # Sizing (last 64 pull-request runs, 2026-09): lane terminal p50 847 s,
+  # p90 1194 s, max 1244 s. The tail is the example-web lane, which starts
+  # after classification (about 60 s) and then runs up to 1182 s, 984 s of
+  # it the wasm release build, under its own 20-minute timeout. A 1200 s
+  # budget was therefore tighter than that lane's own timeout allows and
+  # failed runs in which every lane passed. 1500 s is classification plus
+  # the longest lane timeout plus about 4 minutes of headroom.
+  CI_MAX_SECONDS: "1500"
   # Target set for the closure-check lane: "lib" checks lib and bin targets
   # of the closure; "all" adds every test target (--all-targets), which
   # measured 16 min after a meerkat-mob change and does not fit the budget.
@@ -238,6 +250,13 @@ jobs:
 
       - name: CI lane classifier fails closed
         run: make ci-lanes-selftest
+
+      # The shell path classifiers (scripts/machine-authority-changed, the
+      # remote-graph edge classifier and scripts/cargo-agent-gate) silently
+      # stopped matching after the crates/ layout move because nothing ran
+      # their pinning tests.
+      - name: Path classifiers route gate inputs
+        run: make path-classifier-selftest
 
       - name: Release doctor workflow assertions still bind
         run: scripts/test-release-doctor-workflow-contract.sh
@@ -376,6 +395,15 @@ jobs:
             crates/meerkat-workgraph/src/generated
           if-no-files-found: error
           retention-days: 1
+
+      # The posters render the canonical machine catalog, TLA specs and
+      # contracts. The gate used to run only in cargo.yml, which nothing calls,
+      # so the script's paths and the rendered HTML drifted unnoticed. It
+      # runs here on the same classifier as the other machine ratchets, and
+      # `make verify-machine-poster-coverage` is the same command locally.
+      - name: Verify machine poster coverage and freshness
+        if: ${{ needs.changes.outputs.machine_authority == 'true' }}
+        run: make verify-machine-poster-coverage
 
   clippy:
     name: Clippy (${{ matrix.name }})
@@ -1154,31 +1182,125 @@ jobs:
           echo "All selected lanes succeeded."
 
       - name: Enforce push-to-terminal budget
-        # Pull requests only: the push-to-main run carries the deferred lanes
-        # and has no wall-clock budget.
-        if: ${{ github.event_name != 'push' }}
+        # Reported on every run; enforced on pull requests only (the
+        # push-to-main run carries the deferred lanes and has no wall-clock
+        # budget). Each lane is timed from the start of the run attempt it
+        # actually ran in, so re-running a failed lane gets a fresh clock,
+        # while a lane carried over from an earlier attempt keeps that
+        # attempt's clock: re-running only this gate cannot launder a real
+        # overrun.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           MAX_SECONDS: ${{ env.CI_MAX_SECONDS }}
+          ENFORCE_BUDGET: ${{ github.event_name != 'push' }}
+          GATE_JOB_NAME: CI gate
         run: |
           set -euo pipefail
-          created_at="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at)"
-          elapsed="$(python3 - "${created_at}" <<'PY'
+          python3 - <<'PY'
           import datetime
+          import json
+          import os
+          import subprocess
           import sys
 
-          started = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
-          now = datetime.datetime.now(datetime.timezone.utc)
-          print(int((now - started).total_seconds()))
+
+          def api(path):
+              out = subprocess.run(
+                  ["gh", "api", "--paginate", "--slurp", path],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              ).stdout
+              return json.loads(out)
+
+
+          def ts(value):
+              return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          max_seconds = int(os.environ["MAX_SECONDS"])
+          enforce = os.environ["ENFORCE_BUDGET"] == "true"
+          gate_name = os.environ["GATE_JOB_NAME"]
+
+          # Start of every attempt so far; a carried-over job belongs to the
+          # latest attempt that had started when the job started.
+          attempt_starts = []
+          for n in range(1, attempt + 1):
+              page = api(f"/repos/{repo}/actions/runs/{run_id}/attempts/{n}")[0]
+              attempt_starts.append((n, ts(page["run_started_at"])))
+          jobs = [
+              job
+              for page in api(
+                  f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+              )
+              for job in page["jobs"]
+          ]
+
+          lanes = []
+          for job in jobs:
+              if job["name"] == gate_name or job["conclusion"] in (None, "skipped"):
+                  continue
+              if not job["started_at"] or not job["completed_at"]:
+                  continue
+              started, completed = ts(job["started_at"]), ts(job["completed_at"])
+              if completed < started:
+                  continue
+              ran_in, clock = attempt_starts[0]
+              for n, begun in attempt_starts:
+                  if begun <= started:
+                      ran_in, clock = n, begun
+              lanes.append(
+                  {
+                      "name": job["name"],
+                      "attempt": ran_in,
+                      "queued": int((started - clock).total_seconds()),
+                      "duration": int((completed - started).total_seconds()),
+                      "terminal": int((completed - clock).total_seconds()),
+                      "conclusion": job["conclusion"],
+                  }
+              )
+          if not lanes:
+              print("::error::no completed lanes found for the push-to-terminal budget.")
+              sys.exit(1)
+
+          critical = max(lanes, key=lambda lane: lane["terminal"])
+          slowest = max(lanes, key=lambda lane: lane["duration"])
+          elapsed = critical["terminal"]
+          rows = sorted(lanes, key=lambda lane: lane["terminal"], reverse=True)
+          table = [
+              "| lane | attempt | queued s | ran s | terminal s | result |",
+              "| --- | --- | --- | --- | --- | --- |",
+          ] + [
+              f"| {r['name']} | {r['attempt']} | {r['queued']} | {r['duration']} | {r['terminal']} | {r['conclusion']} |"
+              for r in rows[:10]
+          ]
+          verdict = (
+              f"Push-to-terminal: {elapsed}/{max_seconds} s "
+              f"(critical path: {critical['name']}, terminal at {elapsed} s in attempt {critical['attempt']}; "
+              f"slowest lane: {slowest['name']}, ran {slowest['duration']} s)"
+          )
+          print(verdict)
+          print("\n".join(table))
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(f"### Push-to-terminal budget\n\n{verdict}\n\n" + "\n".join(table) + "\n")
+          output = os.environ.get("GITHUB_OUTPUT")
+          if output:
+              with open(output, "a", encoding="utf-8") as handle:
+                  handle.write(f"elapsed_seconds={elapsed}\n")
+          if enforce and elapsed > max_seconds:
+              print(
+                  f"::error::CI exceeded the {max_seconds}-second push-to-terminal budget "
+                  f"({elapsed} s; critical path {critical['name']}, slowest lane "
+                  f"{slowest['name']} at {slowest['duration']} s)."
+              )
+              sys.exit(1)
           PY
-          )"
-          echo "Push-to-terminal budget: ${elapsed}/${MAX_SECONDS} seconds"
-          echo "elapsed_seconds=${elapsed}" >> "${GITHUB_OUTPUT}"
-          if ((elapsed > MAX_SECONDS)); then
-            echo "::error::CI exceeded the ${MAX_SECONDS}-second push-to-terminal budget (${elapsed}s)."
-            exit 1
-          fi
 
       - name: Checkout attested source tree
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}

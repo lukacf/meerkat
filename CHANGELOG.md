@@ -173,6 +173,20 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   `AuthorizeLiveContextAppendSupersededAttached` and
   `AuthorizeLiveContextAppendSupersededRunning` are added
   (`TransitionId::*` discriminants move).
+- Generated `MeerkatMachine`: `LiveContextRowDisposition` (meerkat-runtime
+  `meerkat_machine::dsl`, meerkat-machine-schema and the kernel enum) gains
+  the runtime-minted variant `ReassertAssistantOutput`
+  (`LiveContextRowDisposition::*`): the assistant's own observed or live
+  speech now replays under it, and `ReassertCausalTail` is heard user speech
+  only. The input `MeerkatMachineInput::EnqueueLiveContextRow`
+  and the kernel payload `inputs::EnqueueLiveContextRow` gain the field
+  `row_author: LiveContextRowAuthor`, with the new catalog enum
+  `LiveContextRowAuthor { User, Assistant, Runtime }` (re-exported from
+  `meerkat_runtime::meerkat_machine::dsl`). Struct-literal users must add it.
+- `meerkat_runtime::live_execution::LiveContextAppendKind` gains the variants
+  `SupersededTypedRow` and `RuntimeWorkReplay` (`LiveContextAppendKind::*`);
+  exhaustive matches must handle them. The meerkat facade sends both on the
+  quiet thinking lane.
 - Behaviour-only (not measured by the gate): the `RuntimeEvent`
   `InputLifecycleEvent::Abandoned` emitted by a staged-rollback abandonment
   now carries the reason the generated arm chose. Before, it was always
@@ -447,6 +461,11 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 - `meerkat_mob::MobHandle::start_injected_context_work_for_identity_bounded`
   queues runtime-authored content on a member as injected execution context
   (exact runtime-input custody, no synthesized conversational user row).
+- `meerkat::experimental_gpt_live::LIVE_CAUSAL_REPLAY_PREFIX`,
+  `LIVE_SUPERSEDED_TYPED_PREFIX` and `LIVE_RUNTIME_WORK_PREFIX` frame quiet
+  live-context appends: a replayed row the call already heard, a text-chat
+  row delivered after newer speech, and runtime work output (a job result
+  merged while the call was down) the model has never seen.
 - Session event subscriptions replay from a typed cursor (#1236).
   `SessionService::subscribe_session_events_from(id, SessionEventCursor)` and
   `EphemeralSessionService`/`PersistentSessionService`
@@ -833,14 +852,17 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   Anthropic refuses. The stored block keeps its `type`, and results recorded
   by earlier versions are recognised and replayed too.
 - GPT Live (public Live) no longer voices a typed row that waited behind a
-  late context summary while the call heard newer speech. Such a row now
-  goes out as a quiet replay in canonical order (generated edge
+  late context summary while the user said something newer aloud. Such a row
+  now goes out quietly in canonical order (generated edge
   `AuthorizeLiveContextAppendSuperseded`), because voiced after the newer
   speech the model took it as the newest fact (S99 answered "Violet" after
-  the user said "cobalt", 3/3). Replayed causal-tail rows carry the new
-  `meerkat::experimental_gpt_live::LIVE_CAUSAL_REPLAY_PREFIX` framing: sent
-  bare, the model answered each replayed turn again.
-
+  the user said "cobalt", 3/3). Its framing orders it before that speech and
+  leaves to the model whether a typed request the speech did not replace
+  still needs a response. Only newer user speech supersedes it; the
+  assistant's own speech and runtime work output do not. Replayed rows the
+  call already heard are framed as such (sent bare, the model answered each
+  replayed turn again), and replayed runtime work output as background work
+  the model has not seen.
 - The ripgrep tombstone scans (`legacy-surface-gate`,
   `session-control-gate`, `deprecated-backend-gate`) now run in pull-request
   CI's always-on fmt-governance lane, after installing ripgrep, which the

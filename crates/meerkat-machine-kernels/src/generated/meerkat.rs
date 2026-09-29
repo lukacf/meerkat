@@ -4353,6 +4353,60 @@ impl std::fmt::Display for LiveContextPreparationPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveContextRowAuthor {
+    #[default]
+    #[serde(rename = "User")]
+    User,
+    #[serde(rename = "Assistant")]
+    Assistant,
+    #[serde(rename = "Runtime")]
+    Runtime,
+}
+impl LiveContextRowAuthor {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "User",
+            Self::Assistant => "Assistant",
+            Self::Runtime => "Runtime",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveContextRowAuthor {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "User" => Ok(Self::User),
+            "Assistant" => Ok(Self::Assistant),
+            "Runtime" => Ok(Self::Runtime),
+            other => Err(format!("invalid LiveContextRowAuthor value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveContextRowAuthor {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveContextRowAuthor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveContextRowDisposition {
     #[default]
     #[serde(rename = "MirrorParentText")]
@@ -4367,6 +4421,8 @@ pub enum LiveContextRowDisposition {
     ReassertCausalTail,
     #[serde(rename = "ReplayRuntimeWork")]
     ReplayRuntimeWork,
+    #[serde(rename = "ReassertAssistantOutput")]
+    ReassertAssistantOutput,
 }
 impl LiveContextRowDisposition {
     pub fn as_str(&self) -> &'static str {
@@ -4377,6 +4433,7 @@ impl LiveContextRowDisposition {
             Self::ExcludedFromLiveContext => "ExcludedFromLiveContext",
             Self::ReassertCausalTail => "ReassertCausalTail",
             Self::ReplayRuntimeWork => "ReplayRuntimeWork",
+            Self::ReassertAssistantOutput => "ReassertAssistantOutput",
         }
     }
 }
@@ -4390,6 +4447,7 @@ impl std::convert::TryFrom<&str> for LiveContextRowDisposition {
             "ExcludedFromLiveContext" => Ok(Self::ExcludedFromLiveContext),
             "ReassertCausalTail" => Ok(Self::ReassertCausalTail),
             "ReplayRuntimeWork" => Ok(Self::ReplayRuntimeWork),
+            "ReassertAssistantOutput" => Ok(Self::ReassertAssistantOutput),
             other => Err(format!("invalid LiveContextRowDisposition value `{other}`")),
         }
     }
@@ -15811,6 +15869,7 @@ pub mod inputs {
         pub disposition: LiveContextRowDisposition,
         pub payload_availability: LiveContextPayloadAvailability,
         pub row_source: LiveContextRowSource,
+        pub row_author: LiveContextRowAuthor,
         pub observation_id: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -1179,6 +1179,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "ExcludedFromLiveContext",
                     "ReassertCausalTail",
                     "ReplayRuntimeWork",
+                    "ReassertAssistantOutput",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -1186,6 +1187,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["NoPayload", "Materializable"],
             ),
             NamedTypeBinding::string_enum("LiveContextRowSource", &["Conversation", "RuntimeWork"]),
+            NamedTypeBinding::string_enum(
+                "LiveContextRowAuthor",
+                &["User", "Assistant", "Runtime"],
+            ),
             NamedTypeBinding::string_enum(
                 "LiveContextPreparationPhase",
                 &[

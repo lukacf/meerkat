@@ -3829,6 +3829,14 @@ pub struct LiveContextAppendAuthority {
 pub enum LiveContextAppendKind {
     Ordinary,
     CausalReassertion,
+    /// A typed row the provider never received, held behind the late summary
+    /// while the user said something newer aloud: delivered quietly, never
+    /// described as heard or answered.
+    SupersededTypedRow,
+    /// Runtime work output the model has never seen (a job result merged
+    /// while the call was down): delivered quietly as background context,
+    /// never described as heard or answered.
+    RuntimeWorkReplay,
     HistoryBootstrap,
 }
 
@@ -4122,15 +4130,29 @@ impl LiveContextQueuedRow {
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::AssistantObservation => LiveContextRowDisposition::AssistantObservation,
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::ExcludedFromLiveContext => LiveContextRowDisposition::ExcludedFromLiveContext,
         };
-        let reasserted = *disposition == LiveContextRowDisposition::ReassertCausalTail
-            && row.payload_availability()
-                == crate::meerkat_machine::dsl::LiveContextPayloadAvailability::Materializable;
+        let materializable = row.payload_availability()
+            == crate::meerkat_machine::dsl::LiveContextPayloadAvailability::Materializable;
+        // Heard user speech replays as ReassertCausalTail, the assistant's own
+        // speech as ReassertAssistantOutput, runtime work output as
+        // ReplayRuntimeWork.
+        let user_authored = row.author() == crate::meerkat_machine::dsl::LiveContextRowAuthor::User;
+        let reasserted_speech = *disposition == LiveContextRowDisposition::ReassertCausalTail
+            && materializable
+            && user_authored;
+        let reasserted_output =
+            *disposition == LiveContextRowDisposition::ReassertAssistantOutput && materializable;
         let disposition_matches = match expected_disposition {
             LiveContextRowDisposition::AssistantObservation => {
-                *disposition == LiveContextRowDisposition::ExcludedFromLiveContext || reasserted
+                *disposition == LiveContextRowDisposition::ExcludedFromLiveContext
+                    || reasserted_output
             }
+            // A live transcript row is present whoever spoke it; heard user
+            // speech replays as ReassertCausalTail, the assistant's own as
+            // ReassertAssistantOutput.
             LiveContextRowDisposition::AlreadyPresentInLiveChannel => {
-                *disposition == LiveContextRowDisposition::AlreadyPresentInLiveChannel || reasserted
+                *disposition == LiveContextRowDisposition::AlreadyPresentInLiveChannel
+                    || reasserted_speech
+                    || (reasserted_output && !user_authored)
             }
             // Runtime work output is replayed quietly instead of voiced.
             LiveContextRowDisposition::MirrorParentText => {
@@ -4178,6 +4200,7 @@ impl LiveContextQueuedRow {
         match self.disposition {
             LiveContextRowDisposition::MirrorParentText => self.row.provider_context(),
             LiveContextRowDisposition::ReassertCausalTail
+            | LiveContextRowDisposition::ReassertAssistantOutput
             | LiveContextRowDisposition::ReplayRuntimeWork => self.row.causal_context(),
             LiveContextRowDisposition::AlreadyPresentInLiveChannel
             | LiveContextRowDisposition::AssistantObservation
@@ -4185,13 +4208,22 @@ impl LiveContextQueuedRow {
         }
     }
 
+    /// A quiet replay of speech this call already heard (the user's or the
+    /// assistant's own).
     #[must_use]
     pub fn is_causal_reassertion(&self) -> bool {
         matches!(
             self.disposition,
             LiveContextRowDisposition::ReassertCausalTail
-                | LiveContextRowDisposition::ReplayRuntimeWork
+                | LiveContextRowDisposition::ReassertAssistantOutput
         )
+    }
+
+    /// A quiet replay of runtime work output the model has never seen, such
+    /// as the reply to a job result merged while the call was down.
+    #[must_use]
+    pub fn is_runtime_work_replay(&self) -> bool {
+        self.disposition == LiveContextRowDisposition::ReplayRuntimeWork
     }
 }
 
@@ -4395,11 +4427,19 @@ impl LiveContextAppendAuthority {
         )
         .map(|authority| {
             authority.map(|mut authority| {
-                // The generated edge reports a voiced row whose channel
-                // already heard newer speech; it travels as a quiet replay.
-                authority.kind = if queued.is_causal_reassertion()
-                    || authority.kind == LiveContextAppendKind::CausalReassertion
-                {
+                // The generated edge reports a voiced typed row whose channel
+                // already heard newer user speech; it travels quietly with its
+                // own framing, distinct from replayed heard speech.
+                authority.kind = if authority.kind == LiveContextAppendKind::SupersededTypedRow {
+                    debug_assert_eq!(
+                        queued.row().disposition(),
+                        meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::MirrorParentText,
+                        "only a voiced parent text row can be superseded"
+                    );
+                    LiveContextAppendKind::SupersededTypedRow
+                } else if queued.is_runtime_work_replay() {
+                    LiveContextAppendKind::RuntimeWorkReplay
+                } else if queued.is_causal_reassertion() {
                     LiveContextAppendKind::CausalReassertion
                 } else {
                     LiveContextAppendKind::Ordinary
@@ -4441,7 +4481,7 @@ impl LiveContextAppendAuthority {
             previous_cursor,
             next_cursor,
             kind: if *superseded_by_heard_speech {
-                LiveContextAppendKind::CausalReassertion
+                LiveContextAppendKind::SupersededTypedRow
             } else {
                 LiveContextAppendKind::Ordinary
             },

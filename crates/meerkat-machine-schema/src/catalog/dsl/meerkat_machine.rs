@@ -1610,10 +1610,16 @@ pub enum LiveContextRowDisposition {
     AlreadyPresentInLiveChannel,
     AssistantObservation,
     ExcludedFromLiveContext,
+    /// Runtime-minted quiet replay of user speech the channel heard live
+    /// while its history summary was pending.
     ReassertCausalTail,
     /// Runtime work output (see `LiveContextRowSource::RuntimeWork`) replayed
     /// on the quiet lane once the conversation has started. Runtime-minted.
     ReplayRuntimeWork,
+    /// Runtime-minted quiet replay of the assistant's own observed or live
+    /// speech. Kept apart from heard user speech because only the user's
+    /// newer speech supersedes a typed row held behind the summary.
+    ReassertAssistantOutput,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -1635,6 +1641,20 @@ pub enum LiveContextRowSource {
     #[default]
     Conversation,
     RuntimeWork,
+}
+
+/// Who authored a committed row queued for a live channel: the user's own
+/// input (typed or spoken), the assistant (a reply or its observed speech),
+/// or the runtime (injected context such as a merged job result). A live
+/// transcript row is `AlreadyPresentInLiveChannel` whoever spoke it, so the
+/// author is what separates heard user speech, which alone supersedes a typed
+/// row held behind a late summary, from the assistant's own speech.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveContextRowAuthor {
+    #[default]
+    User,
+    Assistant,
+    Runtime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -6150,6 +6170,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 disposition: Enum<LiveContextRowDisposition>,
                 payload_availability: Enum<LiveContextPayloadAvailability>,
                 row_source: Enum<LiveContextRowSource>,
+                row_author: Enum<LiveContextRowAuthor>,
                 observation_id: Option<String>,
             },
             AdvanceLiveContextCanonicalCoverage {
@@ -28725,7 +28746,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input EnqueueLiveContextRow {
                 channel_id, runtime_id, fence_token, generation, append_id,
                 canonical_cursor, content_digest, commit_authority_token,
-                disposition, payload_availability, row_source, observation_id
+                disposition, payload_availability, row_source, row_author, observation_id
             }
             guard "append_present" { append_id != "" }
             guard "commit_evidence_present" {
@@ -28766,6 +28787,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "source_disposition_is_not_runtime_minted" {
                 disposition != LiveContextRowDisposition::ReassertCausalTail
                 && disposition != LiveContextRowDisposition::ReplayRuntimeWork
+                && disposition != LiveContextRowDisposition::ReassertAssistantOutput
             }
             guard "ordinary_mirror_has_materializable_payload" {
                 disposition != LiveContextRowDisposition::MirrorParentText
@@ -28807,7 +28829,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                         && (!self.live_context_ack_cut_by_channel.contains_key(channel_id)
                             || self.live_context_observation_ordinal_by_id.get_copied(observation_id.get("value")).get("value")
                                 <= self.live_context_ack_cut_by_channel.get_copied(channel_id).get("value"))
-                    { LiveContextRowDisposition::ReassertCausalTail }
+                    { if disposition == LiveContextRowDisposition::AlreadyPresentInLiveChannel
+                        && row_author == LiveContextRowAuthor::User {
+                        LiveContextRowDisposition::ReassertCausalTail
+                    } else { LiveContextRowDisposition::ReassertAssistantOutput } }
                     else { if disposition == LiveContextRowDisposition::AssistantObservation {
                         LiveContextRowDisposition::ExcludedFromLiveContext
                     } else { if disposition == LiveContextRowDisposition::MirrorParentText
@@ -28942,7 +28967,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReassertCausalTail)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReplayRuntimeWork))
+                    == Some(LiveContextRowDisposition::ReplayRuntimeWork)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
             }
             // A voiced row that the channel's later live speech already
             // superseded is authorized by AuthorizeLiveContextAppendSuperseded.
@@ -29050,13 +29077,26 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertCausalTail))
+                    == Some(LiveContextRowDisposition::ReassertCausalTail)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
             }
             // A typed row held behind the late summary acknowledgement while
-            // the channel heard newer speech (a later queued causal-tail row)
+            // the user said something newer aloud (a later queued
+            // ReassertCausalTail row, which is user speech only; assistant
+            // output replays as ReassertAssistantOutput and never supersedes)
             // is stale when it finally reaches the provider. Voiced, it would
             // become the newest fact and displace that speech (gpt-live-1,
-            // S99 2026-09-29): deliver it as a quiet replay in canonical order.
+            // S99 2026-09-29): deliver it quietly in canonical order, framed
+            // as a late typed row. Any newer user speech supersedes it; no
+            // semantic test tells a correction from an unrelated remark, and
+            // the quiet delivery still hands the model the typed content.
+            // "Newer" is canonical commit order: a typed row carries no live
+            // observation ordinal to compare with heard order, so speech heard
+            // before the row was typed but committed after it also supersedes.
+            // Causal-tail rows only ever enter above the channel's seed or
+            // context cursor (guard canonical_cursor_is_future), so a retired
+            // incarnation's rows at or below it cannot count as later.
             guard "superseded_by_heard_speech" {
                 self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
@@ -29157,6 +29197,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                     == Some(LiveContextRowDisposition::MirrorParentText)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReassertCausalTail)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput)
                     || (self.live_context_queued_disposition_by_append.get_copied(append_id)
                             == Some(LiveContextRowDisposition::ReplayRuntimeWork)
                         && !for_all(assistant_turn_ref in self.live_assistant_interaction_by_turn.keys(),
@@ -29242,7 +29284,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReassertCausalTail)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReplayRuntimeWork))
+                    == Some(LiveContextRowDisposition::ReplayRuntimeWork)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "close_revoked_delivery" { self.live_revoked_execution_channels.contains(channel_id) }
@@ -29278,7 +29322,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::ReassertCausalTail)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReplayRuntimeWork))
+                    == Some(LiveContextRowDisposition::ReplayRuntimeWork)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertAssistantOutput))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "recovery_owns_replacement" {

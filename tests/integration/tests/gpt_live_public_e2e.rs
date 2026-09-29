@@ -1743,6 +1743,28 @@ fn s99_answer_text(events: &[Value], start: usize) -> String {
         .join("")
 }
 
+/// Assistant transcript of the exchange at `start` that began before the
+/// question's first input delta: a response still streaming at the onset.
+/// Its later deltas could carry `start_ms` values inside the answer window,
+/// so S99 refuses the exchange instead of letting it satisfy the match.
+fn s99_in_flight_at_onset(events: &[Value], start: usize) -> Option<String> {
+    let question_start = events[start..]
+        .iter()
+        .filter(|event| is_user_input(event))
+        .find_map(|event| event["start_ms"].as_f64())?;
+    let in_flight = events[start..]
+        .iter()
+        .filter(|event| event["type"] == "session.output_transcript.delta")
+        .filter(|event| {
+            event["start_ms"]
+                .as_f64()
+                .is_some_and(|value| value < question_start)
+        })
+        .filter_map(|event| event["delta"].as_str().or_else(|| event["text"].as_str()))
+        .collect::<String>();
+    (!in_flight.trim().is_empty()).then_some(in_flight)
+}
+
 fn output_transcript_text(events: &[Value], start: usize) -> String {
     events[start..]
         .iter()
@@ -2222,6 +2244,12 @@ async fn s99_native_exchange(
         let text = user_start
             .map(|_| s99_answer_text(&events, start))
             .unwrap_or_default();
+        if let Some(in_flight) = s99_in_flight_at_onset(&events, start) {
+            return Err(format!(
+                "S99 exchange {fixture}: an assistant response was still streaming at the question onset ({in_flight:?}); the answer cannot be attributed to this question"
+            )
+            .into());
+        }
         let audio = live.peer.audio_evidence().await?;
         if matches_text(&text.to_lowercase()) && audio.has_decoded_speech_since(baseline) {
             s99_assert_unmeasured(live)?;

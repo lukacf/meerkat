@@ -184,6 +184,8 @@ pub struct CommittedLiveContextRow {
     disposition: LiveContextCommittedRowDisposition,
     #[cfg(feature = "live")]
     source: crate::meerkat_machine::dsl::LiveContextRowSource,
+    #[cfg(feature = "live")]
+    author: crate::meerkat_machine::dsl::LiveContextRowAuthor,
     provider_context: Option<String>,
     causal_context: Option<String>,
     #[cfg(feature = "live")]
@@ -291,6 +293,7 @@ impl CommittedLiveContextRow {
             store_commit_authority: store_commit_authority.to_string(),
             disposition,
             source: crate::meerkat_machine::dsl::LiveContextRowSource::Conversation,
+            author: row_author(message),
             provider_context,
             causal_context,
             observation_id,
@@ -349,6 +352,12 @@ impl CommittedLiveContextRow {
         }
     }
 
+    /// Who authored this row (user input, assistant output, runtime context).
+    #[cfg(feature = "live")]
+    pub(crate) const fn author(&self) -> crate::meerkat_machine::dsl::LiveContextRowAuthor {
+        self.author
+    }
+
     /// What drove the turn that committed this row (see
     /// [`classify_committed_boundary_rows_after`]).
     #[cfg(feature = "live")]
@@ -359,6 +368,21 @@ impl CommittedLiveContextRow {
     #[cfg(feature = "live")]
     pub(crate) fn observation_id(&self) -> Option<&meerkat_core::LiveContextObservationId> {
         self.observation_id.as_ref()
+    }
+}
+
+/// Author of a committed row as the live-context authority sees it: only a
+/// conversational user row is the user's own input. Injected context and a
+/// compaction summary ride a user message but are runtime-authored.
+#[cfg(feature = "live")]
+fn row_author(message: &Message) -> crate::meerkat_machine::dsl::LiveContextRowAuthor {
+    use crate::meerkat_machine::dsl::LiveContextRowAuthor;
+    match message {
+        Message::User(user) if user.transcript_role.is_conversational() => {
+            LiveContextRowAuthor::User
+        }
+        Message::BlockAssistant(_) => LiveContextRowAuthor::Assistant,
+        _ => LiveContextRowAuthor::Runtime,
     }
 }
 

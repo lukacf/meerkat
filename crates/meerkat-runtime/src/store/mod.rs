@@ -1244,6 +1244,7 @@ impl PreparedHeadCanonicalProvisionalPromotion {
     }
 
     #[must_use]
+    #[cfg(feature = "sqlite-store")]
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -1507,6 +1508,7 @@ impl HeadCanonicalStoreAuthority {
         })
     }
 
+    #[cfg(feature = "sqlite-store")]
     pub(crate) fn issued(
         session_id: meerkat_core::types::SessionId,
         store_revision: u64,
@@ -1576,6 +1578,7 @@ impl HeadCanonicalRuntimeAuthorityActivation {
     }
 }
 
+#[cfg(feature = "sqlite-store")]
 fn head_canonical_activation_predecessor_matches(
     predecessor: &meerkat_core::session_store::SessionHead,
     successor: &meerkat_core::session_store::SessionHead,
@@ -1643,7 +1646,13 @@ fn head_canonical_activation_predecessor_matches(
 /// same live successor. Backends persist those facts with the fixed-size
 /// authority; the physical SessionStore CAS realizes the already-bound head
 /// separately.
+///
+/// `prepare` validates and records these facts for every backend, but the
+/// only reader is the SQLite RuntimeStore adapter (`store/sqlite.rs`), whose
+/// crate-private accessors below exist only with `sqlite-store`. Without it
+/// the recorded fields have no in-crate reader, which is expected.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "sqlite-store"), allow(dead_code))]
 pub struct PreparedHeadCanonicalProvisionalTail {
     committed: HeadCanonicalStoreAuthority,
     run_id: RunId,
@@ -1738,7 +1747,11 @@ impl PreparedHeadCanonicalProvisionalTail {
             compaction_projection_intents,
         })
     }
+}
 
+/// The SQLite RuntimeStore adapter's view of a prepared provisional tail.
+#[cfg(feature = "sqlite-store")]
+impl PreparedHeadCanonicalProvisionalTail {
     #[must_use]
     pub(crate) fn committed(&self) -> &HeadCanonicalStoreAuthority {
         &self.committed
@@ -1982,6 +1995,7 @@ pub struct PreparedDurableTailRecoverySource {
 }
 
 impl PreparedDurableTailRecoverySource {
+    #[cfg(feature = "sqlite-store")]
     pub(crate) fn new(
         runtime_authority: RuntimeSessionAuthority,
         provisional_authority: Option<HeadCanonicalProvisionalTailAuthority>,
@@ -2658,6 +2672,7 @@ fn recovery_class_name(
     }
 }
 
+#[cfg(feature = "sqlite-store")]
 fn recovery_class_from_name(
     name: &str,
 ) -> Result<crate::meerkat_machine::dsl::DurableTailRecoveryClass, RuntimeStoreError> {
@@ -2691,6 +2706,7 @@ fn recovery_disposition_name(
     }
 }
 
+#[cfg(feature = "sqlite-store")]
 fn recovery_disposition_from_name(
     name: &str,
 ) -> Result<crate::meerkat_machine::dsl::DurableTailRecoveryDisposition, RuntimeStoreError> {
@@ -3058,6 +3074,7 @@ impl PreparedRecoveryInputUpdate {
         })
     }
 
+    #[cfg(feature = "sqlite-store")]
     fn decode(
         input_id: InputId,
         expected_row_digest: String,
@@ -3943,6 +3960,7 @@ impl PreparedRecoveryEvidence {
         self.disposition
     }
 
+    #[cfg(feature = "sqlite-store")]
     pub(crate) fn head_canonical_authority_transition(
         &self,
     ) -> Option<(u64, &str, u64, &str, &str)> {
@@ -3998,6 +4016,7 @@ impl PreparedRecoveryEvidence {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(feature = "sqlite-store")]
 struct CommittedRecoveryReceiptDigestEnrichmentWire {
     original_receipt: RunBoundaryReceipt,
     original_exact_row_token: String,
@@ -4006,6 +4025,7 @@ struct CommittedRecoveryReceiptDigestEnrichmentWire {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(feature = "sqlite-store")]
 struct CommittedRecoveryInputUpdateWire {
     input_id: InputId,
     expected_row_digest: String,
@@ -4014,6 +4034,7 @@ struct CommittedRecoveryInputUpdateWire {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "profile", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg(feature = "sqlite-store")]
 enum CommittedRecoverySessionAuthorityWire {
     WholeBlobV1 {
         base_store_revision: u64,
@@ -4033,6 +4054,7 @@ enum CommittedRecoverySessionAuthorityWire {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(feature = "sqlite-store")]
 struct CommittedRecoveryBoundaryWire {
     version: u16,
     session_id: meerkat_core::types::SessionId,
@@ -4059,6 +4081,7 @@ pub struct CommittedRecoveryBoundary {
 }
 
 impl CommittedRecoveryBoundary {
+    #[cfg(feature = "sqlite-store")]
     const VERSION: u16 = 6;
 
     pub(crate) fn from_prepared(
@@ -4079,6 +4102,7 @@ impl CommittedRecoveryBoundary {
         &self.receipt
     }
 
+    #[cfg(feature = "sqlite-store")]
     pub(crate) fn encode(&self) -> Result<Vec<u8>, RuntimeStoreError> {
         serde_json::to_vec(&CommittedRecoveryBoundaryWire {
             version: Self::VERSION,
@@ -4155,6 +4179,7 @@ impl CommittedRecoveryBoundary {
         })
     }
 
+    #[cfg(feature = "sqlite-store")]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, RuntimeStoreError> {
         let wire: CommittedRecoveryBoundaryWire =
             serde_json::from_slice(bytes).map_err(|error| {
@@ -4368,6 +4393,13 @@ pub enum PreparedRuntimeSessionCommitKind {
     Recovery,
 }
 
+/// Backend-neutral commit payload built by the shared commit preparation.
+///
+/// The HeadCanonical promotions and the recovery evidence are consumed only
+/// by the SQLite RuntimeStore adapter (`store/sqlite.rs`); the in-memory
+/// store refuses those variants without reading them. Those fields carry a
+/// narrow `allow(dead_code)` for builds without `sqlite-store`, because
+/// gating them would also gate the preparation inputs that fill them.
 #[derive(Debug, Clone)]
 pub(crate) enum PreparedRuntimeSessionCommitPayload {
     SnapshotOnly {
@@ -4386,6 +4418,7 @@ pub(crate) enum PreparedRuntimeSessionCommitPayload {
         session_store_key: meerkat_core::types::SessionId,
     },
     PromoteHeadCanonicalSuccess {
+        #[cfg_attr(not(feature = "sqlite-store"), allow(dead_code))]
         promotion: PreparedHeadCanonicalProvisionalPromotion,
         receipt: RunBoundaryReceipt,
         input_updates: Vec<InputStatePersistenceRecord>,
@@ -4404,6 +4437,7 @@ pub(crate) enum PreparedRuntimeSessionCommitPayload {
         session_store_key: meerkat_core::types::SessionId,
     },
     PromoteHeadCanonicalServiceTurnTerminal {
+        #[cfg_attr(not(feature = "sqlite-store"), allow(dead_code))]
         promotion: PreparedHeadCanonicalProvisionalPromotion,
         receipt: RunBoundaryReceipt,
         machine_lifecycle: MachineLifecycleCommit,
@@ -4424,6 +4458,7 @@ pub(crate) enum PreparedRuntimeSessionCommitPayload {
         session_store_key: meerkat_core::types::SessionId,
     },
     PromoteHeadCanonicalMachineTerminal {
+        #[cfg_attr(not(feature = "sqlite-store"), allow(dead_code))]
         promotion: PreparedHeadCanonicalProvisionalPromotion,
         receipt: RunBoundaryReceipt,
         machine_lifecycle: MachineLifecycleCommit,
@@ -4432,6 +4467,7 @@ pub(crate) enum PreparedRuntimeSessionCommitPayload {
     },
     Recovery {
         session: BoundSessionCommit,
+        #[cfg_attr(not(feature = "sqlite-store"), allow(dead_code))]
         evidence: PreparedRecoveryEvidence,
         receipt: RunBoundaryReceipt,
         machine_lifecycle: MachineLifecycleCommit,

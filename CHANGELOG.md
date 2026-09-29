@@ -251,15 +251,20 @@ them.
   key (read side-effect free, from one runtime observation) into the roster
   projection through a typed delta bound to the member's incarnation and
   bridge session, before Resume returns and before any new turn or topology
-  operation. No turn, respawn or host roster edit is needed. When a
-  restored member's live endpoint disagrees with its durable generation
+  operation. No turn, respawn or host roster edit is needed. On both
+  paths, the Running cold boot and explicit Resume of a Stopped mob, a
+  restored member whose live endpoint disagrees with its durable generation
   endpoint (for example a lost identity store or a changed advertise
-  address) or exposes no usable endpoint, only that member is recorded
-  Broken, with a reason naming the mismatch and the respawn action, and
-  nothing is published for it; the other members and the Resume carry on.
-  A placed (host-owned) member's durable host-acknowledged peer ID, which
-  spawn projects but replay dropped, is republished the same way after both
-  Running and Stopped restarts.
+  address), or that exposes no usable endpoint, is recorded Broken on its
+  own, with a reason naming the mismatch and the respawn action. Nothing is
+  published for it, and the other members and the boot or Resume carry on;
+  the Running cold boot used to abort the whole mob instead. The verdict is
+  re-derived on every boot from the durable endpoint, so a member left
+  Broken by a Stopped Resume is Broken again after a later Running restart
+  until it is respawned. A placed (host-owned) member's durable
+  host-acknowledged peer ID, which spawn projects but replay dropped, is
+  republished the same way after both Running and Stopped restarts; a
+  Broken placed member publishes nothing.
 - `MobHandle::subscribe_mob_events` returns only once the router is
   subscribed to every member it starts with (local session streams and
   placed members' pump taps). Those subscriptions used to be made inside the

@@ -1367,6 +1367,16 @@ where
     let broken = state.member_restore_failures.contains_key(&dsl_identity);
     let durable_endpoint = state.member_peer_endpoints.get(&dsl_identity).cloned();
     match &projection.observation {
+        MemberCommsIdentityObservation::ClearBroken => {
+            if !broken {
+                return Err(stale("clears a member that is not broken"));
+            }
+            ctx.roster
+                .resume_topology_set_member_comms_identity(agent_identity, None, None);
+            Ok(())
+        }
+        // A Broken member publishes nothing, local or placed.
+        _ if broken => Err(stale("targets a broken member")),
         MemberCommsIdentityObservation::HostOwnedDurable => {
             if !host_owned {
                 return Err(stale("republishes a host endpoint for a local member"));
@@ -1374,11 +1384,15 @@ where
             let Some(endpoint) = durable_endpoint else {
                 return Err(stale("has no durable host-acknowledged endpoint"));
             };
-            let peer_id = PeerId::parse(&endpoint.peer_id.0).map_err(|error| {
-                ResumeTopologyAuthorityError::Failed(MobError::WiringError(format!(
-                    "resume_project_member_comms_identity: durable endpoint of '{agent_identity}' has an invalid peer id: {error}"
-                )))
-            })?;
+            let peer_id = match PeerId::parse(&endpoint.peer_id.0) {
+                Ok(peer_id) => peer_id,
+                Err(error) => {
+                    let detail = format!(
+                        "its durable host-acknowledged endpoint has an invalid peer id: {error}"
+                    );
+                    return record_member_endpoint_broken(ctx, &entry, &dsl_identity, &detail);
+                }
+            };
             // Spawn projects only the host-acknowledged peer id for a placed
             // member; its transport key stays exactly as spawn left it.
             ctx.roster.resume_topology_set_member_comms_identity(
@@ -1389,15 +1403,6 @@ where
             Ok(())
         }
         _ if host_owned => Err(stale("targets a host-owned member")),
-        MemberCommsIdentityObservation::ClearBroken => {
-            if !broken {
-                return Err(stale("clears a member that is not broken"));
-            }
-            ctx.roster
-                .resume_topology_set_member_comms_identity(agent_identity, None, None);
-            Ok(())
-        }
-        _ if broken => Err(stale("targets a broken member")),
         MemberCommsIdentityObservation::Unavailable { detail } => {
             record_member_endpoint_broken(ctx, &entry, &dsl_identity, detail)
         }
@@ -1406,10 +1411,8 @@ where
             if let Some(durable) = durable_endpoint.as_ref()
                 && durable != &candidate
             {
-                let detail = format!(
-                    "live endpoint (peer '{}' at '{}') disagrees with its durable generation endpoint (peer '{}' at '{}')",
-                    candidate.peer_id.0, candidate.address.0, durable.peer_id.0, durable.address.0
-                );
+                let detail =
+                    crate::runtime::builder::member_endpoint_mismatch_detail(&candidate, durable);
                 return record_member_endpoint_broken(ctx, &entry, &dsl_identity, &detail);
             }
             let transport_public_key =
@@ -1438,9 +1441,7 @@ where
     R: ResumeTopologyRosterProjection + ?Sized,
 {
     let agent_identity = &entry.agent_identity;
-    let reason = format!(
-        "restored member '{agent_identity}' cannot publish its comms endpoint: {detail}; respawn the member to mint a new endpoint"
-    );
+    let reason = crate::runtime::builder::member_endpoint_broken_reason(agent_identity, detail);
     crate::runtime::builder::apply_seeded_mob_signal(
         ctx.authority,
         mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
@@ -2056,6 +2057,74 @@ where
     }
 }
 
+/// Observe one member's comms identity for the resume projection step.
+///
+/// `None` means there is nothing to project. Only the side-effect free
+/// `trusted_peer_spec_from_runtime` is used on the live runtime: the
+/// provisioner's `trusted_peer_spec` also marks the member peer ready, which
+/// needs the operation binding explicit Resume only restores after topology.
+async fn observe_member_comms_identity(
+    provisioner: &dyn MobProvisioner,
+    mob_id: &MobId,
+    entry: &RosterEntry,
+    member: &ResumeTopologyMemberObservation,
+) -> Result<Option<MemberCommsIdentityObservation>, ResumeTopologyAuthorityError> {
+    if member.retiring {
+        // Retirement replay owns the exact retiring endpoint.
+        return Ok(None);
+    }
+    let observation = if member.broken {
+        // A Broken member (local or placed) publishes nothing; only a
+        // stale projection is cleared.
+        if entry.peer_id.is_none() && entry.transport_public_key.is_none() {
+            return Ok(None);
+        }
+        MemberCommsIdentityObservation::ClearBroken
+    } else if member.host_owned {
+        let Some(endpoint) = member.peer_endpoint.as_ref() else {
+            return Ok(None);
+        };
+        if entry
+            .peer_id
+            .is_some_and(|peer_id| peer_id.to_string() == endpoint.peer_id.0)
+        {
+            return Ok(None);
+        }
+        MemberCommsIdentityObservation::HostOwnedDurable
+    } else {
+        let Some(comms) = provisioner.comms_runtime(&entry.member_ref).await else {
+            return Ok(None);
+        };
+        let name = render_member_comms_name(
+            mob_id.as_str(),
+            entry.role.as_str(),
+            entry.agent_identity.as_str(),
+        )?;
+        // Side-effect free: the provisioner's `trusted_peer_spec` also
+        // marks the member peer ready, which needs the operation
+        // binding explicit Resume only restores after topology.
+        match crate::runtime::provisioner::trusted_peer_spec_from_runtime(&name, comms.as_ref()) {
+            Ok(Some(descriptor)) => {
+                let transport_public_key =
+                    meerkat_comms::PubKey::new(descriptor.pubkey).to_pubkey_string();
+                if entry.peer_id == Some(descriptor.peer_id)
+                    && entry.transport_public_key.as_deref() == Some(transport_public_key.as_str())
+                {
+                    return Ok(None);
+                }
+                MemberCommsIdentityObservation::Live(Box::new(descriptor))
+            }
+            Ok(None) => MemberCommsIdentityObservation::Unavailable {
+                detail: "its live comms runtime exposes no peer id or public key".to_string(),
+            },
+            Err(error) => MemberCommsIdentityObservation::Unavailable {
+                detail: format!("its live comms runtime has no valid endpoint: {error}"),
+            },
+        }
+    };
+    Ok(Some(observation))
+}
+
 struct ResumeTopologyReconciler<'a, R>
 where
     R: ResumeTopologyAuthorityRouter,
@@ -2148,61 +2217,15 @@ where
         for entry in &plan.entries {
             let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
             let member = plan.member(&dsl_identity);
-            if member.retiring {
-                // Retirement replay owns the exact retiring endpoint.
+            let Some(observation) = observe_member_comms_identity(
+                self.io.provisioner,
+                &self.io.definition.id,
+                entry,
+                &member,
+            )
+            .await?
+            else {
                 continue;
-            }
-            let observation = if member.host_owned {
-                let Some(endpoint) = member.peer_endpoint.as_ref() else {
-                    continue;
-                };
-                if entry
-                    .peer_id
-                    .is_some_and(|peer_id| peer_id.to_string() == endpoint.peer_id.0)
-                {
-                    continue;
-                }
-                MemberCommsIdentityObservation::HostOwnedDurable
-            } else if member.broken {
-                if entry.peer_id.is_none() && entry.transport_public_key.is_none() {
-                    continue;
-                }
-                MemberCommsIdentityObservation::ClearBroken
-            } else {
-                let Some(comms) = self.io.provisioner.comms_runtime(&entry.member_ref).await else {
-                    continue;
-                };
-                let name = render_member_comms_name(
-                    self.io.definition.id.as_str(),
-                    entry.role.as_str(),
-                    entry.agent_identity.as_str(),
-                )?;
-                // Side-effect free: the provisioner's `trusted_peer_spec` also
-                // marks the member peer ready, which needs the operation
-                // binding explicit Resume only restores after topology.
-                match crate::runtime::provisioner::trusted_peer_spec_from_runtime(
-                    &name,
-                    comms.as_ref(),
-                ) {
-                    Ok(Some(descriptor)) => {
-                        let transport_public_key =
-                            meerkat_comms::PubKey::new(descriptor.pubkey).to_pubkey_string();
-                        if entry.peer_id == Some(descriptor.peer_id)
-                            && entry.transport_public_key.as_deref()
-                                == Some(transport_public_key.as_str())
-                        {
-                            continue;
-                        }
-                        MemberCommsIdentityObservation::Live(Box::new(descriptor))
-                    }
-                    Ok(None) => MemberCommsIdentityObservation::Unavailable {
-                        detail: "its live comms runtime exposes no peer id or public key"
-                            .to_string(),
-                    },
-                    Err(error) => MemberCommsIdentityObservation::Unavailable {
-                        detail: format!("its live comms runtime has no valid endpoint: {error}"),
-                    },
-                }
             };
             let agent_identity = entry.agent_identity.clone();
             let projection = Box::new(MemberCommsIdentityProjection {
@@ -4086,14 +4109,19 @@ mod tests {
 
     impl PlacedMemberFixture {
         fn new() -> Self {
+            let signing_key = [3_u8; 32];
+            Self::with_durable_peer_id(
+                meerkat_core::comms::PeerId::from_ed25519_pubkey(&signing_key).to_string(),
+            )
+        }
+
+        fn with_durable_peer_id(peer_id: String) -> Self {
             let placed = mob_dsl::AgentIdentity::from("placed");
             let host = mob_dsl::HostId("placed-host".to_string());
             let signing_key = [3_u8; 32];
             let endpoint = mob_dsl::MemberPeerEndpoint {
                 name: mob_dsl::PeerName("fixture-mob/worker/placed".to_string()),
-                peer_id: mob_dsl::PeerId(
-                    meerkat_core::comms::PeerId::from_ed25519_pubkey(&signing_key).to_string(),
-                ),
+                peer_id: mob_dsl::PeerId(peer_id),
                 address: mob_dsl::PeerAddress("tcp://placed-member.test:4200".to_string()),
                 signing_key: mob_dsl::PeerSigningKey(signing_key),
             };
@@ -4177,6 +4205,268 @@ mod tests {
             handle_resume_topology_authority_request(&mut context, Ok(()), request);
             reply_rx.try_recv().expect("handler always answers")
         }
+    }
+
+    impl PlacedMemberFixture {
+        fn break_member(&mut self) {
+            self.authority
+                .apply_signal(mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
+                    agent_identity: mob_dsl::AgentIdentity::from("placed"),
+                    reason: "placed restore failed".to_string(),
+                })
+                .expect("record the placed member's restore failure");
+        }
+
+        fn projected(&self) -> (Option<PeerId>, Option<String>) {
+            let entry = self.roster.get_by_identity(&identity("placed")).unwrap();
+            (entry.peer_id, entry.transport_public_key.clone())
+        }
+    }
+
+    #[test]
+    fn broken_host_owned_member_is_cleared_never_republished() {
+        let mut fixture = PlacedMemberFixture::new();
+        fixture
+            .project(MemberCommsIdentityObservation::HostOwnedDurable)
+            .expect("publish before the placed member breaks");
+        assert!(fixture.projected().0.is_some());
+        fixture.break_member();
+        let refusal = fixture
+            .project(MemberCommsIdentityObservation::HostOwnedDurable)
+            .expect_err("a Broken placed member publishes nothing");
+        assert!(matches!(refusal, ResumeTopologyAuthorityError::Stale(_)));
+        fixture
+            .project(MemberCommsIdentityObservation::ClearBroken)
+            .expect("a Broken placed member's stale projection is cleared");
+        assert_eq!(fixture.projected(), (None, None));
+    }
+
+    #[test]
+    fn invalid_durable_placed_peer_id_breaks_only_that_member() {
+        let mut fixture = PlacedMemberFixture::with_durable_peer_id("not-a-peer-id".to_string());
+        let epoch_before = fixture.authority.state().topology_epoch;
+        fixture
+            .project(MemberCommsIdentityObservation::HostOwnedDurable)
+            .expect("an invalid durable peer id never fails the resume");
+        let reason = fixture
+            .authority
+            .state()
+            .member_restore_failures
+            .get(&mob_dsl::AgentIdentity::from("placed"))
+            .cloned()
+            .expect("the placed member is recorded Broken");
+        assert!(
+            reason.contains("invalid peer id") && reason.contains("respawn the member"),
+            "{reason}"
+        );
+        assert_eq!(fixture.restore_failures.len(), 1);
+        assert_eq!(fixture.projected(), (None, None));
+        assert_ne!(fixture.authority.state().topology_epoch, epoch_before);
+    }
+
+    /// Provisioner double for the observation step: it serves one live comms
+    /// runtime and fails the test if the side-effecting `trusted_peer_spec`
+    /// (which marks the member peer ready) is ever reached.
+    struct ObservationOnlyProvisioner {
+        comms: Arc<dyn meerkat_core::agent::CommsRuntime>,
+        trusted_peer_spec_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl MobProvisioner for ObservationOnlyProvisioner {
+        async fn provision_member(
+            &self,
+            _req: crate::runtime::provisioner::ProvisionMemberRequest,
+        ) -> Result<crate::runtime::handle::MemberSpawnReceipt, MobError> {
+            unreachable!("the observation step never provisions")
+        }
+        async fn abort_member_provision(
+            &self,
+            _member_ref: &MemberRef,
+            _operation_id: &meerkat_core::ops::OperationId,
+            _reason: &str,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never aborts a provision")
+        }
+        async fn capture_resumed_member_rollback_authority(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Result<crate::runtime::provisioner::ResumedMemberRollbackAuthority, MobError> {
+            unreachable!("the observation step never captures rollback authority")
+        }
+        async fn restore_resumed_member(
+            &self,
+            _member_ref: &MemberRef,
+            _operation_id: &meerkat_core::ops::OperationId,
+            _original_origin: crate::runtime::provisioner::ProvisionSessionOrigin,
+            _rollback_authority: &crate::runtime::provisioner::ResumedMemberRollbackAuthority,
+            _rollback_origin: crate::runtime::provisioner::RollbackOrigin,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never restores")
+        }
+        async fn retire_member(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Result<mob_dsl::MemberSessionDisposal, MobError> {
+            unreachable!("the observation step never retires")
+        }
+        async fn retire_member_until(
+            &self,
+            _member_ref: &MemberRef,
+            _member_identity: &crate::ids::AgentIdentity,
+            _deadline: meerkat_core::time_compat::Instant,
+        ) -> Result<mob_dsl::MemberSessionDisposal, MobError> {
+            unreachable!("the observation step never retires")
+        }
+        async fn interrupt_member(
+            &self,
+            _member_ref: &MemberRef,
+            _expected_member: Option<&crate::runtime::bridge_protocol::BridgeMemberIncarnation>,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never interrupts")
+        }
+        async fn hard_cancel_member(
+            &self,
+            _member_ref: &MemberRef,
+            _reason: &str,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never cancels")
+        }
+        async fn start_turn(
+            &self,
+            _member_ref: &MemberRef,
+            _req: meerkat_core::service::StartTurnRequest,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never starts a turn")
+        }
+        async fn admit_turn(
+            &self,
+            _member_ref: &MemberRef,
+            _req: meerkat_core::service::StartTurnRequest,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never admits a turn")
+        }
+        async fn interaction_event_injector(
+            &self,
+            _bridge_session_id: &SessionId,
+        ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+            None
+        }
+        async fn is_member_active(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Result<Option<bool>, MobError> {
+            Ok(None)
+        }
+        async fn prepare_member_session_for_explicit_resume(
+            &self,
+            _session_id: &SessionId,
+            _deadline: meerkat_core::time_compat::Instant,
+            _admission: Option<crate::runtime::state::LifecycleAdmissionSignal>,
+        ) -> Result<bool, MobError> {
+            unreachable!("the observation step never prepares a session")
+        }
+        async fn comms_runtime(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+            Some(Arc::clone(&self.comms))
+        }
+        async fn trusted_peer_spec(
+            &self,
+            _member_ref: &MemberRef,
+            _fallback_name: &str,
+            _fallback_peer_id: &str,
+        ) -> Result<TrustedPeerDescriptor, MobError> {
+            self.trusted_peer_spec_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(MobError::Internal(
+                "the resume projection step must not mark the member peer ready".to_string(),
+            ))
+        }
+        async fn publish_trusted_peer_spec_for_operation(
+            &self,
+            _member_ref: &MemberRef,
+            _operation_id: &meerkat_core::ops::OperationId,
+            _trusted_peer: TrustedPeerDescriptor,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never publishes for an operation")
+        }
+        async fn active_operation_id_for_member(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Option<meerkat_core::ops::OperationId> {
+            None
+        }
+        async fn bind_member_owner_context(
+            &self,
+            _member_ref: &MemberRef,
+            _owner_bridge_session_id: SessionId,
+            _ops_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never binds an owner context")
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_step_never_calls_the_side_effecting_trusted_peer_spec() {
+        let name = format!("observation-only-{}", uuid::Uuid::new_v4().simple());
+        let runtime =
+            meerkat_comms::CommsRuntime::inproc_only(&name).expect("inproc comms runtime");
+        let comms: Arc<dyn meerkat_core::agent::CommsRuntime> = Arc::new(runtime);
+        let live_peer_id = comms.peer_id().expect("live peer id");
+        let provisioner = ObservationOnlyProvisioner {
+            comms,
+            trusted_peer_spec_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let mob_id = MobId::from("fixture-mob");
+        let mut roster = Roster::new();
+        roster.add(session_roster_entry("member-a"));
+        let entry = roster
+            .get_by_identity(&identity("member-a"))
+            .unwrap()
+            .clone();
+
+        let healthy = observe_member_comms_identity(
+            &provisioner,
+            &mob_id,
+            &entry,
+            &ResumeTopologyMemberObservation::default(),
+        )
+        .await
+        .expect("observation succeeds");
+        match healthy {
+            Some(MemberCommsIdentityObservation::Live(descriptor)) => {
+                assert_eq!(descriptor.peer_id, live_peer_id);
+            }
+            other => panic!("a healthy local member observes its live endpoint, got {other:?}"),
+        }
+
+        // A Broken member is checked before placement: a Broken placed member
+        // with a stale projection is cleared, never republished.
+        let mut stale = entry.clone();
+        stale.peer_id = Some(live_peer_id);
+        let broken_placed = ResumeTopologyMemberObservation {
+            broken: true,
+            host_owned: true,
+            peer_endpoint: Some(test_peer_endpoint("placed")),
+            ..ResumeTopologyMemberObservation::default()
+        };
+        let cleared = observe_member_comms_identity(&provisioner, &mob_id, &stale, &broken_placed)
+            .await
+            .expect("observation succeeds");
+        assert!(
+            matches!(cleared, Some(MemberCommsIdentityObservation::ClearBroken)),
+            "got {cleared:?}"
+        );
+
+        assert_eq!(
+            provisioner
+                .trusted_peer_spec_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the step must use the side-effect free runtime observation only"
+        );
     }
 
     #[test]

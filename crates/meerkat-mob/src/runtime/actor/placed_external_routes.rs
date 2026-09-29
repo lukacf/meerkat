@@ -14,6 +14,12 @@
 //! * The bridge carrier is the existing V4 `InstallPeerTrust` /
 //!   `RemovePeerTrust`: the host arm installs any validated peer descriptor
 //!   on the materialized member, so no protocol change is needed.
+//! * On a confirmed-revoked host (an exact revoke tombstone proves its trust
+//!   store is gone) unwire skips the Remove and commits directly, as for
+//!   member-member routes.
+//! * A failed removal re-records the Install: a timed-out (unreachable but
+//!   Bound) host is left to the drain triggers, any other failure is
+//!   reinstalled immediately.
 
 use super::*;
 
@@ -210,6 +216,38 @@ impl MobActor {
         Ok(())
     }
 
+    /// Record (only) the Install for an external edge whose local member is
+    /// placed and healthy; the drain triggers realize it. A Broken member's
+    /// edge is never recorded (the rederivation rule excludes it too).
+    fn record_external_route_install_for_edge(
+        &mut self,
+        edge: &mob_dsl::ExternalPeerEdge,
+        context: &'static str,
+    ) -> Option<mob_dsl::ExternalRouteObligation> {
+        if self
+            .dsl_authority
+            .state()
+            .member_restore_failures
+            .contains_key(&edge.local)
+        {
+            return None;
+        }
+        let obligation =
+            self.external_route_obligation_for_edge(edge, mob_dsl::RouteObligationKind::Install)?;
+        match self.record_external_route_install_obligation(&obligation, context) {
+            Ok(()) => Some(obligation),
+            Err(error) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    host = %obligation.host.as_str(),
+                    %error,
+                    "external route install not recorded; the host drain re-derives it"
+                );
+                None
+            }
+        }
+    }
+
     /// Record and realize the Install for an external edge whose local member
     /// is placed. A failure leaves the obligation pending (observable in
     /// `route_installs()`); it never unwinds the committed edge.
@@ -218,21 +256,10 @@ impl MobActor {
         edge: &mob_dsl::ExternalPeerEdge,
     ) {
         let Some(obligation) =
-            self.external_route_obligation_for_edge(edge, mob_dsl::RouteObligationKind::Install)
+            self.record_external_route_install_for_edge(edge, "external_wire_route_install")
         else {
             return;
         };
-        if let Err(error) = self
-            .record_external_route_install_obligation(&obligation, "external_wire_route_install")
-        {
-            tracing::warn!(
-                mob_id = %self.definition.id,
-                host = %obligation.host.as_str(),
-                %error,
-                "external route install not recorded; the host drain re-derives it"
-            );
-            return;
-        }
         if let Err(error) = self.realize_external_route(&obligation).await {
             tracing::warn!(
                 mob_id = %self.definition.id,
@@ -422,10 +449,20 @@ impl MobActor {
             self.authorize_external_route_removal_before_unwire(&removal)?;
             if let Err(error) = self.realize_external_route(&removal).await {
                 // A rejected or timed-out removal leaves the edge wired, and
-                // the host may already have dropped the row: reinstall it so
-                // route_installs() never reads complete while a wired edge
-                // lacks host trust.
-                self.fold_external_route_install_after_wire(&edge).await;
+                // the host may already have dropped the row. The Install is
+                // recorded again so route_installs() never reads complete
+                // while a wired edge lacks host trust. A timed-out host is
+                // unreachable though still Bound: realizing now would stall
+                // the actor on two more timeouts, so the drain triggers
+                // (explicit drive, HostStatus, rebind) realize it instead.
+                if Self::route_install_send_is_resendable(&error) {
+                    self.record_external_route_install_for_edge(
+                        &edge,
+                        "external_removal_timeout_restores_install",
+                    );
+                } else {
+                    self.fold_external_route_install_after_wire(&edge).await;
+                }
                 return Err(error);
             }
         }

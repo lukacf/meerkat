@@ -8897,12 +8897,13 @@ impl MobHandle {
     /// it listens now.
     ///
     /// Returns `Ok(None)` when the member is absent, has no registered
-    /// endpoint, or is Broken (a Broken member publishes no endpoint, exactly
-    /// like its roster projection). A Retiring member still returns its
-    /// endpoint: retirement cleanup addresses exactly that endpoint until the
-    /// member is retired. A query fault is `Err`, never `None`. Use
-    /// [`Self::member_endpoint_status`] to also learn who owns an unusable
-    /// endpoint.
+    /// endpoint, has a recorded endpoint that does not form a valid
+    /// descriptor, or is Broken (a Broken member publishes no endpoint,
+    /// exactly like its roster projection). A Retiring member still returns
+    /// its endpoint: retirement cleanup addresses exactly that endpoint until
+    /// the member is retired. Only a genuine query fault is `Err`. Use
+    /// [`Self::member_endpoint_status`] to learn who owns an unusable
+    /// endpoint and why.
     pub async fn member_peer_endpoint(
         &self,
         identity: &AgentIdentity,

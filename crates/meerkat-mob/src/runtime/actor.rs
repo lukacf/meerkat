@@ -14020,54 +14020,23 @@ impl MobActor {
             })
             .await?;
 
-        // Ack echoes vs machine facts (typed mismatch, never absorbed): the
-        // recorded response must name the SAME session and digest.
-        let Some(ack) = receipt.receipt.materialized_ack.as_deref() else {
-            return Err(MobError::Internal(format!(
-                "placed revival ack for '{agent_identity}' carried no materialized ack facts"
-            )));
-        };
-        if ack.session_id.to_string() != binding.0 {
-            return Err(MobError::Internal(format!(
-                "placed revival ack for '{agent_identity}' names session '{}' but the machine \
-                 binding is '{}'",
-                ack.session_id, binding.0
-            )));
-        }
-        if ack.spec_digest_echo != record.spec_digest {
-            return Err(MobError::Internal(format!(
-                "placed revival ack digest echo for '{agent_identity}' diverged from the recorded \
-                 spec digest"
-            )));
-        }
-        // The revived runtime must answer at the member's durable generation
-        // endpoint (peer id, address and transport key). A host that
-        // re-materialized it under a different identity fails the revival,
-        // which records the member Broken instead of adopting an endpoint
-        // nothing durable vouches for (#1269).
-        let revived = mob_dsl::MemberPeerEndpoint::from(&ack.member_peer);
-        let endpoint_defect = super::builder::member_endpoint_defect(
-            self.dsl_authority
-                .state()
-                .member_peer_endpoints
-                .get(&mob_dsl::AgentIdentity::from_domain(agent_identity)),
-            &revived,
-            "it has no durable host-acknowledged endpoint to verify",
-        );
-        if let Some(detail) = endpoint_defect {
-            // The ack bound the refused endpoint into the ops registry for the
-            // committed operation; drop that exact binding so nothing stays
-            // bound to it. The committed operation itself survives with the
-            // (now Broken) member.
-            //
-            // The mismatched host runtime is deliberately LEFT IN PLACE,
-            // untrusted: the only release verb (`ReleaseMember`) is durable
-            // disposal, which would destroy the Broken member's session and
-            // history and pre-empt its retirement. It is harmless meanwhile:
-            // the member is recorded Broken, publishes no endpoint, delivery
-            // to it is refused (`MemberRestoreFailed`), and no peer ever
-            // installs trust for the new key. Retire or respawn releases it
-            // through the normal path.
+        // Every ack refusal (missing facts, session, digest, endpoint) takes
+        // ONE path: the ack bound its endpoint into the ops registry for the
+        // committed operation, so that exact binding is dropped before the
+        // revival fails and the member is recorded Broken. The committed
+        // operation itself survives with the (now Broken) member.
+        //
+        // The refused host runtime is deliberately LEFT IN PLACE, untrusted:
+        // the only release verb (`ReleaseMember`) is durable disposal, which
+        // would destroy the Broken member's session and history and pre-empt
+        // its retirement. It is harmless meanwhile: the member is recorded
+        // Broken, publishes no endpoint, delivery to it is refused
+        // (`MemberRestoreFailed`), and no peer ever installs trust for an
+        // unvouched key. Retire or respawn releases it through the normal
+        // path.
+        if let Some(refusal) =
+            self.revived_placed_ack_refusal(agent_identity, binding, &record, &receipt)
+        {
             if let Err(error) = self
                 .provisioner
                 .clear_placed_member_binding_exact(
@@ -14081,12 +14050,10 @@ impl MobActor {
                     mob_id = %self.definition.id,
                     agent_identity = %agent_identity,
                     %error,
-                    "failed to clear the registry binding of a refused revived endpoint"
+                    "failed to clear the registry binding of a refused revival ack"
                 );
             }
-            return Err(MobError::WiringError(
-                super::builder::member_endpoint_broken_reason(agent_identity, &detail),
-            ));
+            return Err(refusal);
         }
 
         // The G2 ACK is authenticated by the exact bound request. Persist the
@@ -14107,6 +14074,53 @@ impl MobActor {
         // itself stands.
         self.drive_route_installs_for_identity(agent_identity).await;
         Ok(())
+    }
+
+    /// Why a placed revival's ack is refused, or `None` to adopt it. Ack
+    /// echoes are checked against machine facts (typed mismatch, never
+    /// absorbed): the same session and digest, and the member's durable
+    /// generation endpoint (peer id, address and transport key); a host that
+    /// re-materialized it under another identity is refused (#1269).
+    fn revived_placed_ack_refusal(
+        &self,
+        agent_identity: &AgentIdentity,
+        binding: &mob_dsl::SessionId,
+        record: &crate::store::MobPlacedSpawnCarrierRecord,
+        receipt: &super::provisioner::MaterializedSpawnReceipt,
+    ) -> Option<MobError> {
+        let Some(ack) = receipt.receipt.materialized_ack.as_deref() else {
+            return Some(MobError::Internal(format!(
+                "placed revival ack for '{agent_identity}' carried no materialized ack facts"
+            )));
+        };
+        if ack.session_id.to_string() != binding.0 {
+            return Some(MobError::Internal(format!(
+                "placed revival ack for '{agent_identity}' names session '{}' but the machine \
+                 binding is '{}'",
+                ack.session_id, binding.0
+            )));
+        }
+        if ack.spec_digest_echo != record.spec_digest {
+            return Some(MobError::Internal(format!(
+                "placed revival ack digest echo for '{agent_identity}' diverged from the recorded \
+                 spec digest"
+            )));
+        }
+        let revived = mob_dsl::MemberPeerEndpoint::from(&ack.member_peer);
+        super::builder::member_endpoint_defect(
+            self.dsl_authority
+                .state()
+                .member_peer_endpoints
+                .get(&mob_dsl::AgentIdentity::from_domain(agent_identity)),
+            &revived,
+            "it has no durable host-acknowledged endpoint to verify",
+        )
+        .map(|detail| {
+            MobError::WiringError(super::builder::member_endpoint_broken_reason(
+                agent_identity,
+                &detail,
+            ))
+        })
     }
 
     fn active_machine_member_ids_for_profile(

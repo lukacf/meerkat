@@ -1377,6 +1377,18 @@ pub(super) enum MobCommand {
         reason: String,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Run-fenced Stop of one exact member run: the member's runtime stops
+    /// `run_id` and terminalizes every contributor bound to it, and the reply
+    /// is the typed receipt. A stale run id is the `NotCurrent` receipt,
+    /// never an error. `Cancel`-scoped at chokepoint (a); placed members are
+    /// gated on the recorded host `hard_cancel_member` fact BEFORE any bridge
+    /// dispatch.
+    StopMemberRun {
+        agent_identity: AgentIdentity,
+        run_id: meerkat_core::lifecycle::RunId,
+        reason: String,
+        reply_tx: oneshot::Sender<Result<meerkat_contracts::WireRunStopReceipt, MobError>>,
+    },
     /// Open a live channel on a member (§16 phase 6b, DEC-P6B-C2).
     /// Identity-addressed and placement-blind (DL3); `Live`-scoped at
     /// chokepoint (a). There is deliberately NO MobMachine input for the
@@ -1782,6 +1794,7 @@ impl MobCommand {
             Self::RecordOperatorActionProvenance { .. } => "RecordOperatorActionProvenance",
             Self::ForceCancel { .. } => "ForceCancel",
             Self::HardCancelMember { .. } => "HardCancelMember",
+            Self::StopMemberRun { .. } => "StopMemberRun",
             Self::MemberHistory { .. } => "MemberHistory",
             Self::CompleteHostForkedParticipantSpawn { .. } => "CompleteHostForkedParticipantSpawn",
             Self::CreateForkedParticipant { .. } => "CreateForkedParticipant",

@@ -3720,6 +3720,21 @@ impl MobMcpState {
             .await
     }
 
+    /// Run-fenced Stop of one exact member run, as the console principal.
+    /// A stale run id is the typed `NotCurrent` receipt.
+    pub async fn mob_stop_member_run(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+        run_id: meerkat_core::lifecycle::RunId,
+        reason: String,
+    ) -> Result<meerkat_contracts::WireRunStopReceipt, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .stop_member_run(self.console_principal.clone(), identity, run_id, reason)
+            .await
+    }
+
     /// Open a live realtime channel on a member (§16.4). The returned
     /// [`meerkat_contracts::wire::LiveOpenResult`] carries the owning
     /// host's URL + single-use token VERBATIM (DEC-P6B-C7/C8): never

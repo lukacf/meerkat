@@ -2313,6 +2313,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}", get(get_session).delete(archive_session))
         .route("/sessions/{id}/history", get(get_session_history))
         .route("/sessions/{id}/interrupt", post(interrupt_session))
+        .route("/sessions/{id}/runs/{run_id}/stop", post(stop_session_run))
         .route("/sessions/{id}/status", get(get_runtime_status))
         .route("/sessions/{id}/system_context", post(append_system_context))
         .route("/sessions/{id}/system_prompt", post(update_system_prompt))
@@ -2421,6 +2422,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/mob/{id}/members/{agent_identity}/cancel",
             post(mob_force_cancel),
+        )
+        .route(
+            "/mob/{id}/members/{agent_identity}/runs/{run_id}/stop",
+            post(mob_stop_member_run),
         )
         .route(
             "/mob/{id}/members/{agent_identity}/respawn",
@@ -3143,6 +3148,31 @@ async fn mob_resolve_identity_convergence_block(
             convergence: result.convergence.to_wire(),
         },
     ))
+}
+
+/// POST /mob/{id}/members/{agent_identity}/runs/{run_id}/stop - run-fenced
+/// Stop of one exact mob member run. A stale run id is the `not_current`
+/// receipt, never an error.
+#[cfg(feature = "mob")]
+async fn mob_stop_member_run(
+    State(state): State<AppState>,
+    Path((id, agent_identity, run_id)): Path<(String, String, String)>,
+    Json(request): Json<meerkat_contracts::StopRunRequest>,
+) -> Result<Json<meerkat_contracts::MobStopMemberRunResult>, Response> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
+    let run_id = meerkat::surface::parse_wire_run_id(&run_id)
+        .map_err(|message| ApiError::BadRequest(message).into_response())?;
+    let receipt = state
+        .mob_state
+        .mob_stop_member_run(&mob_id, identity, run_id, request.reason)
+        .await
+        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
+    Ok(Json(meerkat_contracts::MobStopMemberRunResult {
+        mob_id: id,
+        agent_identity,
+        receipt,
+    }))
 }
 
 /// POST /mob/{id}/members/{agent_identity}/cancel — force-cancel in-flight turn.
@@ -5929,6 +5959,37 @@ async fn get_session_history(
 }
 
 /// Interrupt an in-flight turn on a session.
+/// Run-fenced Stop: stop the exact run and terminalize every contributor
+/// bound to it. A stale run id is the `not_current` receipt, never an error.
+async fn stop_session_run(
+    State(state): State<AppState>,
+    Path((id, run_id)): Path<(String, String)>,
+    Json(request): Json<meerkat_contracts::StopRunRequest>,
+) -> Result<Json<meerkat_contracts::StopRunResult>, ApiError> {
+    let session_id = resolve_session_id_for_state(&id, &state)?;
+    let run_id = meerkat::surface::parse_wire_run_id(&run_id).map_err(ApiError::BadRequest)?;
+    // Same presence classification as the interrupt route: an unknown or
+    // archived session is 404, not a `not_current` receipt.
+    if matches!(
+        interrupt_noop_target(&state, &session_id).await?,
+        InterruptNoopTarget::Missing
+    ) {
+        return Err(ApiError::NotFound(format!(
+            "Session not found: {session_id}"
+        )));
+    }
+    let receipt = state
+        .runtime_adapter
+        .stop_run(&session_id, &run_id, request.reason)
+        .await
+        .map_err(|error| ApiError::Internal(format!("Failed to stop run: {error}")))?;
+    let receipt = meerkat::surface::wire_run_stop_receipt(&receipt).map_err(ApiError::Internal)?;
+    Ok(Json(meerkat_contracts::StopRunResult {
+        session_id: session_id.to_string(),
+        receipt,
+    }))
+}
+
 async fn interrupt_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -16044,6 +16105,107 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             );
             let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(payload["interrupted"], true);
+        }
+
+        /// `POST /sessions/{id}/runs/{run_id}/stop`: a stale run id on a
+        /// live session is the typed `not_current` receipt, a malformed run id
+        /// is 400, and an unknown session is 404.
+        #[tokio::test]
+        async fn test_stop_session_run_reports_not_current_and_rejects_bad_targets() {
+            use axum::body::Body;
+            use http_body_util::BodyExt;
+            use tower::ServiceExt;
+
+            let temp = TempDir::new().unwrap();
+            let mut state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            state.llm_client_override = Some(Arc::new(MockLlmClient));
+            let pre_session = Session::new();
+            let bindings = state
+                .runtime_adapter
+                .prepare_bindings(pre_session.id().clone())
+                .await
+                .expect("runtime bindings should prepare");
+            let created = state
+                .session_service
+                .create_session(SvcCreateSessionRequest {
+                    injected_context: Vec::new(),
+                    model: resolved_default_model(&state).await,
+                    prompt: "Hello".to_string().into(),
+                    system_prompt: meerkat::SystemPromptOverride::Inherit,
+                    max_tokens: Some(state.max_tokens),
+                    event_tx: None,
+                    initial_turn: InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(SessionBuildOptions {
+                        custom_models: std::collections::BTreeMap::new(),
+                        image_generation_provider: None,
+                        auto_compact_threshold_override: None,
+                        compaction_curator_override: None,
+                        resume_session: Some(pre_session),
+                        llm_client_override: state
+                            .llm_client_override
+                            .clone()
+                            .map(encode_llm_client_override_for_service),
+                        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                        ..Default::default()
+                    }),
+                    labels: None,
+                })
+                .await
+                .expect("idle session should be created");
+            let app = router(state);
+            let stale = meerkat_core::lifecycle::RunId::new().to_string();
+            let post = |uri: String| {
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"reason":"stop"}"#))
+                    .unwrap()
+            };
+
+            let response = app
+                .clone()
+                .oneshot(post(format!(
+                    "/sessions/{}/runs/{stale}/stop",
+                    created.session_id
+                )))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+            let payload: meerkat_contracts::StopRunResult =
+                serde_json::from_slice(&body).expect("typed StopRunResult");
+            assert_eq!(payload.session_id, created.session_id.to_string());
+            assert_eq!(
+                payload.receipt,
+                meerkat_contracts::WireRunStopReceipt::NotCurrent {
+                    run_id: stale.clone(),
+                    current_run_id: None,
+                }
+            );
+
+            let response = app
+                .clone()
+                .oneshot(post(format!(
+                    "/sessions/{}/runs/not-a-uuid/stop",
+                    created.session_id
+                )))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+            let response = app
+                .oneshot(post(format!(
+                    "/sessions/{}/runs/{stale}/stop",
+                    meerkat_core::SessionId::new()
+                )))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
 
         #[tokio::test]

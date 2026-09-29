@@ -444,6 +444,30 @@ export interface SessionExternalEventParamsPeerResponseTerminal {
 
 export type SessionExternalEventParams = SessionExternalEventParamsGenericJson | SessionExternalEventParamsPeerResponseTerminal;
 
+export interface WireRunStopReceiptStopped {
+  contributors: WireRunStopContributor[];
+  outcome: "stopped";
+  run_id: string;
+}
+
+export interface WireRunStopReceiptNotCurrent {
+  current_run_id?: string | null;
+  outcome: "not_current";
+  run_id: string;
+}
+
+export interface WireRunStopReceiptNotStoppable {
+  outcome: "not_stoppable";
+  run_id: string;
+  state: WireRuntimeState;
+}
+
+export type WireRunStopReceipt = WireRunStopReceiptStopped | WireRunStopReceiptNotCurrent | WireRunStopReceiptNotStoppable;
+
+export type WireRunStopCompletion = "completed" | "completed_without_result" | "callback_pending" | "cancelled" | "abandoned" | "abandoned_with_error" | "completed_with_finalization_failure" | "runtime_terminated";
+
+export type WireInputTerminalOutcome = "completed" | "abandoned" | "superseded" | "coalesced" | "cancelled";
+
 export interface WireDeviceCompleteResultPending {
   state: "pending";
 }
@@ -767,6 +791,23 @@ export interface InstructionRevisionRef {
 
 export interface InterruptParams {
   session_id: string;
+}
+
+export interface StopRunParams {
+  reason: string;
+  run_id: string;
+  session_id: string;
+}
+
+export interface StopRunResult {
+  receipt: WireRunStopReceipt;
+  session_id: string;
+}
+
+export interface WireRunStopContributor {
+  completion: WireRunStopCompletion;
+  input_id: string;
+  terminal?: WireInputTerminalOutcome | null;
 }
 
 export interface ListSessionTranscriptRevisionsParams {
@@ -2136,6 +2177,19 @@ export interface MobHardCancelParams {
 
 export interface MobHardCancelResult {
   cancelled: boolean;
+}
+
+export interface MobStopMemberRunParams {
+  agent_identity: string;
+  mob_id: string;
+  reason: string;
+  run_id: string;
+}
+
+export interface MobStopMemberRunResult {
+  agent_identity: string;
+  mob_id: string;
+  receipt: WireRunStopReceipt;
 }
 
 export interface MobMemberLiveOpenParams {
@@ -4149,6 +4203,17 @@ export interface BridgeCommandCancelTrackedMemberInput {
   supervisor: BridgePeerSpec;
 }
 
+export interface BridgeCommandStopMemberRun {
+  command: "stop_member_run";
+  epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  expected_run_id: RunId;
+  operation_id: OperationId;
+  protocol_version: BridgeProtocolVersion;
+  reason: string;
+  supervisor: BridgePeerSpec;
+}
+
 export interface BridgeCommandRetireMember {
   command: "retire_member";
   epoch: number;
@@ -4398,7 +4463,7 @@ export interface BridgeCommandRevokeForkedParticipant {
   supervisor: BridgePeerSpec;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant;
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";
@@ -4645,6 +4710,13 @@ export interface BridgeReplyTrackedInputCancelled {
   result: "tracked_input_cancelled";
 }
 
+export interface BridgeReplyMemberRunStopped {
+  expected_member: BridgeMemberIncarnation;
+  operation_id: OperationId;
+  receipt: WireRunStopReceipt;
+  result: "member_run_stopped";
+}
+
 export interface BridgeReplyRetire {
   outcome: Record<string, unknown>;
   result: "retire";
@@ -4786,7 +4858,7 @@ export interface BridgeReplyForkedParticipantRevoked {
   result: "forked_participant_revoked";
 }
 
-export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked;
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked;
 
 export interface ContentBlockText {
   text: string;
@@ -5662,7 +5734,7 @@ export interface WireInputState {
   policy?: "stage" | "queue" | "immediate" | null;
   reconstruction_source?: "live" | "event_store" | "snapshot" | "replay" | null;
   recovery_count?: number;
-  terminal_outcome?: "completed" | "abandoned" | "superseded" | "coalesced" | "cancelled" | null;
+  terminal_outcome?: WireInputTerminalOutcome | null;
   updated_at: string;
 }
 

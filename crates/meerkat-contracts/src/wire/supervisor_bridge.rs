@@ -425,6 +425,12 @@ pub enum BridgeCommand {
     /// idempotency key rather than a transient run id, so it can close the
     /// stop-before-first-send window and survive host restart.
     CancelTrackedMemberInput(BridgeTrackedInputCancelPayload),
+    /// Run-fenced Stop of one exact member run: the member host stops that
+    /// run and terminalizes every contributor bound to it, replying with the
+    /// typed receipt. The controlling side gates it on the host's recorded
+    /// `hard_cancel_member` fact (same immediate-interrupt authority class);
+    /// a peer that predates the command rejects it at decode.
+    StopMemberRun(BridgeStopMemberRunPayload),
     RetireMember(BridgeRetirePayload),
     DestroyMember(BridgeSupervisorPayload),
     WireMember(BridgePeerWiringPayload),
@@ -475,6 +481,7 @@ impl BridgeCommand {
             Self::InterruptMember(payload) => payload.protocol_version,
             Self::HardCancelMember(payload) => payload.protocol_version,
             Self::CancelTrackedMemberInput(payload) => payload.protocol_version,
+            Self::StopMemberRun(payload) => payload.protocol_version,
             Self::DeliverMemberInput(payload) => payload.protocol_version,
             Self::WireMember(payload) | Self::UnwireMember(payload) => payload.protocol_version,
             Self::DeclareMemberOutboundTaint(payload) => payload.protocol_version,
@@ -638,6 +645,7 @@ fn bridge_command_minimum_protocol(
         }
         "hard_cancel_member"
         | "cancel_tracked_member_input"
+        | "stop_member_run"
         | "read_member_history"
         | "poll_member_events"
         | "open_member_live_channel"
@@ -695,6 +703,7 @@ fn bridge_command_minimum_protocol(
         "issue_host_binding_descriptor" => "IssueHostBindingDescriptor",
         "hard_cancel_member" => "HardCancelMember",
         "cancel_tracked_member_input" => "CancelTrackedMemberInput",
+        "stop_member_run" => "StopMemberRun",
         "read_member_history" => "ReadMemberHistory",
         "poll_member_events" => "PollMemberEvents",
         "open_member_live_channel" => "OpenMemberLiveChannel",
@@ -1828,6 +1837,7 @@ pub enum BridgeReply {
     Observation(BridgeObservationResponse),
     Delivery(BridgeDeliveryResponse),
     TrackedInputCancelled(BridgeTrackedInputCancelResponse),
+    MemberRunStopped(BridgeMemberRunStopResponse),
     Retire(BridgeRetireResponse),
     Destroy(BridgeDestroyResponse),
     /// Observation of a previously submitted supervisor-rotation operation.
@@ -3053,6 +3063,37 @@ pub struct BridgeTrackedInputCancelResponse {
     pub expected_member: BridgeMemberIncarnation,
     pub input_id: String,
     pub outcome: BridgeTrackedInputCancelOutcome,
+}
+
+/// Run-fenced Stop of one exact member run under its full residency fence.
+///
+/// The member host commits `StopCurrentRunForRun` for `expected_run_id` under
+/// the session mutation gate, so a stale request can never stop a newer run:
+/// it returns the `not_current` receipt. A V4 peer that predates this command
+/// rejects it at decode, so the controller surfaces a typed rejection.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeStopMemberRunPayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    pub expected_member: BridgeMemberIncarnation,
+    pub operation_id: meerkat_core::ops::OperationId,
+    pub expected_run_id: meerkat_core::RunId,
+    pub reason: String,
+}
+
+/// Response to [`BridgeCommand::StopMemberRun`]: the member host's typed
+/// run-stop receipt, with the residency and operation echoed so a reply can
+/// never be applied to a replacement member or a different request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeMemberRunStopResponse {
+    pub expected_member: BridgeMemberIncarnation,
+    pub operation_id: meerkat_core::ops::OperationId,
+    pub receipt: super::run_stop::WireRunStopReceipt,
 }
 
 /// Cooperative boundary interrupt. Host-materialized callers carry the exact
@@ -4567,6 +4608,35 @@ mod tests {
     fn bridge_command_hard_cancel_member_round_trip() {
         let cmd = BridgeCommand::HardCancelMember(sample_hard_cancel_payload());
         assert_command_round_trip(&cmd);
+    }
+
+    #[test]
+    fn bridge_command_stop_member_run_round_trip() {
+        let payload = BridgeStopMemberRunPayload {
+            supervisor: sample_peer_spec(),
+            epoch: 42,
+            protocol_version: BridgeProtocolVersion::V4,
+            expected_member: sample_member_incarnation(),
+            operation_id: meerkat_core::ops::OperationId(uuid::Uuid::from_u128(0x5709)),
+            expected_run_id: meerkat_core::RunId::from_uuid(uuid::Uuid::from_u128(0xA11CE)),
+            reason: "test stop".to_string(),
+        };
+        let cmd = BridgeCommand::StopMemberRun(payload.clone());
+        assert_command_round_trip(&cmd);
+        assert_eq!(cmd.protocol_version(), BridgeProtocolVersion::V4);
+
+        let reply = BridgeReply::MemberRunStopped(BridgeMemberRunStopResponse {
+            expected_member: payload.expected_member,
+            operation_id: payload.operation_id,
+            receipt: super::super::run_stop::WireRunStopReceipt::NotCurrent {
+                run_id: payload.expected_run_id.to_string(),
+                current_run_id: None,
+            },
+        });
+        let encoded = serde_json::to_value(&reply).expect("serialize stop reply");
+        assert_eq!(encoded["result"], json!("member_run_stopped"));
+        let decoded: BridgeReply = serde_json::from_value(encoded).expect("decode stop reply");
+        assert_eq!(decoded, reply);
     }
 
     #[test]

@@ -26768,6 +26768,15 @@ impl MobActor {
                     self.handle_hard_cancel_member(agent_identity, reason, reply_tx)
                         .await;
                 }
+                MobCommand::StopMemberRun {
+                    agent_identity,
+                    run_id,
+                    reason,
+                    reply_tx,
+                } => {
+                    self.handle_stop_member_run(agent_identity, run_id, reason, reply_tx)
+                        .await;
+                }
                 MobCommand::MemberHistory {
                     agent_identity,
                     from_index,
@@ -33927,6 +33936,105 @@ impl MobActor {
             .effects
             .iter()
             .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::FlowTerminalized))
+    }
+
+    /// Run-fenced Stop of one exact member run. The Cancel-class
+    /// `ForceCancel` gate is only PROBED (never committed): a stale stop must
+    /// leave mob state untouched. A member with no live runtime has no
+    /// current run and replies `NotCurrent` without any dispatch. Placed
+    /// members are gated on the recorded host `hard_cancel_member` fact (the
+    /// same immediate-interrupt authority class) before any bridge dispatch;
+    /// the dispatch runs on a DETACHED task (ADJ-P4-12).
+    async fn handle_stop_member_run(
+        &mut self,
+        agent_identity: AgentIdentity,
+        run_id: meerkat_core::lifecycle::RunId,
+        reason: String,
+        reply_tx: oneshot::Sender<Result<meerkat_contracts::WireRunStopReceipt, MobError>>,
+    ) {
+        if let Err(error) = self.ensure_placed_carrier_binding_active(&agent_identity, "run stop") {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
+        let prepared = match self.prepare_command_admission(
+            mob_dsl::MobMachineInput::ForceCancel {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&agent_identity),
+            },
+            MobState::Running,
+            "stop_member_run",
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = reply_tx.send(Err(error));
+                return;
+            }
+        };
+        if !Self::force_cancel_interrupt_authorized(&prepared) {
+            let _ = reply_tx.send(Ok(meerkat_contracts::WireRunStopReceipt::NotCurrent {
+                run_id: run_id.to_string(),
+                current_run_id: None,
+            }));
+            return;
+        }
+        drop(prepared);
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(&agent_identity).cloned()
+        };
+        let Some(entry) = entry else {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        };
+        let member_ref = entry.member_ref.clone();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+        let placement = self
+            .dsl_authority
+            .state()
+            .member_placement
+            .get(&dsl_identity)
+            .cloned();
+        let expected_member = match placement {
+            Some(host) => {
+                let advertised = self
+                    .dsl_authority
+                    .state()
+                    .host_hard_cancel_member
+                    .get(&host)
+                    .copied()
+                    .unwrap_or(false);
+                if !advertised {
+                    let _ = reply_tx.send(Err(MobError::BridgeCommandRejected {
+                        cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                        reason: "host does not advertise hard_cancel_member".to_string(),
+                    }));
+                    return;
+                }
+                match self.placed_member_incarnation(&entry) {
+                    Ok(expected_member) => Some(expected_member),
+                    Err(error) => {
+                        let _ = reply_tx.send(Err(error));
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
+        let provisioner = self.provisioner.clone();
+        self.actor_io_tasks.spawn(async move {
+            let result = match expected_member.as_ref() {
+                Some(expected_member) => {
+                    provisioner
+                        .stop_placed_member_run(&member_ref, expected_member, &run_id, &reason)
+                        .await
+                }
+                None => {
+                    provisioner
+                        .stop_member_run(&member_ref, &run_id, &reason)
+                        .await
+                }
+            };
+            let _ = reply_tx.send(result);
+        });
     }
 
     /// Phase 6 (DEC-P6E-8): the explicit HARD cancel verb — the immediate

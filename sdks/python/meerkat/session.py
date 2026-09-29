@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .generated.types import CommsSendResult
+from .generated.types import CommsSendResult, StopRunResult
 from .types import (
     ContentBlock,
     InstructionActivationReadPage,
@@ -234,6 +234,16 @@ class Session:
     async def interrupt(self) -> None:
         """Cancel the currently running turn, if any."""
         await self._client._interrupt(self._id)  # noqa: SLF001
+
+    async def stop_run(self, run_id: str, *, reason: str) -> StopRunResult:
+        """Stop one exact run and terminalize every input bound to it.
+
+        ``run_id`` comes from the ``run_started`` event (``identity.run_id``).
+        Unlike :meth:`interrupt`, a durable steer that already joined the run
+        is cancelled with it instead of taking a follow-up turn. A stale
+        ``run_id`` returns a ``not_current`` receipt and touches nothing.
+        """
+        return await self._client._stop_run(self._id, run_id, reason)  # noqa: SLF001
 
     async def archive(self) -> None:
         """Archive (remove) this session from the server."""
@@ -572,6 +582,16 @@ class DeferredSession:
     async def interrupt(self) -> None:
         """Cancel the currently running turn, if any."""
         await self._client._interrupt(self._id)  # noqa: SLF001
+
+    async def stop_run(self, run_id: str, *, reason: str) -> StopRunResult:
+        """Stop one exact run and terminalize every input bound to it.
+
+        ``run_id`` comes from the ``run_started`` event (``identity.run_id``).
+        Unlike :meth:`interrupt`, a durable steer that already joined the run
+        is cancelled with it instead of taking a follow-up turn. A stale
+        ``run_id`` returns a ``not_current`` receipt and touches nothing.
+        """
+        return await self._client._stop_run(self._id, run_id, reason)  # noqa: SLF001
 
     async def archive(self) -> None:
         """Archive (remove) this session from the server."""

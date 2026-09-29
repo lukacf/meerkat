@@ -306,6 +306,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "InterruptParams",
             "InterruptResult",
         ),
+        RpcMethodDescriptor::typed(
+            "turn/stop_run",
+            "Stop one exact run and terminalize every contributor bound to it",
+            "StopRunParams",
+            "StopRunResult",
+        ),
         RpcMethodDescriptor::result_only("config/get", "Read config", "ConfigEnvelope"),
         RpcMethodDescriptor::typed(
             "config/set",
@@ -1097,6 +1103,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobHardCancelResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/stop_member_run",
+                "Stop one exact run of a mob member and terminalize its contributors",
+                "MobStopMemberRunParams",
+                "MobStopMemberRunResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/member_live_open",
                 "Open a live realtime channel on a mob member by identity",
                 "MobMemberLiveOpenParams",
@@ -1486,6 +1498,7 @@ mod tests {
             "session/archive",
             "turn/start",
             "turn/interrupt",
+            "turn/stop_run",
         ] {
             let descriptors: Vec<_> = methods
                 .iter()
@@ -1877,6 +1890,11 @@ mod tests {
                 "mob/hard_cancel_member",
                 Some("MobHardCancelParams"),
                 Some("MobHardCancelResult"),
+            ),
+            (
+                "mob/stop_member_run",
+                Some("MobStopMemberRunParams"),
+                Some("MobStopMemberRunResult"),
             ),
             (
                 "mob/member_live_open",

@@ -19,7 +19,7 @@
  * ```
  */
 
-import type { PeerDirectoryEntry } from "./generated/types.js";
+import type { PeerDirectoryEntry, StopRunResult } from "./generated/types.js";
 import type {
   AgentEventEnvelope,
   CommsCommand,
@@ -120,6 +120,17 @@ export class Session {
 
   async interrupt(): Promise<void> {
     await this._client._interrupt(this._id);
+  }
+
+  /**
+   * Stop one exact run and terminalize every input bound to it. `runId`
+   * comes from the `run_started` event (`identity.run_id`). Unlike
+   * `interrupt()`, a durable steer that already joined the run is cancelled
+   * with it instead of taking a follow-up turn. A stale `runId` returns a
+   * `not_current` receipt and touches nothing.
+   */
+  async stopRun(runId: string, reason: string): Promise<StopRunResult> {
+    return this._client._stopRun(this._id, runId, reason);
   }
 
   async archive(): Promise<void> {
@@ -339,6 +350,17 @@ export class DeferredSession {
 
   async interrupt(): Promise<void> {
     await this._client._interrupt(this._id);
+  }
+
+  /**
+   * Stop one exact run and terminalize every input bound to it. `runId`
+   * comes from the `run_started` event (`identity.run_id`). Unlike
+   * `interrupt()`, a durable steer that already joined the run is cancelled
+   * with it instead of taking a follow-up turn. A stale `runId` returns a
+   * `not_current` receipt and touches nothing.
+   */
+  async stopRun(runId: string, reason: string): Promise<StopRunResult> {
+    return this._client._stopRun(this._id, runId, reason);
   }
 
   async archive(): Promise<void> {

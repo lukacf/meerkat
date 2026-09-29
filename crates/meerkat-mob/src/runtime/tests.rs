@@ -46270,6 +46270,96 @@ async fn test_explicit_hard_cancel_member_without_adapter_is_rejected() {
     );
 }
 
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_stop_member_run_without_adapter_is_rejected() {
+    let service = Arc::new(MockSessionService::new());
+    let provisioner = super::provisioner::SessionBackend::new(service, None, None);
+    let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
+    let error = provisioner
+        .stop_member_run(&member_ref, &meerkat_core::lifecycle::RunId::new(), "stop")
+        .await
+        .expect_err("a run stop must not bypass runtime authority");
+    assert!(
+        matches!(error, MobError::Internal(ref message) if message.contains("requires MeerkatMachine runtime authority")),
+        "{error:?}"
+    );
+}
+
+/// The local member lane of the run-fenced Stop: a member session with no
+/// current run reports `NotCurrent`, never an error and never an interrupt.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_stop_member_run_of_a_session_without_a_current_run_is_not_current() {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+    let provisioner = super::provisioner::SessionBackend::new(service, Some(adapter), None);
+    let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
+    let run_id = meerkat_core::lifecycle::RunId::new();
+    let receipt = provisioner
+        .stop_member_run(&member_ref, &run_id, "stale stop")
+        .await
+        .expect("stale stop is a typed receipt");
+    assert_eq!(
+        receipt,
+        meerkat_contracts::WireRunStopReceipt::NotCurrent {
+            run_id: run_id.to_string(),
+            current_run_id: None,
+        }
+    );
+}
+
+/// `MobHandle::stop_member_run` addresses a member by identity: a stale run
+/// id on a live member is `NotCurrent` (no interrupt reaches the member),
+/// and an unknown identity is a typed admission error.
+#[tokio::test]
+async fn test_handle_stop_member_run_is_not_current_for_a_stale_run_and_rejects_unknown_members() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-stop-run"),
+            None,
+        )
+        .await
+        .expect("spawn session-backed member");
+    let baseline_interrupts = service.interrupt_call_count();
+    let run_id = meerkat_core::lifecycle::RunId::new();
+    let receipt = handle
+        .stop_member_run(
+            crate::control_policy::MobControlPrincipal::Owner,
+            AgentIdentity::from("w-stop-run"),
+            run_id.clone(),
+            "stale selection",
+        )
+        .await
+        .expect("stale member stop");
+    assert!(
+        matches!(
+            receipt,
+            meerkat_contracts::WireRunStopReceipt::NotCurrent { run_id: ref reported, .. }
+                if reported == &run_id.to_string()
+        ),
+        "{receipt:?}"
+    );
+    assert_eq!(service.interrupt_call_count(), baseline_interrupts);
+
+    let error = handle
+        .stop_member_run(
+            crate::control_policy::MobControlPrincipal::Owner,
+            AgentIdentity::from("missing-member"),
+            run_id,
+            "stop",
+        )
+        .await
+        .expect_err("unknown member");
+    assert!(
+        !matches!(error, MobError::Internal(_)),
+        "unknown member is a typed rejection, got {error:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_external_backend_turn_driven_mode_uses_start_turn_dispatch() {
     let _serial = lock_real_comms_tests();

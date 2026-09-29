@@ -9,6 +9,7 @@ import type {
   AppendSystemContextOptions,
   AppendSystemContextResult,
 } from './types.js';
+import type { WireRunStopReceipt } from './generated/session.js';
 
 // WASM function signatures (bound at construction)
 type StartTurnFn = (handle: number, prompt: string, optionsJson?: string) => Promise<string>;
@@ -16,6 +17,7 @@ type GetSessionStateFn = (handle: number) => Promise<string>;
 type DestroySessionFn = (handle: number) => Promise<void>;
 type InterruptSessionFn = (handle: number) => Promise<void>;
 type WirePeerFn = (handle: number, peerHandle: number) => Promise<void>;
+type StopSessionRunFn = (handle: number, runId: string, reason: string) => Promise<string>;
 type PollEventsFn = (handle: number) => string;
 type AppendSystemContextFn = (
   handle: number,
@@ -156,6 +158,7 @@ export class Session {
   private appendSystemContextFn: AppendSystemContextFn;
   private interruptFn: InterruptSessionFn;
   private wirePeerFn: WirePeerFn;
+  private stopRunFn?: StopSessionRunFn;
 
   /** @internal — use MeerkatRuntime.createSession() instead. */
   constructor(
@@ -167,6 +170,7 @@ export class Session {
     appendSystemContextFn: AppendSystemContextFn,
     interruptFn: InterruptSessionFn,
     wirePeerFn: WirePeerFn,
+    stopRunFn?: StopSessionRunFn,
   ) {
     this.handle = handle;
     this.startTurnFn = startTurnFn;
@@ -176,6 +180,7 @@ export class Session {
     this.appendSystemContextFn = appendSystemContextFn;
     this.interruptFn = interruptFn;
     this.wirePeerFn = wirePeerFn;
+    this.stopRunFn = stopRunFn;
   }
 
   /**
@@ -293,6 +298,26 @@ export class Session {
     }
   }
 
+  /**
+   * Stop one exact run and terminalize every input bound to it. `runId`
+   * comes from the `run_started` event (`identity.run_id`). Unlike
+   * `interrupt()`, a durable steer that already joined the run is cancelled
+   * with it instead of taking a follow-up turn. A stale `runId` resolves to a
+   * `not_current` receipt and touches nothing.
+   */
+  async stopRun(runId: string, reason: string): Promise<WireRunStopReceipt> {
+    if (!this.stopRunFn) {
+      throw new MeerkatError('CAPABILITY_UNAVAILABLE', 'this runtime binding has no run-fenced stop');
+    }
+    let json: string;
+    try {
+      json = await this.stopRunFn(this.handle, runId, reason);
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
+    return parseRunStopReceipt(JSON.parse(json));
+  }
+
   /** Interrupt active work through the runtime's cancellation owner. */
   async interrupt(): Promise<void> {
     try {
@@ -342,4 +367,53 @@ function extractErrorCode(error: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Validate a run-stop receipt from the WASM runtime. The receipt is a tagged
+ * union on `outcome`: `stopped` carries the contributors, `not_current` the
+ * current run (if any), and `not_stoppable` the runtime state that refused
+ * the stop.
+ */
+export function parseRunStopReceipt(value: unknown): WireRunStopReceipt {
+  if (typeof value !== 'object' || value === null) {
+    throw new MeerkatError('INVALID_RESPONSE', 'run-stop receipt must be an object');
+  }
+  const receipt = value as Record<string, unknown>;
+  if (typeof receipt.run_id !== 'string') {
+    throw new MeerkatError('INVALID_RESPONSE', 'run-stop receipt run_id must be a string');
+  }
+  switch (receipt.outcome) {
+    case 'stopped':
+      if (
+        !Array.isArray(receipt.contributors) ||
+        !receipt.contributors.every(
+          (row) =>
+            typeof row === 'object' &&
+            row !== null &&
+            typeof (row as Record<string, unknown>).input_id === 'string' &&
+            typeof (row as Record<string, unknown>).completion === 'string',
+        )
+      ) {
+        throw new MeerkatError('INVALID_RESPONSE', 'stopped receipt contributors are malformed');
+      }
+      break;
+    case 'not_current':
+      if (
+        receipt.current_run_id !== undefined &&
+        receipt.current_run_id !== null &&
+        typeof receipt.current_run_id !== 'string'
+      ) {
+        throw new MeerkatError('INVALID_RESPONSE', 'not_current receipt current_run_id must be a string');
+      }
+      break;
+    case 'not_stoppable':
+      if (typeof receipt.state !== 'string') {
+        throw new MeerkatError('INVALID_RESPONSE', 'not_stoppable receipt needs a state');
+      }
+      break;
+    default:
+      throw new MeerkatError('INVALID_RESPONSE', `unknown run-stop receipt outcome ${String(receipt.outcome)}`);
+  }
+  return receipt as unknown as WireRunStopReceipt;
 }

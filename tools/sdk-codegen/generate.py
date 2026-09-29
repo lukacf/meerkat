@@ -218,6 +218,8 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobRevokeHostResult",
     "MobHardCancelParams",
     "MobHardCancelResult",
+    "MobStopMemberRunParams",
+    "MobStopMemberRunResult",
     "MobMemberLiveOpenParams",
     "MobMemberLiveChannelParams",
     "MobMemberLiveStatusParams",
@@ -377,6 +379,9 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "InstructionActivationReceipt",
     "InstructionRevisionRef",
     "InterruptParams",
+    "StopRunParams",
+    "StopRunResult",
+    "WireRunStopContributor",
     "ListSessionTranscriptRevisionsParams",
     "ListSessionsParams",
     "ListSessionsResult",
@@ -420,6 +425,9 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "InstructionRevisionId",
     "SessionExternalEventEnvelope",
     "SessionExternalEventParams",
+    "WireRunStopReceipt",
+    "WireRunStopCompletion",
+    "WireInputTerminalOutcome",
     "WireDeviceCompleteResult",
 ]
 
@@ -908,6 +916,14 @@ def _promote_nested_schema_def(name: str) -> bool:
         *JOBS_RPC_CONTRACT_TYPES,
         *JOBS_RPC_CONTRACT_HELPER_TYPES,
         *JOBS_RPC_CONTRACT_ALIAS_TYPES,
+        # Run-fenced Stop: keep the receipt union, its contributor rows and
+        # completion class named inside `StopRunResult` /
+        # `MobStopMemberRunResult` instead of widening them to opaque maps.
+        "WireRunStopReceipt",
+        "WireRunStopContributor",
+        "WireRunStopCompletion",
+        "WireInputTerminalOutcome",
+        "WireRuntimeState",
     }
 
 
@@ -5637,7 +5653,7 @@ def generate_web_session_types(schemas: dict, output_dir: Path) -> None:
     wire = schemas["wire-types"]
     definitions: dict[str, Any] = {}
     roots: dict[str, Any] = {}
-    for name in ("WireRunResult", "WireSessionInfo", "InjectSystemContextResult", "RuntimeProfileRefusal", "WireTurnInputOptions"):
+    for name in ("WireRunResult", "WireSessionInfo", "InjectSystemContextResult", "RuntimeProfileRefusal", "WireTurnInputOptions", "WireRunStopReceipt"):
         schema = _lookup_named_schema(wire, name)
         if not schema:
             raise KeyError(f"canonical {name} schema is missing")

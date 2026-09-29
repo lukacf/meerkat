@@ -215,6 +215,12 @@
       "result_type": "InterruptResult"
     },
     {
+      "description": "Stop one exact run and terminalize every contributor bound to it",
+      "name": "turn/stop_run",
+      "params_type": "StopRunParams",
+      "result_type": "StopRunResult"
+    },
+    {
       "description": "Read config",
       "name": "config/get",
       "result_type": "ConfigEnvelope"
@@ -958,6 +964,12 @@
       "name": "mob/hard_cancel_member",
       "params_type": "MobHardCancelParams",
       "result_type": "MobHardCancelResult"
+    },
+    {
+      "description": "Stop one exact run of a mob member and terminalize its contributors",
+      "name": "mob/stop_member_run",
+      "params_type": "MobStopMemberRunParams",
+      "result_type": "MobStopMemberRunResult"
     },
     {
       "description": "Open a live realtime channel on a mob member by identity",

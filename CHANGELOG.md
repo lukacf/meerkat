@@ -88,6 +88,13 @@ them.
   `outstanding_external: Vec<WireExternalRouteInstallObligation>` (serde
   default, omitted when empty, so the wire stays compatible); code that
   constructs the struct must set it.
+- `meerkat_runtime::meerkat_machine_types::SupervisorBridgeCommandKind` gains
+  the variant `StopMemberRun` (inserted after `CancelTrackedMemberInput`, so
+  later `SupervisorBridgeCommandKind::*` discriminants move); exhaustive matches
+  must handle it. The supervisor bridge wire enums gain
+  `BridgeCommand::StopMemberRun(BridgeStopMemberRunPayload)` and
+  `BridgeReply::MemberRunStopped(BridgeMemberRunStopResponse)` (both enums are
+  `#[non_exhaustive]`).
 - Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
   meerkat-runtime `meerkat_machine::dsl`) gains a run-fenced Stop (#1261). The
   input `StopCurrentRunForRun { run_id }` is added (`MeerkatMachineInput::*`,
@@ -289,6 +296,34 @@ them.
   endpoint with its real remote address, which a cross-process host can dial
   even though the controlling process has no local comms runtime for the
   member (#1269).
+- The run-fenced Stop is on the wire (#1261 follow-up). Clients read the run
+  id from the `run_started` event (`identity.run_id`) and stop exactly that run.
+  The typed receipt is `WireRunStopReceipt`
+  (`stopped { run_id, contributors[{input_id, completion, terminal}] }`,
+  `not_current { run_id, current_run_id }` or
+  `not_stoppable { run_id, state }`).
+  - RPC: `turn/stop_run` (`StopRunParams` -> `StopRunResult`) and
+    `mob/stop_member_run` (`MobStopMemberRunParams` -> `MobStopMemberRunResult`).
+  - REST: `POST /sessions/{id}/runs/{run_id}/stop` and
+    `POST /mob/{id}/members/{agent_identity}/runs/{run_id}/stop` (body
+    `StopRunRequest { reason }`).
+  - SDKs: Python `Session.stop_run`, `Mob.stop_member_run` and
+    `MeerkatClient.stop_mob_member_run`; TypeScript `Session.stopRun`,
+    `Mob.stopMemberRun` and `MeerkatClient.stopMobMemberRun`; web
+    `Session.stopRun` and `Mob.stopMemberRun` over the new wasm exports
+    `stop_session_run` and `mob_stop_member_run`. Every SDK validates the
+    receipt union on `outcome`.
+  - Rust: `MobHandle::stop_member_run(caller, identity, run_id, reason)` stops
+    one member run by identity. Placed members are served over the new
+    `StopMemberRun` supervisor-bridge command, gated on the host's recorded
+    `hard_cancel_member` capability; a host that predates the command rejects
+    it at decode. `MeerkatMachine::stop_run_for_member_incarnation` pins a stop
+    to one member residency, and
+    `meerkat_runtime::run_stop_wire::{wire_run_stop_receipt, parse_wire_run_id}`
+    is the shared projection every surface uses.
+  - A stale or malformed target never becomes an interrupt. A stale run id is
+    `not_current`, a malformed run id is invalid params (RPC) or `400` (REST),
+    and an unknown session is not found.
 - `MeerkatMachine::stop_run(session_id, expected_run_id, reason)` stops one
   exact run and terminalizes every contributor already bound to it (#1261).
   The stop is linearized under the session mutation gate as the generated

@@ -1558,6 +1558,32 @@ async fn stop_run_terminalizes_a_discarded_durable_join(
     let receipt = stop_bounded(&rig, &run_id, "host stopped the selected run")
         .await
         .expect("stop the selected run");
+    // The wire projection every surface serves: the batch contributor
+    // receives the canonical cancellation completion, the joined steer the
+    // runtime-termination carrier, and both commit a cancelled terminal.
+    let wire = crate::run_stop_wire::wire_run_stop_receipt(&receipt).expect("wire receipt");
+    match &wire {
+        meerkat_contracts::WireRunStopReceipt::Stopped {
+            run_id: wire_run,
+            contributors,
+        } => {
+            assert_eq!(wire_run, &run_id.to_string());
+            for contributor in contributors {
+                assert_eq!(
+                    contributor.terminal,
+                    Some(meerkat_contracts::wire::runtime::WireInputTerminalOutcome::Cancelled),
+                    "{contributor:?}"
+                );
+                let expected = if contributor.input_id == batch.to_string() {
+                    meerkat_contracts::WireRunStopCompletion::Cancelled
+                } else {
+                    meerkat_contracts::WireRunStopCompletion::RuntimeTerminated
+                };
+                assert_eq!(contributor.completion, expected, "{contributor:?}");
+            }
+        }
+        other => panic!("expected a Stopped wire receipt, got {other:?}"),
+    }
     let contributors = stopped_contributors(receipt, &run_id);
     let mut ids = contributors
         .iter()

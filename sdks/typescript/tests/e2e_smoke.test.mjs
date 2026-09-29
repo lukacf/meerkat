@@ -4,6 +4,7 @@
 
 import { afterEach, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -230,6 +231,12 @@ describe("Live Smoke: TypeScript SDK", () => {
       const textLower = followUp.text.toLowerCase();
       assert.ok(textLower.includes("tsbot"));
       assert.ok(textLower.includes("teal"));
+
+      // Run-fenced Stop against the real server: a stale run id is the typed
+      // not_current receipt and never interrupts anything.
+      const stale = await session.stopRun(randomUUID(), "stale stop");
+      assert.equal(stale.session_id, session.id);
+      assert.equal(stale.receipt.outcome, "not_current");
 
       const details = await client.readSession(session.id);
       assert.equal(details.sessionId, session.id);

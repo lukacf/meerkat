@@ -1369,6 +1369,7 @@ pub enum SupervisorBridgeCommandKind {
     InterruptMember,
     HardCancelMember,
     CancelTrackedMemberInput,
+    StopMemberRun,
     RetireMember,
     DestroyMember,
     WireMember,
@@ -1411,6 +1412,7 @@ impl SupervisorBridgeCommandKind {
         Self::InterruptMember,
         Self::HardCancelMember,
         Self::CancelTrackedMemberInput,
+        Self::StopMemberRun,
         Self::RetireMember,
         Self::DestroyMember,
         Self::WireMember,
@@ -1449,6 +1451,7 @@ impl SupervisorBridgeCommandKind {
             Self::InterruptMember => "InterruptMember",
             Self::HardCancelMember => "HardCancelMember",
             Self::CancelTrackedMemberInput => "CancelTrackedMemberInput",
+            Self::StopMemberRun => "StopMemberRun",
             Self::RetireMember => "RetireMember",
             Self::DestroyMember => "DestroyMember",
             Self::WireMember => "WireMember",
@@ -1490,6 +1493,7 @@ impl SupervisorBridgeCommandKind {
             | Self::InterruptMember
             | Self::HardCancelMember
             | Self::CancelTrackedMemberInput
+            | Self::StopMemberRun
             | Self::RetireMember
             | Self::DestroyMember
             | Self::WireMember
@@ -1541,6 +1545,7 @@ impl SupervisorBridgeCommandKind {
             // pair gained member-drain arms (DEC-P6E-1/3/6/7).
             | Self::HardCancelMember
             | Self::CancelTrackedMemberInput
+            | Self::StopMemberRun
             | Self::ReadMemberHistory
             | Self::PollMemberEvents
             // Phase 6b (§16): the live-channel family gained member-drain

@@ -45572,6 +45572,7 @@ fn phase6_observation_and_cancellation_are_realized_on_the_member_drain() {
     for kind in [
         SupervisorBridgeCommandKind::HardCancelMember,
         SupervisorBridgeCommandKind::CancelTrackedMemberInput,
+        SupervisorBridgeCommandKind::StopMemberRun,
         SupervisorBridgeCommandKind::ReadMemberHistory,
         SupervisorBridgeCommandKind::PollMemberEvents,
     ] {
@@ -45651,6 +45652,7 @@ async fn member_addressed_bridge_admission_covers_manifest_kinds() {
         SupervisorBridgeCommandKind::PollMemberEvents,
         SupervisorBridgeCommandKind::HardCancelMember,
         SupervisorBridgeCommandKind::CancelTrackedMemberInput,
+        SupervisorBridgeCommandKind::StopMemberRun,
         SupervisorBridgeCommandKind::OpenMemberLiveChannel,
         SupervisorBridgeCommandKind::CloseMemberLiveChannel,
         SupervisorBridgeCommandKind::MemberLiveChannelStatus,

@@ -572,6 +572,35 @@ class SessionExternalEventParamsPeerResponseTerminal(TypedDict, total=False):
 
 SessionExternalEventParams = SessionExternalEventParamsGenericJson | SessionExternalEventParamsPeerResponseTerminal
 
+# Typed receipt of a run-fenced Stop.
+class WireRunStopReceiptStopped(TypedDict, total=False):
+    contributors: Required[list[WireRunStopContributor]]
+    outcome: Required[Literal['stopped']]
+    run_id: Required[str]
+
+class WireRunStopReceiptNotCurrent(TypedDict, total=False):
+    current_run_id: NotRequired[Optional[str]]
+    outcome: Required[Literal['not_current']]
+    run_id: Required[str]
+
+class WireRunStopReceiptNotStoppable(TypedDict, total=False):
+    outcome: Required[Literal['not_stoppable']]
+    run_id: Required[str]
+    state: Required[WireRuntimeState]
+
+WireRunStopReceipt = WireRunStopReceiptStopped | WireRunStopReceiptNotCurrent | WireRunStopReceiptNotStoppable
+
+# Completion class delivered to one contributor of a stopped run.
+#
+# A batch contributor of a cancelled run receives `cancelled`. An
+# unretained durable Steer join is terminalized through the runtime
+# termination carrier, so its completion is `runtime_terminated` while its
+# committed terminal is `cancelled`: read `terminal` for the lifecycle fact.
+WireRunStopCompletion = Literal['completed', 'completed_without_result', 'callback_pending', 'cancelled', 'abandoned', 'abandoned_with_error', 'completed_with_finalization_failure', 'runtime_terminated']
+
+# Typed wire projection of an input's terminal outcome.
+WireInputTerminalOutcome = Literal['completed', 'abandoned', 'superseded', 'coalesced', 'cancelled']
+
 # `auth/login/device_complete` success body.
 class WireDeviceCompleteResultPending(TypedDict, total=False):
     state: Required[Literal['pending']]
@@ -994,6 +1023,32 @@ class InstructionRevisionRef:
 class InterruptParams:
     """Parameters for `turn/interrupt`."""
     session_id: str
+
+
+@dataclass
+class StopRunParams:
+    """Parameters for `turn/stop_run`.
+
+`run_id` is the exact run to stop. Clients learn it from the
+`run_started` event (`identity.run_id`) or from an input's `last_run_id`."""
+    reason: str
+    run_id: str
+    session_id: str
+
+
+@dataclass
+class StopRunResult:
+    """Result for `turn/stop_run` and its REST route."""
+    receipt: WireRunStopReceipt
+    session_id: str
+
+
+@dataclass
+class WireRunStopContributor:
+    """One input that contributed to a stopped run."""
+    completion: WireRunStopCompletion
+    input_id: str
+    terminal: Optional[WireInputTerminalOutcome] = None
 
 
 @dataclass
@@ -2848,6 +2903,23 @@ class MobHardCancelResult:
 [`MobForceCancelResult`] reuse) so the hard/force distinction stays
 legible in SDK type names (DEC-P7A-2)."""
     cancelled: bool
+
+
+@dataclass
+class MobStopMemberRunParams:
+    """Parameters for `mob/stop_member_run`."""
+    agent_identity: str
+    mob_id: str
+    reason: str
+    run_id: str
+
+
+@dataclass
+class MobStopMemberRunResult:
+    """Result for `mob/stop_member_run` and its REST route."""
+    agent_identity: str
+    mob_id: str
+    receipt: WireRunStopReceipt
 
 
 @dataclass
@@ -5428,7 +5500,7 @@ fields with typed projections so the wire carries no untyped carriers."""
     policy: Optional[Literal['stage', 'queue', 'immediate']] = None
     reconstruction_source: Optional[Literal['live', 'event_store', 'snapshot', 'replay']] = None
     recovery_count: Optional[int] = None
-    terminal_outcome: Optional[Literal['completed', 'abandoned', 'superseded', 'coalesced', 'cancelled']] = None
+    terminal_outcome: Optional[WireInputTerminalOutcome] = None
 
 
 @dataclass
@@ -7558,6 +7630,16 @@ class BridgeCommandCancelTrackedMemberInput(TypedDict, total=False):
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
 
+class BridgeCommandStopMemberRun(TypedDict, total=False):
+    command: Required[Literal['stop_member_run']]
+    epoch: Required[int]
+    expected_member: Required[BridgeMemberIncarnation]
+    expected_run_id: Required[RunId]
+    operation_id: Required[OperationId]
+    protocol_version: Required[BridgeProtocolVersion]
+    reason: Required[str]
+    supervisor: Required[BridgePeerSpec]
+
 class BridgeCommandRetireMember(TypedDict, total=False):
     command: Required[Literal['retire_member']]
     epoch: Required[int]
@@ -7783,7 +7865,7 @@ class BridgeCommandRevokeForkedParticipant(TypedDict, total=False):
     source_member: Required[BridgeMemberIncarnation]
     supervisor: Required[BridgePeerSpec]
 
-BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
 
 # Outcome of a delivery attempt.
 class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):
@@ -8013,6 +8095,12 @@ class BridgeReplyTrackedInputCancelled(TypedDict, total=False):
     outcome: Required[BridgeTrackedInputCancelOutcome]
     result: Required[Literal['tracked_input_cancelled']]
 
+class BridgeReplyMemberRunStopped(TypedDict, total=False):
+    expected_member: Required[BridgeMemberIncarnation]
+    operation_id: Required[OperationId]
+    receipt: Required[WireRunStopReceipt]
+    result: Required[Literal['member_run_stopped']]
+
 class BridgeReplyRetire(TypedDict, total=False):
     outcome: Required[dict[str, Any]]
     result: Required[Literal['retire']]
@@ -8133,7 +8221,7 @@ class BridgeReplyForkedParticipantRevoked(TypedDict, total=False):
     outcome: Required[dict[str, Any] | dict[str, Literal['pending_attached_release']] | dict[str, Literal['converged']]]
     result: Required[Literal['forked_participant_revoked']]
 
-BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked
+BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #

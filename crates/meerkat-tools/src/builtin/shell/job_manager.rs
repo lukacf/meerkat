@@ -267,6 +267,12 @@ impl JobManager {
         self.process_custody.get()
     }
 
+    /// The bound process custody, if any.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn bound_process_custody(&self) -> Option<Arc<super::custody::ProcessCustody>> {
+        self.process_custody.get().cloned()
+    }
+
     pub(crate) fn with_owner_bridge_session_id(mut self, session_id: SessionId) -> Self {
         self.owner_bridge_session_id = session_id;
         self.owner_session_bound = true;

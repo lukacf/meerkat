@@ -42,7 +42,9 @@ use crate::runtime::terminalization::{TerminalizationOutcome, TerminalizationTar
 use crate::tokio;
 use futures::FutureExt as _;
 use meerkat_core::agent::CommsRuntime;
-use meerkat_core::comms::{CommsCommand, PeerId, SendReceipt, TrustedPeerDescriptor};
+use meerkat_core::comms::{
+    CommsCommand, PeerId, SendReceipt, SessionEventCursor, StreamError, TrustedPeerDescriptor,
+};
 use meerkat_core::lifecycle::run_primitive::{
     KeepAliveDirective, ModelId, ProviderParamsOverride, RuntimeTurnMetadata, TurnInstruction,
     TurnMetadataOverride,
@@ -66,6 +68,30 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::store::MobMemberOperatorRequestKey;
+
+/// Type a member session subscription failure. `NotFound` means the member's
+/// authorized session has no live actor; a rejected cursor keeps its typed
+/// reason. Other stream failures remain internal.
+fn agent_event_subscription_error(
+    agent_identity: &AgentIdentity,
+    session_id: &SessionId,
+    error: StreamError,
+) -> MobError {
+    match error {
+        StreamError::NotFound(_) => MobError::MemberSessionNotLive {
+            agent_identity: agent_identity.clone(),
+            session_id: session_id.clone(),
+        },
+        StreamError::CursorRejected { cursor, reason } => MobError::AgentEventCursorRejected {
+            agent_identity: agent_identity.clone(),
+            cursor,
+            reason,
+        },
+        error => MobError::Internal(format!(
+            "failed to subscribe to agent events for '{agent_identity}': {error}"
+        )),
+    }
+}
 
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 /// Pause between wait polls of a member that is not yet terminal.
@@ -2060,7 +2086,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
     match error {
         MobError::MobNotFound(_)
         | MobError::MobDefinitionProjectionMismatch { .. }
-        | MobError::MobDefinitionAuthorityChanged { .. } => {
+        | MobError::MobDefinitionAuthorityChanged { .. }
+        | MobError::MemberSessionNotLive { .. }
+        | MobError::AgentEventCursorRejected { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
         MobError::ProfileNotFound(_) => {
@@ -6870,27 +6898,38 @@ impl MobHandle {
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
-            MobMachineCommand::SubscribeAgentEvents { agent_identity } => {
+            MobMachineCommand::SubscribeAgentEvents {
+                agent_identity,
+                cursor,
+            } => {
                 let effects = self
                     .apply_machine_input_effects(mob_dsl::MobMachineInput::SubscribeAgentEvents {
                         agent_identity: mob_dsl::AgentIdentity(agent_identity.to_string()),
                     })
                     .await?;
-                let stream = match Self::agent_event_subscription_authority_from_effects(
+                let subscription = match Self::agent_event_subscription_authority_from_effects(
                     effects,
                     &agent_identity,
                 )? {
                     AgentEventSubscriptionAuthority::Local(session_id) => {
-                        self.subscribe_authorized_agent_session_events(&agent_identity, &session_id)
-                            .await?
+                        self.subscribe_authorized_agent_session_events_from(
+                            &agent_identity,
+                            &session_id,
+                            cursor,
+                        )
+                        .await?
                     }
                     // The machine's THIRD outcome (phase 6): a placed member
-                    // subscribes through the member event pump's tap.
+                    // subscribes through the member event pump's tap. Its
+                    // host-resident actor has no local witness.
                     AgentEventSubscriptionAuthority::External => {
-                        self.external_member_event_stream(&agent_identity).await?
+                        self.external_member_event_subscription(&agent_identity, cursor)
+                            .await?
                     }
                 };
-                Ok(MobMachineCommandResult::EventStream(stream))
+                Ok(MobMachineCommandResult::AgentEventSubscription(
+                    subscription,
+                ))
             }
             MobMachineCommand::SubscribeAllAgentEvents => {
                 let machine_state = self.machine_state_watch_rx.borrow().clone();
@@ -8451,9 +8490,20 @@ impl MobHandle {
     pub(super) async fn external_member_event_tap(
         &self,
         agent_identity: &AgentIdentity,
-    ) -> Result<tokio::sync::mpsc::Receiver<crate::event::AttributedEvent>, MobError> {
+    ) -> Result<tokio::sync::mpsc::Receiver<Arc<crate::event::AttributedEvent>>, MobError> {
+        self.external_member_event_tap_from(agent_identity, SessionEventCursor::Live)
+            .await
+            .map(|tap| tap.live)
+    }
+
+    pub(super) async fn external_member_event_tap_from(
+        &self,
+        agent_identity: &AgentIdentity,
+        cursor: SessionEventCursor,
+    ) -> Result<super::event_pump::MemberEventTap, MobError> {
         self.send_actor_command(|reply_tx| super::state::MobCommand::EnsureMemberEventTap {
             agent_identity: agent_identity.clone(),
+            cursor,
             reply_tx,
         })
         .await?
@@ -8467,15 +8517,41 @@ impl MobHandle {
         &self,
         agent_identity: &AgentIdentity,
     ) -> Result<EventStream, MobError> {
-        let tap = self.external_member_event_tap(agent_identity).await?;
-        Ok(Box::pin(futures::stream::unfold(
-            tap,
-            |mut tap| async move {
-                tap.recv()
-                    .await
-                    .map(|attributed| (attributed.envelope, tap))
-            },
-        )))
+        self.external_member_event_subscription(agent_identity, SessionEventCursor::Live)
+            .await
+            .map(|subscription| subscription.stream)
+    }
+
+    /// [`Self::external_member_event_stream`] starting at a typed cursor,
+    /// replayed from the member's bounded replay window. Replayed events are
+    /// copied as the stream is read, never under the pump manager's lock.
+    pub(super) async fn external_member_event_subscription(
+        &self,
+        agent_identity: &AgentIdentity,
+        cursor: SessionEventCursor,
+    ) -> Result<AgentEventSubscription, MobError> {
+        let super::event_pump::MemberEventTap {
+            epoch,
+            gap,
+            replay,
+            live,
+        } = self
+            .external_member_event_tap_from(agent_identity, cursor)
+            .await?;
+        let head = gap.map(|gap| gap.envelope).into_iter().chain(
+            replay
+                .into_iter()
+                .map(|event| Arc::unwrap_or_clone(event).envelope),
+        );
+        let live = futures::stream::unfold(live, |mut live| async move {
+            live.recv()
+                .await
+                .map(|attributed| (Arc::unwrap_or_clone(attributed).envelope, live))
+        });
+        Ok(AgentEventSubscription::without_actor(
+            epoch,
+            Box::pin(futures::StreamExt::chain(futures::stream::iter(head), live)),
+        ))
     }
 
     fn agent_event_subscription_authority_from_effects(
@@ -9317,20 +9393,51 @@ impl MobHandle {
     ///
     /// Looks up the member's backing bridge session from the roster, then
     /// subscribes to the session-level event stream via [`MobSessionService`].
+    /// Delivers only events published after the subscription attaches; use
+    /// [`Self::subscribe_agent_events_from`] to replay retained events.
     ///
     /// Returns `MobError::MemberNotFound` if the member is not in the
-    /// roster or has no backing bridge session.
+    /// roster or has no backing bridge session, and
+    /// `MobError::MemberSessionNotLive` if its session has no live actor.
     pub async fn subscribe_agent_events(
         &self,
         identity: &AgentIdentity,
     ) -> Result<EventStream, MobError> {
+        self.subscribe_agent_events_from(identity, SessionEventCursor::Live)
+            .await
+            .map(|subscription| subscription.stream)
+    }
+
+    /// Subscribe to agent-level events for a specific member, starting at a
+    /// typed cursor.
+    ///
+    /// [`SessionEventCursor::Earliest`] replays the member's current actor
+    /// incarnation from its first retained event, so a host that attaches
+    /// after a newly materialized or restored member already began its first
+    /// run still observes that run's `RunStarted`/`TurnStarted`.
+    /// [`SessionEventCursor::After`] resumes after a sequence the host
+    /// already observed; envelope sequences continue across the member's
+    /// actor incarnations. Replay and live delivery never overlap or leave a
+    /// gap; a position older than the retained window starts with a typed
+    /// `StreamTruncated(StreamLagged)` marker. A rejected cursor surfaces as
+    /// `MobError::AgentEventCursorRejected`.
+    ///
+    /// The subscription names the exact actor incarnation of a local member
+    /// (`None` for a placed member), so a host can let a revoked
+    /// predecessor's stream drain before a successor's.
+    pub async fn subscribe_agent_events_from(
+        &self,
+        identity: &AgentIdentity,
+        cursor: SessionEventCursor,
+    ) -> Result<AgentEventSubscription, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::SubscribeAgentEvents {
                 agent_identity: identity.clone(),
+                cursor,
             })
             .await?
         {
-            MobMachineCommandResult::EventStream(stream) => Ok(stream),
+            MobMachineCommandResult::AgentEventSubscription(subscription) => Ok(subscription),
             _ => Err(MobError::Internal(
                 "unexpected command result variant".into(),
             )),
@@ -15992,16 +16099,28 @@ impl MobHandle {
         agent_identity: &AgentIdentity,
         session_id: &SessionId,
     ) -> Result<EventStream, MobError> {
-        crate::runtime::session_service::MobSessionService::subscribe_session_events(
-            self.session_service.as_ref(),
+        self.subscribe_authorized_agent_session_events_from(
+            agent_identity,
             session_id,
+            SessionEventCursor::Live,
         )
         .await
-        .map_err(|error| {
-            MobError::Internal(format!(
-                "failed to subscribe to agent events for '{agent_identity}': {error}"
-            ))
-        })
+        .map(|subscription| subscription.stream)
+    }
+
+    pub(super) async fn subscribe_authorized_agent_session_events_from(
+        &self,
+        agent_identity: &AgentIdentity,
+        session_id: &SessionId,
+        cursor: SessionEventCursor,
+    ) -> Result<AgentEventSubscription, MobError> {
+        crate::runtime::session_service::MobSessionService::subscribe_agent_session_events_from(
+            self.session_service.as_ref(),
+            session_id,
+            cursor,
+        )
+        .await
+        .map_err(|error| agent_event_subscription_error(agent_identity, session_id, error))
     }
 
     pub(super) async fn authorized_mob_event_router_members(

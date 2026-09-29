@@ -37,6 +37,23 @@ them.
 
 ### Breaking
 
+- Session event subscriptions can replay from a typed cursor (#1236).
+  `meerkat_core::comms::StreamError` gains the variant
+  `CursorRejected { cursor, reason }`, and `meerkat_mob::MobError` gains
+  `MemberSessionNotLive { agent_identity, session_id }` and
+  `AgentEventCursorRejected { agent_identity, cursor, reason }`; exhaustive
+  matches must handle them. `MemberSessionNotLive` classifies as
+  `TargetMissing`.
+- Behaviour-only (not measured by the gate): `MobHandle::subscribe_agent_events`
+  (and the all-member and mob event router subscriptions) now report a member
+  whose authorized session has no live actor as
+  `MobError::MemberSessionNotLive` instead of `MobError::Internal(String)`
+  (#1236).
+- Behaviour-only (not measured by the gate): envelope sequences
+  (`EventEnvelope::seq`) of a session no longer restart at zero for each actor
+  incarnation inside one session service. A successor actor for the same
+  session, including one revived after archive, continues its predecessor's
+  sequence, so a replay cursor stays meaningful across incarnations (#1236).
 - `meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig` gains the
   variant `AnthropicThinkingConfig::BetweenTools`, the wire mirror
   `meerkat_contracts::wire::runtime::WireAnthropicThinkingConfig` gains
@@ -265,6 +282,44 @@ them.
 
 ### Added
 
+- Session event subscriptions replay from a typed cursor (#1236).
+  `SessionService::subscribe_session_events_from(id, SessionEventCursor)` and
+  `EphemeralSessionService`/`PersistentSessionService`
+  `subscribe_session_events_from` accept `SessionEventCursor::Live`,
+  `Earliest` or `After { epoch, seq }` and return a `SessionEventSubscription
+  { epoch, stream }`. Each actor incarnation retains a bounded window of its
+  latest envelopes, 1024 envelopes and 4 MiB of encoded bytes by default
+  (`SessionEventReplayLimits`, `set_session_event_replay_limits`); both
+  bounds evict. Replay and live delivery are captured atomically with
+  respect to publication, so nothing is repeated or skipped at the boundary.
+  A position older than the retained window starts with a typed
+  `StreamTruncated(StreamLagged { dropped })` marker whose event id is
+  stable across replays. A sequence the space never allocated is rejected
+  as `SessionEventCursorRejection::AheadOfTail { tail }`, and a cursor from
+  another sequence space (a restart, a cross-process revive) as
+  `EpochMismatch { current }` instead of silently skipping the new space's
+  first events. All of a session's actor incarnations in one service share
+  one sequence allocator, so a replaced incarnation still publishing (its
+  shutdown drain, a turn it could not interrupt) never reuses a successor's
+  sequence, and its late events appear on the successor's stream as a typed
+  gap. `subscribe_live_actor_session_events_from` also returns the exact
+  `LiveSessionActorWitness` the stream belongs to.
+- `MobHandle::subscribe_agent_events_from(identity, cursor)` (and
+  `MobMcpState::subscribe_agent_events_from`) returns an
+  `AgentEventSubscription { stream, actor, epoch }`. With
+  `SessionEventCursor::Earliest`, a host that attaches after a newly
+  materialized or restored member already began its first run still sees
+  that run's `RunStarted`/`TurnStarted`. `actor` names the local member's
+  exact actor incarnation. Placed members replay from their event pump's
+  window, bounded by the default limits (1024 envelopes, 4 MiB), shared
+  rather than copied, and kept across pump restarts of the same residency
+  (dropped when the member's pump stops for good), so a reconnecting
+  subscriber's cursor stays valid. A new residency (a host rebinding bumps
+  its binding generation) starts a new sequence space. A persistent session
+  with an event store starts a new sequence space above its durable event
+  log's tail, so its sequences keep counting up across a restart.
+  `MobSessionService::subscribe_agent_session_events_from` is the
+  forwarding seam, so session-service decorators must forward it.
 - Anthropic `thinking: {"type": "between_tools"}`
   (`AnthropicThinkingConfig::BetweenTools`): turns off up-front thinking and
   keeps only short progress updates between tool calls. Accepted for models
@@ -524,6 +579,12 @@ them.
   module's largest frames by name).
 
 ### Fixed
+
+- A host subscribing to a member's events could miss the first events of a
+  newly materialized or restored actor: the session broadcast had no replay
+  and each actor's sequence restarted at zero, and `NotFound` reached hosts
+  as `MobError::Internal(String)` (#1236). Cursor replay, cross-incarnation
+  sequences and the typed `MemberSessionNotLive` close all three.
 
 - `make wasm-check` failed on the release branch: the `test-support` fork
   supervisor hook called `JoinError::is_panic`, which wasm32's

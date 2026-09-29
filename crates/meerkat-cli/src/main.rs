@@ -10608,6 +10608,14 @@ impl SessionService for RunMobSessionService {
         self.inner.subscribe_session_events(id).await
     }
 
+    async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::SessionEventCursor,
+    ) -> Result<meerkat_core::SessionEventSubscription, meerkat_core::StreamError> {
+        self.inner.subscribe_session_events_from(id, cursor).await
+    }
+
     async fn update_session_mob_authority_context(
         &self,
         id: &SessionId,
@@ -10821,6 +10829,19 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
         meerkat_mob::MobSessionService::subscribe_session_events(self.inner.as_ref(), session_id)
             .await
+    }
+
+    async fn subscribe_agent_session_events_from(
+        &self,
+        session_id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_mob::AgentEventSubscription, meerkat_core::comms::StreamError> {
+        meerkat_mob::MobSessionService::subscribe_agent_session_events_from(
+            self.inner.as_ref(),
+            session_id,
+            cursor,
+        )
+        .await
     }
 
     fn supports_persistent_sessions(&self) -> bool {
@@ -14011,6 +14032,14 @@ impl SessionService for MobCliSessionService {
         self.inner.subscribe_session_events(id).await
     }
 
+    async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::SessionEventCursor,
+    ) -> Result<meerkat_core::SessionEventSubscription, meerkat_core::StreamError> {
+        self.inner.subscribe_session_events_from(id, cursor).await
+    }
+
     async fn update_session_mob_authority_context(
         &self,
         id: &SessionId,
@@ -14278,6 +14307,19 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
         meerkat_mob::MobSessionService::subscribe_session_events(self.inner.as_ref(), session_id)
             .await
+    }
+
+    async fn subscribe_agent_session_events_from(
+        &self,
+        session_id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_mob::AgentEventSubscription, meerkat_core::comms::StreamError> {
+        meerkat_mob::MobSessionService::subscribe_agent_session_events_from(
+            self.inner.as_ref(),
+            session_id,
+            cursor,
+        )
+        .await
     }
 
     fn supports_persistent_sessions(&self) -> bool {

@@ -491,6 +491,7 @@ async fn subscribe_external_member(
         tap,
         |mut tap| async move {
             tap.recv().await.map(|attributed| {
+                let attributed = std::sync::Arc::unwrap_or_clone(attributed);
                 (
                     (
                         attributed.source,

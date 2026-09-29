@@ -38,10 +38,10 @@ pub mod persistent;
 pub mod projector;
 
 pub use ephemeral::{
-    EphemeralSessionService, LiveBridgePreparedSessionOperation, LiveBridgeSessionOperationRequest,
-    LiveBridgeSessionOperationTerminalReceiver, LiveSessionActorRegistry, LiveSessionActorWitness,
-    LiveSessionActorWitnessSlot, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
-    SessionSnapshot,
+    EphemeralSessionService, LiveActorEventSubscription, LiveBridgePreparedSessionOperation,
+    LiveBridgeSessionOperationRequest, LiveBridgeSessionOperationTerminalReceiver,
+    LiveSessionActorRegistry, LiveSessionActorWitness, LiveSessionActorWitnessSlot,
+    RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder, SessionSnapshot,
 };
 pub use live_durable_source::LiveDurableSourceObservation;
 pub use live_transcript_authority::LiveAssistantPlaybackObservationResult;

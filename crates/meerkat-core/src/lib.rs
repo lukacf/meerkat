@@ -164,7 +164,9 @@ pub use budget::{
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
     PeerDirectorySource, PeerName, PeerRoute, SUPERVISOR_BRIDGE_INTENT, SendAndStreamError,
-    SendError, SendReceipt, SendTaintOverride, SenderContentTaint, StreamError, StreamScope,
+    SendError, SendReceipt, SendTaintOverride, SenderContentTaint, SessionEventCursor,
+    SessionEventCursorRejection, SessionEventEpoch, SessionEventReplayLimits,
+    SessionEventSubscription, StreamError, StreamScope, encoded_envelope_len,
 };
 pub use compact::{
     COMPACTION_SUMMARY_PREFIX, CompactionConfig, CompactionContext, CompactionCurator,

@@ -1090,6 +1090,14 @@ impl SessionService for RpcMobSessionService {
     async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
         self.service.subscribe_session_events(id).await
     }
+
+    async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::SessionEventSubscription, StreamError> {
+        self.service.subscribe_session_events_from(id, cursor).await
+    }
 }
 
 #[cfg(feature = "mob")]
@@ -1152,6 +1160,19 @@ impl SessionServiceHistoryExt for RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RpcMobSessionService {
+    async fn subscribe_agent_session_events_from(
+        &self,
+        session_id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_mob::AgentEventSubscription, StreamError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::subscribe_agent_session_events_from(
+            self.service.as_ref(),
+            session_id,
+            cursor,
+        )
+        .await
+    }
+
     /// The persistent service this RPC service wraps owns the durable
     /// session bodies, so it is the source runtime for forked council
     /// participants, exactly as when it serves mobs directly.

@@ -8360,6 +8360,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         event_store: Arc<dyn EventStore>,
         projector: Arc<SessionProjector>,
     ) -> Self {
+        // Sequences of a session revived after a restart continue above what
+        // it already published durably.
+        self.inner
+            .install_session_event_tail_source(Arc::new(EventStoreStreamTail(Arc::clone(
+                &event_store,
+            ))));
         self.event_store = Some(event_store);
         self.projector = Some(projector);
         self
@@ -13131,6 +13137,36 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 }
 
+/// The newest envelope sequence a session's durable event log recorded (the
+/// maximum `stream_seq` among its last rows).
+struct EventStoreStreamTail(Arc<dyn EventStore>);
+
+/// Rows read from the durable log's end to find its stream tail. Rows are
+/// appended in publication order, which can differ slightly from sequence
+/// order only while a replaced actor incarnation still publishes.
+const EVENT_STREAM_TAIL_ROWS: u64 = 16;
+
+#[async_trait]
+impl crate::ephemeral::SessionEventTailSource for EventStoreStreamTail {
+    async fn durable_stream_tail(&self, id: &SessionId) -> Option<u64> {
+        let last = self.0.last_seq(id).await.ok()?;
+        if last == 0 {
+            return None;
+        }
+        let from = last.saturating_sub(EVENT_STREAM_TAIL_ROWS - 1).max(1);
+        let rows = self
+            .0
+            .read_from_bounded(
+                id,
+                from,
+                usize::try_from(EVENT_STREAM_TAIL_ROWS).unwrap_or(16),
+            )
+            .await
+            .ok()?;
+        rows.iter().map(|row| row.stream_seq).max()
+    }
+}
+
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionService<B> {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
@@ -13431,6 +13467,15 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
         self.inner.subscribe_session_events(id).await
+    }
+
+    async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::SessionEventSubscription, meerkat_core::comms::StreamError>
+    {
+        self.inner.subscribe_session_events_from(id, cursor).await
     }
 
     /// Route the typed live-adapter terminal cause onto the session's owned
@@ -14343,6 +14388,39 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
         self.inner.subscribe_session_events(id).await
+    }
+
+    /// Subscribe to session-wide events from the live inner service starting
+    /// at a typed cursor; see
+    /// [`crate::EphemeralSessionService::subscribe_session_events_from`].
+    pub async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::SessionEventSubscription, meerkat_core::comms::StreamError>
+    {
+        self.inner.subscribe_session_events_from(id, cursor).await
+    }
+
+    /// Bound each subsequently created actor incarnation's replay window; see
+    /// [`crate::EphemeralSessionService::set_session_event_replay_limits`].
+    pub fn set_session_event_replay_limits(
+        &self,
+        limits: meerkat_core::comms::SessionEventReplayLimits,
+    ) {
+        self.inner.set_session_event_replay_limits(limits);
+    }
+
+    /// Witness-bearing cursor subscription from the live inner service; see
+    /// [`crate::EphemeralSessionService::subscribe_live_actor_session_events_from`].
+    pub async fn subscribe_live_actor_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<crate::LiveActorEventSubscription, meerkat_core::comms::StreamError> {
+        self.inner
+            .subscribe_live_actor_session_events_from(id, cursor)
+            .await
     }
 
     /// Whether a live session still has its deferred first turn pending.

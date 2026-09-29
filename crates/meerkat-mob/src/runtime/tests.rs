@@ -77073,6 +77073,10 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::MobNotFound(_) => "mob_not_found".to_string(),
         MobError::ProfileNotFound(_) => "profile_not_found".to_string(),
         MobError::MemberNotFound(_) => "meerkat_not_found".to_string(),
+        MobError::MemberSessionNotLive { .. } => "member_session_not_live".to_string(),
+        MobError::AgentEventCursorRejected { reason, .. } => {
+            format!("agent_event_cursor_rejected:{reason:?}")
+        }
         MobError::SessionUnavailableForResume { reason, .. } => {
             format!("session_unavailable_for_resume:{reason:?}")
         }

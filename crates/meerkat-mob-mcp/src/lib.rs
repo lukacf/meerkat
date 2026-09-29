@@ -3219,6 +3219,21 @@ impl MobMcpState {
         handle.subscribe_agent_events(identity).await
     }
 
+    /// Subscribe to agent-level events for a specific member, starting at a
+    /// typed cursor; see [`meerkat_mob::MobHandle::subscribe_agent_events_from`].
+    ///
+    /// (b) gate at subscription admission only (ADJ-P5-17).
+    pub async fn subscribe_agent_events_from(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_mob::AgentEventSubscription, MobError> {
+        let handle = self.handle_for(mob_id).await?;
+        self.require_console_scope(&handle, ControlScope::SubscribeEvents)?;
+        handle.subscribe_agent_events_from(identity, cursor).await
+    }
+
     /// Find the implicit delegation mob for the given bridge session, if one exists.
     ///
     /// Scans the in-memory mob registry for a mob whose generated MobMachine

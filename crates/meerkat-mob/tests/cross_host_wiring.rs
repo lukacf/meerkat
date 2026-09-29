@@ -1686,3 +1686,390 @@ async fn placed_retirement_unwire_failure_retains_non_routable_retry_anchor() {
     b2_responder.shutdown();
     scripted.shutdown();
 }
+
+// ==========================================================================
+// Placed-member external edges: a placed member wired to an external peer
+// (another process's comms endpoint), realized on its host.
+// ==========================================================================
+
+/// A placed member's durable endpoint, as a cross-process host dials it.
+async fn placed_member_descriptor(
+    controlling: &ControllingMob,
+    member: &str,
+) -> meerkat_core::comms::TrustedPeerDescriptor {
+    controlling
+        .handle
+        .member_peer_endpoint(&identity(member))
+        .await
+        .expect("query placed endpoint")
+        .expect("placed member publishes its durable endpoint")
+        .descriptor
+}
+
+async fn external_route_installs_at_rest(controlling: &ControllingMob) -> bool {
+    let installs = controlling
+        .handle
+        .route_installs()
+        .await
+        .expect("route installs projection");
+    installs.complete && installs.outstanding_external.is_empty()
+}
+
+struct PlacedExternalScenario {
+    controlling: ControllingMob,
+    fixture: support::HostDaemonFixture,
+    host_id: String,
+    external: Arc<PeerCommsEndpoint>,
+    external_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    b2_session: String,
+}
+
+async fn placed_external_scenario(label: &str) -> PlacedExternalScenario {
+    let fixture = spawn_host_daemon_fixture(
+        HostFixtureOptions::named(&format!("{label}-host")).with_member_build(),
+    )
+    .await
+    .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob(label).await;
+    let report = controlling.bind_fixture(&fixture).await;
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("b2 materializes on the host");
+    let external = Arc::new(spawn_peer_comms_endpoint(&format!("{label}-ext"), true, None).await);
+    controlling
+        .handle
+        .wire(
+            identity("b2"),
+            meerkat_mob::PeerTarget::External(external.self_descriptor()),
+        )
+        .await
+        .expect("a placed member wires an external peer through its host");
+    assert!(
+        external_route_installs_at_rest(&controlling).await,
+        "the external route install is realized on the host"
+    );
+    // The external process trusts the placed member at its durable endpoint.
+    external
+        .trust(placed_member_descriptor(&controlling, "b2").await)
+        .await;
+    let b2_session = fixture
+        .host_binding_record(controlling.mob_id.as_ref())
+        .await
+        .materialized
+        .get("b2")
+        .cloned()
+        .expect("b2 materialized row")
+        .session_id;
+    let external_runtime: Arc<dyn meerkat_core::agent::CommsRuntime> = external.runtime.clone();
+    PlacedExternalScenario {
+        controlling,
+        fixture,
+        host_id: report.host_id,
+        external,
+        external_runtime,
+        b2_session,
+    }
+}
+
+async fn assert_placed_external_delivers_both_ways(scenario: &PlacedExternalScenario, label: &str) {
+    let b2_runtime = scenario
+        .fixture
+        .member_comms_runtime(&scenario.b2_session)
+        .await;
+    let b2_peer = b2_runtime.peer_id().expect("b2 peer id");
+    let external_peer = scenario.external.self_descriptor().peer_id;
+    let receipt = send_peer_text(
+        &scenario.external_runtime,
+        b2_peer,
+        &format!("{label} ext->b2"),
+    )
+    .await
+    .expect("the external peer delivers to the placed member");
+    assert!(
+        peer_message_receipt_proves_admission(&receipt),
+        "ext -> b2 must be admitted by the placed member's host runtime: {receipt:?}"
+    );
+    let receipt = send_peer_text(&b2_runtime, external_peer, &format!("{label} b2->ext"))
+        .await
+        .expect("the placed member delivers to the external peer");
+    assert!(
+        peer_message_receipt_proves_admission(&receipt),
+        "b2 -> ext must be admitted by the external peer: {receipt:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_member_external_edge_delivers_both_ways_and_unwire_refuses_both_ways() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scenario = placed_external_scenario("xhw-pext-wire").await;
+    assert!(
+        scenario
+            .fixture
+            .member_trusts_peer(
+                &scenario.b2_session,
+                &scenario.external.self_descriptor().peer_id.to_string()
+            )
+            .await,
+        "the host member trusts the external peer after the wire"
+    );
+    assert_placed_external_delivers_both_ways(&scenario, "wired").await;
+
+    let external_name = meerkat_core::comms::PeerName::new(
+        scenario
+            .external
+            .self_descriptor()
+            .name
+            .as_str()
+            .to_string(),
+    )
+    .expect("external peer name");
+    scenario
+        .controlling
+        .handle
+        .unwire(
+            identity("b2"),
+            meerkat_mob::PeerTarget::External(scenario.external.self_descriptor()),
+        )
+        .await
+        .expect("unwire removes the host row before committing");
+    assert!(
+        !scenario
+            .fixture
+            .member_trusts_peer(
+                &scenario.b2_session,
+                &scenario.external.self_descriptor().peer_id.to_string()
+            )
+            .await,
+        "the host member no longer trusts the external peer"
+    );
+    let b2_runtime = scenario
+        .fixture
+        .member_comms_runtime(&scenario.b2_session)
+        .await;
+    let b2_peer = b2_runtime.peer_id().expect("b2 peer id");
+    assert_send_not_admitted(&scenario.external_runtime, b2_peer, "unwired ext->b2").await;
+    assert_send_not_admitted(
+        &b2_runtime,
+        scenario.external.self_descriptor().peer_id,
+        "unwired b2->ext",
+    )
+    .await;
+    let unwired = scenario
+        .controlling
+        .storage_events
+        .replay_all()
+        .await
+        .expect("replay mob events")
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::ExternalPeerUnwired { local, peer_name }
+                    if local.as_str() == "b2" && peer_name == &external_name
+            )
+        })
+        .count();
+    assert_eq!(
+        unwired, 1,
+        "the unwire commits exactly one ExternalPeerUnwired"
+    );
+    scenario.fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_member_external_edge_retirement_converges() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scenario = placed_external_scenario("xhw-pext-retire").await;
+    assert_placed_external_delivers_both_ways(&scenario, "before retire").await;
+    let b2_peer = placed_member_descriptor(&scenario.controlling, "b2")
+        .await
+        .peer_id;
+    scenario
+        .controlling
+        .handle
+        .retire(identity("b2"))
+        .await
+        .expect("retire a placed member with an external edge");
+    assert!(
+        scenario
+            .controlling
+            .handle
+            .get_member(&identity("b2"))
+            .await
+            .expect("query retired b2")
+            .is_none(),
+        "the retired member leaves the roster"
+    );
+    assert!(external_route_installs_at_rest(&scenario.controlling).await);
+    assert!(
+        scenario
+            .controlling
+            .handle
+            .member_peer_endpoint(&identity("b2"))
+            .await
+            .expect("query retired endpoint")
+            .is_none()
+    );
+    assert_send_not_admitted(&scenario.external_runtime, b2_peer, "retired ext->b2").await;
+    scenario.fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_member_external_edge_is_reestablished_after_host_and_controlling_restart() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scenario = placed_external_scenario("xhw-pext-restart").await;
+    assert_placed_external_delivers_both_ways(&scenario, "before restarts").await;
+    let PlacedExternalScenario {
+        controlling,
+        fixture,
+        host_id,
+        external,
+        external_runtime,
+        b2_session,
+    } = scenario;
+
+    // Controlling cold restart: the durable edge and placement recover, the
+    // route ledger is re-derived, and delivery keeps working.
+    let controlling = controlling.restart().await;
+    wait_until(
+        "external route installs to settle after the controlling restart",
+        || external_route_installs_at_rest(&controlling),
+    )
+    .await;
+    let scenario = PlacedExternalScenario {
+        controlling,
+        fixture,
+        host_id,
+        external,
+        external_runtime,
+        b2_session,
+    };
+    assert_placed_external_delivers_both_ways(&scenario, "after controlling restart").await;
+
+    // Member-host restart: the revived member holds no volatile trust rows;
+    // the new host incarnation re-derives and reinstalls the external route
+    // without a manual drive.
+    let PlacedExternalScenario {
+        controlling,
+        fixture,
+        host_id,
+        external,
+        external_runtime,
+        b2_session,
+    } = scenario;
+    let fixture = fixture.partition().await.restore().await;
+    wait_until("public readiness after the member-host restart", || async {
+        public_remote_member_ready(&controlling, "b2", &host_id, &b2_session).await
+    })
+    .await;
+    wait_until(
+        "the host member to trust the external peer again",
+        || async {
+            fixture
+                .member_trusts_peer(&b2_session, &external.self_descriptor().peer_id.to_string())
+                .await
+        },
+    )
+    .await;
+    let scenario = PlacedExternalScenario {
+        controlling,
+        fixture,
+        host_id,
+        external,
+        external_runtime,
+        b2_session,
+    };
+    assert_placed_external_delivers_both_ways(&scenario, "after host restart").await;
+    scenario.fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_member_external_install_and_removal_rejections_are_typed() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("xhw-pext-scripted-host").await;
+    let probe = Arc::new(spawn_peer_comms_endpoint("xhw-pext-scripted-b2", true, None).await);
+    scripted.script_member_identity("b2", member_identity_of(&probe));
+    scripted.bind_member_endpoint("b2", Arc::clone(&probe));
+    let controlling = create_controlling_mob("xhw-pext-scripted").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("b2 placed on the scripted host");
+    let external = spawn_peer_comms_endpoint("xhw-pext-scripted-ext", true, None).await;
+    let external_descriptor = external.self_descriptor();
+
+    // A rejected host install never unwinds the committed edge: the
+    // obligation is named by the projection until a retry drains it.
+    scripted.reject_next_install_peer_trust(
+        BridgeRejectionCause::Unavailable,
+        "scripted external install rejection",
+    );
+    controlling
+        .handle
+        .wire(
+            identity("b2"),
+            meerkat_mob::PeerTarget::External(external_descriptor.clone()),
+        )
+        .await
+        .expect("the wire commits the edge and records the obligation");
+    let installs = controlling
+        .handle
+        .route_installs()
+        .await
+        .expect("route installs projection");
+    assert!(
+        !installs.complete,
+        "an outstanding external install marks the projection incomplete"
+    );
+    assert_eq!(installs.outstanding_external.len(), 1);
+    let obligation = &installs.outstanding_external[0];
+    assert_eq!(obligation.local, "b2");
+    assert_eq!(obligation.peer_id, external_descriptor.peer_id.to_string());
+    assert_eq!(obligation.host.0, report.host_id);
+    controlling
+        .handle
+        .drive_route_installs()
+        .await
+        .expect("drive the pending install");
+    assert!(external_route_installs_at_rest(&controlling).await);
+    let installed = scripted.received_install_peer_trust_payloads();
+    let last = installed.last().expect("the host received the install");
+    assert_eq!(last.agent_identity, "b2");
+    assert_eq!(last.peer.peer_id, external_descriptor.peer_id.to_string());
+
+    // A rejected host removal leaves the edge wired and returns the error;
+    // the next unwire removes it for real.
+    scripted.reject_remove_peer_trust_for(
+        "b2",
+        BridgeRejectionCause::Unavailable,
+        "scripted external removal rejection",
+    );
+    let rejected = controlling
+        .handle
+        .unwire(
+            identity("b2"),
+            meerkat_mob::PeerTarget::External(external_descriptor.clone()),
+        )
+        .await;
+    assert!(
+        rejected.is_err(),
+        "a rejected host removal is a typed unwire failure"
+    );
+    let removals_before = scripted.received_remove_peer_trust_payloads().len();
+    controlling
+        .handle
+        .unwire(
+            identity("b2"),
+            meerkat_mob::PeerTarget::External(external_descriptor.clone()),
+        )
+        .await
+        .expect("the edge was still wired, so a second unwire removes it");
+    assert_eq!(
+        scripted.received_remove_peer_trust_payloads().len(),
+        removals_before + 1,
+        "the second unwire sent exactly one more RemovePeerTrust"
+    );
+    scripted.shutdown();
+}

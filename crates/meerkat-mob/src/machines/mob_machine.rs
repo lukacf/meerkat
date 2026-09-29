@@ -7085,6 +7085,197 @@ mod tests {
         )));
     }
 
+    /// Authority with one committed placed member on a bound host and one
+    /// external edge from it, for the external route ledger rows.
+    fn placed_member_with_external_edge() -> (MobMachineAuthority, HostId, ExternalPeerEdge) {
+        let identity = AgentIdentity::from("placed-ext-worker");
+        let host = HostId("placed-ext-host".to_string());
+        let mut authority = MobMachineAuthority::new();
+        authority
+            .apply_signal(MobMachineSignal::RecoverOwnerBridgeSession {
+                bridge_session_id: SessionId("owner-session".to_string()),
+                destroy_on_owner_archive: false,
+                implicit_delegation_mob: false,
+            })
+            .expect("recover owner");
+        authority
+            .apply_signal(MobMachineSignal::RecoverHostBinding {
+                host_id: host.clone(),
+                pubkey: PeerSigningKey([8; 32]),
+                endpoint: PeerAddress("tcp://placed-ext-host.test:4100".to_string()),
+                epoch: 1,
+                binding_generation: 1,
+                protocol_min: 4,
+                protocol_max: 4,
+                engine_version: "placed-test-engine".to_string(),
+                durable_sessions: true,
+                autonomous_members: true,
+                hard_cancel_member: true,
+                tracked_input_cancel: true,
+                memory_store: true,
+                mcp: true,
+                resolvable_providers: std::collections::BTreeSet::from(["anthropic".to_string()]),
+                approval_forwarding: false,
+                live_endpoint: None,
+            })
+            .expect("recover bound host");
+        authority
+            .apply_signal(MobMachineSignal::RecoverCommittedPlacedSpawn {
+                spawn_id: PlacedSpawnId("placed-ext-spawn".to_string()),
+                agent_identity: identity.clone(),
+                agent_runtime_id: AgentRuntimeId("placed-ext-worker:0".to_string()),
+                generation: Generation(0),
+                fence_token: FenceToken(7),
+                host_id: host.clone(),
+                host_binding_generation: 1,
+                member_session_id: SessionId("placed-ext-session".to_string()),
+                member_peer_endpoint: MemberPeerEndpoint {
+                    name: PeerName("mob/worker/placed-ext-worker".to_string()),
+                    peer_id: PeerId("placed-ext-peer".to_string()),
+                    address: PeerAddress("tcp://placed-ext-member.test:4200".to_string()),
+                    signing_key: PeerSigningKey([3; 32]),
+                },
+                profile_name: "worker".to_string(),
+                runtime_mode: SpawnPolicyRuntimeMode::TurnDriven,
+                external_addressable: true,
+                provision_operation_id: "placed-ext-operation".to_string(),
+                operation_owner_session_id: SessionId("owner-session".to_string()),
+            })
+            .expect("recover committed placed member");
+        let edge = external_peer_edge_for_test("placed-ext-worker", "remote-peer");
+        authority
+            .apply_signal(MobMachineSignal::RecoverExternalPeerWiring {
+                key: ExternalPeerKey::new(edge.local.clone(), edge.endpoint.name.clone()),
+                edge: edge.clone(),
+            })
+            .expect("recover the external edge");
+        (authority, host, edge)
+    }
+
+    fn external_obligation(
+        edge: &ExternalPeerEdge,
+        host: &HostId,
+        kind: RouteObligationKind,
+    ) -> ExternalRouteObligation {
+        ExternalRouteObligation {
+            edge: edge.clone(),
+            host: host.clone(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn external_route_install_is_recorded_for_a_placed_members_edge() {
+        let (mut authority, host, edge) = placed_member_with_external_edge();
+        let obligation = external_obligation(&edge, &host, RouteObligationKind::Install);
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordExternalRouteInstall {
+                obligation: obligation.clone(),
+            },
+        )
+        .expect("record the external route install");
+        assert!(transition.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::ExternalRouteInstallRequested { obligation: requested }
+                if requested == &obligation
+        )));
+        assert!(
+            authority
+                .state()
+                .pending_external_route_installs
+                .contains(&obligation)
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::ResolveExternalRouteInstall {
+                obligation: obligation.clone(),
+            },
+        )
+        .expect("resolve the install");
+        assert!(authority.state().pending_external_route_installs.is_empty());
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RollbackExternalRouteInstall { obligation },
+        )
+        .expect("rollback of an absent install is idempotent");
+    }
+
+    #[test]
+    fn external_route_install_refuses_remove_unwired_and_unplaced_obligations() {
+        let (mut authority, host, edge) = placed_member_with_external_edge();
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::RecordExternalRouteInstall {
+                    obligation: external_obligation(&edge, &host, RouteObligationKind::Remove),
+                },
+            )
+            .is_err(),
+            "the ledger accepts Install obligations only"
+        );
+        let unwired = external_peer_edge_for_test("placed-ext-worker", "never-wired");
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::RecordExternalRouteInstall {
+                    obligation: external_obligation(&unwired, &host, RouteObligationKind::Install),
+                },
+            )
+            .is_err(),
+            "an edge that is not wired has no route"
+        );
+        let other_host = HostId("some-other-host".to_string());
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::RecordExternalRouteInstall {
+                    obligation: external_obligation(
+                        &edge,
+                        &other_host,
+                        RouteObligationKind::Install
+                    ),
+                },
+            )
+            .is_err(),
+            "the route lives on the host the local member is placed on"
+        );
+        assert!(authority.state().pending_external_route_installs.is_empty());
+    }
+
+    #[test]
+    fn external_route_removal_is_synchronous_authority_outside_the_ledger() {
+        let (mut authority, host, edge) = placed_member_with_external_edge();
+        let removal = external_obligation(&edge, &host, RouteObligationKind::Remove);
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AuthorizeExternalRouteRemovalBeforeUnwire {
+                obligation: removal.clone(),
+            },
+        )
+        .expect("authorize the removal while the edge is wired");
+        assert!(transition.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::ExternalRouteInstallRequested { obligation: requested }
+                if requested == &removal
+        )));
+        assert!(
+            authority.state().pending_external_route_installs.is_empty(),
+            "a removal never enters the pending ledger"
+        );
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::AuthorizeExternalRouteRemovalBeforeUnwire {
+                    obligation: external_obligation(&edge, &host, RouteObligationKind::Install),
+                },
+            )
+            .is_err(),
+            "pre-unwire authority is for Remove obligations only"
+        );
+    }
+
     #[test]
     fn committed_placed_recovery_restores_exact_roster_and_routing_facts() {
         let identity = AgentIdentity::from("committed-placed-worker");

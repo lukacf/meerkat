@@ -452,8 +452,14 @@ pub(crate) fn validate_transcript_history_state(
         ));
     }
     let mut expected_base = state.anchor().revision();
-    let mut expected_witness = TranscriptEndpointWitness::from_messages(state.anchor().messages())
-        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    // The anchor's exact row prefix was just re-derived from its messages and
+    // proved equal to the stored one; the endpoint witness binds that same
+    // prefix instead of serializing and hashing the anchor a second time.
+    let mut expected_witness = TranscriptEndpointWitness::from_messages_with_row_prefix(
+        state.anchor().messages(),
+        anchor_row_prefix,
+    )
+    .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
     let mut rewrite_prefix = TranscriptRewritePrefixAccumulator::empty();
     for (index, edge) in state.edges().iter().enumerate() {
         let expected = u64::try_from(index)

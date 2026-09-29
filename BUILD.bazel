@@ -591,6 +591,7 @@ test_suite(
         "//crates/meerkat-mob-mcp:temporary_council_test",
         "//crates/meerkat-mob-pack:meerkat_mob_pack_unit_test",
         "//crates/meerkat-mob:cold_restart_mob_resume_test",
+        "//crates/meerkat-mob:cold_resume_digest_cost_test",
         "//crates/meerkat-mob:cross_host_events_test",
         "//crates/meerkat-mob:cross_host_flows_test",
         "//crates/meerkat-mob:cross_host_wiring_test",

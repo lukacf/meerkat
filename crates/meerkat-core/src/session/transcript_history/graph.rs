@@ -1728,13 +1728,10 @@ impl TranscriptHistoryState {
                 "store-replayed compact graph anchor does not match its first edge".to_string(),
             ));
         }
-        let actual_anchor_revision = transcript_messages_digest(&anchor_messages)
-            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
-        if actual_anchor_revision != anchor_revision {
-            return Err(TranscriptEditError::HistoryStateMalformed(format!(
-                "store-replayed compact graph anchor revision {anchor_revision} has digest {actual_anchor_revision}"
-            )));
-        }
+        // The anchor's content digest is proved against `anchor_revision` by
+        // `validate_transcript_history_state` below, over this exact state and
+        // before it is returned; digesting the anchor here as well would hash
+        // the whole retained pre-rewrite transcript twice on every cold read.
         let anchor = TranscriptRevisionAnchor {
             revision: anchor_revision,
             messages: anchor_messages,

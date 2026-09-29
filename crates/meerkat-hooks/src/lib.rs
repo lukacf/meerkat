@@ -64,6 +64,60 @@ use tokio::time::timeout;
 
 pub use meerkat_core::config::HookInProcessHandlerId as InProcessHookHandlerId;
 
+/// Durable process custody for command hooks, supplied by the host.
+///
+/// meerkat-hooks cannot depend on the host's custody implementation, so the
+/// host adapts it to this seam. With custody installed, a command hook is
+/// reserved durably before it is spawned, runs behind a spawn gate until its
+/// leader is recorded, and stays in custody until its process group is proven
+/// exited, so a host that dies mid-hook leaves the hook to the next
+/// incarnation's recovery instead of running on unowned.
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+pub trait CommandHookProcessCustody: Send + Sync {
+    /// Reserve custody for a hook process that will run `program args...`
+    /// (inside run `run_id`, when the invocation belongs to one) and return
+    /// the gated command to configure and spawn. The command must stay in the
+    /// process group it was given.
+    async fn prepare(
+        &self,
+        hook_id: &HookId,
+        run_id: Option<&meerkat_core::RunId>,
+        program: &std::ffi::OsStr,
+        args: &[std::ffi::OsString],
+    ) -> Result<(Box<dyn CommandHookCustodySpawn>, Command), CommandHookCustodyError>;
+}
+
+/// One reserved, gated command-hook spawn.
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+pub trait CommandHookCustodySpawn: Send {
+    /// Record the spawned leader and release the gate. Custody then holds the
+    /// hook's process group until it is proven exited. On error the gate stays
+    /// closed and the command never ran.
+    async fn spawned(
+        self: Box<Self>,
+        child: &tokio::process::Child,
+    ) -> Result<(), CommandHookCustodyError>;
+}
+
+/// Command-hook custody could not be established; the hook does not run.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct CommandHookCustodyError {
+    pub reason: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for CommandHookCustodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "command hook process custody failed: {}", self.reason)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::error::Error for CommandHookCustodyError {}
+
 /// Observer told the leader pid of every command-hook process group right
 /// after spawn (the group id equals the leader pid).
 #[cfg(unix)]
@@ -365,6 +419,9 @@ pub struct DefaultHookEngine {
     #[cfg(not(target_arch = "wasm32"))]
     inflight_background: Arc<Mutex<tokio::task::JoinSet<()>>>,
     revision: Arc<AtomicU64>,
+    /// Durable custody for command-hook processes, when the host supplies it.
+    #[cfg(not(target_arch = "wasm32"))]
+    process_custody: Option<Arc<dyn CommandHookProcessCustody>>,
 }
 
 impl DefaultHookEngine {
@@ -400,6 +457,8 @@ impl DefaultHookEngine {
             #[cfg(not(target_arch = "wasm32"))]
             inflight_background: Arc::new(Mutex::new(tokio::task::JoinSet::new())),
             revision: Arc::new(AtomicU64::new(1)),
+            #[cfg(not(target_arch = "wasm32"))]
+            process_custody: None,
         }
     }
 
@@ -435,6 +494,18 @@ impl DefaultHookEngine {
             .iter()
             .map(|entry| (entry.id.clone(), entry.runtime.clone()))
             .collect()
+    }
+
+    /// Run command hooks under the host's durable process custody (see
+    /// [`CommandHookProcessCustody`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_command_process_custody(
+        mut self,
+        custody: Arc<dyn CommandHookProcessCustody>,
+    ) -> Self {
+        self.process_custody = Some(custody);
+        self
     }
 
     pub fn with_in_process_handler(
@@ -755,9 +826,31 @@ impl DefaultHookEngine {
             });
         }
 
-        let mut command = Command::new(command);
+        let (custody_spawn, mut command) = match self.process_custody.as_ref() {
+            Some(custody) => {
+                let args: Vec<std::ffi::OsString> =
+                    args.iter().map(std::ffi::OsString::from).collect();
+                let (spawn, command) = custody
+                    .prepare(
+                        &entry.id,
+                        invocation.run_id.as_ref(),
+                        std::ffi::OsStr::new(command),
+                        &args,
+                    )
+                    .await
+                    .map_err(|err| HookEngineError::ExecutionFailed {
+                        hook_id: entry.id.clone(),
+                        reason: err.to_string(),
+                    })?;
+                (Some(spawn), command)
+            }
+            None => {
+                let mut command = Command::new(command);
+                command.args(args);
+                (None, command)
+            }
+        };
         command
-            .args(args)
             .envs(env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -771,8 +864,22 @@ impl DefaultHookEngine {
                 hook_id: entry.id.clone(),
                 reason: format!("failed to spawn command hook: {err}"),
             })?;
-        #[cfg(unix)]
-        observe_command_hook_process_group(&child);
+        match custody_spawn {
+            Some(spawn) => {
+                if let Err(err) = spawn.spawned(&child).await {
+                    // The gate stayed closed: the hook command never ran.
+                    terminate_child_process_group(&mut child).await;
+                    return Err(HookEngineError::ExecutionFailed {
+                        hook_id: entry.id.clone(),
+                        reason: err.to_string(),
+                    });
+                }
+            }
+            None => {
+                #[cfg(unix)]
+                observe_command_hook_process_group(&child);
+            }
+        }
 
         let mut stdin = match child.stdin.take() {
             Some(stdin) => stdin,
@@ -1386,6 +1493,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreLlmRequest,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1445,6 +1553,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PostToolExecution,
                     session_id: session_id.clone(),
                     turn_number: Some(1),
@@ -1505,6 +1614,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PostToolExecution,
                     session_id: session_id.clone(),
                     turn_number: Some(1),
@@ -1576,6 +1686,7 @@ mod tests {
         let err = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreLlmRequest,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1646,6 +1757,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreLlmRequest,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1697,6 +1809,7 @@ mod tests {
         let err = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1736,6 +1849,7 @@ mod tests {
         let err = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1819,6 +1933,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1878,6 +1993,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1928,6 +2044,7 @@ mod tests {
         let err = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::RunStarted,
                     session_id: SessionId::new(),
                     turn_number: Some(0),
@@ -1964,6 +2081,7 @@ mod tests {
         let err = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PostToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -2039,6 +2157,7 @@ mod tests {
         let report = DefaultHookEngine::new(config)
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -2089,6 +2208,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -2202,6 +2322,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -2228,6 +2349,7 @@ mod tests {
 
     fn invocation(point: HookPoint, session_id: SessionId) -> HookInvocation {
         HookInvocation {
+            run_id: None,
             point,
             session_id,
             turn_number: Some(1),

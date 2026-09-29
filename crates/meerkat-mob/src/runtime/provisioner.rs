@@ -10273,6 +10273,26 @@ mod tests {
     }
 }
 
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+struct MobTranscriptNoticeHandle {
+    session_service: Arc<dyn MobSessionService>,
+    session_id: SessionId,
+}
+
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle for MobTranscriptNoticeHandle {
+    async fn append_system_notice_under_turn_finalization_boundary(
+        &self,
+        record: meerkat_core::types::SystemNoticeRecord,
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .append_system_notice_under_runtime_turn_boundary(&self.session_id, record)
+            .await
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+}
+
 #[cfg(feature = "runtime-adapter")]
 pub(super) struct MobSessionRuntimeExecutor {
     session_service: Arc<dyn MobSessionService>,
@@ -10747,6 +10767,19 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             Arc::clone(&self.runtime_adapter),
             self.bridge_session_id.clone(),
         ))
+    }
+
+    /// Typed system notices (such as an interrupted-run notice after an
+    /// abrupt host stop) are recorded through the member's session service
+    /// without a turn.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transcript_notice_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle>> {
+        Some(Arc::new(MobTranscriptNoticeHandle {
+            session_service: Arc::clone(&self.session_service),
+            session_id: self.bridge_session_id.clone(),
+        }))
     }
 
     async fn apply(

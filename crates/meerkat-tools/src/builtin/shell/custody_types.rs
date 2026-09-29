@@ -6,35 +6,9 @@
 
 use std::path::PathBuf;
 
+pub use meerkat_core::tool_process::{ToolProcessCessation, ToolProcessSpawner};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-/// How recovery established that an earlier incarnation's tool has ceased.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "cessation", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ToolProcessCessation {
-    /// The host died before releasing the spawn gate, so the command never
-    /// started.
-    NeverStarted,
-    /// The recorded group had no member left when recovery inspected it: the
-    /// tool had already finished or been killed. Its result was not
-    /// delivered.
-    AlreadyExited,
-    /// The recorded leader pid or group id now names a different process or
-    /// group (another start stamp, another user, a member that cannot descend
-    /// from the recorded leader, or a live group of the current
-    /// incarnation). Group ids are not reused while a group exists, so the
-    /// recorded group is gone. Nothing was signalled.
-    GroupReassigned,
-    /// Recovery SIGKILLed the group and observed every member exit.
-    KilledByRecovery { members: usize },
-    /// The earlier incarnation ran in a boot or pid namespace that has since
-    /// been replaced. A reboot ends every process; the kernel SIGKILLs every
-    /// process of a pid namespace when its init exits. Recovery cannot
-    /// observe that environment, so it signals nothing.
-    PriorEnvironmentEnded,
-}
 
 /// One earlier-incarnation tool settled by recovery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +18,10 @@ pub struct RecoveredToolProcess {
     pub prior_incarnation: Uuid,
     /// Provider tool-call id of the interrupted call, when known.
     pub tool_call_id: Option<String>,
+    /// The run the process belonged to, when it was spawned inside one.
+    pub run_id: Option<meerkat_core::RunId>,
+    /// What spawned the process.
+    pub spawner: ToolProcessSpawner,
     pub cessation: ToolProcessCessation,
 }
 
@@ -52,6 +30,50 @@ pub struct RecoveredToolProcess {
 #[non_exhaustive]
 pub struct ProcessCustodyRecoveryReport {
     pub recovered: Vec<RecoveredToolProcess>,
+}
+
+/// Result of settling one scope during a realm sweep.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ScopeSweep {
+    /// The scope (session id) the records belonged to.
+    pub scope: String,
+    /// The scope's settlement, or why it could not be settled now (for
+    /// example [`ProcessCustodyError::PriorIncarnationAlive`] for a session
+    /// another live host still serves). A failed scope keeps its records and
+    /// is settled again when the session is next built or swept.
+    pub outcome: Result<ProcessCustodyRecoveryReport, ProcessCustodyError>,
+}
+
+/// Outcome of a realm-level custody sweep over every scope under a custody
+/// root, including sessions that are never resumed.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct ProcessCustodySweepReport {
+    pub scopes: Vec<ScopeSweep>,
+}
+
+/// What the incarnation lock of a host in another pid namespace shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ForeignIncarnationLiveness {
+    /// A live process holds the host's incarnation lock: a sibling host
+    /// still owns the record.
+    Running,
+    /// Nothing can prove it either way: the lock file is missing (a record
+    /// written before incarnation locks), or the custody root is on a
+    /// network or userspace filesystem where `flock(2)` is not a reliable
+    /// cross-process proof.
+    Unverifiable,
+}
+
+impl std::fmt::Display for ForeignIncarnationLiveness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Running => "still running",
+            Self::Unverifiable => "not verifiable from here",
+        })
+    }
 }
 
 /// Errors establishing or recovering process custody.
@@ -82,8 +104,8 @@ pub enum ProcessCustodyError {
     #[error("process custody record {path} is unreadable: {reason}")]
     CorruptRecord { path: PathBuf, reason: String },
     /// A record was written by a custody format this build does not know
-    /// (for example by a newer release before a rollback), in the same boot
-    /// and pid namespace, by another host incarnation. Its phase and process
+    /// (for example by a newer release before a rollback), in the same boot,
+    /// by another host incarnation. Its phase and process
     /// identity cannot be interpreted, so cessation cannot be proven.
     /// Operator action: run the newer release again to settle it, or confirm
     /// the tool process is not running and delete the file at `path`.
@@ -99,6 +121,22 @@ pub enum ProcessCustodyError {
         entry_id: Uuid,
         incarnation: Uuid,
         host_pid: i32,
+    },
+    /// The entry was written in this boot but in another pid namespace (for
+    /// example another container sharing the realm root), and its host
+    /// incarnation's liveness lock does not prove the host ended (see
+    /// [`ForeignIncarnationLiveness`]). Its pids cannot be observed from
+    /// here, so nothing was signalled or settled. Operator action: for
+    /// `Running`, stop the other host (or let it settle its own session);
+    /// for `Unverifiable`, confirm the container that wrote it has stopped,
+    /// then delete the entry's record and retry. A reboot also settles it.
+    #[error(
+        "custody entry {entry_id} of host incarnation {incarnation} was written in another pid namespace of this boot, and its host is {liveness}"
+    )]
+    ForeignPidNamespace {
+        entry_id: Uuid,
+        incarnation: Uuid,
+        liveness: ForeignIncarnationLiveness,
     },
     /// Recovery SIGKILLed the group but some member did not exit before the
     /// deadline (a process stuck in an uninterruptible kernel wait), or the

@@ -1754,6 +1754,25 @@ pub trait CoreExecutorPreDequeueHandle: Send + Sync {
     ) -> Result<CorePreDequeueOutcome, CoreExecutorError>;
 }
 
+/// Endpoint that records a typed system notice (with the user requests it
+/// accounts for, see [`crate::types::SystemNoticeRecord`]) in the session's
+/// durable transcript without a turn (no model call).
+///
+/// The runtime invokes it at the same position as
+/// [`CoreExecutorPreDequeueHandle`]: the turn-finalization boundary is held,
+/// the session actor is provably idle, and the next admitted input has not
+/// been dequeued yet, so the notice is part of the transcript the next real
+/// turn sees. Implementations MUST NOT reacquire the boundary, and must be
+/// idempotent: appending a notice already in the transcript is a no-op.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait CoreExecutorTranscriptNoticeHandle: Send + Sync {
+    async fn append_system_notice_under_turn_finalization_boundary(
+        &self,
+        record: crate::types::SystemNoticeRecord,
+    ) -> Result<(), CoreExecutorError>;
+}
+
 /// The interface core exposes for the runtime layer to apply run primitives.
 ///
 /// The runtime layer creates an implementation that wraps an `Agent` and
@@ -1830,6 +1849,12 @@ pub trait CoreExecutor: Send + Sync {
     /// committed for it to miss. Runtime bindings alone do not supply durable
     /// handoff realization.
     fn pre_dequeue_handle(&self) -> Option<Arc<dyn CoreExecutorPreDequeueHandle>> {
+        None
+    }
+
+    /// Optional endpoint recording typed system notices in the durable
+    /// transcript without a turn (see [`CoreExecutorTranscriptNoticeHandle`]).
+    fn transcript_notice_handle(&self) -> Option<Arc<dyn CoreExecutorTranscriptNoticeHandle>> {
         None
     }
 

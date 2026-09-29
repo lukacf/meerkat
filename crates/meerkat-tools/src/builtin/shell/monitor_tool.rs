@@ -40,6 +40,7 @@ impl MonitorStartTool {
         &self,
         args: Value,
         tool_call_id: Option<&str>,
+        run_id: Option<&meerkat_core::RunId>,
     ) -> Result<ToolOutput, BuiltinToolError> {
         let input: MonitorStartInput = serde_json::from_value(args)
             .map_err(|error| BuiltinToolError::invalid_args(error.to_string()))?;
@@ -86,11 +87,12 @@ impl MonitorStartTool {
         let job_id = match tool_call_id {
             Some(tool_call_id) => {
                 self.job_manager
-                    .spawn_monitor_for_call(
+                    .spawn_monitor_for_call_in_run(
                         &input.command,
                         working_dir.as_deref(),
                         timeout_secs,
                         tool_call_id,
+                        run_id,
                         options,
                     )
                     .await
@@ -98,11 +100,12 @@ impl MonitorStartTool {
             None => {
                 let nonce = meerkat_core::time_compat::new_uuid_v7().to_string();
                 self.job_manager
-                    .spawn_monitor_for_call(
+                    .spawn_monitor_for_call_in_run(
                         &input.command,
                         working_dir.as_deref(),
                         timeout_secs,
                         &nonce,
+                        run_id,
                         options,
                     )
                     .await
@@ -292,16 +295,19 @@ impl BuiltinTool for MonitorStartTool {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        self.call_with_tool_call_id(args, None).await
+        self.call_with_tool_call_id(args, None, None).await
     }
 
     async fn call_with_context(
         &self,
         call: ToolCallView<'_>,
         args: Value,
-        _context: &meerkat_core::ToolDispatchContext,
+        context: &meerkat_core::ToolDispatchContext,
     ) -> Result<ToolOutput, BuiltinToolError> {
-        self.call_with_tool_call_id(args, Some(call.id)).await
+        // The owning run id travels into the monitor's process custody, so a
+        // run interrupted by an abrupt host stop is settled, not replayed.
+        self.call_with_tool_call_id(args, Some(call.id), context.run_id())
+            .await
     }
 
     fn async_ops_for_output(&self, output: &ToolOutput) -> Vec<meerkat_core::ops::AsyncOpRef> {

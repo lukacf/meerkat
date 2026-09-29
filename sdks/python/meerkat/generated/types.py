@@ -7148,6 +7148,24 @@ class ContentBlockSkillContext(TypedDict, total=False):
 
 ContentBlock = ContentBlockText | ContentBlockImageInline | ContentBlockImageBlob | ContentBlockVideoInline | ContentBlockVideoUri | ContentBlockStructured | ContentBlockSkillContext
 
+# What kind of input an interrupted run had in flight.
+InterruptedInputKind = Literal['prompt', 'peer', 'flow_step', 'external_event', 'continuation', 'operation', 'unknown']
+
+# What settling interrupted-run evidence did to the run the process belonged
+# to, as told to the model.
+class InterruptedToolRunDispositionInputsSettled(TypedDict, total=False):
+    inputs: Required[int]
+    kind: Required[Literal['inputs_settled']]
+    unrestored: NotRequired[list[InterruptedInputKind]]
+
+class InterruptedToolRunDispositionRunCompleted(TypedDict, total=False):
+    kind: Required[Literal['run_completed']]
+
+class InterruptedToolRunDispositionUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+InterruptedToolRunDisposition = InterruptedToolRunDispositionInputsSettled | InterruptedToolRunDispositionRunCompleted | InterruptedToolRunDispositionUnknown
+
 # Sender-declared content-taint classification for peer content.
 #
 # This is the typed vocabulary for the optional taint declaration a sender
@@ -7176,6 +7194,56 @@ SystemNoticeDirection = Literal['incoming', 'outgoing', 'internal']
 # over the wire, or derived from a 32-byte Ed25519 public key when a transport
 # still authenticates by raw signing key.
 PeerId = str
+
+# How recovery established that an earlier incarnation's tool process has
+# ceased.
+class ToolProcessCessationNeverStarted(TypedDict, total=False):
+    kind: Required[Literal['never_started']]
+
+class ToolProcessCessationAlreadyExited(TypedDict, total=False):
+    kind: Required[Literal['already_exited']]
+
+class ToolProcessCessationGroupReassigned(TypedDict, total=False):
+    kind: Required[Literal['group_reassigned']]
+
+class ToolProcessCessationKilledByRecovery(TypedDict, total=False):
+    kind: Required[Literal['killed_by_recovery']]
+    members: Required[int]
+
+class ToolProcessCessationPriorEnvironmentEnded(TypedDict, total=False):
+    kind: Required[Literal['prior_environment_ended']]
+
+class ToolProcessCessationExitedBeforeCommit(TypedDict, total=False):
+    kind: Required[Literal['exited_before_commit']]
+
+class ToolProcessCessationForeignIncarnationEnded(TypedDict, total=False):
+    kind: Required[Literal['foreign_incarnation_ended']]
+
+class ToolProcessCessationUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded | ToolProcessCessationExitedBeforeCommit | ToolProcessCessationForeignIncarnationEnded | ToolProcessCessationUnknown
+
+# Which kind of owned process a custody entry guards.
+class ToolProcessSpawnerShellCall(TypedDict, total=False):
+    kind: Required[Literal['shell_call']]
+
+class ToolProcessSpawnerBackgroundJob(TypedDict, total=False):
+    job_id: Required[str]
+    kind: Required[Literal['background_job']]
+
+class ToolProcessSpawnerMonitor(TypedDict, total=False):
+    job_id: Required[str]
+    kind: Required[Literal['monitor']]
+
+class ToolProcessSpawnerCommandHook(TypedDict, total=False):
+    hook_id: Required[str]
+    kind: Required[Literal['command_hook']]
+
+class ToolProcessSpawnerUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+ToolProcessSpawner = ToolProcessSpawnerShellCall | ToolProcessSpawnerBackgroundJob | ToolProcessSpawnerMonitor | ToolProcessSpawnerCommandHook | ToolProcessSpawnerUnknown
 
 # Typed runtime-authored transcript metadata.
 #
@@ -7236,15 +7304,23 @@ class SystemNoticeBlockRuntimeNotice(TypedDict, total=False):
     payload: NotRequired[Any]
     type: Required[Literal['runtime_notice']]
 
+class SystemNoticeBlockToolProcessInterrupted(TypedDict, total=False):
+    cessation: Required[ToolProcessCessation]
+    disposition: Required[InterruptedToolRunDisposition]
+    run_id: Required[RunId]
+    spawner: Required[ToolProcessSpawner]
+    tool_call_id: NotRequired[Optional[str]]
+    type: Required[Literal['tool_process_interrupted']]
+
 class SystemNoticeBlockUnknown(TypedDict, total=False):
     payload: NotRequired[Any]
     summary: NotRequired[Optional[str]]
     type: Required[Literal['unknown']]
 
-SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockUnknown
+SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockToolProcessInterrupted | SystemNoticeBlockUnknown
 
 # Typed system notice content carried in the transcript.
-SystemNoticeKind = Literal['generic', 'comms', 'external_event', 'mcp_pending', 'mcp', 'background_job', 'tool_scope', 'tool_scope_warning'] | Literal['auth_reauth_required']
+SystemNoticeKind = Literal['generic', 'comms', 'external_event', 'mcp_pending', 'mcp', 'background_job', 'tool_scope', 'tool_scope_warning'] | Literal['auth_reauth_required'] | Literal['tool_process_recovery']
 
 # Stable host-chosen identity for one replaceable system-prompt slot.
 #

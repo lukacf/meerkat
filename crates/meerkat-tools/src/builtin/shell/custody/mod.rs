@@ -17,13 +17,55 @@
 //! 3. **Spawned** - the leader's pid and kernel start stamp (pid-reuse proof)
 //!    are written, and only then is the gate released.
 //! 4. **Settle** - after the in-process guard proves containment the record
-//!    is removed.
+//!    is removed, or, for a process spawned inside a run, replaced by an
+//!    `Exited` marker kept until the run reaches a durable terminal
+//!    ([`InterruptedToolEvidence::run_ended`]): until then a host crash
+//!    would replay the run and repeat the tool, so the marker is the evidence
+//!    that the run already executed it.
 //! 5. **Recover** - a later incarnation opening the same scope must first
 //!    settle every record left by earlier incarnations: verify the group's
 //!    identity, SIGKILL it, and wait for every member's exit through kernel
 //!    exit notification (pidfd on Linux, kqueue `EVFILT_PROC` on macOS).
 //!    [`ProcessCustody`] handles can only be obtained through that recovery,
 //!    so holding one is the proof that the scope's earlier tools have ceased.
+//!
+//! **Multi-process model.** Several host processes may share a custody root
+//! (a realm served by more than one process, or a sweep in one process while
+//! another serves a session). Every read-modify-write of a scope's records by
+//! a recoverer (recovery, sweep, interrupted-run evidence) holds the scope's
+//! settlement lock: an in-process mutex plus `flock(2)` on the scope
+//! directory itself, re-validated against the directory's identity so a
+//! directory removed and recreated meanwhile is re-locked. Hosts write and
+//! remove only their own incarnation's records, without that lock, and a
+//! recoverer never rewrites a record whose host is still running: host
+//! liveness is decided first (pid plus kernel start stamp, which cannot be
+//! reused), so a live host's record is left untouched and reported as
+//! [`ProcessCustodyError::PriorIncarnationAlive`], and a record that host
+//! removes is never resurrected.
+//!
+//! **Other pid namespaces.** A record from the same boot but another pid
+//! namespace (a container restarted without a host reboot, or a sibling
+//! container sharing the root) names pids that cannot be probed or signalled
+//! from here. Liveness is instead proven through the kernel: every host
+//! incarnation holds an exclusive `flock(2)` on
+//! `<root>/.incarnations/<incarnation>.lock` for its whole lifetime (created
+//! under a temporary name, locked, then renamed, so the file is never visible
+//! unlocked), and flock works across pid namespaces on one kernel and
+//! filesystem. Recovery takes that lock without blocking:
+//!
+//! - acquired: the kernel released the owner's lock, so the host process has
+//!   exited. Its tools ran in its container, which a restart tears down with
+//!   every process in its pid namespace, so the record is settled as
+//!   [`ToolProcessCessation::ForeignIncarnationEnded`] without signalling;
+//! - held: a live sibling host owns the record, which fails closed with
+//!   [`ProcessCustodyError::ForeignPidNamespace`] (`Running`);
+//! - lock file missing (a record written before incarnation locks), or the
+//!   root on a network or userspace filesystem where flock is not a reliable
+//!   proof: fail closed with `Unverifiable`.
+//!
+//! Lock files of ended incarnations that no unsettled record names any more
+//! are removed by the realm sweep. Only a changed boot proves an environment
+//! ended without a lock.
 //!
 //! **Durability.** Records must survive the death of the host *process*, and
 //! the page cache already guarantees that: a file written and renamed by a
@@ -55,23 +97,36 @@ mod gate;
 
 pub(super) use gate::SpawnGate;
 
+use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
+use meerkat_core::tool_process::{
+    InterruptedRunInputs, InterruptedToolCall, InterruptedToolEvidence,
+    InterruptedToolEvidenceError, InterruptedToolSettlement,
+};
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use super::custody_types::{
-    ProcessCustodyError, ProcessCustodyRecoveryReport, RecoveredToolProcess, ToolProcessCessation,
+    ForeignIncarnationLiveness, ProcessCustodyError, ProcessCustodyRecoveryReport,
+    ProcessCustodySweepReport, RecoveredToolProcess, ScopeSweep, ToolProcessCessation,
+    ToolProcessSpawner,
 };
 
 /// Directory, under a realm runtime root, that holds custody records.
 pub const PROCESS_CUSTODY_DIR: &str = "tool_process_custody";
+
+/// Directory, under a custody root, of per-incarnation liveness locks. Its
+/// name is not a valid scope, so sweeps never treat it as a session.
+const INCARNATIONS_DIR: &str = ".incarnations";
+const LOCK_EXTENSION: &str = "lock";
 
 const RECORD_EXTENSION: &str = "json";
 const TEMP_EXTENSION: &str = "tmp";
@@ -176,13 +231,16 @@ enum HostEnvironment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnvironmentRelation {
     Same,
-    /// Provably another boot or pid namespace: everything recorded there has
-    /// ended, and its pids name nothing here.
+    /// Provably another boot (or another operating system): everything
+    /// recorded there has ended, and its pids name nothing here.
     Ended,
     /// Not provably the same or different (an identity was not recorded).
     /// Recovery proceeds with per-process checks, which classify reused and
     /// foreign pids safely.
     Unknown,
+    /// The same boot but another pid namespace: its pids name nothing
+    /// observable here, and nothing proves its processes ended.
+    ForeignNamespace,
 }
 
 impl HostEnvironment {
@@ -207,7 +265,7 @@ impl HostEnvironment {
                     (Some(rd), Some(ri), Some(cd), Some(ci)) if (rd, ri) == (cd, ci) => {
                         EnvironmentRelation::Same
                     }
-                    (Some(_), Some(_), Some(_), Some(_)) => EnvironmentRelation::Ended,
+                    (Some(_), Some(_), Some(_), Some(_)) => EnvironmentRelation::ForeignNamespace,
                     _ => EnvironmentRelation::Unknown,
                 }
             }
@@ -345,11 +403,23 @@ fn live_group_supersedes(pgid: i32, recorded_start: &ProcessStartStamp) -> bool 
 /// notification, then release it. Runs on its own thread because a group may
 /// live as long as its tool. If the group cannot be observed the entry is
 /// kept; its leader stamp lets later recoveries recognise it as stale.
-fn release_when_group_exits(pgid: i32, leader_start: Option<ProcessStartStamp>) {
+/// A custody record handed to a release watcher, settled once its group is
+/// proven exited.
+struct WatchedRecord {
+    dir: PathBuf,
+    path: PathBuf,
+    record: CustodyRecord,
+}
+
+fn release_when_group_exits(
+    pgid: i32,
+    leader_start: Option<ProcessStartStamp>,
+    record: Option<WatchedRecord>,
+) {
     let spawned = std::thread::Builder::new()
         .name("meerkat-custody-group-watch".to_owned())
         .spawn(move || {
-            if let Err(error) = watch_until_group_exits(pgid, leader_start) {
+            if let Err(error) = watch_until_group_exits(pgid, leader_start, record.as_ref()) {
                 // Only a group that cannot be observed keeps its entry; its
                 // leader stamp lets later recoveries recognise it as stale.
                 tracing::warn!(
@@ -370,6 +440,7 @@ fn release_when_group_exits(pgid: i32, leader_start: Option<ProcessStartStamp>) 
 fn watch_until_group_exits(
     pgid: i32,
     leader_start: Option<ProcessStartStamp>,
+    record: Option<&WatchedRecord>,
 ) -> std::io::Result<()> {
     loop {
         let mut live = Vec::new();
@@ -381,6 +452,11 @@ fn watch_until_group_exits(
             }
         }
         if live.is_empty() {
+            // Proven exited: the record, if any, has no process left to
+            // guard.
+            if let Some(watched) = record {
+                finish_record_blocking(&watched.dir, &watched.path, &watched.record, true)?;
+            }
             release_live_group(pgid, leader_start);
             return Ok(());
         }
@@ -401,7 +477,431 @@ pub fn track_owned_process_group(leader_pid: i32) {
         Ok(ProcessProbe::Absent | ProcessProbe::Foreign) | Err(_) => None,
     };
     register_live_group(leader_pid, leader_start);
-    release_when_group_exits(leader_pid, leader_start);
+    release_when_group_exits(leader_pid, leader_start, None);
+}
+
+/// Per-scope recovery locks, so recoveries of one scope in this process
+/// (a session build and a realm sweep, or two builds) never interleave.
+static SCOPE_LOCKS: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+
+fn scope_lock(dir: &Path) -> Arc<Mutex<()>> {
+    Arc::clone(
+        SCOPE_LOCKS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(dir.to_path_buf())
+            .or_default(),
+    )
+}
+
+/// Name of a scope's settlement lock file, inside the scope directory. It is
+/// neither a record nor a temporary file, so listings ignore it.
+const SCOPE_LOCK_FILE: &str = ".lock";
+
+/// Take the cross-process half of a scope's settlement lock: `flock(2)` on
+/// the scope's lock file, opened for writing so the lock also works where
+/// flock is emulated with POSIX locks (NFS). Callers hold the in-process
+/// [`scope_lock`] first. Returns `None` when the scope directory does not
+/// exist (the scope holds no records). The lock is re-validated against the
+/// lock file's identity, so a scope removed (and possibly recreated) while
+/// this caller waited is locked afresh.
+fn lock_scope_dir(dir: &Path) -> std::io::Result<Option<nix::fcntl::Flock<std::fs::File>>> {
+    let path = dir.join(SCOPE_LOCK_FILE);
+    loop {
+        let mut file = match std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            // The scope directory does not exist: nothing to settle.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let locked = loop {
+            match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive) {
+                Ok(locked) => break locked,
+                Err((returned, nix::errno::Errno::EINTR)) => file = returned,
+                Err((_, errno)) => return Err(std::io::Error::from(errno)),
+            }
+        };
+        match scope_lock_is_current(&path, &locked) {
+            Ok(true) => return Ok(Some(locked)),
+            // Replaced while we waited: lock the current file.
+            Ok(false) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !dir.exists() {
+                    return Ok(None);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Whether the locked file is still the one at `path`.
+fn scope_lock_is_current(path: &Path, locked: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+    let held = locked.metadata()?;
+    let current = std::fs::metadata(path)?;
+    Ok(current.dev() == held.dev() && current.ino() == held.ino())
+}
+
+/// Remove a scope directory that holds nothing but its lock file. Call while
+/// holding the scope's settlement lock: waiters on the removed lock file
+/// re-validate and find the scope gone. A concurrent reservation recreates
+/// the directory (see `write_record_blocking`).
+fn remove_scope_dir_if_empty(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let only_lock = entries
+        .filter_map(Result::ok)
+        .all(|entry| entry.file_name() == SCOPE_LOCK_FILE);
+    if only_lock {
+        let _ = std::fs::remove_file(dir.join(SCOPE_LOCK_FILE));
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+/// Live custody-bound spawns inside runs, per scope directory and run, and
+/// whether that run has already ended (reached a durable terminal). A spawn
+/// that finishes after its run ended leaves no `Exited` marker; entries only
+/// exist while such spawns are live.
+#[derive(Debug, Default)]
+struct RunSpawns {
+    live: usize,
+    ended: bool,
+}
+
+type RunSpawnKey = (PathBuf, meerkat_core::RunId);
+
+static RUN_SPAWNS: LazyLock<Mutex<HashMap<RunSpawnKey, RunSpawns>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn run_spawns() -> std::sync::MutexGuard<'static, HashMap<RunSpawnKey, RunSpawns>> {
+    RUN_SPAWNS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn run_spawn_started(dir: &Path, run_id: &meerkat_core::RunId) {
+    run_spawns()
+        .entry((dir.to_path_buf(), run_id.clone()))
+        .or_default()
+        .live += 1;
+}
+
+/// One spawn of `run_id` finished; returns whether the run already ended.
+fn run_spawn_finished(dir: &Path, run_id: &meerkat_core::RunId) -> bool {
+    let mut spawns = run_spawns();
+    let key = (dir.to_path_buf(), run_id.clone());
+    let Some(entry) = spawns.get_mut(&key) else {
+        return false;
+    };
+    let ended = entry.ended;
+    entry.live = entry.live.saturating_sub(1);
+    if entry.live == 0 {
+        spawns.remove(&key);
+    }
+    ended
+}
+
+/// The owner proved the record's process group exited (or the command never
+/// ran, when `ran` is false). Remove the record, or keep an `Exited` marker
+/// for a process that ran inside a run that has not ended yet. Holds the
+/// in-process scope lock so it serializes with
+/// [`InterruptedToolEvidence::run_ended`].
+fn finish_record_blocking(
+    dir: &Path,
+    path: &Path,
+    record: &CustodyRecord,
+    ran: bool,
+) -> std::io::Result<()> {
+    let lock = scope_lock(dir);
+    let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(run_id) = record.run_id.as_ref() else {
+        return remove_record(path);
+    };
+    let ended = run_spawn_finished(dir, run_id);
+    if ended || !ran {
+        return remove_record(path);
+    }
+    let mut marker = record.clone();
+    marker.phase = CustodyPhase::Exited;
+    let bytes = serde_json::to_vec(&marker).map_err(std::io::Error::other)?;
+    let temp = temp_path(dir, marker.entry_id, marker.incarnation);
+    write_record_blocking(dir, path, &temp, &bytes)
+}
+
+/// Incarnation locks this process holds, per custody root, for its lifetime.
+static HELD_INCARNATION_LOCKS: Mutex<BTreeMap<PathBuf, nix::fcntl::Flock<std::fs::File>>> =
+    Mutex::new(BTreeMap::new());
+
+fn incarnation_lock_path(root: &Path, incarnation: Uuid) -> PathBuf {
+    root.join(INCARNATIONS_DIR)
+        .join(format!("{incarnation}.{LOCK_EXTENSION}"))
+}
+
+/// Hold this incarnation's liveness lock under `root` for the rest of the
+/// process lifetime. The file is created and locked under a temporary name,
+/// then renamed into place, so a visible lock file is always locked by its
+/// owner from the moment it appears.
+fn hold_incarnation_lock(root: &Path, incarnation: &CustodyIncarnation) -> std::io::Result<()> {
+    let mut held = HELD_INCARNATION_LOCKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if held.contains_key(root) {
+        return Ok(());
+    }
+    let dir = root.join(INCARNATIONS_DIR);
+    let path = incarnation_lock_path(root, incarnation.id);
+    let temp = dir.join(format!(
+        "{}.{LOCK_EXTENSION}.{TEMP_EXTENSION}",
+        incarnation.id
+    ));
+    loop {
+        std::fs::create_dir_all(&dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temp)?;
+        // Blocking: a concurrent sweep may hold (and is about to reap) the
+        // not yet locked temporary file; the rename below then retries.
+        let mut file = file;
+        let locked = loop {
+            match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive) {
+                Ok(locked) => break locked,
+                Err((returned, nix::errno::Errno::EINTR)) => file = returned,
+                Err((_, errno)) => return Err(std::io::Error::from(errno)),
+            }
+        };
+        match std::fs::rename(&temp, &path) {
+            Ok(()) => {
+                held.insert(root.to_path_buf(), locked);
+                return Ok(());
+            }
+            // A sweep reaped the temporary file before it was locked: retry.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// What an incarnation's liveness lock shows.
+enum IncarnationLock {
+    /// The lock was free: its owner has exited (the kernel releases a flock
+    /// only when every descriptor of it is closed).
+    Released,
+    /// A live process holds it.
+    Held,
+    /// No lock can prove anything: the file is missing (written before
+    /// incarnation locks), or `root` is on a filesystem where flock is not a
+    /// reliable cross-process proof.
+    Unprovable,
+}
+
+fn foreign_incarnation_lock(root: &Path, incarnation: Uuid) -> std::io::Result<IncarnationLock> {
+    if !sys::lock_filesystem_is_local(root)? {
+        return Ok(IncarnationLock::Unprovable);
+    }
+    try_incarnation_lock(&incarnation_lock_path(root, incarnation))
+        .map(|lock| match lock {
+            Some(_released) => IncarnationLock::Released,
+            None => IncarnationLock::Held,
+        })
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(IncarnationLock::Unprovable)
+            } else {
+                Err(error)
+            }
+        })
+}
+
+/// Take a lock file without blocking: `Some` when it was free (the caller
+/// now holds it), `None` when another holder has it.
+fn try_incarnation_lock(path: &Path) -> std::io::Result<Option<nix::fcntl::Flock<std::fs::File>>> {
+    // Opened for writing, so the lock also works where flock is emulated
+    // with POSIX locks.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    loop {
+        match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+            Ok(locked) => return Ok(Some(locked)),
+            Err((_, nix::errno::Errno::EWOULDBLOCK)) => return Ok(None),
+            Err((returned, nix::errno::Errno::EINTR)) => file = returned,
+            Err((_, errno)) => return Err(std::io::Error::from(errno)),
+        }
+    }
+}
+
+/// Remove the lock files (and interrupted lock creations) of incarnations
+/// that have ended and that no unsettled record under `root` names any more.
+/// Runs after a sweep settled every scope it could.
+fn reap_ended_incarnation_locks(root: &Path, current: Uuid) -> std::io::Result<()> {
+    let dir = root.join(INCARNATIONS_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let named = incarnations_named_by_unsettled_records(root)?;
+    for entry in entries {
+        let path = entry?.path();
+        let Some(owner) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.split('.').next())
+            .and_then(|stem| Uuid::parse_str(stem).ok())
+        else {
+            continue;
+        };
+        if owner == current || named.contains(&owner) {
+            continue;
+        }
+        match try_incarnation_lock(&path) {
+            // Held while removed: no one can be waiting on an ended owner.
+            Ok(Some(_ended)) => remove_record(&path)?,
+            Ok(None) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Incarnations named by records under `root` that still need their owner's
+/// liveness decided (every phase but settled interrupted-run evidence).
+fn incarnations_named_by_unsettled_records(root: &Path) -> std::io::Result<BTreeSet<Uuid>> {
+    let mut named = BTreeSet::new();
+    for scope in std::fs::read_dir(root)? {
+        let scope = scope?.path();
+        if !scope.is_dir() {
+            continue;
+        }
+        let records = match std::fs::read_dir(&scope) {
+            Ok(records) => records,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for record in records {
+            let path = record?.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some(RECORD_EXTENSION) {
+                continue;
+            }
+            match read_listed_record(&path) {
+                Ok(ListedRecord::Current(record))
+                    if matches!(record.phase, CustodyPhase::Interrupted { .. }) => {}
+                Ok(ListedRecord::Current(record)) => {
+                    named.insert(record.incarnation);
+                }
+                Ok(ListedRecord::OtherVersion(envelope)) => {
+                    named.insert(envelope.incarnation);
+                }
+                Ok(ListedRecord::Gone) => {}
+                // An unreadable record may name anyone: keep every lock.
+                Err(error) => return Err(std::io::Error::other(error.to_string())),
+            }
+        }
+    }
+    Ok(named)
+}
+
+/// Custody roots already swept by this process.
+static SWEPT_ROOTS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// Settle every scope under `root` on a background thread, once per root per
+/// process. This covers sessions that are never resumed: their
+/// earlier-incarnation tools are killed (or proven gone) with the same fence
+/// and typed outcomes as a session build. Scopes a live host still serves
+/// are left for that host. Outcomes are logged; use
+/// [`ProcessCustody::sweep`] to obtain the typed report.
+pub fn sweep_process_custody_once(root: PathBuf) {
+    if !SWEPT_ROOTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(root.clone())
+    {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("meerkat-custody-sweep".to_owned())
+        .spawn(move || match sweep_blocking(&root) {
+            Ok(report) => log_sweep(&report),
+            Err(error) => {
+                tracing::warn!(%error, "process custody sweep could not list its root");
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "could not start the process custody sweep");
+    }
+}
+
+fn log_sweep(report: &ProcessCustodySweepReport) {
+    for scope in &report.scopes {
+        match &scope.outcome {
+            Ok(settled) => {
+                for recovered in &settled.recovered {
+                    tracing::warn!(
+                        scope = %scope.scope,
+                        entry_id = %recovered.entry_id,
+                        prior_incarnation = %recovered.prior_incarnation,
+                        tool_call_id = ?recovered.tool_call_id,
+                        spawner = ?recovered.spawner,
+                        cessation = ?recovered.cessation,
+                        "custody sweep settled a process left by a prior host incarnation"
+                    );
+                }
+            }
+            Err(error) => tracing::info!(
+                scope = %scope.scope,
+                %error,
+                "custody sweep left a scope for its session build"
+            ),
+        }
+    }
+}
+
+fn sweep_blocking(root: &Path) -> Result<ProcessCustodySweepReport, ProcessCustodyError> {
+    let incarnation = incarnation()?;
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ProcessCustodySweepReport::default());
+        }
+        Err(error) => return Err(ProcessCustodyError::io("list custody scopes", error)),
+    };
+    let mut scopes = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| ProcessCustodyError::io("list custody scopes", error))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let scope = ProcessCustodyScope(name);
+        if scope.validate().is_err() || !entry.path().is_dir() {
+            continue;
+        }
+        scopes.push(scope);
+    }
+    scopes.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut report = ProcessCustodySweepReport::default();
+    for scope in scopes {
+        let dir = root.join(scope.as_str());
+        let outcome =
+            recover_scope_blocking(&dir, incarnation, Instant::now() + CESSATION_DEADLINE);
+        report.scopes.push(ScopeSweep {
+            scope: scope.0,
+            outcome,
+        });
+    }
+    if let Err(error) = reap_ended_incarnation_locks(root, incarnation.id) {
+        tracing::warn!(%error, "custody sweep could not reap ended incarnation locks");
+    }
+    Ok(report)
 }
 
 /// The unit whose earlier tools must cease before new work is admitted.
@@ -446,6 +946,19 @@ enum CustodyPhase {
         /// Session id of the leader at spawn; every group member inherits it.
         session_leader: i32,
     },
+    /// Settled by a later incarnation's recovery while its run may still have
+    /// been in flight. Kept as durable interrupted-run evidence until the
+    /// runtime settles the run's inputs and tells the model; no process is
+    /// associated with it any more.
+    Interrupted {
+        cessation: ToolProcessCessation,
+        settlement: InterruptedToolSettlement,
+    },
+    /// The process, spawned inside a run, exited and its owner proved the
+    /// whole group gone, but the run has not ended yet. Kept as evidence
+    /// that the run already executed the tool until the run reaches a
+    /// durable terminal; no process is associated with it any more.
+    Exited,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,6 +971,11 @@ struct CustodyRecord {
     environment: HostEnvironment,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    #[serde(default)]
+    spawner: ToolProcessSpawner,
+    /// The run the process was spawned in, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_id: Option<meerkat_core::RunId>,
     #[serde(flatten)]
     phase: CustodyPhase,
 }
@@ -487,6 +1005,18 @@ pub struct ProcessCustody {
     incarnation: &'static CustodyIncarnation,
 }
 
+/// Custody handles this process has open, per scope directory. While one is
+/// alive its scope was already recovered by this incarnation, and every later
+/// record in it is this incarnation's own, so opening the scope again reuses
+/// the handle instead of recovering again.
+static OPEN_SCOPES: Mutex<BTreeMap<PathBuf, Weak<ProcessCustody>>> = Mutex::new(BTreeMap::new());
+
+fn open_scope(dir: &Path) -> Option<Arc<ProcessCustody>> {
+    let mut open = OPEN_SCOPES.lock().unwrap_or_else(PoisonError::into_inner);
+    open.retain(|_, custody| custody.strong_count() > 0);
+    open.get(dir).and_then(Weak::upgrade)
+}
+
 impl ProcessCustody {
     /// Settle every earlier-incarnation custody record for `scope` under
     /// `root`, then return the scope's custody handle.
@@ -494,6 +1024,8 @@ impl ProcessCustody {
     /// Earlier tools are proven stopped (or never started, or provably gone)
     /// before this returns `Ok`; any doubt is a typed error and yields no
     /// handle. See [`ProcessCustodyError`] for the operator action per error.
+    /// A scope this process already holds open is not recovered again: the
+    /// open handle is returned with an empty report.
     pub async fn recover_and_open(
         root: &Path,
         scope: ProcessCustodyScope,
@@ -501,6 +1033,18 @@ impl ProcessCustody {
         scope.validate()?;
         let incarnation = incarnation()?;
         let dir = root.join(scope.as_str());
+        if let Some(open) = open_scope(&dir) {
+            return Ok((open, ProcessCustodyRecoveryReport::default()));
+        }
+        // Held before any record of this incarnation can exist under `root`,
+        // so other pid namespaces can prove whether this host still runs.
+        let lock_root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || hold_incarnation_lock(&lock_root, incarnation))
+            .await
+            .map_err(|error| {
+                ProcessCustodyError::io("join incarnation lock", std::io::Error::other(error))
+            })?
+            .map_err(|error| ProcessCustodyError::io("hold incarnation lock", error))?;
         let recovery_dir = dir.clone();
         let report = tokio::task::spawn_blocking(move || {
             recover_scope_blocking(
@@ -513,24 +1057,66 @@ impl ProcessCustody {
         .map_err(|error| {
             ProcessCustodyError::io("join custody recovery", std::io::Error::other(error))
         })??;
-        Ok((
-            Arc::new(Self {
-                dir,
-                scope,
-                incarnation,
-            }),
-            report,
-        ))
+        let custody = Arc::new(Self {
+            dir: dir.clone(),
+            scope,
+            incarnation,
+        });
+        OPEN_SCOPES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(dir, Arc::downgrade(&custody));
+        Ok((custody, report))
     }
 
     pub fn scope(&self) -> &ProcessCustodyScope {
         &self.scope
     }
 
+    /// Settle every scope under `root` (a realm's custody root), including
+    /// sessions that are never resumed. Only listing `root` itself can fail;
+    /// each scope carries its own outcome.
+    pub async fn sweep(root: &Path) -> Result<ProcessCustodySweepReport, ProcessCustodyError> {
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || sweep_blocking(&root))
+            .await
+            .map_err(|error| {
+                ProcessCustodyError::io("join custody sweep", std::io::Error::other(error))
+            })?
+    }
+
+    /// Reserve custody for a process that will run `program args...`, and
+    /// return the gated command to configure and spawn. The command cannot
+    /// run until [`PreparedCustodySpawn::spawned`] records the spawned
+    /// leader and releases the gate; if that never happens (the host dies,
+    /// or the caller drops the preparation) the command never runs.
+    ///
+    /// The returned command already runs in a fresh process group; callers
+    /// must not change the process group, and should set `kill_on_drop`.
+    pub async fn prepare_spawn(
+        self: &Arc<Self>,
+        spawner: ToolProcessSpawner,
+        tool_call_id: Option<&str>,
+        run_id: Option<&meerkat_core::RunId>,
+        program: &OsStr,
+        args: &[OsString],
+    ) -> Result<(PreparedCustodySpawn, tokio::process::Command), ProcessCustodyError> {
+        let reservation = self.reserve(spawner, tool_call_id, run_id).await?;
+        let gate = SpawnGate::new(reservation.entry_id())
+            .map_err(|error| ProcessCustodyError::io("create spawn gate", error))?;
+        let mut command = gate
+            .command_argv(program, args)
+            .map_err(|error| ProcessCustodyError::io("build gated command", error))?;
+        command.process_group(0);
+        Ok((PreparedCustodySpawn { reservation, gate }, command))
+    }
+
     /// Reserve custody for one tool process before it is spawned.
     pub(super) async fn reserve(
         self: &Arc<Self>,
+        spawner: ToolProcessSpawner,
         tool_call_id: Option<&str>,
+        run_id: Option<&meerkat_core::RunId>,
     ) -> Result<CustodyReservation, ProcessCustodyError> {
         let record = CustodyRecord {
             version: RECORD_VERSION,
@@ -540,15 +1126,80 @@ impl ProcessCustody {
             host: self.incarnation.host,
             environment: self.incarnation.environment,
             tool_call_id: tool_call_id.map(str::to_owned),
+            spawner,
+            run_id: run_id.cloned(),
             phase: CustodyPhase::Reserved,
         };
         let path = record_path(&self.dir, record.entry_id);
         write_record(&self.dir, &path, &record).await?;
+        if let Some(run_id) = record.run_id.as_ref() {
+            run_spawn_started(&self.dir, run_id);
+        }
         Ok(CustodyReservation {
             path: Some(path),
             dir: self.dir.clone(),
             record,
         })
+    }
+}
+
+/// A reserved, gated spawn (see [`ProcessCustody::prepare_spawn`]).
+#[derive(Debug)]
+pub struct PreparedCustodySpawn {
+    reservation: CustodyReservation,
+    gate: SpawnGate,
+}
+
+impl PreparedCustodySpawn {
+    /// Record the spawned leader, then release the gate so the command runs.
+    ///
+    /// On error the gate stays closed and the command never runs; the caller
+    /// must reap `child` (with `kill_on_drop` set, dropping it suffices).
+    pub async fn spawned(
+        self,
+        child: &tokio::process::Child,
+    ) -> Result<CustodyGuard, ProcessCustodyError> {
+        let Self {
+            mut reservation,
+            mut gate,
+        } = self;
+        gate.spawned();
+        let pid = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .ok_or_else(|| {
+                ProcessCustodyError::io(
+                    "capture spawned leader pid",
+                    std::io::Error::from(std::io::ErrorKind::NotFound),
+                )
+            })?;
+        reservation.record_spawned(pid).await?;
+        gate.release()
+            .map_err(|error| ProcessCustodyError::io("release spawn gate", error))?;
+        Ok(CustodyGuard { reservation })
+    }
+}
+
+/// Custody of one spawned, released process group. Dropping it keeps the
+/// record until the group is proven exited, so a host that dies meanwhile
+/// leaves the group to recovery.
+#[derive(Debug)]
+pub struct CustodyGuard {
+    reservation: CustodyReservation,
+}
+
+impl CustodyGuard {
+    /// Remove the record now: the caller has proven the whole group exited.
+    pub async fn settle(self) {
+        self.reservation.settle().await;
+    }
+
+    /// Keep the record until kernel exit notification proves the group
+    /// exited, then remove it. For owners that cannot prove containment
+    /// themselves (for example a command hook whose background members may
+    /// outlive it).
+    pub fn settle_when_exited(self) {
+        self.reservation.retain();
     }
 }
 
@@ -590,7 +1241,17 @@ impl CustodyReservation {
     fn leader(&self) -> Option<ProcessIdentity> {
         match &self.record.phase {
             CustodyPhase::Spawned { leader, .. } => Some(*leader),
-            CustodyPhase::Reserved => None,
+            CustodyPhase::Reserved | CustodyPhase::Interrupted { .. } | CustodyPhase::Exited => {
+                None
+            }
+        }
+    }
+
+    fn watched(&self, path: PathBuf) -> WatchedRecord {
+        WatchedRecord {
+            dir: self.dir.clone(),
+            path,
+            record: self.record.clone(),
         }
     }
 
@@ -629,16 +1290,24 @@ impl CustodyReservation {
         write_record(&self.dir, path, &self.record).await
     }
 
-    /// Remove the record once the in-process guard has proven containment.
-    /// A failed removal is harmless: recovery later finds the group gone.
+    /// Settle the record once the in-process guard has proven containment:
+    /// remove it, or keep an `Exited` marker until its run commits. A failed
+    /// write is harmless for containment: recovery later finds the group
+    /// gone.
     pub(super) async fn settle(mut self) {
         if let Some(leader) = self.leader() {
             release_live_group(leader.pid, Some(leader.start));
         }
         if let Some(path) = self.path.take() {
-            let result = tokio::task::spawn_blocking(move || remove_record(&path)).await;
+            let dir = self.dir.clone();
+            let record = self.record.clone();
+            let ran = self.leader().is_some();
+            let result = tokio::task::spawn_blocking(move || {
+                finish_record_blocking(&dir, &path, &record, ran)
+            })
+            .await;
             if !matches!(result, Ok(Ok(()))) {
-                tracing::warn!("failed to remove settled shell custody record");
+                tracing::warn!("failed to settle shell custody record");
             }
         }
     }
@@ -647,9 +1316,10 @@ impl CustodyReservation {
     /// not proven in-process). The group stays registered as live until it
     /// is proven exited.
     pub(super) fn retain(mut self) {
-        self.path = None;
+        let path = self.path.take();
         if let Some(leader) = self.leader() {
-            release_when_group_exits(leader.pid, Some(leader.start));
+            let watched = path.map(|path| self.watched(path));
+            release_when_group_exits(leader.pid, Some(leader.start), watched);
         }
     }
 }
@@ -661,15 +1331,36 @@ impl Drop for CustodyReservation {
         };
         match self.leader() {
             None => {
-                if let Err(error) = remove_record(&path) {
-                    tracing::warn!(%error, "failed to remove unreleased shell custody reservation");
-                }
+                // The gate was never released: nothing ran. The removal is
+                // file I/O; keep it off the async worker running this drop.
+                let dir = self.dir.clone();
+                let record = self.record.clone();
+                run_off_async_worker(move || {
+                    if let Err(error) = finish_record_blocking(&dir, &path, &record, false) {
+                        tracing::warn!(
+                            %error,
+                            "failed to remove unreleased shell custody reservation"
+                        );
+                    }
+                });
             }
             // Cancelled after spawn: the in-process guard kills the group;
             // keep it registered (and the record for recovery) until its
             // exit is observed.
-            Some(leader) => release_when_group_exits(leader.pid, Some(leader.start)),
+            Some(leader) => {
+                let watched = self.watched(path);
+                release_when_group_exits(leader.pid, Some(leader.start), Some(watched));
+            }
         }
+    }
+}
+
+/// Run blocking custody file I/O without blocking an async worker: on the
+/// runtime's blocking pool when called from a runtime, inline otherwise.
+fn run_off_async_worker(work: impl FnOnce() + Send + 'static) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => drop(handle.spawn_blocking(work)),
+        Err(_) => work(),
     }
 }
 
@@ -769,6 +1460,19 @@ fn recover_scope_blocking(
     incarnation: &CustodyIncarnation,
     deadline: Instant,
 ) -> Result<ProcessCustodyRecoveryReport, ProcessCustodyError> {
+    let root = dir.parent().ok_or_else(|| {
+        ProcessCustodyError::io(
+            "locate custody root",
+            std::io::Error::from(std::io::ErrorKind::InvalidInput),
+        )
+    })?;
+    let lock = scope_lock(dir);
+    let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(_dir_lock) = lock_scope_dir(dir)
+        .map_err(|error| ProcessCustodyError::io("lock custody scope", error))?
+    else {
+        return Ok(ProcessCustodyRecoveryReport::default());
+    };
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -789,10 +1493,10 @@ fn recover_scope_blocking(
         }
     }
     paths.sort();
-    // Incarnations whose host is proven gone (not running, or its boot or
-    // namespace ended). Only their temp files are interrupted writes; a temp
-    // of a live host (this one, or a concurrent host sharing the root) may be
-    // a write in flight.
+    // Incarnations whose host is proven gone (not running, or its boot
+    // ended). Only their temp files are interrupted writes; a temp of a live
+    // host (this one, or a concurrent host sharing the root) may be a write
+    // in flight.
     let mut ended_incarnations = BTreeSet::new();
 
     let mut report = ProcessCustodyRecoveryReport::default();
@@ -800,20 +1504,48 @@ fn recover_scope_blocking(
         let settled = match read_listed_record(&path)? {
             ListedRecord::Gone => continue,
             ListedRecord::Current(record) => {
-                if record.incarnation == incarnation.id {
+                if record.incarnation == incarnation.id
+                    || matches!(record.phase, CustodyPhase::Interrupted { .. })
+                {
+                    // Live-owned by this incarnation, or already settled
+                    // evidence awaiting the runtime.
                     continue;
                 }
-                let settlement = settle_prior_record(&record, incarnation, deadline)?;
-                if !settlement.host_alive {
-                    ended_incarnations.insert(record.incarnation);
-                }
-                let cessation = settlement.cessation;
-                RecoveredToolProcess {
+                let cessation = settle_prior_record(root, &record, incarnation, deadline)?;
+                // Settled only once its host is proven gone.
+                ended_incarnations.insert(record.incarnation);
+                let recovered = RecoveredToolProcess {
                     entry_id: record.entry_id,
                     prior_incarnation: record.incarnation,
-                    tool_call_id: record.tool_call_id,
+                    tool_call_id: record.tool_call_id.clone(),
+                    run_id: record.run_id.clone(),
+                    spawner: record.spawner.clone(),
                     cessation,
+                };
+                if record.run_id.is_some() && cessation.may_have_run() {
+                    // The process may have had effects inside a run that may
+                    // still be in flight: keep the record as durable
+                    // interrupted-run evidence until the runtime settles the
+                    // run's inputs, instead of letting the run replay.
+                    let mut evidence = record;
+                    evidence.phase = CustodyPhase::Interrupted {
+                        cessation,
+                        settlement: InterruptedToolSettlement::Pending,
+                    };
+                    let bytes = serde_json::to_vec(&evidence).map_err(|error| {
+                        ProcessCustodyError::io(
+                            "encode interrupted-run evidence",
+                            std::io::Error::other(error),
+                        )
+                    })?;
+                    let temp = temp_path(dir, evidence.entry_id, incarnation.id);
+                    write_record_blocking(dir, &path, &temp, &bytes).map_err(|error| {
+                        ProcessCustodyError::io("record interrupted-run evidence", error)
+                    })?;
+                    report.recovered.push(recovered);
+                    continue;
                 }
+                recovered
             }
             ListedRecord::OtherVersion(envelope) => {
                 if envelope.incarnation == incarnation.id {
@@ -836,6 +1568,8 @@ fn recover_scope_blocking(
                     entry_id: envelope.entry_id,
                     prior_incarnation: envelope.incarnation,
                     tool_call_id: envelope.tool_call_id,
+                    run_id: None,
+                    spawner: ToolProcessSpawner::default(),
                     cessation: ToolProcessCessation::PriorEnvironmentEnded,
                 }
             }
@@ -851,57 +1585,79 @@ fn recover_scope_blocking(
             })?;
         }
     }
-    // Drop the scope directory once it is empty. A concurrent reservation
-    // recreates it (see `write_record_blocking`); a non-empty directory is
-    // left as is.
-    let _ = std::fs::remove_dir(dir);
+    // Drop the scope directory once it holds nothing but its lock file.
+    remove_scope_dir_if_empty(dir);
     Ok(report)
 }
 
-/// A settled earlier-incarnation record.
-struct Settlement {
-    cessation: ToolProcessCessation,
-    /// Whether the recording host still runs (it may still be writing).
-    host_alive: bool,
-}
-
+/// Settle one earlier-incarnation record. Host liveness is decided before
+/// anything else, so a record whose host still runs is never rewritten or
+/// removed (that host may still settle or delete it).
 fn settle_prior_record(
+    root: &Path,
     record: &CustodyRecord,
     current: &CustodyIncarnation,
     deadline: Instant,
-) -> Result<Settlement, ProcessCustodyError> {
-    if record.environment.relation_to(&current.environment) == EnvironmentRelation::Ended {
-        // Pids and sessions from another boot or pid namespace name nothing
-        // here; comparing or signalling them could only hit strangers.
-        return Ok(Settlement {
-            cessation: ToolProcessCessation::PriorEnvironmentEnded,
-            host_alive: false,
-        });
+) -> Result<ToolProcessCessation, ProcessCustodyError> {
+    match record.environment.relation_to(&current.environment) {
+        // Pids and sessions from another boot name nothing here; comparing or
+        // signalling them could only hit strangers.
+        EnvironmentRelation::Ended => return Ok(ToolProcessCessation::PriorEnvironmentEnded),
+        // Another pid namespace of this boot: its pids name nothing here.
+        // Only the incarnation's kernel-held lock can prove its host ended.
+        EnvironmentRelation::ForeignNamespace => {
+            let liveness = match foreign_incarnation_lock(root, record.incarnation)
+                .map_err(|error| ProcessCustodyError::io("probe incarnation lock", error))?
+            {
+                IncarnationLock::Released => {
+                    return Ok(match record.phase {
+                        CustodyPhase::Exited => ToolProcessCessation::ExitedBeforeCommit,
+                        _ => ToolProcessCessation::ForeignIncarnationEnded,
+                    });
+                }
+                // An `Exited` marker guards no process, so no pid needs
+                // observing: unless its host provably still runs (and may
+                // still commit the run), it settles in any namespace.
+                IncarnationLock::Unprovable if matches!(record.phase, CustodyPhase::Exited) => {
+                    return Ok(ToolProcessCessation::ExitedBeforeCommit);
+                }
+                IncarnationLock::Held => ForeignIncarnationLiveness::Running,
+                IncarnationLock::Unprovable => ForeignIncarnationLiveness::Unverifiable,
+            };
+            return Err(ProcessCustodyError::ForeignPidNamespace {
+                entry_id: record.entry_id,
+                incarnation: record.incarnation,
+                liveness,
+            });
+        }
+        EnvironmentRelation::Same | EnvironmentRelation::Unknown => {}
     }
-    let host_alive = record
+    if record
         .host
         .is_running()
-        .map_err(|error| ProcessCustodyError::io("probe prior host", error))?;
-    settle_phase(record, host_alive, deadline).map(|cessation| Settlement {
-        cessation,
-        host_alive,
-    })
+        .map_err(|error| ProcessCustodyError::io("probe prior host", error))?
+    {
+        // The live host may still supervise the tool, release its spawn
+        // gate, or settle the record itself.
+        return Err(ProcessCustodyError::PriorIncarnationAlive {
+            entry_id: record.entry_id,
+            incarnation: record.incarnation,
+            host_pid: record.host.pid,
+        });
+    }
+    settle_phase(record, deadline)
 }
 
+/// Settle a record whose host is proven gone.
 fn settle_phase(
     record: &CustodyRecord,
-    host_alive: bool,
     deadline: Instant,
 ) -> Result<ToolProcessCessation, ProcessCustodyError> {
-    let prior_alive = || ProcessCustodyError::PriorIncarnationAlive {
-        entry_id: record.entry_id,
-        incarnation: record.incarnation,
-        host_pid: record.host.pid,
-    };
     match &record.phase {
-        // Only the live host could still release the gate.
-        CustodyPhase::Reserved if host_alive => Err(prior_alive()),
+        // Only the (gone) host could have released the gate.
         CustodyPhase::Reserved => Ok(ToolProcessCessation::NeverStarted),
+        CustodyPhase::Interrupted { cessation, .. } => Ok(*cessation),
+        CustodyPhase::Exited => Ok(ToolProcessCessation::ExitedBeforeCommit),
         CustodyPhase::Spawned {
             leader,
             session_leader,
@@ -918,10 +1674,6 @@ fn settle_phase(
             };
             if members.is_empty() {
                 return Ok(ToolProcessCessation::AlreadyExited);
-            }
-            if host_alive {
-                // Never kill a tool its live host still supervises.
-                return Err(prior_alive());
             }
             kill_group_and_await_exit(record.entry_id, pgid, members, deadline)
         }
@@ -1105,6 +1857,193 @@ fn all_exited(members: &[ProcessIdentity]) -> Result<bool, ProcessCustodyError> 
         }
     }
     Ok(true)
+}
+
+fn evidence_error(error: impl std::fmt::Display) -> InterruptedToolEvidenceError {
+    InterruptedToolEvidenceError {
+        reason: error.to_string(),
+    }
+}
+
+/// Interrupted-run evidence records of one scope.
+fn interrupted_records(dir: &Path) -> Result<Vec<(PathBuf, CustodyRecord)>, ProcessCustodyError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(ProcessCustodyError::io("list custody records", error)),
+    };
+    let mut records = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|error| ProcessCustodyError::io("list custody records", error))?
+            .path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some(RECORD_EXTENSION) {
+            continue;
+        }
+        if let ListedRecord::Current(record) = read_listed_record(&path)?
+            && matches!(record.phase, CustodyPhase::Interrupted { .. })
+        {
+            records.push((path, record));
+        }
+    }
+    records.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(records)
+}
+
+fn interrupted_call(record: &CustodyRecord) -> Option<InterruptedToolCall> {
+    let CustodyPhase::Interrupted {
+        cessation,
+        settlement,
+    } = &record.phase
+    else {
+        return None;
+    };
+    Some(InterruptedToolCall {
+        entry_id: record.entry_id,
+        run_id: record.run_id.clone()?,
+        tool_call_id: record.tool_call_id.clone(),
+        spawner: record.spawner.clone(),
+        cessation: *cessation,
+        settlement: settlement.clone(),
+    })
+}
+
+#[async_trait::async_trait]
+impl InterruptedToolEvidence for ProcessCustody {
+    async fn interrupted_calls(
+        &self,
+    ) -> Result<Vec<InterruptedToolCall>, InterruptedToolEvidenceError> {
+        let dir = self.dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let lock = scope_lock(&dir);
+            let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(_dir_lock) = lock_scope_dir(&dir)
+                .map_err(|error| ProcessCustodyError::io("lock custody scope", error))?
+            else {
+                return Ok(Vec::new());
+            };
+            interrupted_records(&dir).map(|records| {
+                records
+                    .iter()
+                    .filter_map(|(_, r)| interrupted_call(r))
+                    .collect()
+            })
+        })
+        .await
+        .map_err(evidence_error)?
+        .map_err(evidence_error)
+    }
+
+    async fn mark_inputs_settled(
+        &self,
+        entry_ids: &[Uuid],
+        inputs: &InterruptedRunInputs,
+    ) -> Result<(), InterruptedToolEvidenceError> {
+        let dir = self.dir.clone();
+        let entry_ids: BTreeSet<Uuid> = entry_ids.iter().copied().collect();
+        let inputs = inputs.clone();
+        let incarnation = self.incarnation.id;
+        tokio::task::spawn_blocking(move || {
+            let lock = scope_lock(&dir);
+            let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(_dir_lock) = lock_scope_dir(&dir)
+                .map_err(|error| ProcessCustodyError::io("lock custody scope", error))?
+            else {
+                return Ok(());
+            };
+            // Re-listed under the lock: an entry another process already
+            // acknowledged is gone and is never rewritten.
+            for (path, mut record) in interrupted_records(&dir)? {
+                if !entry_ids.contains(&record.entry_id) {
+                    continue;
+                }
+                if let CustodyPhase::Interrupted { settlement, .. } = &mut record.phase {
+                    *settlement = InterruptedToolSettlement::InputsSettled(inputs.clone());
+                }
+                let bytes = serde_json::to_vec(&record).map_err(|error| {
+                    ProcessCustodyError::io(
+                        "encode interrupted-run evidence",
+                        std::io::Error::other(error),
+                    )
+                })?;
+                let temp = temp_path(&dir, record.entry_id, incarnation);
+                write_record_blocking(&dir, &path, &temp, &bytes).map_err(|error| {
+                    ProcessCustodyError::io("record interrupted-run settlement", error)
+                })?;
+            }
+            Ok::<(), ProcessCustodyError>(())
+        })
+        .await
+        .map_err(evidence_error)?
+        .map_err(evidence_error)
+    }
+
+    async fn acknowledge(&self, entry_ids: &[Uuid]) -> Result<(), InterruptedToolEvidenceError> {
+        let dir = self.dir.clone();
+        let paths: Vec<PathBuf> = entry_ids
+            .iter()
+            .map(|entry_id| record_path(&self.dir, *entry_id))
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            let lock = scope_lock(&dir);
+            let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(_dir_lock) = lock_scope_dir(&dir)? else {
+                return Ok(());
+            };
+            for path in paths {
+                remove_record(&path)?;
+            }
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+        .map_err(evidence_error)?
+        .map_err(evidence_error)
+    }
+
+    async fn run_ended(
+        &self,
+        run_id: &meerkat_core::RunId,
+    ) -> Result<(), InterruptedToolEvidenceError> {
+        let dir = self.dir.clone();
+        let run_id = run_id.clone();
+        let incarnation = self.incarnation.id;
+        tokio::task::spawn_blocking(move || {
+            let lock = scope_lock(&dir);
+            let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            // Spawns of the run still live finish without a marker.
+            if let Some(spawns) = run_spawns().get_mut(&(dir.clone(), run_id.clone())) {
+                spawns.ended = true;
+            }
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(ProcessCustodyError::io("list custody records", error)),
+            };
+            for entry in entries {
+                let path = entry
+                    .map_err(|error| ProcessCustodyError::io("list custody records", error))?
+                    .path();
+                if path.extension().and_then(|extension| extension.to_str())
+                    != Some(RECORD_EXTENSION)
+                {
+                    continue;
+                }
+                if let ListedRecord::Current(record) = read_listed_record(&path)?
+                    && matches!(record.phase, CustodyPhase::Exited)
+                    && record.incarnation == incarnation
+                    && record.run_id.as_ref() == Some(&run_id)
+                {
+                    remove_record(&path).map_err(|error| {
+                        ProcessCustodyError::io("remove ended run marker", error)
+                    })?;
+                }
+            }
+            Ok::<(), ProcessCustodyError>(())
+        })
+        .await
+        .map_err(evidence_error)?
+        .map_err(evidence_error)
+    }
 }
 
 #[cfg(test)]

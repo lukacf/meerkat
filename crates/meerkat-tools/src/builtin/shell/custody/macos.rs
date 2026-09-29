@@ -206,6 +206,16 @@ pub(super) fn host_environment() -> io::Result<HostEnvironment> {
 }
 
 /// Whether exactly this process is still running (ours, not a zombie).
+/// Whether `flock(2)` on files under `path` is a reliable liveness proof
+/// across processes of this kernel: a local filesystem, not a network one.
+pub(super) fn lock_filesystem_is_local(path: &std::path::Path) -> io::Result<bool> {
+    let stat = nix::sys::statfs::statfs(path).map_err(io::Error::from)?;
+    Ok(!matches!(
+        stat.filesystem_type_name(),
+        "nfs" | "smbfs" | "afpfs" | "webdav" | "cifs" | "macfuse" | "osxfuse"
+    ))
+}
+
 pub(super) fn is_running(identity: &ProcessIdentity) -> io::Result<bool> {
     let BsdInfo::Ours(info) = bsd_info(identity.pid)? else {
         return Ok(false);

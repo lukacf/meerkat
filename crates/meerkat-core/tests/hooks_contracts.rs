@@ -41,6 +41,7 @@ fn hooks_config_roundtrip_contract() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error::Error>> {
     let invocation = HookInvocation {
+        run_id: None,
         point: HookPoint::PreLlmRequest,
         session_id: SessionId::new(),
         turn_number: Some(1),

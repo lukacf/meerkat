@@ -1184,6 +1184,21 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         )
     }
 
+    /// Interrupted-run notices of RPC-hosted mob members land in the wrapped
+    /// persistent service, so their evidence is acknowledged.
+    async fn append_system_notice_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        record: meerkat_core::types::SystemNoticeRecord,
+    ) -> Result<(), SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::append_system_notice_under_runtime_turn_boundary(
+            &self.service,
+            session_id,
+            record,
+        )
+        .await
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         machine: &meerkat_runtime::MeerkatMachine,
@@ -21284,6 +21299,30 @@ mod tests {
         assert!(
             matches!(abort, Err(SessionError::NotFound { ref id }) if id == &missing_session),
             "uncommitted abort must reach the persistent owner instead of taking the SessionService default: {abort:?}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_forwards_interrupted_run_notices_to_persistent_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let service = runtime.session_service();
+        let missing_session = SessionId::new();
+        let record = meerkat_core::types::SystemNoticeRecord::from(
+            meerkat_core::types::SystemNoticeMessage::tool_process_interrupted(Vec::new()),
+        );
+
+        let appended =
+            meerkat_mob::MobSessionService::append_system_notice_under_runtime_turn_boundary(
+                service.as_ref(),
+                &missing_session,
+                record,
+            )
+            .await;
+        assert!(
+            matches!(appended, Err(SessionError::NotFound { ref id }) if id == &missing_session),
+            "RPC-hosted mob members must reach the persistent owner instead of the Unsupported default: {appended:?}"
         );
     }
 

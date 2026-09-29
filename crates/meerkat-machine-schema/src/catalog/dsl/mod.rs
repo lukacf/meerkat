@@ -1707,6 +1707,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Cancelled",
                     "MaxAttemptsExhausted",
                     "NeverExecuted",
+                    "ToolProcessInterrupted",
                 ],
             ),
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),

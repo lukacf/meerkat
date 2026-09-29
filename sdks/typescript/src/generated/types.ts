@@ -6219,7 +6219,85 @@ export type BackgroundJobTerminalStatus = "completed" | "failed" | "aborted" | "
 
 export type CommsNoticeKind = string;
 
+export type InterruptedInputKind = "prompt" | "peer" | "flow_step" | "external_event" | "continuation" | "operation" | "unknown";
+
+export interface InterruptedToolRunDispositionInputsSettled {
+  inputs: number;
+  kind: "inputs_settled";
+  unrestored?: InterruptedInputKind[];
+}
+
+export interface InterruptedToolRunDispositionRunCompleted {
+  kind: "run_completed";
+}
+
+export interface InterruptedToolRunDispositionUnknown {
+  kind: "unknown";
+}
+
+export type InterruptedToolRunDisposition = InterruptedToolRunDispositionInputsSettled | InterruptedToolRunDispositionRunCompleted | InterruptedToolRunDispositionUnknown;
+
 export type SystemNoticeDirection = "incoming" | "outgoing" | "internal";
+
+export interface ToolProcessCessationNeverStarted {
+  kind: "never_started";
+}
+
+export interface ToolProcessCessationAlreadyExited {
+  kind: "already_exited";
+}
+
+export interface ToolProcessCessationGroupReassigned {
+  kind: "group_reassigned";
+}
+
+export interface ToolProcessCessationKilledByRecovery {
+  kind: "killed_by_recovery";
+  members: number;
+}
+
+export interface ToolProcessCessationPriorEnvironmentEnded {
+  kind: "prior_environment_ended";
+}
+
+export interface ToolProcessCessationExitedBeforeCommit {
+  kind: "exited_before_commit";
+}
+
+export interface ToolProcessCessationForeignIncarnationEnded {
+  kind: "foreign_incarnation_ended";
+}
+
+export interface ToolProcessCessationUnknown {
+  kind: "unknown";
+}
+
+export type ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded | ToolProcessCessationExitedBeforeCommit | ToolProcessCessationForeignIncarnationEnded | ToolProcessCessationUnknown;
+
+export interface ToolProcessSpawnerShellCall {
+  kind: "shell_call";
+}
+
+export interface ToolProcessSpawnerBackgroundJob {
+  job_id: string;
+  kind: "background_job";
+}
+
+export interface ToolProcessSpawnerMonitor {
+  job_id: string;
+  kind: "monitor";
+}
+
+export interface ToolProcessSpawnerCommandHook {
+  hook_id: string;
+  kind: "command_hook";
+}
+
+export interface ToolProcessSpawnerUnknown {
+  kind: "unknown";
+}
+
+export type ToolProcessSpawner = ToolProcessSpawnerShellCall | ToolProcessSpawnerBackgroundJob | ToolProcessSpawnerMonitor | ToolProcessSpawnerCommandHook | ToolProcessSpawnerUnknown;
 
 export interface SystemNoticeBlockComms {
   content?: ContentBlock[];
@@ -6283,15 +6361,24 @@ export interface SystemNoticeBlockRuntimeNotice {
   type: "runtime_notice";
 }
 
+export interface SystemNoticeBlockToolProcessInterrupted {
+  cessation: ToolProcessCessation;
+  disposition: InterruptedToolRunDisposition;
+  run_id: RunId;
+  spawner: ToolProcessSpawner;
+  tool_call_id?: string | null;
+  type: "tool_process_interrupted";
+}
+
 export interface SystemNoticeBlockUnknown {
   payload?: unknown;
   summary?: string | null;
   type: "unknown";
 }
 
-export type SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockUnknown;
+export type SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockToolProcessInterrupted | SystemNoticeBlockUnknown;
 
-export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required";
+export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required" | "tool_process_recovery";
 
 export type SystemPromptKey = string;
 

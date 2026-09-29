@@ -3555,6 +3555,9 @@ pub enum InputAbandonReason {
     /// from `Cancelled` because nobody asked for the work to stop; the runtime
     /// refused a run it could not prove had started.
     NeverExecuted,
+    /// The input's in-flight run had a tool process that host process custody
+    /// proved had started; the input is settled instead of replayed.
+    ToolProcessInterrupted,
 }
 
 impl From<&crate::input_state::InputAbandonReason> for InputAbandonReason {
@@ -3569,6 +3572,9 @@ impl From<&crate::input_state::InputAbandonReason> for InputAbandonReason {
                 Self::MaxAttemptsExhausted
             }
             crate::input_state::InputAbandonReason::NeverExecuted => Self::NeverExecuted,
+            crate::input_state::InputAbandonReason::ToolProcessInterrupted => {
+                Self::ToolProcessInterrupted
+            }
         }
     }
 }
@@ -3586,6 +3592,7 @@ impl InputAbandonReason {
             Self::Cancelled => "cancelled",
             Self::MaxAttemptsExhausted => "max_attempts_exhausted",
             Self::NeverExecuted => "never_executed",
+            Self::ToolProcessInterrupted => "tool_process_interrupted",
         }
     }
 }

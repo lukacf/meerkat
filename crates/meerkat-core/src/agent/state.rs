@@ -2477,6 +2477,7 @@ where
         let turn_boundary_report = self
             .execute_hooks(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::TurnBoundary,
                     session_id: self.session.id().clone(),
                     turn_number: Some(turn_count),
@@ -5184,6 +5185,7 @@ where
             .map_err(|error| AgentError::ConfigError(error.to_string()))?;
 
         let pre_llm_invocation = HookInvocation {
+            run_id: None,
             point: HookPoint::PreLlmRequest,
             session_id: self.session.id().clone(),
             turn_number: Some(ctx.turn_count),
@@ -6123,6 +6125,7 @@ where
         }
 
         let post_llm_invocation = HookInvocation {
+            run_id: None,
             point: HookPoint::PostLlmResponse,
             session_id: self.session.id().clone(),
             turn_number: Some(ctx.turn_count),
@@ -6373,6 +6376,7 @@ where
         let pre_tool_reports = futures::future::join_all(tool_calls.iter().map(|(tc, args)| {
             self.execute_hooks(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: self.session.id().clone(),
                     turn_number: Some(ctx.turn_count),
@@ -6522,6 +6526,7 @@ where
             let post_tool_report = self
                 .execute_turn_hooks(
                     HookInvocation {
+                        run_id: None,
                         point: HookPoint::PostToolExecution,
                         session_id: self.session.id().clone(),
                         turn_number: Some(ctx.turn_count),

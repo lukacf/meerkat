@@ -97,6 +97,8 @@ fn write_prior_record_in(
         host,
         environment,
         tool_call_id: Some("call-prior".to_owned()),
+        spawner: ToolProcessSpawner::ShellCall,
+        run_id: None,
         phase,
     };
     let dir = root.join(scope.as_str());
@@ -104,6 +106,13 @@ fn write_prior_record_in(
     let temp = temp_path(&dir, record.entry_id, record.incarnation);
     write_record_blocking(&dir, &path, &temp, &serde_json::to_vec(&record).unwrap()).unwrap();
     path
+}
+
+/// Rewrite a written record with a run id (for interrupted-run evidence).
+fn set_run_id(path: &Path, run_id: meerkat_core::RunId) {
+    let mut record: CustodyRecord = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    record.run_id = Some(run_id);
+    std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
 }
 
 fn live_members(pgid: i32) -> Vec<i32> {
@@ -656,7 +665,10 @@ async fn a_cancelled_spawned_reservation_is_released_once_its_group_exits() {
         .unwrap();
     let mut leader = spawn_group("exec sleep 60");
     let pgid = leader.id() as i32;
-    let mut reservation = custody.reserve(Some("call-cancelled")).await.unwrap();
+    let mut reservation = custody
+        .reserve(ToolProcessSpawner::ShellCall, Some("call-cancelled"), None)
+        .await
+        .unwrap();
     reservation.record_spawned(pgid).await.unwrap();
     assert!(registered(pgid));
     // The call future is cancelled after spawn: the reservation is dropped
@@ -856,10 +868,162 @@ async fn recovery_removes_an_emptied_scope_directory() {
     assert!(!dir.exists());
 
     // A later reservation recreates it.
-    let reservation = custody.reserve(Some("call")).await.unwrap();
+    let reservation = custody
+        .reserve(ToolProcessSpawner::ShellCall, Some("call"), None)
+        .await
+        .unwrap();
     assert_eq!(record_files(&dir).len(), 1);
-    drop(reservation);
+    // Outside a runtime the unreleased reservation is removed inline.
+    std::thread::spawn(move || drop(reservation))
+        .join()
+        .unwrap();
     assert!(record_files(&dir).is_empty());
+}
+
+#[tokio::test]
+async fn a_killed_tool_of_an_in_flight_run_is_kept_as_interrupted_run_evidence() {
+    use meerkat_core::tool_process::{InterruptedToolEvidence, InterruptedToolSettlement};
+
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let mut leader = spawn_group("exec sleep 60");
+    let pgid = leader.id() as i32;
+    let run_id = meerkat_core::RunId::new();
+    let path = write_prior_record(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        spawned_phase(pgid),
+    );
+    set_run_id(&path, run_id.clone());
+    // A never-started reservation of the same run has no possible effect.
+    let never_started = write_prior_record(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        CustodyPhase::Reserved,
+    );
+    set_run_id(&never_started, run_id.clone());
+
+    let (custody, report) = ProcessCustody::recover_and_open(root.path(), scope.clone())
+        .await
+        .unwrap();
+    leader.wait().unwrap();
+
+    assert_eq!(report.recovered.len(), 2);
+    assert!(path.exists(), "the killed tool's record stays as evidence");
+    assert!(
+        !never_started.exists(),
+        "a never-started entry is not evidence"
+    );
+    let calls = custody.interrupted_calls().await.unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].run_id, run_id);
+    assert_eq!(calls[0].tool_call_id.as_deref(), Some("call-prior"));
+    assert!(matches!(
+        calls[0].cessation,
+        ToolProcessCessation::KilledByRecovery { .. }
+    ));
+    assert_eq!(calls[0].settlement, InterruptedToolSettlement::Pending);
+
+    // Evidence is never re-settled by a later recovery.
+    let (_again, report) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+    assert!(report.recovered.is_empty());
+
+    let settled = meerkat_core::tool_process::InterruptedRunInputs {
+        inputs: vec![
+            meerkat_core::tool_process::InterruptedRunInput {
+                kind: meerkat_core::tool_process::InterruptedInputKind::Prompt,
+                request: Some(meerkat_core::tool_process::InterruptedRequest {
+                    content: meerkat_core::types::ContentInput::from("run the tool"),
+                    created_at: meerkat_core::types::message_timestamp_now(),
+                    identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+                    render_metadata: None,
+                }),
+            },
+            meerkat_core::tool_process::InterruptedRunInput {
+                kind: meerkat_core::tool_process::InterruptedInputKind::Peer,
+                request: None,
+            },
+        ],
+    };
+    custody
+        .mark_inputs_settled(&[calls[0].entry_id], &settled)
+        .await
+        .unwrap();
+    assert_eq!(
+        custody.interrupted_calls().await.unwrap()[0].settlement,
+        InterruptedToolSettlement::InputsSettled(settled)
+    );
+    custody.acknowledge(&[calls[0].entry_id]).await.unwrap();
+    assert!(custody.interrupted_calls().await.unwrap().is_empty());
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn realm_sweep_settles_every_scope_and_leaves_live_hosts_alone() {
+    let root = TempDir::new().unwrap();
+    let orphaned = scope();
+    let served = scope();
+    let mut orphan_leader = spawn_group("exec sleep 60");
+    let orphan_pgid = orphan_leader.id() as i32;
+    write_prior_record(
+        root.path(),
+        &orphaned,
+        Uuid::new_v4(),
+        dead_identity(),
+        spawned_phase(orphan_pgid),
+    );
+    let mut host = Command::new("/bin/sh")
+        .args(["-c", "exec sleep 60"])
+        .spawn()
+        .unwrap();
+    let host_identity = ProcessIdentity::capture(host.id() as i32).unwrap().unwrap();
+    let mut served_leader = spawn_group("exec sleep 60");
+    let served_pgid = served_leader.id() as i32;
+    write_prior_record(
+        root.path(),
+        &served,
+        Uuid::new_v4(),
+        host_identity,
+        spawned_phase(served_pgid),
+    );
+
+    let report = ProcessCustody::sweep(root.path()).await.unwrap();
+
+    let outcome = |scope: &ProcessCustodyScope| {
+        report
+            .scopes
+            .iter()
+            .find(|swept| swept.scope == scope.as_str())
+            .map(|swept| &swept.outcome)
+            .unwrap()
+    };
+    assert!(matches!(
+        outcome(&orphaned),
+        Ok(settled) if matches!(
+            settled.recovered[0].cessation,
+            ToolProcessCessation::KilledByRecovery { .. }
+        )
+    ));
+    assert!(matches!(
+        outcome(&served),
+        Err(ProcessCustodyError::PriorIncarnationAlive { .. })
+    ));
+    assert!(live_members(orphan_pgid).is_empty(), "the orphan is killed");
+    assert!(
+        process_running(served_pgid),
+        "a live host's tool is left alone"
+    );
+    orphan_leader.wait().unwrap();
+    for child in [&mut served_leader, &mut host] {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
 }
 
 #[tokio::test]
@@ -878,6 +1042,7 @@ async fn custody_bound_shell_call_records_then_settles() {
         .call_with_tool_call_id(
             json!({"command": format!("ls '{}'", dir.display())}),
             Some("call-live"),
+            None,
         )
         .await
         .unwrap();
@@ -916,6 +1081,7 @@ async fn custody_gateway_child_role() {
         .call_with_tool_call_id(
             json!({"command": command, "timeout_secs": 60}),
             Some("call-gateway"),
+            None,
         )
         .await;
 }
@@ -1006,7 +1172,7 @@ async fn gateway_sigkill_mid_tool_is_recovered_before_new_work() {
     // New same-scope work runs under the fresh custody.
     let tool = ShellTool::new(sh_config(project.path()));
     tool.job_manager.bind_process_custody(custody).unwrap();
-    tool.call_with_tool_call_id(json!({"command": "true"}), Some("call-next"))
+    tool.call_with_tool_call_id(json!({"command": "true"}), Some("call-next"), None)
         .await
         .unwrap();
 
@@ -1015,5 +1181,561 @@ async fn gateway_sigkill_mid_tool_is_recovered_before_new_work() {
     assert!(
         !effect.exists(),
         "the prior incarnation's tool performed its effect after recovery"
+    );
+}
+
+/// The environment of a host in another pid namespace of this boot, if this
+/// host records its namespace identity.
+fn foreign_namespace_environment() -> Option<HostEnvironment> {
+    match super::incarnation().unwrap().environment {
+        HostEnvironment::Linux {
+            boot_id,
+            pid_namespace_dev: Some(dev),
+            pid_namespace_ino: Some(ino),
+        } => Some(HostEnvironment::Linux {
+            boot_id,
+            pid_namespace_dev: Some(dev),
+            pid_namespace_ino: Some(ino.wrapping_add(1)),
+        }),
+        _ => None,
+    }
+}
+
+/// Write the incarnation lock file of a foreign host (unlocked).
+fn write_incarnation_lock(root: &Path, incarnation: Uuid) -> PathBuf {
+    let path = incarnation_lock_path(root, incarnation);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"").unwrap();
+    path
+}
+
+#[tokio::test]
+async fn a_foreign_namespace_record_without_an_incarnation_lock_fails_closed() {
+    let Some(foreign) = foreign_namespace_environment() else {
+        return;
+    };
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let mut leader = spawn_group("exec sleep 60");
+    let pgid = leader.id() as i32;
+    let path = write_prior_record_in(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        foreign,
+        spawned_phase(pgid),
+    );
+
+    let error = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .expect_err("a record written before incarnation locks cannot be verified");
+
+    assert!(
+        matches!(
+            error,
+            ProcessCustodyError::ForeignPidNamespace {
+                liveness: ForeignIncarnationLiveness::Unverifiable,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(path.exists(), "the record is left for the operator");
+    assert!(
+        process_running(pgid),
+        "a local process must not be signalled"
+    );
+    leader.kill().unwrap();
+    leader.wait().unwrap();
+}
+
+#[tokio::test]
+async fn a_foreign_namespace_record_whose_host_holds_its_lock_fails_closed() {
+    let Some(foreign) = foreign_namespace_environment() else {
+        return;
+    };
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let incarnation = Uuid::new_v4();
+    let lock = write_incarnation_lock(root.path(), incarnation);
+    // The live sibling host's lock.
+    let _held = try_incarnation_lock(&lock).unwrap().expect("lock free");
+    let path = write_prior_record_in(
+        root.path(),
+        &scope,
+        incarnation,
+        dead_identity(),
+        foreign,
+        CustodyPhase::Reserved,
+    );
+
+    let error = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .expect_err("a live foreign host owns the record");
+
+    assert!(
+        matches!(
+            error,
+            ProcessCustodyError::ForeignPidNamespace {
+                liveness: ForeignIncarnationLiveness::Running,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(path.exists(), "a live host's record is left alone");
+    assert!(lock.exists());
+}
+
+#[tokio::test]
+async fn a_foreign_namespace_record_whose_lock_was_released_is_settled() {
+    let Some(foreign) = foreign_namespace_environment() else {
+        return;
+    };
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let incarnation = Uuid::new_v4();
+    // The owner died: its lock file remains, released by the kernel.
+    write_incarnation_lock(root.path(), incarnation);
+    let mut leader = spawn_group("exec sleep 60");
+    let pgid = leader.id() as i32;
+    let path = write_prior_record_in(
+        root.path(),
+        &scope,
+        incarnation,
+        dead_identity(),
+        foreign,
+        spawned_phase(pgid),
+    );
+
+    let (_custody, report) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.recovered[0].cessation,
+        ToolProcessCessation::ForeignIncarnationEnded
+    );
+    assert!(
+        !path.exists(),
+        "a record without a run is settled and removed"
+    );
+    assert!(
+        process_running(pgid),
+        "pids of another namespace are never signalled"
+    );
+    leader.kill().unwrap();
+    leader.wait().unwrap();
+}
+
+#[tokio::test]
+async fn recovery_holds_this_incarnations_lock_for_the_process_lifetime() {
+    let root = TempDir::new().unwrap();
+    let (custody, _) = ProcessCustody::recover_and_open(root.path(), scope())
+        .await
+        .unwrap();
+    drop(custody);
+    let lock = incarnation_lock_path(root.path(), super::incarnation().unwrap().id);
+    assert!(lock.exists());
+    assert!(
+        try_incarnation_lock(&lock).unwrap().is_none(),
+        "this host's incarnation lock stays held"
+    );
+}
+
+#[tokio::test]
+async fn the_sweep_reaps_only_ended_unreferenced_incarnation_locks() {
+    let root = TempDir::new().unwrap();
+    let current = super::incarnation().unwrap();
+    // Held by this process, as every custody-opening host does.
+    let (_custody, _) = ProcessCustody::recover_and_open(root.path(), scope())
+        .await
+        .unwrap();
+    let ended = write_incarnation_lock(root.path(), Uuid::new_v4());
+    let live = write_incarnation_lock(root.path(), Uuid::new_v4());
+    let _live_held = try_incarnation_lock(&live).unwrap().expect("lock free");
+    // An ended incarnation still named by a record that cannot be settled
+    // (an unknown format in this environment) keeps its lock.
+    let referenced_owner = Uuid::new_v4();
+    let referenced = write_incarnation_lock(root.path(), referenced_owner);
+    let stuck_scope = scope();
+    let stuck_dir = root.path().join(stuck_scope.as_str());
+    std::fs::create_dir_all(&stuck_dir).unwrap();
+    let entry = Uuid::new_v4();
+    std::fs::write(
+        stuck_dir.join(format!("{entry}.json")),
+        serde_json::to_vec(&serde_json::json!({
+            "version": 99,
+            "entry_id": entry,
+            "incarnation": referenced_owner,
+            "environment": current.environment,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    ProcessCustody::sweep(root.path()).await.unwrap();
+
+    assert!(!ended.exists(), "an ended, unreferenced lock is reaped");
+    assert!(live.exists(), "a held lock is kept");
+    assert!(
+        referenced.exists(),
+        "a lock an unsettled record needs is kept"
+    );
+    assert!(incarnation_lock_path(root.path(), current.id).exists());
+}
+
+const UNSHARE_ROOT_ENV: &str = "MEERKAT_TEST_CUSTODY_UNSHARE_ROOT";
+const UNSHARE_SCOPE_ENV: &str = "MEERKAT_TEST_CUSTODY_UNSHARE_SCOPE";
+const UNSHARE_CHILD_TEST: &str =
+    "builtin::shell::custody::tests::custody_foreign_namespace_host_role";
+
+/// Host role run inside a new pid namespace by
+/// [`a_host_in_another_pid_namespace_is_proven_ended_by_its_lock`]: open
+/// custody (taking the incarnation lock), run a tool in custody, report
+/// ready, and wait to be killed with its namespace.
+#[tokio::test]
+#[ignore = "helper role executed only inside a new pid namespace"]
+async fn custody_foreign_namespace_host_role() {
+    let (Some(root), Some(scope)) = (
+        std::env::var_os(UNSHARE_ROOT_ENV).map(PathBuf::from),
+        std::env::var(UNSHARE_SCOPE_ENV).ok(),
+    ) else {
+        return;
+    };
+    let (custody, _) = ProcessCustody::recover_and_open(&root, ProcessCustodyScope(scope))
+        .await
+        .unwrap();
+    let (prepared, mut command) = custody
+        .prepare_spawn(
+            ToolProcessSpawner::ShellCall,
+            Some("call-foreign"),
+            None,
+            OsStr::new("/bin/sh"),
+            &[OsString::from("-c"), OsString::from("exec sleep 600")],
+        )
+        .await
+        .unwrap();
+    let child = command.spawn().unwrap();
+    let _guard = prepared.spawned(&child).await.unwrap();
+    std::fs::write(root.join("ready.fifo"), "ready\n").unwrap();
+    std::future::pending::<()>().await;
+}
+
+#[tokio::test]
+async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
+    // Unprivileged user and pid namespaces may be unavailable (for example
+    // restricted by AppArmor); the test then has nothing to exercise.
+    let unshare = |args: &[&str]| Command::new("unshare").args(args).output();
+    match unshare(&["-Urpf", "--kill-child", "true"]) {
+        Ok(output) if output.status.success() => {}
+        _ => return,
+    }
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let status = Command::new("mkfifo")
+        .arg(root.path().join("ready.fifo"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut host = Command::new("unshare")
+        .args(["-Urpf", "--kill-child"])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            UNSHARE_CHILD_TEST,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(UNSHARE_ROOT_ENV, root.path())
+        .env(UNSHARE_SCOPE_ENV, scope.as_str())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let fifo = root.path().join("ready.fifo");
+    let ready = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        tokio::task::spawn_blocking(move || std::fs::read_to_string(fifo)),
+    )
+    .await;
+    let ready = match ready {
+        Ok(joined) => joined.unwrap().unwrap(),
+        Err(_) => {
+            let _ = host.kill();
+            let _ = host.wait();
+            panic!("the foreign-namespace host never became ready");
+        }
+    };
+    assert_eq!(ready.trim(), "ready");
+
+    // Alive in its own namespace: its lock is held.
+    let error = ProcessCustody::recover_and_open(root.path(), scope.clone())
+        .await
+        .expect_err("a live foreign host owns its records");
+    assert!(
+        matches!(
+            error,
+            ProcessCustodyError::ForeignPidNamespace {
+                liveness: ForeignIncarnationLiveness::Running,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+
+    // Tear the namespace down with its host.
+    host.kill().unwrap();
+    host.wait().unwrap();
+    let (_custody, report) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+    assert_eq!(report.recovered.len(), 1);
+    assert_eq!(
+        report.recovered[0].cessation,
+        ToolProcessCessation::ForeignIncarnationEnded
+    );
+}
+
+#[tokio::test]
+async fn a_live_hosts_record_is_never_rewritten_even_when_its_group_is_gone() {
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let mut host = Command::new("/bin/sh")
+        .args(["-c", "exec sleep 60"])
+        .spawn()
+        .unwrap();
+    let host_identity = ProcessIdentity::capture(host.id() as i32).unwrap().unwrap();
+    // The recorded group has already exited: only the live host may settle
+    // (or delete) its record.
+    let mut finished = spawn_group("exit 0");
+    let phase = spawned_phase(finished.id() as i32);
+    finished.wait().unwrap();
+    let path = write_prior_record(root.path(), &scope, Uuid::new_v4(), host_identity, phase);
+    let before = std::fs::read(&path).unwrap();
+
+    let report = ProcessCustody::sweep(root.path()).await.unwrap();
+
+    assert!(matches!(
+        report.scopes[0].outcome,
+        Err(ProcessCustodyError::PriorIncarnationAlive { .. })
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "a live host's record is never rewritten"
+    );
+    host.kill().unwrap();
+    host.wait().unwrap();
+}
+
+#[test]
+fn the_scope_settlement_lock_excludes_every_other_open_file() {
+    let root = TempDir::new().unwrap();
+    let dir = root.path().join("scope");
+    assert!(
+        lock_scope_dir(&dir).unwrap().is_none(),
+        "a missing scope holds no records"
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    let held = lock_scope_dir(&dir).unwrap().expect("scope locked");
+    // flock(2) excludes every other open file description, whichever process
+    // holds it.
+    let lock_file = dir.join(SCOPE_LOCK_FILE);
+    assert!(
+        try_incarnation_lock(&lock_file).unwrap().is_none(),
+        "a second holder acquired the scope lock"
+    );
+    drop(held);
+    assert!(try_incarnation_lock(&lock_file).unwrap().is_some());
+}
+
+#[test]
+fn a_scope_replaced_while_waiting_is_locked_afresh() {
+    let root = TempDir::new().unwrap();
+    let dir = root.path().join("scope");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lock_file = dir.join(SCOPE_LOCK_FILE);
+    // A waiter's lock on the lock file as it was when it started waiting.
+    let stale = lock_scope_dir(&dir).unwrap().expect("scope locked");
+    // Meanwhile the scope was removed and recreated.
+    std::fs::remove_file(&lock_file).unwrap();
+    std::fs::remove_dir(&dir).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(
+        !scope_lock_is_current(&lock_file, &stale).unwrap_or(false),
+        "a lock on the replaced scope's file does not hold the current scope"
+    );
+    drop(stale);
+    let fresh = lock_scope_dir(&dir).unwrap().expect("current scope locked");
+    assert!(scope_lock_is_current(&lock_file, &fresh).unwrap());
+    // The removed scope is gone for a waiter that finds no directory.
+    drop(fresh);
+    remove_scope_dir_if_empty(&dir);
+    assert!(!dir.exists());
+    assert!(lock_scope_dir(&dir).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_exit_marker_from_another_pid_namespace_settles_without_a_lock() {
+    let Some(foreign) = foreign_namespace_environment() else {
+        return;
+    };
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    // No incarnation lock (written before locks): the marker guards no
+    // process, so nothing needs observing.
+    let path = write_prior_record_in(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        foreign,
+        CustodyPhase::Exited,
+    );
+    set_run_id(&path, meerkat_core::RunId::new());
+
+    let (_custody, report) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.recovered[0].cessation,
+        ToolProcessCessation::ExitedBeforeCommit
+    );
+}
+
+#[tokio::test]
+async fn a_tool_that_exits_inside_a_run_keeps_a_marker_until_the_run_commits() {
+    use meerkat_core::tool_process::InterruptedToolEvidence;
+
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let dir = root.path().join(scope.as_str());
+    let (custody, _) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+    let spawn_and_finish = |run_id: meerkat_core::RunId| {
+        let custody = Arc::clone(&custody);
+        async move {
+            let (prepared, mut command) = custody
+                .prepare_spawn(
+                    ToolProcessSpawner::ShellCall,
+                    Some("call-done"),
+                    Some(&run_id),
+                    OsStr::new("/bin/sh"),
+                    &[OsString::from("-c"), OsString::from("exit 0")],
+                )
+                .await
+                .unwrap();
+            command.kill_on_drop(true);
+            let mut child = command.spawn().unwrap();
+            let guard = prepared.spawned(&child).await.unwrap();
+            child.wait().await.unwrap();
+            guard
+        }
+    };
+
+    // Exits before its run commits: a marker stays.
+    let run = meerkat_core::RunId::new();
+    spawn_and_finish(run.clone()).await.settle().await;
+    let markers = record_files(&dir);
+    assert_eq!(markers.len(), 1, "the finished tool leaves a marker");
+    let marker: CustodyRecord =
+        serde_json::from_slice(&std::fs::read(&markers[0]).unwrap()).unwrap();
+    assert!(matches!(marker.phase, CustodyPhase::Exited));
+    assert_eq!(marker.run_id.as_ref(), Some(&run));
+    // Markers of this incarnation are not interrupted-run evidence.
+    assert!(custody.interrupted_calls().await.unwrap().is_empty());
+    custody.run_ended(&run).await.unwrap();
+    assert!(record_files(&dir).is_empty(), "the commit drops the marker");
+
+    // Its run ends (commits, fails or is cancelled) while it is still live:
+    // no marker is left behind.
+    let later = meerkat_core::RunId::new();
+    let guard = spawn_and_finish(later.clone()).await;
+    custody.run_ended(&later).await.unwrap();
+    guard.settle().await;
+    assert!(record_files(&dir).is_empty());
+
+    // A retained group (a hook whose members may outlive it) that exits
+    // after its run ended leaves no marker either.
+    let failed = meerkat_core::RunId::new();
+    let guard = spawn_and_finish(failed.clone()).await;
+    custody.run_ended(&failed).await.unwrap();
+    guard.settle_when_exited();
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !record_files(&dir).is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "the ended run's retained record is removed"
+    );
+}
+
+#[tokio::test]
+async fn a_prior_incarnations_exit_marker_becomes_interrupted_run_evidence() {
+    use meerkat_core::tool_process::InterruptedToolEvidence;
+
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let run_id = meerkat_core::RunId::new();
+    let path = write_prior_record(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        CustodyPhase::Exited,
+    );
+    set_run_id(&path, run_id.clone());
+
+    let (custody, report) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.recovered[0].cessation,
+        ToolProcessCessation::ExitedBeforeCommit
+    );
+    let calls = custody.interrupted_calls().await.unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].run_id, run_id);
+    assert_eq!(calls[0].cessation, ToolProcessCessation::ExitedBeforeCommit);
+}
+
+#[tokio::test]
+async fn reopening_an_open_scope_reuses_its_handle_without_recovering_again() {
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let (first, _) = ProcessCustody::recover_and_open(root.path(), scope.clone())
+        .await
+        .unwrap();
+    let path = write_prior_record(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        CustodyPhase::Reserved,
+    );
+
+    let (again, report) = ProcessCustody::recover_and_open(root.path(), scope.clone())
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(&first, &again), "one handle per open scope");
+    assert!(report.recovered.is_empty());
+    assert!(path.exists());
+
+    drop((first, again));
+    let (_reopened, report) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+    assert_eq!(
+        report.recovered[0].cessation,
+        ToolProcessCessation::NeverStarted
     );
 }

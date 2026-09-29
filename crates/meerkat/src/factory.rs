@@ -3742,8 +3742,16 @@ impl AgentFactory {
     }
 
     /// Set runtime root used for realm-scoped runtime artifacts.
+    ///
+    /// On Linux and macOS this also starts, once per root per process, a
+    /// background sweep that settles durable tool process custody left by
+    /// earlier host incarnations for every session under the root, including
+    /// sessions that are never resumed.
     pub fn runtime_root(mut self, path: impl Into<PathBuf>) -> Self {
-        self.runtime_root = Some(path.into());
+        let path = path.into();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        crate::process_custody::sweep_realm_once(&path);
+        self.runtime_root = Some(path);
         self
     }
 
@@ -5429,10 +5437,6 @@ impl AgentFactory {
         composite: &CompositeDispatcher,
         session_id: Option<&str>,
     ) -> Result<(), CompositeDispatcherError> {
-        use meerkat_tools::builtin::shell::{
-            PROCESS_CUSTODY_DIR, ProcessCustody, ProcessCustodyScope,
-        };
-
         Self::install_process_group_observers();
         let Some(job_manager) = composite.shell_job_manager() else {
             return Ok(());
@@ -5447,21 +5451,11 @@ impl AgentFactory {
             );
             return Ok(());
         };
-        let (custody, report) = ProcessCustody::recover_and_open(
-            &runtime_root.join(PROCESS_CUSTODY_DIR),
-            ProcessCustodyScope::session(&session_id),
-        )
-        .await?;
-        for recovered in &report.recovered {
-            tracing::warn!(
-                %session_id,
-                entry_id = %recovered.entry_id,
-                prior_incarnation = %recovered.prior_incarnation,
-                tool_call_id = ?recovered.tool_call_id,
-                cessation = ?recovered.cessation,
-                "settled a shell tool process left by a prior host incarnation"
-            );
-        }
+        // The build already settled the scope (see `build_agent`); this
+        // returns that same open handle without recovering again.
+        let custody = crate::process_custody::open_session_custody(runtime_root, &session_id)
+            .await
+            .map_err(CompositeDispatcherError::ProcessCustody)?;
         job_manager.bind_process_custody(custody).map_err(|_| {
             CompositeDispatcherError::ToolInitFailed {
                 name: "shell".to_string(),
@@ -6184,6 +6178,32 @@ impl AgentFactory {
         let effective_shell = build_config.override_shell.resolve(self.enable_shell);
         let initial_tool_filter = build_config.initial_tool_filter.take();
         let _session_id = session.id().to_string();
+        // Settle the session's earlier-incarnation tool processes (shell
+        // calls, background jobs, monitors, command hooks) before the agent -
+        // and so any new work for the session - exists, whatever this build
+        // enables. The custody's interrupted-run evidence goes to the runtime
+        // through the session bindings so recovered inputs of interrupted
+        // runs are settled instead of replayed.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let session_process_custody = match self.runtime_root.as_ref() {
+            Some(root) => {
+                let custody = crate::process_custody::open_session_custody(root, session.id())
+                    .await
+                    .map_err(|error| {
+                        BuildAgentError::ToolDispatcher(CompositeDispatcherError::ProcessCustody(
+                            error,
+                        ))
+                    })?;
+                if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode {
+                    bindings
+                        .interrupted_tool_evidence()
+                        .install(Arc::clone(&custody)
+                            as Arc<dyn meerkat_core::tool_process::InterruptedToolEvidence>);
+                }
+                Some(custody)
+            }
+            None => None,
+        };
         #[cfg(not(target_arch = "wasm32"))]
         let durable_shell_runtime = if effective_shell {
             match (
@@ -6848,7 +6868,25 @@ impl AgentFactory {
                         config,
                     )
                     .await;
-                    create_default_hook_engine(layered_hooks)
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    {
+                        match session_process_custody.as_ref() {
+                            Some(custody) if !layered_hooks.entries.is_empty() => Some(Arc::new(
+                                meerkat_hooks::DefaultHookEngine::new(layered_hooks)
+                                    .with_command_process_custody(Arc::new(
+                                        crate::process_custody::HookProcessCustody::new(
+                                            Arc::clone(custody),
+                                        ),
+                                    )),
+                            )
+                                as Arc<dyn meerkat_core::HookEngine>),
+                            _ => create_default_hook_engine(layered_hooks),
+                        }
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    {
+                        create_default_hook_engine(layered_hooks)
+                    }
                 }
                 #[cfg(target_arch = "wasm32")]
                 {

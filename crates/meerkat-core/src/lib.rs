@@ -110,6 +110,7 @@ pub mod tool_catalog;
 pub mod tool_consequence_policy;
 pub mod tool_execution;
 pub mod tool_execution_policy;
+pub mod tool_process;
 pub mod tool_scope;
 pub mod transcript_replay;
 pub mod turn_boundary;
@@ -288,11 +289,11 @@ pub use lifecycle::{
     CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor, CoreExecutorBoundaryHandle,
     CoreExecutorError, CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle,
     CoreExecutorPreDequeueHandle, CoreExecutorPublicationHandle, CoreExecutorTeardownReason,
-    CoreExecutorTurnFinalizationBoundaryHandle, CoreExecutorTurnFinalizationGuard,
-    CoreInteractionTerminalPublicationReceipt, CorePreDequeueOutcome, CoreRenderable,
-    DurableTurnBoundaryAppends, DurableTurnBoundaryAppendsError, InputId, RunApplyBoundary,
-    RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput,
-    TurnBoundaryDelivery,
+    CoreExecutorTranscriptNoticeHandle, CoreExecutorTurnFinalizationBoundaryHandle,
+    CoreExecutorTurnFinalizationGuard, CoreInteractionTerminalPublicationReceipt,
+    CorePreDequeueOutcome, CoreRenderable, DurableTurnBoundaryAppends,
+    DurableTurnBoundaryAppendsError, InputId, RunApplyBoundary, RunBoundaryReceipt,
+    RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput, TurnBoundaryDelivery,
 };
 pub use live_execution::{
     AmbiguousDeliveryNoRetryEvidence, CanonicalContextRevision, CanonicalTranscriptPrefixDigest,
@@ -560,10 +561,10 @@ pub use types::{
     MemoryIndexExclusion, MemoryIndexableContent, Message, OutputSchema, ProviderMeta, RunInput,
     RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolKind, SessionId, StopReason,
     SystemMessage, SystemMessageIdentity, SystemNoticeBlock, SystemNoticeDirection,
-    SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer, SystemPromptKey, SystemPromptVersion,
-    SystemPromptVersionIdentity, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity,
-    ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
-    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnUsage,
+    SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer, SystemNoticeRecord, SystemPromptKey,
+    SystemPromptVersion, SystemPromptVersionIdentity, ToolCall, ToolCallIter, ToolCallView,
+    ToolDef, ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId,
+    ToolSourceKind, TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnUsage,
     TurnUsageAccountingMissing, Usage, UserMessage, VideoData,
     assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
     has_video, is_supported_video_media_type, materialize_latest_system_prompt_versions,

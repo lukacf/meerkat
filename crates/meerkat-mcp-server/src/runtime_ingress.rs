@@ -2642,6 +2642,17 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
         ))
     }
 
+    fn transcript_notice_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle>> {
+        Some(
+            meerkat::surface::persistent_runtime_transcript_notice_handle(
+                Arc::clone(&self.context.service),
+                self.session_id.clone(),
+            ),
+        )
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,

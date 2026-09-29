@@ -40,7 +40,7 @@ pub async fn incremental(factory: &dyn SessionStoreFactory) -> Result<(), Confor
     append_and_head_create(&steps, &store, inc.as_ref()).await?;
     append_contract(&steps, inc.as_ref()).await?;
     save_head_cas(&steps, inc.as_ref()).await?;
-    verify_current_head_contract(&steps, inc.as_ref()).await?;
+    verify_current_head_contract(&steps, inc.as_ref(), HeadSeeding::LegacyVerbs).await?;
     rewrite_commit_and_adoption(&steps, factory, &store, inc.as_ref()).await?;
     chained_prefix_rewrites(&steps, factory, &store, inc.as_ref()).await?;
     range_read_capability(&steps, &store, inc.as_ref(), true).await?;
@@ -64,7 +64,7 @@ pub async fn incremental_head_canonical(
     append_and_head_create(&steps, &store, inc.as_ref()).await?;
     append_contract(&steps, inc.as_ref()).await?;
     save_head_cas(&steps, inc.as_ref()).await?;
-    verify_current_head_contract(&steps, inc.as_ref()).await?;
+    verify_current_head_contract(&steps, inc.as_ref(), HeadSeeding::PreparedHeadCanonical).await?;
     prepared_rewrite_commit_and_adoption(&steps, factory, &store, inc.as_ref()).await?;
     range_read_capability(&steps, &store, inc.as_ref(), false).await?;
     Ok(())
@@ -708,34 +708,68 @@ async fn save_head_cas(
     }
 }
 
+/// How a chapter step writes heads: through the legacy incremental verbs
+/// (`append_messages` + `save_head`), or through the sealed prepared
+/// HeadCanonical mutation production uses.
+#[derive(Clone, Copy)]
+enum HeadSeeding {
+    LegacyVerbs,
+    PreparedHeadCanonical,
+}
+
 /// `verify_current_head` is the body-free current-head proof: it accepts
 /// the current head, refuses a superseded head with
 /// `TranscriptRevisionConflict`, and reports a session without a head as
-/// `NotFound`.
+/// `NotFound`. Heads are written the way the profile's production writer
+/// writes them.
 async fn verify_current_head_contract(
     steps: &Steps,
     inc: &dyn IncrementalSessionStore,
+    seeding: HeadSeeding,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "verify_current_head";
-    let (mut session, head, token) = seed(steps, STEP, inc, &["one", "two"]).await?;
-    let root = TranscriptStrandId::root();
-    steps.wrap(STEP, inc.verify_current_head(&head).await)?;
-
-    fixtures::push_text(&mut session, "three")?;
-    steps.wrap(
-        STEP,
-        inc.append_messages(session.id(), &root, 2, &session.messages()[2..])
-            .await,
-    )?;
-    let advanced = steps.wrap(
-        STEP,
-        SessionHead::from_session(&session, root, head.rewrite_count),
-    )?;
-    steps.wrap(
-        STEP,
-        inc.save_head(&advanced, SessionHeadCas::IfToken(token))
-            .await,
-    )?;
+    let (head, advanced) = match seeding {
+        HeadSeeding::LegacyVerbs => {
+            let (mut session, head, token) = seed(steps, STEP, inc, &["one", "two"]).await?;
+            let root = TranscriptStrandId::root();
+            steps.wrap(STEP, inc.verify_current_head(&head).await)?;
+            fixtures::push_text(&mut session, "three")?;
+            steps.wrap(
+                STEP,
+                inc.append_messages(session.id(), &root, 2, &session.messages()[2..])
+                    .await,
+            )?;
+            let advanced = steps.wrap(
+                STEP,
+                SessionHead::from_session(&session, root, head.rewrite_count),
+            )?;
+            steps.wrap(
+                STEP,
+                inc.save_head(&advanced, SessionHeadCas::IfToken(token))
+                    .await,
+            )?;
+            (head, advanced)
+        }
+        HeadSeeding::PreparedHeadCanonical => {
+            let (mut session, head) =
+                seed_prepared_head_canonical(steps, STEP, inc, &["one", "two"]).await?;
+            steps.wrap(STEP, inc.verify_current_head(&head).await)?;
+            fixtures::push_text(&mut session, "three")?;
+            let successor = steps.wrap(
+                STEP,
+                PreparedHeadCanonicalMutation::prepare(&session, Some(head.clone())),
+            )?;
+            let committed_token = steps.wrap(
+                STEP,
+                inc.apply_prepared_head_canonical_mutation(&successor).await,
+            )?;
+            steps.wrap(
+                STEP,
+                successor.acknowledge_session(&mut session, &committed_token),
+            )?;
+            (head, successor.successor_head().clone())
+        }
+    };
     steps.wrap(STEP, inc.verify_current_head(&advanced).await)?;
     match inc.verify_current_head(&head).await {
         Err(SessionStoreError::TranscriptRevisionConflict { .. }) => {}

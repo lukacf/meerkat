@@ -44,7 +44,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::time::Instant;
+use tokio::time::{Duration, Instant};
 
 const LEAD_ID: &str = "lead-1";
 const LARGE_MEMBER_IDS: [&str; 2] = ["w-large-a", "w-large-b"];
@@ -291,8 +291,10 @@ fn persistent_service(
 
 /// Settles on the mob actor's own machine-state publications: the member
 /// status projection is re-read after every published change, never on a
-/// timer.
+/// timer. The deadline only bounds a broken run, so it fails with the roster
+/// instead of hanging until the harness timeout.
 async fn wait_all_active(handle: &MobHandle, expected: usize, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(300);
     let mut changes = handle.machine_state_changes();
     loop {
         let members = handle.list_members().await;
@@ -303,12 +305,17 @@ async fn wait_all_active(handle: &MobHandle, expected: usize, what: &str) {
         if active >= expected {
             return;
         }
-        changes.changed().await.unwrap_or_else(|_| {
-            panic!(
-                "the mob actor stopped before {expected} members were active {what}; \
-                 roster: {members:?}"
-            )
-        });
+        tokio::select! {
+            changed = changes.changed() => changed.unwrap_or_else(|_| {
+                panic!(
+                    "the mob actor stopped before {expected} members were active {what}; \
+                     roster: {members:?}"
+                )
+            }),
+            () = tokio::time::sleep_until(deadline) => panic!(
+                "timed out waiting for {expected} active members {what}; roster: {members:?}"
+            ),
+        }
     }
 }
 

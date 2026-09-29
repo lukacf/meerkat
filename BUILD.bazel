@@ -674,6 +674,7 @@ test_suite(
         "//crates/meerkat-runtime:runtime_bindings_contract_test",
         "//crates/meerkat-runtime:runtime_ingress_control_test",
         "//crates/meerkat-runtime:runtime_terminal_publication_contract_test",
+        "//crates/meerkat-runtime:stop_run_public_api_test",
         "//crates/meerkat-runtime:trust_reconcile_add_failure_test",
         "//crates/meerkat-runtime:trust_reconcile_concurrency_test",
         "//crates/meerkat-runtime:turn_content_shape_contract_test",

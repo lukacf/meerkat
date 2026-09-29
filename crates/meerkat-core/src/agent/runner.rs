@@ -1754,8 +1754,8 @@ where
         extraction_required: bool,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
-        let _ = crate::event_tap::tap_emit(
-            &self.event_tap,
+        self.publish_run_lifecycle_event(
+            crate::agent::RunLifecycleEvent::Terminal,
             event_tx,
             AgentEvent::RunCompleted {
                 session_id: self.session.id().clone(),
@@ -1771,6 +1771,24 @@ where
             },
         )
         .await;
+    }
+
+    /// Publish one run lifecycle event to the event tap and then the run's
+    /// event stream, recording each sink as it receives it (see
+    /// [`crate::agent::RunLifecyclePublication`]).
+    async fn publish_run_lifecycle_event(
+        &self,
+        lifecycle: crate::agent::RunLifecycleEvent,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+        event: AgentEvent,
+    ) {
+        crate::event_tap::tap_try_send(&self.event_tap, &event);
+        self.run_lifecycle_publication.mark_tapped(lifecycle);
+        if let Some(tx) = event_tx
+            && tx.send(event).await.is_ok()
+        {
+            self.run_lifecycle_publication.mark_streamed(lifecycle);
+        }
     }
 
     pub(super) async fn emit_extraction_succeeded_event(
@@ -1818,8 +1836,9 @@ where
         input: RunInput,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
-        let _ = crate::event_tap::tap_emit(
-            &self.event_tap,
+        self.run_lifecycle_publication.announce_start();
+        self.publish_run_lifecycle_event(
+            crate::agent::RunLifecycleEvent::Started,
             event_tx,
             AgentEvent::RunStarted {
                 session_id: self.session.id().clone(),
@@ -1836,12 +1855,12 @@ where
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
         let event = self.run_failed_event(error);
-        let _ = crate::event_tap::tap_emit(&self.event_tap, event_tx, event).await;
-        // Recorded only once the send resolved: a hard interrupt that drops
-        // the run future mid-send left no terminal on the stream, so
-        // `cancel_dropped_run` must still publish one.
-        self.run_failed_event_emitted
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.publish_run_lifecycle_event(
+            crate::agent::RunLifecycleEvent::Terminal,
+            event_tx,
+            event,
+        )
+        .await;
     }
 
     fn run_failed_event(&self, error: &AgentError) -> AgentEvent {
@@ -2100,7 +2119,7 @@ where
         let saved_terminal_error_metadata = self.terminal_error_metadata.take();
         let saved_run_completed_hooks_applied = self.run_completed_hooks_applied;
         let saved_run_completed_event_emitted = self.run_completed_event_emitted;
-        let saved_run_failed_event_emitted = *self.run_failed_event_emitted.get_mut();
+        let saved_run_lifecycle_publication = self.run_lifecycle_publication.take();
         let saved_run_result_assistant_message = self.run_result_assistant_message.take();
         let saved_extraction_state = std::mem::take(&mut self.extraction_state);
         let saved_pending_callback_async_ops = self.pending_callback_async_ops.take();
@@ -2191,7 +2210,7 @@ where
         self.terminal_error_metadata = saved_terminal_error_metadata;
         self.run_completed_hooks_applied = saved_run_completed_hooks_applied;
         self.run_completed_event_emitted = saved_run_completed_event_emitted;
-        *self.run_failed_event_emitted.get_mut() = saved_run_failed_event_emitted;
+        self.run_lifecycle_publication = saved_run_lifecycle_publication;
         self.run_result_assistant_message = saved_run_result_assistant_message;
         self.extraction_state = saved_extraction_state;
         self.pending_callback_async_ops = saved_pending_callback_async_ops;
@@ -2385,7 +2404,7 @@ where
         self.terminal_error_metadata = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
-        *self.run_failed_event_emitted.get_mut() = false;
+        self.run_lifecycle_publication.reset();
         self.run_result_assistant_message = None;
         self.clear_staged_model_routing_handoff();
 
@@ -2638,7 +2657,7 @@ where
         self.terminal_error_metadata = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
-        *self.run_failed_event_emitted.get_mut() = false;
+        self.run_lifecycle_publication.reset();
         self.run_result_assistant_message = None;
         self.clear_staged_model_routing_handoff();
 
@@ -2724,11 +2743,12 @@ where
     ///
     /// A hard interrupt drops the run future before it reaches
     /// `handle_run_failure`, so a run that published `RunStarted` would end
-    /// without a terminal. When a run had started and has published neither
-    /// `RunCompleted` nor `RunFailed`, this returns `RunFailed` with the
-    /// `cancelled` error class. The event has already been offered to the
-    /// event tap; the caller publishes it on the run's event stream after the
-    /// events the dropped future had queued.
+    /// without a terminal. This returns `RunFailed` with the `cancelled` error
+    /// class when the run's event stream saw the run start (or the run
+    /// announces no start) and received no terminal; the caller publishes it
+    /// on that stream after the events the dropped future had queued. The
+    /// event tap is offered the same terminal under the same rule, on its own
+    /// facts, so neither sink gets a second terminal.
     pub fn cancel_dropped_run(&mut self) -> Option<AgentEvent> {
         self.runtime_terminal_failure_witness = None;
         if let Err(error) = self.observe_dropped_run_cancellation() {
@@ -2739,22 +2759,21 @@ where
         // cancel inputs read the turn phase through the stamp gate and the
         // terminal event carries the run identity, so both are cleared last.
         self.clear_runtime_execution_kind();
-        if let Some(event) = terminal.as_ref() {
-            crate::event_tap::tap_try_send(&self.event_tap, event);
+        let (event, owed) = terminal?;
+        // Each sink gets the terminal it is still owed, and nothing more: the
+        // tap may already hold a terminal the stream never received.
+        if owed.tap {
+            crate::event_tap::tap_try_send(&self.event_tap, &event);
+            self.run_lifecycle_publication
+                .mark_tapped(crate::agent::RunLifecycleEvent::Terminal);
         }
-        terminal
+        owed.stream.then_some(event)
     }
 
-    fn dropped_run_terminal_event(&self) -> Option<AgentEvent> {
-        if self.runtime_started_run_id.is_none()
-            || self.run_completed_event_emitted
-            || self
-                .run_failed_event_emitted
-                .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return None;
-        }
-        Some(self.run_failed_event(&AgentError::Cancelled))
+    fn dropped_run_terminal_event(&self) -> Option<(AgentEvent, crate::agent::OwedRunTerminal)> {
+        self.runtime_started_run_id.as_ref()?;
+        let owed = self.run_lifecycle_publication.owed_terminal();
+        (owed.tap || owed.stream).then(|| (self.run_failed_event(&AgentError::Cancelled), owed))
     }
 
     fn observe_dropped_run_cancellation(&mut self) -> Result<(), AgentError> {
@@ -2996,7 +3015,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             terminal_error_metadata: None,
             run_completed_hooks_applied: false,
             run_completed_event_emitted: false,
-            run_failed_event_emitted: std::sync::atomic::AtomicBool::new(false),
+            run_lifecycle_publication: crate::agent::RunLifecyclePublication::default(),
             run_result_assistant_message: None,
             silent_comms_intents: self.silent_comms_intents.clone(),
             ops_lifecycle: None,
@@ -4368,6 +4387,107 @@ mod skill_activation_effect_tests {
             interaction_id.to_string()
         );
         assert_eq!(event["identity"]["run_id"], run_id.to_string());
+    }
+
+    fn subscribe_tap(
+        agent: &Agent<StaticLlmClient, NoTools, NoopStore>,
+    ) -> mpsc::Receiver<AgentEvent> {
+        let (tap_tx, tap_rx) = mpsc::channel(16);
+        *agent.event_tap().lock() = Some(crate::event_tap::EventTapState {
+            tx: tap_tx,
+            truncated: std::sync::atomic::AtomicBool::new(false),
+        });
+        tap_rx
+    }
+
+    fn lifecycle_kinds(rx: &mut mpsc::Receiver<AgentEvent>) -> Vec<&'static str> {
+        let mut kinds = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            kinds.push(match event {
+                AgentEvent::RunStarted { .. } => "started",
+                AgentEvent::RunFailed { .. } => "failed",
+                AgentEvent::RunCompleted { .. } => "completed",
+                _ => continue,
+            });
+        }
+        kinds
+    }
+
+    /// #1233: the tap is offered a lifecycle event before the stream send
+    /// resolves. A hard interrupt that drops the run mid-send of its own
+    /// `RunFailed` leaves the tap holding that terminal and the stream
+    /// without one: the dropped-run terminal goes to the stream only, so each
+    /// sink ends with exactly one terminal.
+    #[tokio::test]
+    async fn a_terminal_dropped_mid_send_is_owed_to_the_stream_only() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let mut tap = subscribe_tap(&agent);
+        agent.runtime_started_run_id = Some(crate::lifecycle::RunId::new());
+        let (tx, mut rx) = mpsc::channel(1);
+        agent
+            .emit_run_started_event(
+                RunInput::Content {
+                    content: "go".to_string().into(),
+                },
+                Some(&tx),
+            )
+            .await;
+        // The stream is full, so the terminal's send parks after the tap got it.
+        {
+            let failed = agent.emit_run_failed_event(&AgentError::Cancelled, Some(&tx));
+            tokio::pin!(failed);
+            tokio::select! {
+                biased;
+                () = &mut failed => panic!("the full stream parks the send"),
+                () = std::future::ready(()) => {}
+            }
+        }
+        assert_eq!(lifecycle_kinds(&mut tap), vec!["started", "failed"]);
+        assert_eq!(lifecycle_kinds(&mut rx), vec!["started"]);
+
+        let owed = agent.cancel_dropped_run();
+        assert!(
+            matches!(owed, Some(AgentEvent::RunFailed { .. })),
+            "the stream is still owed the terminal: {owed:?}"
+        );
+        assert!(
+            lifecycle_kinds(&mut tap).is_empty(),
+            "the tap already holds the run's terminal"
+        );
+    }
+
+    /// #1233: a drop mid-send of `RunStarted` leaves the stream without the
+    /// run's start. The stream then gets no terminal either, while the tap,
+    /// which saw the start, gets one.
+    #[tokio::test]
+    async fn a_start_dropped_mid_send_owes_the_stream_no_terminal() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let mut tap = subscribe_tap(&agent);
+        agent.runtime_started_run_id = Some(crate::lifecycle::RunId::new());
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(AgentEvent::TextDelta {
+            delta: "filler".to_string(),
+            assistant_message_id: None,
+        })
+        .await
+        .unwrap();
+        {
+            let started = agent.emit_run_started_event(
+                RunInput::Content {
+                    content: "go".to_string().into(),
+                },
+                Some(&tx),
+            );
+            tokio::pin!(started);
+            tokio::select! {
+                biased;
+                () = &mut started => panic!("the full stream parks the send"),
+                () = std::future::ready(()) => {}
+            }
+        }
+        assert!(agent.cancel_dropped_run().is_none());
+        assert_eq!(lifecycle_kinds(&mut tap), vec!["started", "failed"]);
+        assert!(lifecycle_kinds(&mut rx).is_empty());
     }
 
     #[tokio::test]

@@ -2483,6 +2483,29 @@ impl MemberSessionDisposalArc {
         session_id: &SessionId,
         deadline: Instant,
     ) -> Result<(), SessionError> {
+        // As in `dispose_until`: the member's comms runtime can outlive the
+        // released runtime in any task still holding it, so the exact
+        // generation's inproc route is released once the release succeeded,
+        // before a successor claims the participant name.
+        let retiring_comms = self.session_service.comms_runtime(session_id).await;
+        self.release_runtime_only_until_inner(session_id, deadline)
+            .await?;
+        if let Some(comms) = retiring_comms
+            && comms.retire_inproc_route()
+        {
+            tracing::debug!(
+                %session_id,
+                "released the released member runtime's inproc participant route"
+            );
+        }
+        Ok(())
+    }
+
+    async fn release_runtime_only_until_inner(
+        &self,
+        session_id: &SessionId,
+        deadline: Instant,
+    ) -> Result<(), SessionError> {
         let quiescent = self
             .acquire_quiescent_runtime_turn_finalization_boundary(session_id, deadline)
             .await?;

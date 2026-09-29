@@ -1345,87 +1345,87 @@ async fn relink_by_receipt(
         // floor); the limit then decides, where only a completed turn wins,
         // including the one this read found.
         let limit_passed = deadline_ms.is_some_and(|deadline| now_ms() >= deadline);
-        let reason = match past_limit_ceiling_receipt(
-            ceiling_receipt(last_read),
-            limit_passed,
-            |record| completed_receipt(record),
-        ) {
-            CeilingReceipt::Terminal(record) => {
-                return deliver_receipt(
-                    service, delivery, owner, mob_id, handle, child, job, *record, None,
-                )
-                .await;
-            }
-            CeilingReceipt::Absent {
-                pending_input: None,
-            } => reason,
-            CeilingReceipt::Absent {
-                pending_input: Some(input_id),
-            } => {
-                // The input is still admitted in the child's runtime, so a
-                // run could still answer it after this read. Fence it first:
-                // settle that exact input, then the job's outcome is its
-                // terminal.
-                match fence_job_input(handle, child, turn_delivery, &spec, &input_id).await {
-                    FencedJobInput::Terminal(record) => {
-                        return deliver_receipt(
-                            service, delivery, owner, mob_id, handle, child, job, *record, reason,
-                        )
-                        .await;
-                    }
-                    FencedJobInput::Unsettled(detail) => {
-                        if !stall_watch.inconclusive_ceiling_read() {
-                            tracing::debug!(
+        let reason =
+            match past_limit_ceiling_receipt(ceiling_receipt(last_read), limit_passed, |record| {
+                completed_receipt(record)
+            }) {
+                CeilingReceipt::Terminal(record) => {
+                    return deliver_receipt(
+                        service, delivery, owner, mob_id, handle, child, job, *record, None,
+                    )
+                    .await;
+                }
+                CeilingReceipt::Absent {
+                    pending_input: None,
+                } => reason,
+                CeilingReceipt::Absent {
+                    pending_input: Some(input_id),
+                } => {
+                    // The input is still admitted in the child's runtime, so a
+                    // run could still answer it after this read. Fence it first:
+                    // settle that exact input, then the job's outcome is its
+                    // terminal.
+                    match fence_job_input(handle, child, turn_delivery, &spec, &input_id).await {
+                        FencedJobInput::Terminal(record) => {
+                            return deliver_receipt(
+                                service, delivery, owner, mob_id, handle, child, job, *record,
+                                reason,
+                            )
+                            .await;
+                        }
+                        FencedJobInput::Unsettled(detail) => {
+                            // The exact input could not be settled (its run is not
+                            // current, or the cancellation failed), so a run could
+                            // still answer it later. Retiring the child is the
+                            // definitive fence: its runtime is retired and no run
+                            // of it can take the input up any more. The outcome is
+                            // then the input's terminal if one landed first, and
+                            // `restart_interrupted` otherwise.
+                            tracing::warn!(
                                 mob_id = %mob_id,
                                 child = %child,
                                 detail = %detail,
-                                "fork_off re-link could not fence the job input at the ceiling; \
-                                 watching on"
+                                "fork_off re-link could not settle the job input at the ceiling; \
+                                 retiring the child to fence it"
                             );
-                            tokio::time::sleep(within_limit(
-                                unreadable_backoff.next_pause(),
-                                deadline_ms,
-                            ))
+                            return fence_by_retirement(
+                                service,
+                                delivery,
+                                owner,
+                                mob_id,
+                                handle,
+                                child,
+                                job,
+                                turn_delivery,
+                                &spec,
+                                reason,
+                            )
                             .await;
-                            continue;
                         }
-                        // An outcome committed now could be contradicted by
-                        // a run that still answers the input, so none is:
-                        // the job and its child stay on record for the next
-                        // pass.
-                        tracing::warn!(
+                    }
+                }
+                CeilingReceipt::LimitDecides => continue,
+                CeilingReceipt::Inconclusive(detail) => {
+                    if !stall_watch.inconclusive_ceiling_read() {
+                        tracing::debug!(
                             mob_id = %mob_id,
                             child = %child,
                             detail = %detail,
-                            "fork_off re-link could not fence the job input; the job stays \
-                             owed"
+                            "fork_off re-link: the last receipt read at the ceiling said nothing; \
+                             watching on"
                         );
-                        return ForkRelinkAction::Failed(format!(
-                            "the job turn's input could not be settled before its outcome: \
-                             {detail}"
-                        ));
-                    }
-                }
-            }
-            CeilingReceipt::LimitDecides => continue,
-            CeilingReceipt::Inconclusive(detail) => {
-                if !stall_watch.inconclusive_ceiling_read() {
-                    tracing::debug!(
-                        mob_id = %mob_id,
-                        child = %child,
-                        detail = %detail,
-                        "fork_off re-link: the last receipt read at the ceiling said nothing; \
-                         watching on"
-                    );
-                    tokio::time::sleep(within_limit(unreadable_backoff.next_pause(), deadline_ms))
+                        tokio::time::sleep(within_limit(
+                            unreadable_backoff.next_pause(),
+                            deadline_ms,
+                        ))
                         .await;
-                    continue;
+                        continue;
+                    }
+                    // No read at the ceiling was evidence, so the outcome names
+                    // no cause.
+                    None
                 }
-                // No read at the ceiling was evidence, so the outcome names
-                // no cause.
-                None
-            }
-        };
+            };
         tracing::warn!(
             mob_id = %mob_id,
             child = %child,
@@ -1563,6 +1563,58 @@ async fn fence_job_input(
         Ok(other) => FencedJobInput::Unsettled(format!("the job input was not settled: {other:?}")),
         Err(error) => FencedJobInput::Unsettled(format!("settling the job input failed: {error}")),
     }
+}
+
+/// Fence a job input that could not be settled by retiring its child with
+/// its descendants, then deliver the input's terminal if one landed before
+/// the retirement took hold, and `restart_interrupted` (with the ceiling's
+/// `reason`) otherwise. A retirement that fails fences nothing, so the job
+/// and its child stay on record ([`ForkRelinkAction::Failed`]).
+#[allow(clippy::too_many_arguments)]
+async fn fence_by_retirement(
+    service: &Arc<dyn meerkat_mob::MobSessionService>,
+    delivery: &RelinkDelivery,
+    owner: &JobOwner,
+    mob_id: &MobId,
+    handle: &MobHandle,
+    child: &AgentIdentity,
+    job: &ForkJobRecord,
+    turn_delivery: &meerkat_mob::store::MobDeliveryIdentity,
+    spec: &meerkat_mob::BoundedResultSpec,
+    reason: Option<RestartInterruptedReason>,
+) -> ForkRelinkAction {
+    if let Err(error) = handle.retire_with_descendants(child.clone()).await {
+        tracing::warn!(
+            mob_id = %mob_id,
+            child = %child,
+            error = %error,
+            "fork_off re-link could not retire the child whose job input it could not \
+             settle; the job stays owed"
+        );
+        return ForkRelinkAction::Failed(format!(
+            "the job turn's input could not be settled, and retiring its child failed: {error}"
+        ));
+    }
+    // The retired member's runtime no longer runs anything; a terminal it
+    // finalized before retiring is durable and read from the store.
+    let settled = handle
+        .wait_bounded_work_for_identity_with_delivery_identity(
+            child,
+            turn_delivery,
+            spec,
+            meerkat_core::time_compat::Instant::now() + RECEIPT_WAIT_SLICE,
+        )
+        .await
+        .map(|report| report.into_parts().1);
+    if let Ok(meerkat_mob::DeliveryTerminalWait::Terminal(record)) = settled {
+        return deliver_receipt(
+            service, delivery, owner, mob_id, handle, child, job, *record, reason,
+        )
+        .await;
+    }
+    let mut completion = restart_interrupted(mob_id, child);
+    completion.restart_reason = reason;
+    deliver(delivery, owner, mob_id, job, completion).await
 }
 
 /// What the receipt watch does with a job input still owed a terminal
@@ -2591,10 +2643,6 @@ mod tests {
         assert_eq!(within_limit(bound, Some(now_ms() + 60_000)), bound);
     }
 
-    /// A completion record is another child's when its detail names another
-    /// identity, or a member ref of another mob or identity; a detail that
-    /// names no child (a field missing, or a member ref that does not decode)
-    /// excludes no one (review: a job id is not unique across children).
     /// #1227 (d): the last receipt read at the ceiling can end just past an
     /// opt-in `max_run`. Past the limit only a completed turn wins, and the
     /// completed receipt that read found is that turn: it is kept, not
@@ -2720,6 +2768,10 @@ mod tests {
         assert!(pending_completion(&retired_payload, &mob, &child, &job).is_none());
     }
 
+    /// A completion record is another child's when its detail names another
+    /// identity, or a member ref of another mob or identity; a detail that
+    /// names no child (a field missing, or a member ref that does not decode)
+    /// excludes no one (review: a job id is not unique across children).
     #[test]
     fn a_committed_record_is_matched_to_its_child_by_typed_fields() {
         let (mob, child) = (MobId::from("mob-a"), AgentIdentity::from("child-a"));

@@ -2532,6 +2532,90 @@ pub(crate) struct SuspendedRunUsage {
     pub(crate) callback_results_applied: bool,
 }
 
+/// Which sinks received the current run's lifecycle events: the event tap
+/// and the run's event stream each get an event on its own, the tap before
+/// the stream send resolves, so a hard interrupt can drop the run future
+/// after one sink got an event and before the other did.
+///
+/// A dropped run's terminal is published from these facts, per sink: to a
+/// sink that got no terminal yet, and only when that sink saw the run start
+/// (or the run announces no start). The tap and the stream therefore each see
+/// at most one terminal, and never a terminal without its start.
+#[derive(Debug, Default)]
+pub(crate) struct RunLifecyclePublication {
+    /// The run publishes `RunStarted`.
+    start_announced: std::sync::atomic::AtomicBool,
+    started_tapped: std::sync::atomic::AtomicBool,
+    started_streamed: std::sync::atomic::AtomicBool,
+    terminal_tapped: std::sync::atomic::AtomicBool,
+    terminal_streamed: std::sync::atomic::AtomicBool,
+}
+
+/// A run lifecycle event's place in [`RunLifecyclePublication`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunLifecycleEvent {
+    Started,
+    Terminal,
+}
+
+/// Where a dropped run's terminal is still owed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwedRunTerminal {
+    pub(crate) tap: bool,
+    pub(crate) stream: bool,
+}
+
+impl RunLifecyclePublication {
+    fn flag(&self, event: RunLifecycleEvent, stream: bool) -> &std::sync::atomic::AtomicBool {
+        match (event, stream) {
+            (RunLifecycleEvent::Started, false) => &self.started_tapped,
+            (RunLifecycleEvent::Started, true) => &self.started_streamed,
+            (RunLifecycleEvent::Terminal, false) => &self.terminal_tapped,
+            (RunLifecycleEvent::Terminal, true) => &self.terminal_streamed,
+        }
+    }
+
+    fn load(flag: &std::sync::atomic::AtomicBool) -> bool {
+        flag.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn announce_start(&self) {
+        self.start_announced
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn mark_tapped(&self, event: RunLifecycleEvent) {
+        self.flag(event, false)
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn mark_streamed(&self, event: RunLifecycleEvent) {
+        self.flag(event, true)
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Where a terminal for a run whose future was dropped is still owed.
+    pub(crate) fn owed_terminal(&self) -> OwedRunTerminal {
+        let announced = Self::load(&self.start_announced);
+        OwedRunTerminal {
+            tap: !Self::load(&self.terminal_tapped)
+                && (Self::load(&self.started_tapped) || !announced),
+            stream: !Self::load(&self.terminal_streamed)
+                && (Self::load(&self.started_streamed) || !announced),
+        }
+    }
+
+    /// A fresh run starts with nothing published.
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Move the facts out (a nested run saves and restores its parent's).
+    pub(crate) fn take(&mut self) -> Self {
+        std::mem::take(self)
+    }
+}
+
 /// The main Agent struct
 pub struct Agent<C, T, S>
 where
@@ -2656,10 +2740,10 @@ where
     /// True once the current run's public `RunCompleted` event has been
     /// emitted. Extraction may continue afterward as a separate post-run phase.
     pub(crate) run_completed_event_emitted: bool,
-    /// True once the current run's public `RunFailed` event has been
-    /// delivered. A hard interrupt that drops the run future after this point
-    /// must not publish a second terminal for the same run.
-    pub(crate) run_failed_event_emitted: std::sync::atomic::AtomicBool,
+    /// Which sinks received the current run's lifecycle events, so a run
+    /// whose future a hard interrupt dropped publishes its terminal exactly
+    /// where it is still owed (see [`RunLifecyclePublication`]).
+    pub(crate) run_lifecycle_publication: RunLifecyclePublication,
     /// The committed assistant message whose text the current run's result
     /// repeats, referenced by `RunCompleted`. Set by the terminal commit and
     /// by `build_result`; reset at every run entry. Run-local, never

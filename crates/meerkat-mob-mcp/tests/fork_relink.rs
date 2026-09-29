@@ -2830,7 +2830,9 @@ async fn a_ceiling_outcome_is_fixed_only_after_the_job_input_is_fenced() {
         ),
         "the released run answered the job input: {answered:?}"
     );
-    release_fence.send(()).expect("the fence was still held");
+    release_fence
+        .send(meerkat_mob::DeliveryInputSettleTestRelease::Proceed)
+        .expect("the fence was still held");
 
     assert_eq!(relink.await.unwrap(), ForkRelinkAction::Delivered);
     await_completion_record(&fixture, &owner, job_id).await;
@@ -2841,6 +2843,221 @@ async fn a_ceiling_outcome_is_fixed_only_after_the_job_input_is_fenced() {
         "the outcome is the fenced input's terminal: {outcome}"
     );
     assert_eq!(outcome["bounded_result"]["text"], CHILD_REPLY, "{outcome}");
+    fixture.teardown().await;
+}
+
+/// #1227 (b), the unsettled arm: when the fence cannot settle the job input
+/// (injected here as a failed cancellation, as a run that is no longer
+/// current leaves it), the re-link retires the child, which fences the input
+/// for good, and delivers the input's terminal if one landed first. Here the
+/// held run answers the input while the retirement waits for its boundary, so
+/// the job is `completed`, never a bare `Failed` left for a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsettled_fence_retires_the_child_and_delivers_a_definitive_outcome() {
+    let gate = TurnGate::new();
+    let fixture = held_child_fixture(&gate);
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-unsettled-fence";
+    let (child, child_session) = fork_held_child(
+        &fixture,
+        &handle,
+        &gate,
+        "unsettled-fence-child",
+        job_id,
+        &owner,
+    )
+    .await;
+    let runtime = meerkat_mob::MobSessionService::runtime_adapter(fixture.service.as_ref())
+        .expect("the service derives its runtime");
+    let (commit_entered, release_commit) =
+        runtime.arm_runtime_loop_before_terminal_commit_test_hook(child_session.clone());
+    gate.open();
+    commit_entered
+        .await
+        .expect("the finished turn reaches its commit");
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+
+    let (fence_entered, release_fence) =
+        meerkat_mob::MobHandle::arm_delivery_input_settle_test_gate(child.clone());
+    let mut relink = tokio::spawn({
+        let service = fixture.state.session_service();
+        let delivery = relink_delivery(&fixture);
+        let mob_id = fixture.source_mob_id();
+        let handle = handle.clone();
+        let child = child.clone();
+        async move {
+            meerkat_mob_mcp::fork_relink::relink_child_within(
+                service,
+                &delivery,
+                &mob_id,
+                &handle,
+                &child,
+                &job,
+                Duration::ZERO,
+            )
+            .await
+        }
+    });
+    tokio::select! {
+        action = &mut relink => panic!(
+            "the re-link fixed the job's outcome before fencing its input: {action:?}"
+        ),
+        entered = fence_entered => entered.expect("the re-link fences the job input"),
+    }
+    release_fence
+        .send(meerkat_mob::DeliveryInputSettleTestRelease::FailCancellation)
+        .expect("the fence was still held");
+    release_commit
+        .send(())
+        .expect("the finished turn's commit was still held");
+
+    assert_eq!(relink.await.unwrap(), ForkRelinkAction::Delivered);
+    assert!(
+        handle.get_member(&child).await.unwrap().is_none(),
+        "the unsettled fence retired the child"
+    );
+    await_completion_record(&fixture, &owner, job_id).await;
+    assert_eq!(completion_records(&fixture, &owner, job_id).await, 1);
+    let outcome = completion_record_outcome(&fixture, &owner, job_id).await;
+    assert_eq!(
+        outcome["status"], "completed",
+        "the input's terminal that landed first is the outcome: {outcome}"
+    );
+    fixture.teardown().await;
+}
+
+/// #1227 (b), the fence's own cancellation: a job input still queued behind
+/// an idle child (as a restart requeues it before the recovered run opens)
+/// reads not terminal at the ceiling. The fence abandons that exact input, so
+/// the job settles `restart_interrupted` on the input's own terminal (no run
+/// can answer an abandoned input), and the child stays seated. The child's
+/// run loop is held before it takes queue authority, a typed barrier.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fence_cancels_a_queued_job_input_before_restart_interrupted() {
+    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let runtime = relink_runtime(&fixture).expect("runtime-backed fixture");
+    let name = "queued-fence-child";
+    let child = AgentIdentity::from(name);
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec(name),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: format!("job-{name}-first"),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    assert!(matches!(
+        run.outcome().await,
+        Some(ForkChildRunOutcome::Completed(_))
+    ));
+    let child_session = handle
+        .resolve_bridge_session_id(&child)
+        .await
+        .expect("child session");
+
+    // A second job turn, admitted under its own delivery identity while the
+    // child's run loop is held before queue authority: it stays queued.
+    let (loop_entered, release_loop) =
+        runtime.arm_runtime_loop_before_queue_authority_test_hook(child_session.clone());
+    let job_id = format!("job-{name}");
+    let turn_delivery = meerkat_mob::store::MobDeliveryIdentity::new(
+        format!("{job_id}-turn"),
+        uuid::Uuid::new_v4().to_string(),
+    )
+    .expect("delivery identity");
+    let mut prompt = meerkat_runtime::PromptInput::new(CHILD_TASK, None);
+    prompt.header.idempotency_key = Some(meerkat_runtime::identifiers::IdempotencyKey::new(
+        turn_delivery.idempotency_key.clone(),
+    ));
+    let (accepted, _completion) = runtime
+        .accept_input_with_completion(&child_session, meerkat_runtime::Input::Prompt(prompt))
+        .await
+        .expect("admit the queued job turn");
+    assert!(
+        matches!(accepted, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+        "{accepted:?}"
+    );
+    loop_entered
+        .await
+        .expect("the child's run loop is held before queue authority");
+    let mut job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    job.job_id = job_id.clone();
+    job.turn_delivery = Some(turn_delivery.clone());
+
+    let action = meerkat_mob_mcp::fork_relink::relink_child_within(
+        fixture.state.session_service(),
+        &relink_delivery(&fixture),
+        &fixture.source_mob_id(),
+        &handle,
+        &child,
+        &job,
+        Duration::ZERO,
+    )
+    .await;
+    assert_eq!(action, ForkRelinkAction::Delivered);
+    await_completion_record(&fixture, &owner, &job_id).await;
+    let outcome = completion_record_outcome(&fixture, &owner, &job_id).await;
+    assert_eq!(outcome["status"], "restart_interrupted", "{outcome}");
+    assert!(
+        handle.get_member(&child).await.unwrap().is_some(),
+        "a settled restart_interrupted keeps its child seated"
+    );
+
+    // The fence abandoned the exact input: releasing the loop runs nothing.
+    let spec = meerkat_mob::BoundedResultSpec::new("fork_off_result".to_string(), 16 * 1024)
+        .expect("bounded result spec");
+    let settled = handle
+        .wait_bounded_work_for_identity_with_delivery_identity(
+            &child,
+            &turn_delivery,
+            &spec,
+            meerkat_core::time_compat::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("read the job turn's receipt");
+    assert!(
+        matches!(
+            settled.work(),
+            meerkat_mob::DeliveryTerminalWait::Terminal(record)
+                if matches!(
+                    record.terminal(),
+                    meerkat_runtime::InputTerminalOutcome::Abandoned { .. }
+                )
+        ),
+        "the fence's cancellation is the input's terminal: {settled:?}"
+    );
+    release_loop.send(()).expect("the run loop was still held");
     fixture.teardown().await;
 }
 

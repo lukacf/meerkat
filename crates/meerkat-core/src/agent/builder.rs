@@ -726,7 +726,7 @@ impl AgentBuilder {
             terminal_error_metadata: None,
             run_completed_hooks_applied: false,
             run_completed_event_emitted: false,
-            run_failed_event_emitted: std::sync::atomic::AtomicBool::new(false),
+            run_lifecycle_publication: crate::agent::RunLifecyclePublication::default(),
             run_result_assistant_message: None,
             silent_comms_intents: self.silent_comms_intents,
             checkpointer: self.checkpointer,

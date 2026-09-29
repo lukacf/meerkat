@@ -224,6 +224,9 @@ pub use run::{
     mob_machine_run_public_result_class, mob_machine_run_status_is_terminal,
     mob_machine_step_status_is_terminal,
 };
+#[cfg(all(feature = "runtime-adapter", any(test, feature = "test-support")))]
+#[doc(hidden)]
+pub use runtime::DeliveryInputSettleTestRelease;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::FactoryChainSpawnBasePromptSource;
 pub use runtime::RestoreIncompatible;

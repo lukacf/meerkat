@@ -29703,6 +29703,52 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
 /// build carries that id in `resume_session`. It is typed as a mint, and a
 /// real resume of the member's durable session is typed as a resume: a
 /// builder can tell them apart without inspecting the carried session.
+/// #1232: the runtime-only disposal that host materializers use releases the
+/// released generation's inproc route too, not only the archive disposal, so
+/// a stale owner of the member's comms runtime cannot keep its participant
+/// name from a successor.
+#[tokio::test]
+async fn test_runtime_only_release_releases_the_members_inproc_route() {
+    let service = Arc::new(RealCommsSessionService::new());
+    service.retain_retired_routes.store(true, Ordering::Release);
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let session_id = handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("runtime-only-release"),
+            None,
+        )
+        .await
+        .expect("spawn")
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+    let stale_owner = service
+        .sessions
+        .read()
+        .await
+        .get(&session_id)
+        .cloned()
+        .expect("the member's live comms runtime");
+
+    let disposal = super::provisioner::MemberSessionDisposalArc::new(
+        service.clone(),
+        MobSessionService::runtime_adapter(service.as_ref()),
+    );
+    disposal
+        .release_runtime_only(&session_id)
+        .await
+        .expect("runtime-only release");
+    assert!(
+        !stale_owner.retire_inproc_route(),
+        "the runtime-only release already released the member's route"
+    );
+}
+
 #[tokio::test]
 async fn test_member_builds_type_a_spawn_as_a_mint_and_a_revival_as_a_resume() {
     let service = Arc::new(MockSessionService::new());
@@ -55512,6 +55558,10 @@ struct RealCommsSessionService {
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     volatile_intake_tasks: std::sync::Mutex<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
     session_counter: AtomicU64,
+    /// Keep a retired session's inproc route published, the way a production
+    /// service leaves it to whichever task still holds the runtime: set by
+    /// tests that prove the mob releases the route itself.
+    retain_retired_routes: AtomicBool,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
 }
 
@@ -55530,6 +55580,7 @@ impl RealCommsSessionService {
             session_comms_names: RwLock::new(HashMap::new()),
             volatile_intake_tasks: std::sync::Mutex::new(HashMap::new()),
             session_counter: AtomicU64::new(0),
+            retain_retired_routes: AtomicBool::new(false),
             runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
         }
     }
@@ -55808,7 +55859,9 @@ impl RealCommsSessionService {
         // it stays published with no owner able to free it. Generation-exact,
         // so it can only remove the route this exact runtime published.
         if let Some(retired) = sessions.remove(witness.session_id()) {
-            retired.retire_inproc_route();
+            if !self.retain_retired_routes.load(Ordering::Acquire) {
+                retired.retire_inproc_route();
+            }
         }
         let session_id = witness.session_id();
         self.remove_volatile_control_intake(session_id);
@@ -55927,7 +55980,9 @@ impl SessionService for RealCommsSessionService {
         // it stays published with no owner able to free it. Generation-exact,
         // so it can only remove the route this exact runtime published.
         if let Some(retired) = sessions.remove(id) {
-            retired.retire_inproc_route();
+            if !self.retain_retired_routes.load(Ordering::Acquire) {
+                retired.retire_inproc_route();
+            }
             self.actor_registry.remove_current(id);
         }
         self.remove_volatile_control_intake(id);
@@ -56252,7 +56307,9 @@ impl MobSessionService for RealCommsSessionService {
         // it stays published with no owner able to free it. Generation-exact,
         // so it can only remove the route this exact runtime published.
         if let Some(retired) = sessions.remove(session_id) {
-            retired.retire_inproc_route();
+            if !self.retain_retired_routes.load(Ordering::Acquire) {
+                retired.retire_inproc_route();
+            }
             self.actor_registry.remove_current(session_id);
         }
         self.remove_volatile_control_intake(session_id);

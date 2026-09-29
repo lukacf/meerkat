@@ -112983,6 +112983,33 @@
   },
   "MobRouteInstallsResult": {
     "$defs": {
+      "WireExternalRouteInstallObligation": {
+        "description": "One outstanding host route install for an external-peer edge whose local\nmember is placed on `host`.",
+        "properties": {
+          "host": {
+            "$ref": "#/$defs/WireHostRef"
+          },
+          "local": {
+            "description": "The placed local member.",
+            "type": "string"
+          },
+          "peer_id": {
+            "description": "The external peer's canonical peer id.",
+            "type": "string"
+          },
+          "peer_name": {
+            "description": "The external peer's display name (the edge key with `local`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "local",
+          "peer_id",
+          "peer_name",
+          "host"
+        ],
+        "type": "object"
+      },
       "WireHostRef": {
         "description": "Opaque host reference: the host's canonical comms `PeerId` string.",
         "type": "string"
@@ -113012,11 +113039,19 @@
     "description": "Response payload for the route-install status projection.",
     "properties": {
       "complete": {
+        "description": "`true` only when neither ledger has an outstanding install.",
         "type": "boolean"
       },
       "outstanding": {
         "items": {
           "$ref": "#/$defs/WireRouteInstallObligation"
+        },
+        "type": "array"
+      },
+      "outstanding_external": {
+        "description": "Outstanding host route installs for external-peer edges of placed\nmembers. Absent on the wire when empty.",
+        "items": {
+          "$ref": "#/$defs/WireExternalRouteInstallObligation"
         },
         "type": "array"
       }
@@ -142139,6 +142174,41 @@
       "envelope"
     ],
     "title": "WireEventRow",
+    "type": "object"
+  },
+  "WireExternalRouteInstallObligation": {
+    "$defs": {
+      "WireHostRef": {
+        "description": "Opaque host reference: the host's canonical comms `PeerId` string.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One outstanding host route install for an external-peer edge whose local\nmember is placed on `host`.",
+    "properties": {
+      "host": {
+        "$ref": "#/$defs/WireHostRef"
+      },
+      "local": {
+        "description": "The placed local member.",
+        "type": "string"
+      },
+      "peer_id": {
+        "description": "The external peer's canonical peer id.",
+        "type": "string"
+      },
+      "peer_name": {
+        "description": "The external peer's display name (the edge key with `local`).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "local",
+      "peer_id",
+      "peer_name",
+      "host"
+    ],
+    "title": "WireExternalRouteInstallObligation",
     "type": "object"
   },
   "WireFlowTurnOutcome": {

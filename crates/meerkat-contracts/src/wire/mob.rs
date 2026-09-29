@@ -3376,11 +3376,30 @@ pub struct WireRouteInstallObligation {
     pub host: WireHostRef,
 }
 
+/// One outstanding host route install for an external-peer edge whose local
+/// member is placed on `host`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireExternalRouteInstallObligation {
+    /// The placed local member.
+    pub local: String,
+    /// The external peer's canonical peer id.
+    pub peer_id: String,
+    /// The external peer's display name (the edge key with `local`).
+    pub peer_name: String,
+    pub host: WireHostRef,
+}
+
 /// Response payload for the route-install status projection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobRouteInstallsResult {
     pub outstanding: Vec<WireRouteInstallObligation>,
+    /// Outstanding host route installs for external-peer edges of placed
+    /// members. Absent on the wire when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outstanding_external: Vec<WireExternalRouteInstallObligation>,
+    /// `true` only when neither ledger has an outstanding install.
     pub complete: bool,
 }
 

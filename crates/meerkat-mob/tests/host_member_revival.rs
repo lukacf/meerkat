@@ -518,6 +518,17 @@ async fn broken_member_refuses_revival_retry_typed() {
             .expect("query broken placed endpoint")
             .is_none()
     );
+    assert!(
+        matches!(
+            controlling
+                .handle
+                .member_endpoint_status(&AgentIdentity::from("b2"))
+                .await
+                .expect("query broken placed endpoint status"),
+            Some(meerkat_mob::MobMemberEndpointStatus::HostUnavailable { .. })
+        ),
+        "a Broken placed member is HostUnavailable, never mistaken for a local member"
+    );
 
     fixture.shutdown().await;
 }

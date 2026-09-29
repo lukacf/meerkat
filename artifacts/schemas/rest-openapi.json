@@ -11589,11 +11589,19 @@
         "description": "Response payload for the route-install status projection.",
         "properties": {
           "complete": {
+            "description": "`true` only when neither ledger has an outstanding install.",
             "type": "boolean"
           },
           "outstanding": {
             "items": {
               "$ref": "#/components/schemas/WireRouteInstallObligation"
+            },
+            "type": "array"
+          },
+          "outstanding_external": {
+            "description": "Outstanding host route installs for external-peer edges of placed\nmembers. Absent on the wire when empty.",
+            "items": {
+              "$ref": "#/components/schemas/WireExternalRouteInstallObligation"
             },
             "type": "array"
           }
@@ -19651,6 +19659,33 @@
         "required": [
           "durable_seq",
           "envelope"
+        ],
+        "type": "object"
+      },
+      "WireExternalRouteInstallObligation": {
+        "description": "One outstanding host route install for an external-peer edge whose local\nmember is placed on `host`.",
+        "properties": {
+          "host": {
+            "$ref": "#/components/schemas/WireHostRef"
+          },
+          "local": {
+            "description": "The placed local member.",
+            "type": "string"
+          },
+          "peer_id": {
+            "description": "The external peer's canonical peer id.",
+            "type": "string"
+          },
+          "peer_name": {
+            "description": "The external peer's display name (the edge key with `local`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "local",
+          "peer_id",
+          "peer_name",
+          "host"
         ],
         "type": "object"
       },

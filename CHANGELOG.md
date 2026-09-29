@@ -73,6 +73,21 @@ them.
   sessions only gain a marker, which is not prefix content, and keep their
   cache (#1235).
 
+- Generated `MobMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-mob `machines::mob_machine`) gains the placed-member external-edge
+  route ledger: state `pending_external_route_installs`, type
+  `ExternalRouteObligation`, inputs `RecordExternalRouteInstall`,
+  `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`
+  and `RollbackExternalRouteInstall`, and effect
+  `ExternalRouteInstallRequested` (`MobMachineInput::*`,
+  `MobMachineInputVariant::*`, `MobMachineEffect::*`, `MobMachineCatalogInput::*`
+  and kernel `Input::*` / `InputKind::*` / `Effect::*` / `EffectKind::*` /
+  `TransitionId::*` discriminants move; `ExternalRouteInstallRequested` lands
+  mid-enum in `EffectKind`).
+  `meerkat_contracts::wire::MobRouteInstallsResult` gains the field
+  `outstanding_external: Vec<WireExternalRouteInstallObligation>` (serde
+  default, omitted when empty, so the wire stays compatible); code that
+  constructs the struct must set it.
 - Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
   meerkat-runtime `meerkat_machine::dsl`) gains a run-fenced Stop (#1261). The
   input `StopCurrentRunForRun { run_id }` is added (`MeerkatMachineInput::*`,
@@ -235,6 +250,36 @@ them.
   no longer matches the stored head in backends that persist one). The
   default compares recomputed tokens over `load_head`; `SqliteSessionStore`
   and `MemoryStore` override it. Cold-resume body reuse uses it.
+- `MobHandle::member_endpoint_status(&identity)` returns a typed
+  `MobMemberEndpointStatus` (`Local(descriptor)`, `Host(descriptor)`,
+  `LocalUnavailable { reason }`, `HostUnavailable { reason }`), so who owns a
+  member's endpoint stays observable when no usable endpoint exists: a Broken
+  or restore-failed placed member is `HostUnavailable`, never mistaken for a
+  local member. `member_peer_endpoint` is its usable-endpoint view.
+- A placed (host-owned) member can be wired to an external peer (#1269).
+  `MobHandle::wire` / `unwire` with `PeerTarget::External` on a placed member
+  used to be refused outright. The edge is the ordinary machine-owned
+  external edge (`WireExternalPeer`, durable `ExternalPeerWired` /
+  `ExternalPeerUnwired`); its trust row lives on the member's host and is
+  realized through the existing V4 `InstallPeerTrust` / `RemovePeerTrust`
+  bridge commands (no protocol change), on a new MobMachine ledger that
+  mirrors placed member-member routes. A failed host install never unwinds
+  the committed edge: it stays pending, is reported in `route_installs()`
+  (`outstanding_external`), and drains on every route trigger (explicit
+  drive, host rebind and new host incarnation, placed revival, controlling
+  cold-boot recovery). Unwire removes the host row synchronously before it
+  commits, and a rejected removal leaves the edge wired with a typed error.
+  Retiring a placed member converges its external edges (its host rows die
+  with `ReleaseMember`) instead of failing. A wire whose host route cannot
+  be recorded (host not Bound, carrier binding inactive) is refused typed
+  (`BridgeCommandRejected { cause: NotBound }`) before the edge commits; a
+  second edge to an already-wired peer id under another name is refused (the
+  host keys trust rows by peer id); a failed or timed-out host removal
+  reinstalls the row; and unwire on a confirmed-revoked host commits without
+  a removal. Security: wiring a placed member to an external peer makes its
+  host's member runtime accept and dial the descriptor's address, so only a
+  caller with the mob's wiring authority can do it (the same admission as
+  local external wiring).
 - `MobHandle::member_peer_endpoint(&identity)` returns a member's canonical
   comms endpoint as a `MobMemberPeerEndpoint`: the exact generation
   endpoint MobMachine holds for its current incarnation (name, peer id,

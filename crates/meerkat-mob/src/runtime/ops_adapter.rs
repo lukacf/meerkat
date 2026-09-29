@@ -5917,6 +5917,84 @@ mod tests {
         );
     }
 
+    /// A refused placed revival ack drops the exact binding it created while
+    /// the committed operation stays Running, so the durable endpoint can
+    /// bind the same operation again on the next revival.
+    #[tokio::test]
+    async fn refused_revival_clears_the_exact_binding_and_keeps_the_operation() {
+        let adapter = MobOpsAdapter::new();
+        let registry = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let owner = SessionId::new();
+        let operation_id = OperationId::new();
+        let display_name = "mob/profile/revived";
+        MobOpsAdapter::ensure_committed_placed_provision_operation_exact(
+            registry.as_ref(),
+            &owner,
+            &operation_id,
+            display_name,
+        )
+        .expect("seed the committed Running operation");
+        let refused_peer = PeerId::new();
+        let refused_address = PeerAddress::parse("inproc://refused-revival").unwrap();
+        let refused_ref = MemberRef::BackendPeer {
+            peer_id: refused_peer.to_string(),
+            address: refused_address.to_string(),
+            pubkey: [4u8; 32],
+            bootstrap_token: None,
+            session_id: None,
+        };
+        adapter
+            .bind_member_registry_for_exact_operation(
+                &refused_ref,
+                owner.clone(),
+                Arc::clone(&registry) as Arc<dyn OpsLifecycleRegistry>,
+                display_name,
+                OperationSource::backend_peer(refused_peer, refused_address),
+                operation_id.clone(),
+            )
+            .expect("the refused ack bound its endpoint");
+        adapter
+            .clear_placed_member_binding_exact(&owner, &operation_id, display_name)
+            .expect("clear the refused binding");
+        assert!(
+            adapter
+                .active_operation_id_for_member(&refused_ref)
+                .await
+                .is_none(),
+            "no binding stays on the refused endpoint"
+        );
+        MobOpsAdapter::ensure_committed_placed_provision_operation_exact(
+            registry.as_ref(),
+            &owner,
+            &operation_id,
+            display_name,
+        )
+        .expect("the committed operation is still Running");
+        let durable_peer = PeerId::new();
+        let durable_address = PeerAddress::parse("inproc://durable-revival").unwrap();
+        let durable_ref = MemberRef::BackendPeer {
+            peer_id: durable_peer.to_string(),
+            address: durable_address.to_string(),
+            pubkey: [5u8; 32],
+            bootstrap_token: None,
+            session_id: None,
+        };
+        adapter
+            .bind_member_registry_for_exact_operation(
+                &durable_ref,
+                owner,
+                Arc::clone(&registry) as Arc<dyn OpsLifecycleRegistry>,
+                display_name,
+                OperationSource::backend_peer(durable_peer, durable_address),
+                operation_id.clone(),
+            )
+            .expect("the durable endpoint binds the same operation after the clear");
+        assert_eq!(
+            adapter.active_operation_id_for_member(&durable_ref).await,
+            Some(operation_id)
+        );
+    }
+
     #[tokio::test]
     async fn exact_placed_retirement_clears_binding_before_same_peer_reuse() {
         let adapter = MobOpsAdapter::new();

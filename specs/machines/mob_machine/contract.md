@@ -283,6 +283,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `cancel_requested_placed_completion_outcomes`: `Set<PlacedCompletionObligation>`
 - `resolved_placed_completion_outcomes`: `Set<PlacedCompletionObligation>`
 - `pending_route_installs`: `Set<RouteInstallObligation>`
+- `pending_external_route_installs`: `Set<ExternalRouteObligation>`
 - `operator_grant_scopes`: `Map<PrincipalId, Set<ControlScope>>`
 - `operator_grant_expiries`: `Map<PrincipalId, Option<u64>>`
 - `spawn_profile_authority_resolved_spec_digests`: `Map<AgentIdentity, String>`
@@ -302,6 +303,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `UnwireMembers`(edge: WiringEdge)
 - `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
+- `RecordExternalRouteInstall`(obligation: ExternalRouteObligation)
+- `AuthorizeExternalRouteRemovalBeforeUnwire`(obligation: ExternalRouteObligation)
+- `ResolveExternalRouteInstall`(obligation: ExternalRouteObligation)
+- `RollbackExternalRouteInstall`(obligation: ExternalRouteObligation)
 - `SubmitWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin, content_attribution: WorkContentAttribution)
 - `CancelWork`(work_id: WorkId)
 - `CancelAllWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -730,6 +735,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PlacedCarrierCleanupResolved`(obligation: PlacedCarrierCleanupObligation)
 - `RequestMemberRelease`(agent_identity: AgentIdentity, generation: Generation, fence_token: FenceToken, host: HostId)
 - `RouteInstallRequested`(obligation: RouteInstallObligation)
+- `ExternalRouteInstallRequested`(obligation: ExternalRouteObligation)
 - `MemberOperatorAdmitted`(agent_identity: AgentIdentity, request_id: String)
 - `MemberOperatorRejected`(agent_identity: AgentIdentity, request_id: String, cause: MemberOperatorRejectKind)
 - `FlowStepDispatchClassified`(run_id: RunId, step_id: StepId, target: AgentIdentity, dispatch: FlowStepDispatchKind)
@@ -876,6 +882,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `placed_kickoff_and_flow_correlations_are_disjoint`
 - `placed_completion_correlations_are_disjoint`
 - `pending_route_ledger_is_install_only`
+- `pending_external_route_ledger_is_install_only`
 - `remote_turn_custody_requires_exact_current_placement`
 - `placed_completion_custody_requires_exact_current_placement`
 - `placed_kickoff_custody_requires_exact_current_placement`
@@ -9333,6 +9340,88 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `RollbackRouteInstallDestroyed`
 - From: `Destroyed`
 - On: `RollbackRouteInstall`(obligation)
+- Guards:
+  - `obligation_is_install`
+- To: `Destroyed`
+
+### `RecordExternalRouteInstallInstall`
+- From: `Running`
+- On: `RecordExternalRouteInstall`(obligation)
+- Guards:
+  - `lifecycle_origin_open`
+  - `obligation_is_install`
+  - `edge_currently_wired`
+  - `host_bound`
+  - `local_member_placed_on_host`
+  - `placed_binding_active`
+- Emits: `ExternalRouteInstallRequested`
+- To: `Running`
+
+### `AuthorizeExternalRouteRemovalBeforeUnwire`
+- From: `Running`
+- On: `AuthorizeExternalRouteRemovalBeforeUnwire`(obligation)
+- Guards:
+  - `obligation_is_remove`
+  - `edge_currently_wired`
+  - `host_bound`
+  - `local_member_placed_on_host`
+  - `placed_binding_active`
+  - `local_endpoint_published`
+- Emits: `ExternalRouteInstallRequested`
+- To: `Running`
+
+### `ResolveExternalRouteInstallRunning`
+- From: `Running`
+- On: `ResolveExternalRouteInstall`(obligation)
+- Guards:
+  - `obligation_is_install`
+- To: `Running`
+
+### `ResolveExternalRouteInstallStopped`
+- From: `Stopped`
+- On: `ResolveExternalRouteInstall`(obligation)
+- Guards:
+  - `obligation_is_install`
+- To: `Stopped`
+
+### `ResolveExternalRouteInstallCompleted`
+- From: `Completed`
+- On: `ResolveExternalRouteInstall`(obligation)
+- Guards:
+  - `obligation_is_install`
+- To: `Completed`
+
+### `ResolveExternalRouteInstallDestroyed`
+- From: `Destroyed`
+- On: `ResolveExternalRouteInstall`(obligation)
+- Guards:
+  - `obligation_is_install`
+- To: `Destroyed`
+
+### `RollbackExternalRouteInstallRunning`
+- From: `Running`
+- On: `RollbackExternalRouteInstall`(obligation)
+- Guards:
+  - `obligation_is_install`
+- To: `Running`
+
+### `RollbackExternalRouteInstallStopped`
+- From: `Stopped`
+- On: `RollbackExternalRouteInstall`(obligation)
+- Guards:
+  - `obligation_is_install`
+- To: `Stopped`
+
+### `RollbackExternalRouteInstallCompleted`
+- From: `Completed`
+- On: `RollbackExternalRouteInstall`(obligation)
+- Guards:
+  - `obligation_is_install`
+- To: `Completed`
+
+### `RollbackExternalRouteInstallDestroyed`
+- From: `Destroyed`
+- On: `RollbackExternalRouteInstall`(obligation)
 - Guards:
   - `obligation_is_install`
 - To: `Destroyed`

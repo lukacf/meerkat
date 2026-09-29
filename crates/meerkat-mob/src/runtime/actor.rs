@@ -16,6 +16,7 @@ pub(super) mod explicit_resume;
 pub(super) mod live_durable_source_loads;
 pub(super) mod member_effect_lane;
 pub(super) mod member_status_lane;
+mod placed_external_routes;
 pub(super) mod reload_revival;
 mod resume_post_commit;
 mod resume_rollback;
@@ -10337,6 +10338,7 @@ impl MobActor {
     /// them. Set semantics dedupe; machine guards own admission (guard
     /// rejects are debug-logged skips — ADJ-P4-1 re-derive posture).
     fn record_derived_route_install_obligations(&mut self, host_filter: Option<&mob_dsl::HostId>) {
+        self.record_derived_external_route_install_obligations(host_filter);
         let derived: BTreeSet<mob_dsl::RouteInstallObligation> =
             super::derive_install_obligations(self.dsl_authority.state(), host_filter);
         for obligation in derived {
@@ -10392,7 +10394,10 @@ impl MobActor {
                 );
             }
         }
-        Ok(())
+        // Placed-member external edges drain on every trigger that drains
+        // member routes (the one canonical drain every trigger converges on).
+        self.realize_pending_external_route_installs(host_filter)
+            .await
     }
 
     /// The explicit retry verb (ADJ-P4-9b): drain the PENDING obligation
@@ -10439,6 +10444,7 @@ impl MobActor {
         for edge in edges {
             self.fold_route_install_obligations_after_wire(&edge).await;
         }
+        self.drive_external_routes_for_identity(identity).await;
     }
 
     // -----------------------------------------------------------------------
@@ -13997,6 +14003,8 @@ impl MobActor {
             )));
         }
 
+        let binding_owner = owner_bridge_session_id.clone();
+        let binding_display_name = peer_name.clone();
         let receipt = self
             .provisioner
             .materialize_member(super::provisioner::MaterializeMemberRequest {
@@ -14012,44 +14020,40 @@ impl MobActor {
             })
             .await?;
 
-        // Ack echoes vs machine facts (typed mismatch, never absorbed): the
-        // recorded response must name the SAME session and digest.
-        let Some(ack) = receipt.receipt.materialized_ack.as_deref() else {
-            return Err(MobError::Internal(format!(
-                "placed revival ack for '{agent_identity}' carried no materialized ack facts"
-            )));
-        };
-        if ack.session_id.to_string() != binding.0 {
-            return Err(MobError::Internal(format!(
-                "placed revival ack for '{agent_identity}' names session '{}' but the machine \
-                 binding is '{}'",
-                ack.session_id, binding.0
-            )));
-        }
-        if ack.spec_digest_echo != record.spec_digest {
-            return Err(MobError::Internal(format!(
-                "placed revival ack digest echo for '{agent_identity}' diverged from the recorded \
-                 spec digest"
-            )));
-        }
-        // The revived runtime must answer at the member's durable generation
-        // endpoint (peer id, address and transport key). A host that
-        // re-materialized it under a different identity fails the revival,
-        // which records the member Broken instead of adopting an endpoint
-        // nothing durable vouches for (#1269).
-        let revived = mob_dsl::MemberPeerEndpoint::from(&ack.member_peer);
-        let endpoint_defect = super::builder::member_endpoint_defect(
-            self.dsl_authority
-                .state()
-                .member_peer_endpoints
-                .get(&mob_dsl::AgentIdentity::from_domain(agent_identity)),
-            &revived,
-            "it has no durable host-acknowledged endpoint to verify",
-        );
-        if let Some(detail) = endpoint_defect {
-            return Err(MobError::WiringError(
-                super::builder::member_endpoint_broken_reason(agent_identity, &detail),
-            ));
+        // Every ack refusal (missing facts, session, digest, endpoint) takes
+        // ONE path: the ack bound its endpoint into the ops registry for the
+        // committed operation, so that exact binding is dropped before the
+        // revival fails and the member is recorded Broken. The committed
+        // operation itself survives with the (now Broken) member.
+        //
+        // The refused host runtime is deliberately LEFT IN PLACE, untrusted:
+        // the only release verb (`ReleaseMember`) is durable disposal, which
+        // would destroy the Broken member's session and history and pre-empt
+        // its retirement. It is harmless meanwhile: the member is recorded
+        // Broken, publishes no endpoint, delivery to it is refused
+        // (`MemberRestoreFailed`), and no peer ever installs trust for an
+        // unvouched key. Retire or respawn releases it through the normal
+        // path.
+        if let Some(refusal) =
+            self.revived_placed_ack_refusal(agent_identity, binding, &record, &receipt)
+        {
+            if let Err(error) = self
+                .provisioner
+                .clear_placed_member_binding_exact(
+                    &binding_owner,
+                    &record.provision_operation_id,
+                    &binding_display_name,
+                )
+                .await
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    %error,
+                    "failed to clear the registry binding of a refused revival ack"
+                );
+            }
+            return Err(refusal);
         }
 
         // The G2 ACK is authenticated by the exact bound request. Persist the
@@ -14070,6 +14074,53 @@ impl MobActor {
         // itself stands.
         self.drive_route_installs_for_identity(agent_identity).await;
         Ok(())
+    }
+
+    /// Why a placed revival's ack is refused, or `None` to adopt it. Ack
+    /// echoes are checked against machine facts (typed mismatch, never
+    /// absorbed): the same session and digest, and the member's durable
+    /// generation endpoint (peer id, address and transport key); a host that
+    /// re-materialized it under another identity is refused (#1269).
+    fn revived_placed_ack_refusal(
+        &self,
+        agent_identity: &AgentIdentity,
+        binding: &mob_dsl::SessionId,
+        record: &crate::store::MobPlacedSpawnCarrierRecord,
+        receipt: &super::provisioner::MaterializedSpawnReceipt,
+    ) -> Option<MobError> {
+        let Some(ack) = receipt.receipt.materialized_ack.as_deref() else {
+            return Some(MobError::Internal(format!(
+                "placed revival ack for '{agent_identity}' carried no materialized ack facts"
+            )));
+        };
+        if ack.session_id.to_string() != binding.0 {
+            return Some(MobError::Internal(format!(
+                "placed revival ack for '{agent_identity}' names session '{}' but the machine \
+                 binding is '{}'",
+                ack.session_id, binding.0
+            )));
+        }
+        if ack.spec_digest_echo != record.spec_digest {
+            return Some(MobError::Internal(format!(
+                "placed revival ack digest echo for '{agent_identity}' diverged from the recorded \
+                 spec digest"
+            )));
+        }
+        let revived = mob_dsl::MemberPeerEndpoint::from(&ack.member_peer);
+        super::builder::member_endpoint_defect(
+            self.dsl_authority
+                .state()
+                .member_peer_endpoints
+                .get(&mob_dsl::AgentIdentity::from_domain(agent_identity)),
+            &revived,
+            "it has no durable host-acknowledged endpoint to verify",
+        )
+        .map(|detail| {
+            MobError::WiringError(super::builder::member_endpoint_broken_reason(
+                agent_identity,
+                &detail,
+            ))
+        })
     }
 
     fn active_machine_member_ids_for_profile(
@@ -41454,6 +41505,11 @@ impl MobActor {
         local: AgentIdentity,
         spec: TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
+        if super::member_runtime_is_host_owned(self.dsl_authority.state(), &local) {
+            // A placed member's trust row lives on its host: same machine
+            // edge and durable projection, realized through the host lane.
+            return self.wire_placed_member_external_peer(local, spec).await;
+        }
         let preparation = self.prepare_external_peer_wire(local, spec).await?;
         self.realize_wiring_preparation_inline(preparation).await
     }
@@ -41474,8 +41530,8 @@ impl MobActor {
         )?;
         let local_identity = AgentIdentity::from(local.as_str());
         if super::member_runtime_is_host_owned(self.dsl_authority.state(), &local_identity) {
-            return Err(MobError::WiringError(format!(
-                "wire between placed member '{local}' and an external peer is unsupported"
+            return Err(MobError::Internal(format!(
+                "placed member '{local}' is wired to an external peer through its host lane, not the local wiring plan"
             )));
         }
         let external_identity = AgentIdentity::from(spec.name.as_str());
@@ -41585,9 +41641,11 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let local_identity = AgentIdentity::from(local.as_str());
         if super::member_runtime_is_host_owned(self.dsl_authority.state(), &local_identity) {
-            return Err(MobError::WiringError(format!(
-                "unwire between placed member '{local}' and an external peer is unsupported"
-            )));
+            // The machine-owned edge is the only authority for a placed
+            // member's external row; a stale descriptor names no host row.
+            return self
+                .unwire_placed_member_external_peer(local_identity, peer_name)
+                .await;
         }
         // The machine-owned external edge supplies the prior descriptor.
         // The roster mirror may lag and is display-only.
@@ -42928,16 +42986,18 @@ impl MobActor {
         if external_edges.is_empty() {
             return Ok(());
         }
-        if super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity) {
-            // Placed↔legacy-external wiring has no remote cleanup protocol.
-            // Fail closed rather than treating the host-resident session id
-            // as local or deleting topology while remote trust survives.
-            return Err(MobError::WiringError(format!(
-                "retire external-peer cleanup is unsupported for placed member '{}'",
-                entry.agent_identity
-            )));
-        }
-        let comms = self.provisioner_comms(&entry.member_ref).await;
+        // A retiring placed member's external rows live on its host and die
+        // with the exact ReleaseMember (its member-member rows likewise):
+        // there is no local comms runtime to clean, so the observed-absent
+        // machine cleanup applies.
+        let comms = if super::member_runtime_is_host_owned(
+            self.dsl_authority.state(),
+            &entry.agent_identity,
+        ) {
+            None
+        } else {
+            self.provisioner_comms(&entry.member_ref).await
+        };
         for edge in external_edges {
             let peer_name = meerkat_core::comms::PeerName::new(edge.endpoint.name.0.clone())
                 .map_err(|error| {
@@ -42971,6 +43031,7 @@ impl MobActor {
                     }
                 }
                 None => {
+                    self.rollback_superseded_external_installs(&edge)?;
                     self.apply_cleanup_retiring_external_peer_observed_absent(entry, &key, &edge)?;
                     tracing::debug!(
                         mob_id = %self.definition.id,

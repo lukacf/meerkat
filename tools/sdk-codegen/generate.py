@@ -211,6 +211,7 @@ MOB_RPC_CONTRACT_TYPES = [
     "WireHostCapabilityFlags",
     "MobRouteInstallsResult",
     "WireRouteInstallObligation",
+    "WireExternalRouteInstallObligation",
     "MobBindHostParams",
     "MobBindHostResult",
     "MobRevokeHostParams",
@@ -684,6 +685,7 @@ MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
         "MobHostStatus",
         "WireHostCapabilityFlags",
         "WireRouteInstallObligation",
+        "WireExternalRouteInstallObligation",
         # Run-result accounting: the block, its per-member rows, and the
         # attribution tag are schema-local `$defs` under
         # `WireMobRunResultEnvelope`. Without promotion the envelope's

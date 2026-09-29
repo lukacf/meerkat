@@ -2786,6 +2786,25 @@ fn record_recovered_route_install_obligations(
 ) {
     use crate::machines::mob_machine as mob_dsl;
 
+    let external: Vec<mob_dsl::ExternalRouteObligation> =
+        super::derive_external_install_obligations(authority.state(), None)
+            .into_iter()
+            .collect();
+    for obligation in external {
+        if let Err(error) = mob_dsl::MobMachineMutator::apply(
+            authority,
+            mob_dsl::MobMachineInput::RecordExternalRouteInstall {
+                obligation: obligation.clone(),
+            },
+        ) {
+            tracing::debug!(
+                mob_id = %mob_id,
+                host = %obligation.host.as_str(),
+                %error,
+                "recovery external route-install re-derive skipped by machine admission"
+            );
+        }
+    }
     let derived: Vec<mob_dsl::RouteInstallObligation> =
         super::derive_install_obligations(authority.state(), None)
             .into_iter()

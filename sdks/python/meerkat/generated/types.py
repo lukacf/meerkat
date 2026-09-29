@@ -2782,6 +2782,7 @@ class MobRouteInstallsResult:
     """Response payload for the route-install status projection."""
     complete: bool
     outstanding: list[WireRouteInstallObligation]
+    outstanding_external: Optional[list[WireExternalRouteInstallObligation]] = None
 
 
 @dataclass
@@ -2790,6 +2791,16 @@ class WireRouteInstallObligation:
     edge_a: str
     edge_b: str
     host: WireHostRef
+
+
+@dataclass
+class WireExternalRouteInstallObligation:
+    """One outstanding host route install for an external-peer edge whose local
+member is placed on `host`."""
+    host: WireHostRef
+    local: str
+    peer_id: str
+    peer_name: str
 
 
 @dataclass

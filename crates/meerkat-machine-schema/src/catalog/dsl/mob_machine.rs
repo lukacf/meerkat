@@ -489,6 +489,12 @@ macro_rules! mob_catalog_machine_dsl {
             // trust is rejected by the receiver); this set makes install
             // convergence observable, retryable, and reportable.
             pending_route_installs: Set<RouteInstallObligation>,
+            // Placed-member external edges: outstanding host route INSTALL
+            // obligations for external-peer edges whose local member is
+            // placed. Same posture as pending_route_installs: volatile,
+            // rebuilt from durable external_peer_edges x member_placement x
+            // bound hosts; Remove is synchronous pre-unwire authority only.
+            pending_external_route_installs: Set<ExternalRouteObligation>,
             // §6.5 grants: principal -> granted control scopes + raw expiry.
             // Expiry is DATA checked at the enforcement seam; the machine
             // never reads a clock.
@@ -777,6 +783,7 @@ macro_rules! mob_catalog_machine_dsl {
             cancel_requested_placed_completion_outcomes = EmptySet,
             resolved_placed_completion_outcomes = EmptySet,
             pending_route_installs = EmptySet,
+            pending_external_route_installs = EmptySet,
             operator_grant_scopes = EmptyMap,
             operator_grant_expiries = EmptyMap,
             spawn_profile_authority_resolved_spec_digests = EmptyMap,
@@ -1285,6 +1292,13 @@ macro_rules! mob_catalog_machine_dsl {
             AuthorizeRouteRemovalBeforeUnwire { obligation: RouteInstallObligation },
             ResolveRouteInstall { obligation: RouteInstallObligation },
             RollbackRouteInstall { obligation: RouteInstallObligation },
+            // Placed-member external edges: the same Record / synchronous
+            // pre-unwire Authorize / Resolve / Rollback quartet, over an
+            // external-peer edge whose local member is placed on the host.
+            RecordExternalRouteInstall { obligation: ExternalRouteObligation },
+            AuthorizeExternalRouteRemovalBeforeUnwire { obligation: ExternalRouteObligation },
+            ResolveExternalRouteInstall { obligation: ExternalRouteObligation },
+            RollbackExternalRouteInstall { obligation: ExternalRouteObligation },
             // --- Multi-host mobs (§18 O2): remote turn-outcome obligations ---
             RecordRemoteTurnObligation { obligation: RemoteTurnObligation },
             AbortRemoteTurnObligation { obligation: RemoteTurnObligation },
@@ -2070,6 +2084,10 @@ macro_rules! mob_catalog_machine_dsl {
             // is resolved by the realizing shell from machine-projected
             // member_peer_endpoints at install time.
             RouteInstallRequested { obligation: RouteInstallObligation },
+            // External-edge host route handoff: the realizing shell installs
+            // (or removes) the edge's external descriptor on the placed
+            // local member through its host.
+            ExternalRouteInstallRequested { obligation: ExternalRouteObligation },
             MemberOperatorAdmitted { agent_identity: AgentIdentity, request_id: String },
             MemberOperatorRejected { agent_identity: AgentIdentity, request_id: String, cause: Enum<MemberOperatorRejectKind> },
             FlowStepDispatchClassified { run_id: RunId, step_id: StepId, target: AgentIdentity, dispatch: Enum<FlowStepDispatchKind> },
@@ -2769,6 +2787,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition PlacedCarrierCleanupResolved => local seam SurfaceResultAlignment,
         disposition RequestMemberRelease => external seam OwnerRealizationOnly,
         disposition RouteInstallRequested => external seam OwnerRealizationOnly,
+        disposition ExternalRouteInstallRequested => external seam OwnerRealizationOnly,
         disposition MemberOperatorAdmitted => local seam SurfaceResultAlignment,
         disposition MemberOperatorRejected => local seam SurfaceResultAlignment,
         disposition FlowStepDispatchClassified => local seam SurfaceResultAlignment,
@@ -3346,6 +3365,11 @@ macro_rules! mob_catalog_machine_dsl {
 
         invariant pending_route_ledger_is_install_only {
             for_all(obligation in self.pending_route_installs,
+                obligation.kind == RouteObligationKind::Install)
+        }
+
+        invariant pending_external_route_ledger_is_install_only {
+            for_all(obligation in self.pending_external_route_installs,
                 obligation.kind == RouteObligationKind::Install)
         }
 
@@ -14532,6 +14556,73 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         // =====================================================================
+        // Placed-member external edges: host route obligations for an
+        // external-peer edge whose local member is placed. The graph stays
+        // owned by WireExternalPeer / UnwireExternalPeer; these only make the
+        // host-side trust row observable, retryable and removable.
+        // =====================================================================
+
+        transition RecordExternalRouteInstallInstall {
+            on input RecordExternalRouteInstall { obligation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "lifecycle_origin_open" { self.placed_completion_lifecycle_quiescing == false }
+            guard "obligation_is_install" { obligation.kind == RouteObligationKind::Install }
+            guard "edge_currently_wired" { self.external_peer_edges.contains(obligation.edge) == true }
+            guard "host_bound" { self.host_bind_phase.get_cloned(obligation.host) == Some(HostBindPhase::Bound) }
+            guard "local_member_placed_on_host" {
+                self.member_placement.get_cloned(mob_machine_external_peer_edge_local(obligation.edge)) == Some(obligation.host)
+            }
+            guard "placed_binding_active" {
+                mob_machine_placed_carrier_binding_active(self.member_placement, self.current_placed_spawn_host_binding_generations, self.host_bind_phase, self.host_binding_generations, mob_machine_external_peer_edge_local(obligation.edge))
+            }
+            update {
+                self.pending_external_route_installs.insert(obligation);
+            }
+            to Running
+            emit ExternalRouteInstallRequested { obligation: obligation }
+        }
+
+        transition AuthorizeExternalRouteRemovalBeforeUnwire {
+            on input AuthorizeExternalRouteRemovalBeforeUnwire { obligation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "obligation_is_remove" { obligation.kind == RouteObligationKind::Remove }
+            guard "edge_currently_wired" { self.external_peer_edges.contains(obligation.edge) == true }
+            guard "host_bound" { self.host_bind_phase.get_cloned(obligation.host) == Some(HostBindPhase::Bound) }
+            guard "local_member_placed_on_host" {
+                self.member_placement.get_cloned(mob_machine_external_peer_edge_local(obligation.edge)) == Some(obligation.host)
+            }
+            guard "placed_binding_active" {
+                mob_machine_placed_carrier_binding_active(self.member_placement, self.current_placed_spawn_host_binding_generations, self.host_bind_phase, self.host_binding_generations, mob_machine_external_peer_edge_local(obligation.edge))
+            }
+            guard "local_endpoint_published" {
+                self.member_peer_endpoints.contains_key(mob_machine_external_peer_edge_local(obligation.edge)) == true
+            }
+            update {}
+            to Running
+            emit ExternalRouteInstallRequested { obligation: obligation }
+        }
+
+        transition ResolveExternalRouteInstall {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveExternalRouteInstall { obligation }
+            guard "obligation_is_install" { obligation.kind == RouteObligationKind::Install }
+            update {
+                self.pending_external_route_installs.remove(obligation);
+            }
+            to Running
+        }
+
+        transition RollbackExternalRouteInstall {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input RollbackExternalRouteInstall { obligation }
+            guard "obligation_is_install" { obligation.kind == RouteObligationKind::Install }
+            update {
+                self.pending_external_route_installs.remove(obligation);
+            }
+            to Running
+        }
+
+        // =====================================================================
         // Multi-host mobs (§18 O2): remote turn-outcome obligations.
         // Recorded before the directed send. Commit is admitted only after a
         // durable StepTargetCompleted/StepTargetFailed row names the exact
@@ -23236,6 +23327,29 @@ impl Default for RouteInstallObligation {
     fn default() -> Self {
         Self {
             edge: WiringEdge::new(AgentIdentity(String::new()), AgentIdentity(String::new())),
+            host: HostId::default(),
+            kind: RouteObligationKind::default(),
+        }
+    }
+}
+
+/// Host-scoped route operation for an external-peer edge whose local member
+/// is placed on `host`. Only `Install` values may be outstanding in
+/// `pending_external_route_installs`; `Remove` values are ephemeral
+/// synchronous pre-unwire authority.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct ExternalRouteObligation {
+    pub edge: ExternalPeerEdge,
+    pub host: HostId,
+    pub kind: RouteObligationKind,
+}
+
+impl Default for ExternalRouteObligation {
+    fn default() -> Self {
+        Self {
+            edge: ExternalPeerEdge::default(),
             host: HostId::default(),
             kind: RouteObligationKind::default(),
         }

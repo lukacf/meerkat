@@ -752,6 +752,17 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Fixed
 
+- GPT Live no longer talks over a user who pauses mid-thought. gpt-live-1
+  backchanneled ("mm-hm", "got it, Tuesday afternoon") into 700-900 ms pauses
+  of a long spoken request and sometimes delegated at a pause before the
+  request itself was said; the public API exposes no turn-detection setting,
+  so the default client-context session instructions now ask the model to
+  let the user finish: stay silent through pauses, no backchannels, no
+  repeating details back, and no delegation until the user has finished.
+  The S103 monologue fixture is re-minted so its three pauses sit inside a
+  clause, as the scenario documents, instead of two of them after a finished
+  sentence.
+
 - The placed-member external-edge route inputs (`RecordExternalRouteInstall`,
   `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`,
   `RollbackExternalRouteInstall`) are now declared runtime-internal in the

@@ -542,6 +542,7 @@ impl SessionEventLine {
     }
 
     /// Reserve `count` sequences; returns the sequence just below the range.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     fn reserve(&self, count: u64) -> u64 {
         self.allocated.fetch_add(count, Ordering::AcqRel)
     }

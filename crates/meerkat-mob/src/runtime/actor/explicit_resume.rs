@@ -222,14 +222,15 @@ impl MobActor {
         });
         match verdict {
             Some(mob_dsl::MemberRevivalVerdictKind::BrokenRecorded) => {
-                self.restore_diagnostics.write().await.insert(
-                    work.rebuild.entry.agent_identity.clone(),
+                self.record_member_restore_failure(
+                    &work.rebuild.entry.agent_identity,
                     crate::runtime::handle::RestoreFailureDiagnostic {
                         bridge_session_id: Some(work.rebuild.bridge_session_id.clone()),
                         reason,
                         hold: None,
                     },
-                );
+                )
+                .await;
                 self.explicit_resume_member_settled(work, ExplicitResumeMemberCompletion::Accepted)
                     .await;
             }
@@ -503,14 +504,15 @@ impl MobActor {
                     ) {
                         self.retain_explicit_resume_error(error);
                     } else {
-                        self.restore_diagnostics.write().await.insert(
-                            work.rebuild.entry.agent_identity.clone(),
+                        self.record_member_restore_failure(
+                            &work.rebuild.entry.agent_identity,
                             crate::runtime::handle::RestoreFailureDiagnostic {
                                 bridge_session_id: Some(work.rebuild.bridge_session_id.clone()),
                                 reason,
                                 hold: None,
                             },
-                        );
+                        )
+                        .await;
                     }
                 } else {
                     self.retain_explicit_resume_error(error);

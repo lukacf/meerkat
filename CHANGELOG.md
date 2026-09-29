@@ -253,10 +253,18 @@ them.
   member and MobKit's `member_peer_info` failed for it even right after
   spawn. The key now comes from the same host-acknowledged endpoint at spawn
   and is republished from the durable MobMachine endpoint after Running and
-  Stopped restarts. The roster fallback descriptor used by retirement and
-  dispose cleanup no longer synthesizes an `inproc://` address for a placed
-  member: it uses the durable endpoint with the member's real remote address
-  and key.
+  Stopped restarts. Because a placed member now carries a roster key, the
+  roster-based fallback descriptor used by retirement and dispose cleanup
+  explicitly skips placed members, so it can never render one at an
+  `inproc://` address; their cleanup keeps using the durable host endpoint.
+  A member recorded Broken while the mob is Running (a missing bridge
+  session, a terminal revival classification, a failed revival, a refused
+  runtime binding) now clears its projected peer ID and key, local and
+  placed alike, consistent with the resume paths; a successful revival
+  republishes them from the live runtime or the durable host endpoint. A
+  placed revival whose host acknowledges a different endpoint than the
+  member's durable one now fails, recording the member Broken, instead of
+  being adopted.
 - A member restored from a cleanly Stopped mob now publishes its preserved
   comms endpoint (#1262). After `MobStopped`, a restart through
   `MobBuilder::for_resume` and an explicit `MobHandle::resume()`, the member

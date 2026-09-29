@@ -11898,8 +11898,10 @@ impl MobActor {
             // A placed member lives behind its host's transport, never at an
             // `inproc://` address in this process. Its only endpoint authority
             // is the durable host-acknowledged generation endpoint, which
-            // carries the real remote address and key (#1269).
-            return self.machine_member_peer_spec_for(&entry.agent_identity, context);
+            // every caller consults (`machine_member_peer_spec_for`) BEFORE
+            // this roster fallback. Reaching here means that endpoint is
+            // absent, and the roster must not synthesize one (#1269).
+            return Ok(None);
         }
         let Some(peer_id) = entry.peer_id else {
             return Ok(None);
@@ -12595,14 +12597,15 @@ impl MobActor {
                     self.pending_routed_effects.remove(0);
 
                     if let Some(agent_identity) = closed.broken_member.as_ref() {
-                        self.restore_diagnostics.write().await.insert(
-                            agent_identity.clone(),
+                        self.record_member_restore_failure(
+                            &agent_identity,
                             super::handle::RestoreFailureDiagnostic {
                                 bridge_session_id: Some(closed.session_id.clone()),
                                 reason: format!("{} [{}]", closed.reason, closed.refusal_code),
                                 hold: None,
                             },
-                        );
+                        )
+                        .await;
                     }
                     tracing::warn!(
                         mob_id = %self.definition.id,
@@ -13172,6 +13175,77 @@ impl MobActor {
         ))
     }
 
+    /// Record `agent_identity` Broken for public reads and clear its projected
+    /// comms identity. A Broken member publishes no endpoint, on every path
+    /// that records it: resume, cold boot, and runtime classification (#1262).
+    pub(super) async fn record_member_restore_failure(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        diagnostic: super::handle::RestoreFailureDiagnostic,
+    ) {
+        self.restore_diagnostics
+            .write()
+            .await
+            .insert(agent_identity.clone(), diagnostic);
+        let _ = self
+            .roster
+            .write()
+            .await
+            .set_comms_identity(agent_identity, None, None);
+    }
+
+    /// Clear a member's restore failure and republish its comms identity from
+    /// its current endpoint authority: the live local comms runtime for a
+    /// local member, the durable host-acknowledged endpoint for a placed one.
+    /// Nothing is published while MobMachine still records the member Broken.
+    pub(super) async fn clear_member_restore_failure(&mut self, agent_identity: &AgentIdentity) {
+        self.restore_diagnostics
+            .write()
+            .await
+            .remove(agent_identity);
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let (peer_id, transport_public_key) = {
+            let state = self.dsl_authority.state();
+            if state.member_restore_failures.contains_key(&dsl_identity) {
+                return;
+            }
+            if super::member_runtime_is_host_owned(state, agent_identity) {
+                let Some(endpoint) = state.member_peer_endpoints.get(&dsl_identity) else {
+                    return;
+                };
+                let Ok(peer_id) = meerkat_core::comms::PeerId::parse(&endpoint.peer_id.0) else {
+                    return;
+                };
+                (
+                    peer_id,
+                    meerkat_comms::PubKey::new(endpoint.signing_key.0).to_pubkey_string(),
+                )
+            } else {
+                let Some(entry) = self.roster.read().await.get(agent_identity).cloned() else {
+                    return;
+                };
+                let Some(comms) = self.provisioner_comms(&entry.member_ref).await else {
+                    return;
+                };
+                let Ok(name) = self.comms_name_for(&entry) else {
+                    return;
+                };
+                match super::provisioner::trusted_peer_spec_from_runtime(&name, comms.as_ref()) {
+                    Ok(Some(descriptor)) => (
+                        descriptor.peer_id,
+                        meerkat_comms::PubKey::new(descriptor.pubkey).to_pubkey_string(),
+                    ),
+                    _ => return,
+                }
+            }
+        };
+        let _ = self.roster.write().await.set_comms_identity(
+            agent_identity,
+            Some(peer_id),
+            Some(transport_public_key),
+        );
+    }
+
     async fn record_missing_member_bridge_session(
         &mut self,
         agent_identity: &AgentIdentity,
@@ -13225,14 +13299,15 @@ impl MobActor {
             );
             return Some(fallback);
         }
-        self.restore_diagnostics.write().await.insert(
-            agent_identity.clone(),
+        self.record_member_restore_failure(
+            &agent_identity,
             super::handle::RestoreFailureDiagnostic {
                 bridge_session_id: Some(bridge_session_id.clone()),
                 reason: reason.clone(),
                 hold: None,
             },
-        );
+        )
+        .await;
         tracing::error!(
             mob_id = %self.definition.id,
             agent_identity = %agent_identity,
@@ -13359,14 +13434,15 @@ impl MobActor {
 
         match verdict {
             mob_dsl::MemberRevivalVerdictKind::BrokenRecorded => {
-                self.restore_diagnostics.write().await.insert(
-                    agent_identity.clone(),
+                self.record_member_restore_failure(
+                    &agent_identity,
                     super::handle::RestoreFailureDiagnostic {
                         bridge_session_id: Some(bridge_session_id.clone()),
                         reason: classify_reason.clone(),
                         hold: None,
                     },
-                );
+                )
+                .await;
                 tracing::error!(
                     mob_id = %self.definition.id,
                     agent_identity = %agent_identity,
@@ -13393,10 +13469,7 @@ impl MobActor {
                             },
                             "resolve_placed_member_revival_succeeded",
                         )?;
-                        self.restore_diagnostics
-                            .write()
-                            .await
-                            .remove(agent_identity);
+                        self.clear_member_restore_failure(agent_identity).await;
                         tracing::info!(
                             mob_id = %self.definition.id,
                             agent_identity = %agent_identity,
@@ -13419,14 +13492,15 @@ impl MobActor {
                             },
                             "resolve_placed_member_revival_failed",
                         )?;
-                        self.restore_diagnostics.write().await.insert(
-                            agent_identity.clone(),
+                        self.record_member_restore_failure(
+                            &agent_identity,
                             super::handle::RestoreFailureDiagnostic {
                                 bridge_session_id: Some(bridge_session_id.clone()),
                                 reason: failure_reason.clone(),
                                 hold,
                             },
-                        );
+                        )
+                        .await;
                         tracing::error!(
                             mob_id = %self.definition.id,
                             agent_identity = %agent_identity,
@@ -13871,6 +13945,26 @@ impl MobActor {
                 "placed revival ack digest echo for '{agent_identity}' diverged from the recorded \
                  spec digest"
             )));
+        }
+        // The revived runtime must answer at the member's durable generation
+        // endpoint (peer id, address and transport key). A host that
+        // re-materialized it under a different identity fails the revival,
+        // which records the member Broken instead of adopting an endpoint
+        // nothing durable vouches for (#1269).
+        let revived = mob_dsl::MemberPeerEndpoint::from(&ack.member_peer);
+        if let Some(durable) = self
+            .dsl_authority
+            .state()
+            .member_peer_endpoints
+            .get(&mob_dsl::AgentIdentity::from_domain(agent_identity))
+            .filter(|durable| *durable != &revived)
+        {
+            return Err(MobError::WiringError(
+                super::builder::member_endpoint_broken_reason(
+                    agent_identity,
+                    &super::builder::member_endpoint_mismatch_detail(&revived, durable),
+                ),
+            ));
         }
 
         // The G2 ACK is authenticated by the exact bound request. Persist the

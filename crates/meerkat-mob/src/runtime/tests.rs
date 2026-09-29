@@ -28511,6 +28511,12 @@ async fn test_wait_for_members_ready_marks_missing_bridge_session_broken() {
         .bridge_session_id()
         .expect("session-backed member")
         .clone();
+    let spawned = handle
+        .get_member(&member)
+        .await
+        .expect("read spawned member")
+        .expect("spawned member present");
+    assert!(spawned.peer_id().is_some() && spawned.transport_public_key().is_some());
 
     service
         .archive(&bridge_session_id)
@@ -28541,6 +28547,21 @@ async fn test_wait_for_members_ready_marks_missing_bridge_session_broken() {
             .is_some_and(|message| message.contains("missing bridge session")),
         "broken member should surface missing bridge-session reason: {:?}",
         snapshots[0].1
+    );
+    // A member recorded Broken at runtime publishes no endpoint (#1269).
+    let broken = handle
+        .get_member(&member)
+        .await
+        .expect("read broken member")
+        .expect("broken member stays in the roster");
+    assert_eq!(broken.peer_id(), None);
+    assert_eq!(broken.transport_public_key(), None);
+    assert!(
+        handle
+            .member_peer_endpoint(&member)
+            .await
+            .expect("query broken endpoint")
+            .is_none()
     );
 }
 

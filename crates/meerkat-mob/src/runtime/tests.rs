@@ -1572,6 +1572,9 @@ struct CreateSessionRecord {
     /// Names of the tools the build's composed `external_tools` surface, in
     /// catalog order (the per-spawn overlay composed with mob-owned tools).
     external_tool_names: Vec<String>,
+    /// The session the build is seated on, and what the build does with it.
+    resume_session_id: Option<SessionId>,
+    session_build_intent: meerkat_core::SessionBuildIntent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3566,6 +3569,15 @@ impl MockSessionService {
                             .collect()
                     })
                     .unwrap_or_default(),
+                resume_session_id: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.resume_session.as_ref())
+                    .map(|session| session.id().clone()),
+                session_build_intent: req.build.as_ref().map_or(
+                    meerkat_core::SessionBuildIntent::Mint,
+                    meerkat_core::service::SessionBuildOptions::session_build_intent,
+                ),
             });
 
         let mcp_server_names: Vec<String> = req
@@ -29687,6 +29699,112 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
     assert!(broken_including_retiring.is_final);
 }
 
+/// #1225: a fresh member's session id is assigned before its build, so the
+/// build carries that id in `resume_session`. It is typed as a mint, and a
+/// real resume of the member's durable session is typed as a resume: a
+/// builder can tell them apart without inspecting the carried session.
+/// #1232: the runtime-only disposal that host materializers use releases the
+/// released generation's inproc route too, not only the archive disposal, so
+/// a stale owner of the member's comms runtime cannot keep its participant
+/// name from a successor.
+#[tokio::test]
+async fn test_runtime_only_release_releases_the_members_inproc_route() {
+    let service = Arc::new(RealCommsSessionService::new());
+    service.retain_retired_routes.store(true, Ordering::Release);
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let session_id = handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("runtime-only-release"),
+            None,
+        )
+        .await
+        .expect("spawn")
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+    let stale_owner = service
+        .sessions
+        .read()
+        .await
+        .get(&session_id)
+        .cloned()
+        .expect("the member's live comms runtime");
+
+    let disposal = super::provisioner::MemberSessionDisposalArc::new(
+        service.clone(),
+        MobSessionService::runtime_adapter(service.as_ref()),
+    );
+    disposal
+        .release_runtime_only(&session_id)
+        .await
+        .expect("runtime-only release");
+    assert!(
+        !stale_owner.retire_inproc_route(),
+        "the runtime-only release already released the member's route"
+    );
+}
+
+#[tokio::test]
+async fn test_member_builds_type_a_spawn_as_a_mint_and_a_revival_as_a_resume() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let identity = AgentIdentity::from("build-intent-worker");
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn");
+    let session_id = handle
+        .get_member(&identity)
+        .await
+        .unwrap()
+        .expect("roster entry")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    let spawned = last_member_build(&service, &identity).await;
+    assert_eq!(
+        spawned.session_build_intent,
+        meerkat_core::SessionBuildIntent::Mint,
+        "a spawn mints the member's session under its pre-assigned id"
+    );
+    assert_eq!(spawned.resume_session_id.as_ref(), Some(&session_id));
+
+    handle.stop().await.expect("stop");
+    MobSessionService::discard_live_session(service.as_ref(), &session_id)
+        .await
+        .expect("discard the live session");
+    crash_stop_and_release_routes(handle).await;
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("reconstruct the mob");
+    resumed.resume().await.expect("resume revives the member");
+    let revived = last_member_build(&service, &identity).await;
+    assert_eq!(
+        revived.session_build_intent,
+        meerkat_core::SessionBuildIntent::Resume,
+        "a revival continues the member's durable session"
+    );
+    assert_eq!(revived.resume_session_id.as_ref(), Some(&session_id));
+}
+
 #[tokio::test]
 async fn test_resume_repoints_snapshotless_member_head_to_latest_persisted_session() {
     let service = Arc::new(MockSessionService::new());
@@ -55440,6 +55558,10 @@ struct RealCommsSessionService {
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     volatile_intake_tasks: std::sync::Mutex<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
     session_counter: AtomicU64,
+    /// Keep a retired session's inproc route published, the way a production
+    /// service leaves it to whichever task still holds the runtime: set by
+    /// tests that prove the mob releases the route itself.
+    retain_retired_routes: AtomicBool,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
 }
 
@@ -55458,6 +55580,7 @@ impl RealCommsSessionService {
             session_comms_names: RwLock::new(HashMap::new()),
             volatile_intake_tasks: std::sync::Mutex::new(HashMap::new()),
             session_counter: AtomicU64::new(0),
+            retain_retired_routes: AtomicBool::new(false),
             runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
         }
     }
@@ -55736,7 +55859,9 @@ impl RealCommsSessionService {
         // it stays published with no owner able to free it. Generation-exact,
         // so it can only remove the route this exact runtime published.
         if let Some(retired) = sessions.remove(witness.session_id()) {
-            retired.retire_inproc_route();
+            if !self.retain_retired_routes.load(Ordering::Acquire) {
+                retired.retire_inproc_route();
+            }
         }
         let session_id = witness.session_id();
         self.remove_volatile_control_intake(session_id);
@@ -55855,7 +55980,9 @@ impl SessionService for RealCommsSessionService {
         // it stays published with no owner able to free it. Generation-exact,
         // so it can only remove the route this exact runtime published.
         if let Some(retired) = sessions.remove(id) {
-            retired.retire_inproc_route();
+            if !self.retain_retired_routes.load(Ordering::Acquire) {
+                retired.retire_inproc_route();
+            }
             self.actor_registry.remove_current(id);
         }
         self.remove_volatile_control_intake(id);
@@ -56180,7 +56307,9 @@ impl MobSessionService for RealCommsSessionService {
         // it stays published with no owner able to free it. Generation-exact,
         // so it can only remove the route this exact runtime published.
         if let Some(retired) = sessions.remove(session_id) {
-            retired.retire_inproc_route();
+            if !self.retain_retired_routes.load(Ordering::Acquire) {
+                retired.retire_inproc_route();
+            }
             self.actor_registry.remove_current(session_id);
         }
         self.remove_volatile_control_intake(session_id);

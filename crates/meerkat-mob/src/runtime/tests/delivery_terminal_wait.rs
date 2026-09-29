@@ -376,6 +376,71 @@ async fn elapsed_wait_reports_not_terminal_and_a_later_wait_returns_the_terminal
     fixture.finish().await;
 }
 
+/// #1227: settling a delivery cancels its exact runtime input through the
+/// input's own run and reads the terminal that cancellation produced; a
+/// settle naming an input the delivery was not admitted as is refused,
+/// typed, before anything is cancelled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settle_cancels_the_deliverys_exact_input_and_refuses_a_foreign_one() {
+    let fixture = Fixture::new().await;
+    let requests_before = fixture.client.requests().len();
+    fixture.client.block();
+    let key = delivery("settle-exact");
+    fixture
+        .submit_generic(
+            WorkSpec::new("delivery to settle", WorkOrigin::External),
+            key.clone(),
+        )
+        .await;
+    fixture.client.wait_for_requests(requests_before + 1).await;
+    let input_id = admitted_pending(&fixture, &key).await;
+
+    let foreign = InputId::new();
+    let refused = fixture
+        .handle
+        .settle_delivery_input_for_identity(
+            &fixture.entry.agent_identity,
+            &key,
+            &foreign,
+            &bound(),
+            deadline(),
+        )
+        .await
+        .expect_err("a foreign input is refused");
+    assert!(
+        matches!(
+            &refused,
+            DeliveryTerminalWaitError::InputNotOfDelivery { input_id } if input_id == &foreign
+        ),
+        "{refused:?}"
+    );
+
+    let settled = fixture
+        .handle
+        .settle_delivery_input_for_identity(
+            &fixture.entry.agent_identity,
+            &key,
+            &input_id,
+            &bound(),
+            deadline(),
+        )
+        .await
+        .expect("settle the delivery");
+    let DeliveryTerminalWait::Terminal(record) = settled.work() else {
+        panic!("the settled delivery is terminal: {:?}", settled.work());
+    };
+    assert_eq!(record.input_id(), &input_id);
+    assert!(
+        !matches!(
+            record.resolution(),
+            DeliveryTerminalResolution::Receipt { result: Ok(_), .. }
+        ),
+        "the cancellation, not a completed turn, is the terminal: {record:?}"
+    );
+    fixture.client.release();
+    fixture.finish().await;
+}
+
 /// The budget up to the deadline (less the evidence floor) is spent waiting:
 /// a terminal that lands in the last quarter of the budget is returned, not
 /// reported as an elapsed deadline.

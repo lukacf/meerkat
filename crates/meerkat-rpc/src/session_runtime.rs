@@ -479,9 +479,8 @@ impl RpcMobSessionService {
         if let Some(session) = build.resume_session.as_ref() {
             return session.id().clone();
         }
-        let session = Session::new();
-        let session_id = session.id().clone();
-        build.resume_session = Some(session);
+        let session_id = SessionId::new();
+        build.mint_session_with_id(session_id.clone());
         session_id
     }
 
@@ -8848,8 +8847,11 @@ impl SessionRuntime {
                 data: None,
             })?;
 
+        // The seed is a machine-created generation-zero session (see above):
+        // the build mints it under its pre-assigned id.
         let build_config = AgentBuildConfig {
             resume_session: Some(session),
+            resume_session_intent: meerkat_core::SessionBuildIntent::Mint,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             ..build_config
         };
@@ -14216,6 +14218,69 @@ mod tests {
         ));
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
         runtime
+    }
+
+    /// #1225: public `session/create` and the RPC schedule host stage a
+    /// machine-created generation-zero session under a pre-assigned id. The
+    /// staged build is a mint, typed as one, never a resume.
+    #[tokio::test]
+    async fn created_and_scheduled_sessions_stage_a_typed_mint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(AgentFactory::new(temp.path().join("sessions")), 4);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let created = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create session");
+        let scheduled = SessionId::new();
+        let scheduled_spec = meerkat::SessionMaterializationSpec {
+            model: "claude-sonnet-4-5".to_string(),
+            system_prompt: None,
+            max_tokens: None,
+            provider: None,
+            output_schema: None,
+            structured_output_retries: None,
+            provider_params: None,
+            comms_name: None,
+            peer_meta: None,
+            labels: Default::default(),
+            preload_skills: Vec::new(),
+            additional_instructions: Vec::new(),
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            keep_alive: false,
+            app_context: None,
+        };
+        let materialized = runtime
+            .materialize_scheduled_session(&scheduled, &scheduled_spec)
+            .await
+            .expect("materialize scheduled session");
+        assert_eq!(materialized, scheduled);
+
+        for session_id in [created, scheduled] {
+            let staged = runtime
+                .staged_sessions
+                .begin_promotion(&session_id)
+                .await
+                .expect("staged lifecycle")
+                .expect("the session is staged");
+            assert_eq!(
+                staged.build_config.resume_session_intent,
+                meerkat_core::SessionBuildIntent::Mint,
+                "{session_id}"
+            );
+            assert_eq!(
+                staged
+                    .build_config
+                    .resume_session
+                    .as_ref()
+                    .map(|session| session.id().clone()),
+                Some(session_id)
+            );
+        }
     }
 
     fn invalid_no_turn_build() -> AgentBuildConfig {

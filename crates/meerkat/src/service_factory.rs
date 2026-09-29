@@ -539,6 +539,10 @@ impl SessionAgent for FactoryAgent {
         self.agent.cancel();
     }
 
+    fn cancel_dropped_run(&mut self) -> Option<AgentEvent> {
+        self.agent.cancel_dropped_run()
+    }
+
     fn cancel_after_boundary_handle(&self) -> Option<meerkat_core::CancelAfterBoundarySender> {
         Some(self.agent.cancel_after_boundary_handle())
     }

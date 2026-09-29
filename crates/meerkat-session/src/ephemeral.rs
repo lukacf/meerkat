@@ -2143,6 +2143,19 @@ pub trait SessionAgent: Send {
     /// Cancel the currently running turn.
     fn cancel(&mut self);
 
+    /// Cancel a turn whose run future a hard interrupt has dropped, and
+    /// return the run's canonical terminal event.
+    ///
+    /// The dropped future never reaches the agent's own failure path, so an
+    /// agent that published `RunStarted` returns `RunFailed` (error class
+    /// `cancelled`) here and the session task publishes it on the session
+    /// event stream. The default cancels and returns `None`, which is right
+    /// only for agents that publish no run lifecycle events.
+    fn cancel_dropped_run(&mut self) -> Option<AgentEvent> {
+        self.cancel();
+        None
+    }
+
     /// Typed command sender for cancel-after-boundary requests.
     ///
     /// Implementations expose a supported exact-cancellation capability only
@@ -7748,12 +7761,19 @@ async fn session_task<A: SessionAgent>(
                         }
                     };
                     drop(run_fut);
-                    if interrupted {
-                        agent.cancel();
-                    }
+                    let mut dropped_run_terminal = if interrupted {
+                        agent.cancel_dropped_run()
+                    } else {
+                        None
+                    };
 
-                    // Drain any remaining events
-                    while let Ok(event) = agent_event_rx.try_recv() {
+                    // Drain any remaining events, then publish the dropped
+                    // run's terminal after everything the run had queued.
+                    while let Some(event) = agent_event_rx
+                        .try_recv()
+                        .ok()
+                        .or_else(|| dropped_run_terminal.take())
+                    {
                         let envelope = stamp_event_envelope(&mut next_seq, &source, event);
                         control.publish_session_event(envelope.clone()).await;
                         if event_stream_open

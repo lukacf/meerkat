@@ -165,44 +165,14 @@ impl RestScheduleContext {
         let pre_session = prepared.session;
         let runtime_bindings = prepared.bindings;
 
-        let mut build_config = AgentBuildConfig::new(create.model.clone());
-        build_config.provider = create.provider;
-        build_config.max_tokens = create.max_tokens;
-        build_config.system_prompt = match create.system_prompt.clone() {
-            Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
-            None => meerkat::SystemPromptOverride::Inherit,
-        };
-        build_config.output_schema = create.output_schema.clone();
-        build_config.structured_output_retries = create.structured_output_retries;
-        build_config.provider_params = create.provider_params.clone();
-        build_config.comms_name = create.comms_name.clone();
-        build_config.peer_meta = create.peer_meta.clone();
-        build_config.preload_skills = materialized_preload_skills(&create.preload_skills);
-        build_config.additional_instructions = (!create.additional_instructions.is_empty())
-            .then(|| create.additional_instructions.clone());
-        // Schedule specs carry the realm as a plain slug string; parse it once
-        // at this ingest boundary, falling back to the runtime's typed realm.
-        build_config.realm_id = create
-            .realm_id
-            .as_deref()
-            .map(meerkat_core::RealmId::parse)
-            .transpose()
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
-            .or_else(|| Some(self.runtime.realm.clone()));
-        build_config.instance_id = create
-            .instance_id
-            .clone()
-            .or_else(|| self.runtime.instance_id.clone());
-        build_config.backend = create
-            .backend
-            .as_deref()
-            .and_then(meerkat_core::RecoveryBackendKind::parse)
-            .or_else(|| meerkat_core::RecoveryBackendKind::parse(&self.runtime.backend));
-        build_config.keep_alive = create.keep_alive;
-        build_config.app_context = create.app_context.clone();
-        build_config.resume_session = Some(pre_session);
-        build_config.runtime_build_mode =
-            meerkat_core::RuntimeBuildMode::SessionOwned(runtime_bindings);
+        let mut build_config = scheduled_session_build_config(
+            create,
+            pre_session,
+            runtime_bindings,
+            &self.runtime.realm,
+            self.runtime.instance_id.as_ref(),
+            &self.runtime.backend,
+        )?;
         build_config.config_generation = self
             .runtime
             .config_runtime
@@ -603,6 +573,60 @@ async fn update_peer_ingress_context(
     Ok(())
 }
 
+/// The build of a scheduled session the REST schedule host materializes.
+/// `pre_session` carries the occurrence's id for a session minted under it.
+fn scheduled_session_build_config(
+    create: &SessionMaterializationSpec,
+    pre_session: meerkat_core::Session,
+    runtime_bindings: meerkat_core::SessionRuntimeBindings,
+    default_realm: &meerkat_core::RealmId,
+    default_instance_id: Option<&String>,
+    default_backend: &str,
+) -> Result<AgentBuildConfig, ScheduleDomainError> {
+    let mut build_config = AgentBuildConfig::new(create.model.clone());
+    build_config.provider = create.provider;
+    build_config.max_tokens = create.max_tokens;
+    build_config.system_prompt = match create.system_prompt.clone() {
+        Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
+        None => meerkat::SystemPromptOverride::Inherit,
+    };
+    build_config.output_schema = create.output_schema.clone();
+    build_config.structured_output_retries = create.structured_output_retries;
+    build_config.provider_params = create.provider_params.clone();
+    build_config.comms_name = create.comms_name.clone();
+    build_config.peer_meta = create.peer_meta.clone();
+    build_config.preload_skills = materialized_preload_skills(&create.preload_skills);
+    build_config.additional_instructions = (!create.additional_instructions.is_empty())
+        .then(|| create.additional_instructions.clone());
+    // Schedule specs carry the realm as a plain slug string; parse it once
+    // at this ingest boundary, falling back to the runtime's typed realm.
+    build_config.realm_id = create
+        .realm_id
+        .as_deref()
+        .map(meerkat_core::RealmId::parse)
+        .transpose()
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+        .or_else(|| Some(default_realm.clone()));
+    build_config.instance_id = create
+        .instance_id
+        .clone()
+        .or_else(|| default_instance_id.cloned());
+    build_config.backend = create
+        .backend
+        .as_deref()
+        .and_then(meerkat_core::RecoveryBackendKind::parse)
+        .or_else(|| meerkat_core::RecoveryBackendKind::parse(default_backend));
+    build_config.keep_alive = create.keep_alive;
+    build_config.app_context = create.app_context.clone();
+    // The occurrence has no durable session yet (checked above): the build
+    // mints one under its deterministic id.
+    build_config.resume_session = Some(pre_session);
+    build_config.resume_session_intent = meerkat_core::SessionBuildIntent::Mint;
+    build_config.runtime_build_mode =
+        meerkat_core::RuntimeBuildMode::SessionOwned(runtime_bindings);
+    Ok(build_config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,6 +644,56 @@ mod tests {
         assert_eq!(
             materialized_preload_skills(std::slice::from_ref(&key)),
             Some(vec![key])
+        );
+    }
+
+    /// #1225: the REST schedule host materializes an occurrence that has no
+    /// durable session yet, so its build is a mint under the occurrence id,
+    /// typed as one, never a resume.
+    #[tokio::test]
+    async fn scheduled_session_build_mints_the_occurrence_session() {
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare runtime bindings");
+        let build = scheduled_session_build_config(
+            &SessionMaterializationSpec {
+                model: "claude-sonnet-4-6".to_string(),
+                system_prompt: None,
+                max_tokens: None,
+                provider: None,
+                output_schema: None,
+                structured_output_retries: None,
+                provider_params: None,
+                comms_name: None,
+                peer_meta: None,
+                labels: Default::default(),
+                preload_skills: Vec::new(),
+                additional_instructions: Vec::new(),
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                keep_alive: false,
+                app_context: None,
+            },
+            meerkat_core::Session::with_id(session_id.clone()),
+            bindings,
+            &meerkat_core::RealmId::parse("rest-schedule").expect("realm id"),
+            None,
+            "sqlite",
+        )
+        .expect("valid spec")
+        .to_session_build_options();
+        assert_eq!(
+            build.session_build_intent(),
+            meerkat_core::SessionBuildIntent::Mint
+        );
+        assert_eq!(
+            build.resume_session.map(|session| session.id().clone()),
+            Some(session_id)
         );
     }
 

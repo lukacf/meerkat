@@ -726,6 +726,7 @@ impl AgentBuilder {
             terminal_error_metadata: None,
             run_completed_hooks_applied: false,
             run_completed_event_emitted: false,
+            run_lifecycle_publication: crate::agent::RunLifecyclePublication::default(),
             run_result_assistant_message: None,
             silent_comms_intents: self.silent_comms_intents,
             checkpointer: self.checkpointer,
@@ -2277,6 +2278,94 @@ mod tests {
             Some(TurnTerminalOutcome::Completed)
         );
         assert_ne!(completed.terminal_run_id, terminal.terminal_run_id);
+    }
+
+    #[tokio::test]
+    async fn stamped_dropped_run_cancel_observes_generated_terminal_and_returns_run_failed() {
+        use crate::TurnStateHandle;
+        use crate::event::{AgentErrorClass, AgentEvent};
+        use crate::turn_execution_authority::{
+            ContentShape, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+        };
+
+        // Every SessionOwned runtime build requires the execution-kind stamp.
+        // The dropped-run cancel must apply its generated cancel inputs while
+        // the dropped run's stamp is still in place, then consume it.
+        let handle = Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(handle.clone())
+            .with_runtime_test_visibility_owner(explicit_test_visibility_owner())
+            .require_runtime_execution_kind_stamp()
+            .build_standalone(
+                Arc::new(MockClient),
+                Arc::new(MockTools),
+                Arc::new(MockStore),
+            )
+            .await;
+        let run_id = crate::lifecycle::RunId::new();
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .unwrap();
+        handle.primitive_applied(run_id.clone()).unwrap();
+        // The state a hard interrupt leaves behind: the run was stamped and
+        // started, then its future was dropped mid-flight.
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+        agent.runtime_started_run_id = Some(run_id.clone());
+
+        let terminal_event = agent.cancel_dropped_run();
+
+        let terminal = handle.snapshot();
+        assert_eq!(terminal.turn_phase, TurnPhase::Cancelled);
+        assert_eq!(terminal.terminal_run_id, Some(run_id.clone()));
+        assert_eq!(
+            terminal.terminal_outcome,
+            Some(TurnTerminalOutcome::Cancelled)
+        );
+        assert!(terminal.active_run_id.is_none());
+        match terminal_event {
+            Some(AgentEvent::RunFailed {
+                identity,
+                error_report,
+                ..
+            }) => {
+                assert_eq!(error_report.class, AgentErrorClass::Cancelled);
+                assert_eq!(identity.run_id, Some(run_id));
+            }
+            other => panic!("expected the dropped run's RunFailed terminal, got {other:?}"),
+        }
+
+        // The stamp and run identity are consumed: a second cancel has no run
+        // to terminate and publishes nothing, and a raw follow-up run needs a
+        // fresh stamp.
+        assert!(agent.cancel_dropped_run().is_none());
+        assert_eq!(handle.snapshot(), terminal);
+        let error = agent
+            .run("unstamped follow-up".to_string().into())
+            .await
+            .expect_err("dropped-run cancellation must consume the execution stamp");
+        assert!(error.to_string().contains("runtime_execution_kind not set"));
+    }
+
+    #[tokio::test]
+    async fn dropped_run_cancel_without_started_run_publishes_no_terminal() {
+        let handle = Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(handle)
+            .with_runtime_test_visibility_owner(explicit_test_visibility_owner())
+            .build_standalone(
+                Arc::new(MockClient),
+                Arc::new(MockTools),
+                Arc::new(MockStore),
+            )
+            .await;
+        assert!(agent.cancel_dropped_run().is_none());
     }
 
     #[tokio::test]

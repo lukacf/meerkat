@@ -4172,6 +4172,8 @@ async fn handle_meerkat_run(
                 comms_name: input.comms_name.clone(),
                 peer_meta: input.peer_meta.clone(),
                 resume_session: Some(session),
+                // `session` only claims the new session's id.
+                resume_session_intent: meerkat_core::SessionBuildIntent::Mint,
                 budget_limits: input.budget_limits.clone().map(Into::into),
                 provider_params: input.provider_params.clone(),
                 call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
@@ -4598,6 +4600,7 @@ async fn handle_meerkat_resume(
             hooks_override: input.hooks_override.clone().unwrap_or_default(),
             comms_name: input.comms_name.clone(),
             resume_session: Some(session.clone()),
+            resume_session_intent: meerkat_core::SessionBuildIntent::Resume,
             budget_limits: input.budget_limits.clone().map(Into::into),
             provider_params: input.provider_params.clone(),
             call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,

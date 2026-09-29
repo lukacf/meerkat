@@ -4780,8 +4780,11 @@ pub(super) fn admit_bridge_session_for_spawn(
     if let Some(session) = build.resume_session.as_ref() {
         return session.id().clone();
     }
+    // A fresh member's session id is assigned here, before its build: the
+    // build mints a new session under that id, typed as a mint so a builder
+    // never takes it for a resume.
     let session_id = SessionId::new();
-    build.resume_session = Some(meerkat_core::session::Session::with_id(session_id.clone()));
+    build.mint_session_with_id(session_id.clone());
     session_id
 }
 

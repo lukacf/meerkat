@@ -387,6 +387,9 @@ pub use delegation::{
     DelegationMemberOptions, DelegationParentContext, DelegationTerminalizedExecution,
     DelegationTurnTerminal, LiveDelegationTerminalEvidence, render_bounded_delegation_task,
 };
+#[cfg(all(feature = "runtime-adapter", any(test, feature = "test-support")))]
+#[doc(hidden)]
+pub use delivery_wait::DeliveryInputSettleTestRelease;
 pub use delivery_wait::{
     DeliveryNotTerminalCause, DeliveryTerminalRecord, DeliveryTerminalResolution,
     DeliveryTerminalWait, DeliveryTerminalWaitError, DeliveryTerminalWaitReport,

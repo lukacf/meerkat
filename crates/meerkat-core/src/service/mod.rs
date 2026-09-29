@@ -666,6 +666,29 @@ impl ForkBuildSource {
     }
 }
 
+/// What a build does with its session.
+///
+/// [`SessionBuildOptions::resume_session`] carries two different things: the
+/// durable session a build continues, and an empty carrier of the id a new
+/// session is minted under (a mob member's spawn assigns its session id before
+/// the build). Builders read which one it is here, typed, through
+/// [`SessionBuildOptions::session_build_intent`], never from the carried
+/// session's message count or from store presence: an empty resumed session
+/// and a pre-assigned mint look alike on both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SessionBuildIntent {
+    /// The build continues an existing session: `resume_session` is its
+    /// durable transcript and metadata.
+    #[default]
+    Resume,
+    /// The build mints a new session. With `resume_session` set, that session
+    /// is an empty carrier of the pre-assigned id and nothing else.
+    Mint,
+}
+
 /// Optional build-time options used by factory-backed session builders.
 #[derive(Clone)]
 pub struct SessionBuildOptions {
@@ -703,7 +726,15 @@ pub struct SessionBuildOptions {
     pub hooks_override: HookRunOverrides,
     pub comms_name: Option<String>,
     pub peer_meta: Option<PeerMeta>,
+    /// The session this build is seated on: a session it continues, or the
+    /// empty carrier of a pre-assigned id it mints (see
+    /// [`Self::resume_session_intent`]). `None` builds mint a fresh session.
     pub resume_session: Option<Session>,
+    /// Which of the two `resume_session` carries. Set together with it by
+    /// [`Self::mint_session_with_id`] or [`Self::resume_existing_session`];
+    /// meaningless while `resume_session` is `None`. Read it through
+    /// [`Self::session_build_intent`].
+    pub resume_session_intent: SessionBuildIntent,
     pub budget_limits: Option<BudgetLimits>,
     /// Typed explicit provider parameter overrides for this build (K2:
     /// the JSON bag is retired; surfaces parse fail-closed at their ingress).
@@ -1534,6 +1565,30 @@ pub struct ResumeOverrideMask {
 }
 
 impl SessionBuildOptions {
+    /// Seat this build on a new session minted under the pre-assigned
+    /// `session_id`.
+    pub fn mint_session_with_id(&mut self, session_id: SessionId) {
+        self.resume_session = Some(Session::with_id(session_id));
+        self.resume_session_intent = SessionBuildIntent::Mint;
+    }
+
+    /// Seat this build on the existing `session`, which it continues.
+    pub fn resume_existing_session(&mut self, session: Session) {
+        self.resume_session = Some(session);
+        self.resume_session_intent = SessionBuildIntent::Resume;
+    }
+
+    /// What this build does with its session: [`SessionBuildIntent::Mint`]
+    /// when it carries no session (it mints a fresh one) or carries the
+    /// pre-assigned id of a mint, [`SessionBuildIntent::Resume`] when it
+    /// continues the session it carries.
+    pub fn session_build_intent(&self) -> SessionBuildIntent {
+        match self.resume_session {
+            None => SessionBuildIntent::Mint,
+            Some(_) => self.resume_session_intent,
+        }
+    }
+
     /// Apply the shared rehydration rule for mob operator access.
     ///
     /// Serialized authority contexts are compatibility projections. They do
@@ -1593,6 +1648,7 @@ impl Default for SessionBuildOptions {
             comms_name: None,
             peer_meta: None,
             resume_session: None,
+            resume_session_intent: SessionBuildIntent::default(),
             // Phase 3 field — default None keeps the legacy flat path.
             // Populated by surfaces that accept realm/binding inputs.
             budget_limits: None,
@@ -1668,6 +1724,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("comms_name", &self.comms_name)
             .field("peer_meta", &self.peer_meta)
             .field("resume_session", &self.resume_session.is_some())
+            .field("resume_session_intent", &self.resume_session_intent)
             .field("budget_limits", &self.budget_limits)
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())

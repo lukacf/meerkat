@@ -12012,6 +12012,8 @@ async fn run_agent(
             comms_name: comms_name.clone(),
             peer_meta: comms_overrides.peer_meta.clone(),
             resume_session: Some(session),
+            // `session` only claims the new session's id.
+            resume_session_intent: meerkat_core::SessionBuildIntent::Mint,
             budget_limits: Some(limits),
             provider_params,
             external_tools,
@@ -13498,6 +13500,44 @@ fn materialized_preload_skills(
     (!preload_skills.is_empty()).then(|| preload_skills.to_vec())
 }
 
+/// The build of a scheduled session the CLI schedule host materializes: a
+/// new session minted under the occurrence's deterministic id.
+#[cfg(feature = "session-store")]
+fn cli_scheduled_session_build(
+    create: &meerkat::SessionMaterializationSpec,
+    session_id: SessionId,
+    realm_id: Option<meerkat_core::RealmId>,
+    bindings: meerkat_core::SessionRuntimeBindings,
+) -> SessionBuildOptions {
+    let mut build = SessionBuildOptions {
+        custom_models: std::collections::BTreeMap::new(),
+        image_generation_provider: None,
+        auto_compact_threshold_override: None,
+        compaction_curator_override: None,
+        provider: create.provider,
+        output_schema: create.output_schema.clone(),
+        structured_output_retries: create.structured_output_retries,
+        comms_name: create.comms_name.clone(),
+        peer_meta: create.peer_meta.clone(),
+        provider_params: create.provider_params.clone(),
+        preload_skills: materialized_preload_skills(&create.preload_skills),
+        additional_instructions: (!create.additional_instructions.is_empty())
+            .then(|| create.additional_instructions.clone()),
+        realm_id,
+        instance_id: create.instance_id.clone(),
+        backend: create
+            .backend
+            .as_deref()
+            .and_then(meerkat_core::RecoveryBackendKind::parse),
+        keep_alive: create.keep_alive,
+        app_context: create.app_context.clone(),
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+        ..SessionBuildOptions::default()
+    };
+    build.mint_session_with_id(session_id);
+    build
+}
+
 #[cfg(feature = "session-store")]
 #[async_trait::async_trait]
 impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
@@ -13565,8 +13605,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         // Deterministic per-occurrence id so a reclaim/redrive reuses the same
         // session instead of orphaning a fresh random one in the
         // materialize->bind crash window.
-        let session = Session::with_id(occurrence.materialized_session_id());
-        let session_id = session.id().clone();
+        let session_id = occurrence.materialized_session_id();
         let bindings = self
             .runtime_adapter
             .prepare_bindings(session_id.clone())
@@ -13582,32 +13621,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             .transpose()
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
-        let build = SessionBuildOptions {
-            custom_models: std::collections::BTreeMap::new(),
-            image_generation_provider: None,
-            auto_compact_threshold_override: None,
-            compaction_curator_override: None,
-            provider: create.provider,
-            output_schema: create.output_schema.clone(),
-            structured_output_retries: create.structured_output_retries,
-            comms_name: create.comms_name.clone(),
-            peer_meta: create.peer_meta.clone(),
-            resume_session: Some(session),
-            provider_params: create.provider_params.clone(),
-            preload_skills: materialized_preload_skills(&create.preload_skills),
-            additional_instructions: (!create.additional_instructions.is_empty())
-                .then(|| create.additional_instructions.clone()),
-            realm_id,
-            instance_id: create.instance_id.clone(),
-            backend: create
-                .backend
-                .as_deref()
-                .and_then(meerkat_core::RecoveryBackendKind::parse),
-            keep_alive: create.keep_alive,
-            app_context: create.app_context.clone(),
-            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-            ..SessionBuildOptions::default()
-        };
+        let build = cli_scheduled_session_build(create, session_id, realm_id, bindings);
 
         let result = self
             .service
@@ -19500,6 +19514,48 @@ mod tests {
             meerkat::SqliteSessionStore::open(temp.path().join("sessions.sqlite"))
                 .expect("sqlite session store should open"),
         )
+    }
+
+    /// #1225: the CLI schedule host mints the occurrence's session under its
+    /// deterministic id, typed as a mint, never a resume.
+    #[cfg(feature = "session-store")]
+    #[tokio::test]
+    async fn cli_scheduled_session_build_mints_the_occurrence_session() {
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare runtime bindings");
+        let create = meerkat::SessionMaterializationSpec {
+            model: "claude-sonnet-4-6".to_string(),
+            system_prompt: None,
+            max_tokens: None,
+            provider: None,
+            output_schema: None,
+            structured_output_retries: None,
+            provider_params: None,
+            comms_name: None,
+            peer_meta: None,
+            labels: Default::default(),
+            preload_skills: Vec::new(),
+            additional_instructions: Vec::new(),
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            keep_alive: false,
+            app_context: None,
+        };
+        let build = cli_scheduled_session_build(&create, session_id.clone(), None, bindings);
+        assert_eq!(
+            build.session_build_intent(),
+            meerkat_core::SessionBuildIntent::Mint
+        );
+        assert_eq!(
+            build.resume_session.map(|session| session.id().clone()),
+            Some(session_id)
+        );
     }
 
     #[test]

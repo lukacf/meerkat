@@ -105,6 +105,13 @@ them.
   preparing or staged and provisioning, now fails with
   `MobError::SpawnCanceled` instead of `MobError::Internal("spawn canceled
   for ...")` (#1249).
+- `meerkat_core::SessionBuildOptions` gains the public field
+  `resume_session_intent: SessionBuildIntent` (#1225), and
+  `meerkat::AgentBuildConfig` gains the same field
+  `resume_session_intent: meerkat_core::SessionBuildIntent`. Exhaustive struct
+  literals must add it; `..Default::default()` literals are unaffected (the
+  default is `SessionBuildIntent::Resume`, which is what every existing
+  `resume_session` setter meant unless it pre-assigns a mint).
 
 ### Added
 
@@ -127,6 +134,33 @@ them.
   (`NotFound`, `Retired`, `kind()`, `to_tool_error`). Target presence is read
   from the roster, and a durable retirement record from the mob's event log,
   before the ownership admission runs (#1234).
+- `meerkat_core::SessionBuildIntent` (`Resume`, `Mint`) with
+  `SessionBuildOptions::mint_session_with_id`,
+  `SessionBuildOptions::resume_existing_session` and
+  `SessionBuildOptions::session_build_intent` (#1225). `resume_session` carries
+  either a session a build continues or the empty carrier of an id a new
+  session is minted under; builders now read which one, typed. Mob member
+  spawns and the provisioner's pre-assigned ids declare `Mint`, as do the
+  ephemeral runtime, RPC `session/create`, REST, MCP and CLI create paths and
+  the RPC, REST and CLI schedule hosts (the MCP schedule host declares `Mint`
+  for a fresh occurrence and `Resume` for one whose durable session already
+  exists); resumes declare `Resume`.
+- `meerkat_session::SessionAgent::cancel_dropped_run` and
+  `meerkat_core::Agent::cancel_dropped_run` return the canonical terminal
+  event of a run whose future a hard interrupt dropped (#1233). The trait
+  method has a default (cancel, no event) for agents that publish no run
+  lifecycle events.
+- `meerkat_core::agent::CommsRuntime::retire_inproc_route` exposes the
+  generation-exact inproc route release on the dyn comms seam (#1232); the
+  default is for runtimes that publish no inproc route.
+- `meerkat_mob::MobHandle::settle_delivery_input_for_identity` settles the
+  exact runtime input a caller-identified delivery was admitted as (cancel it
+  unless already terminal, then read its terminal), so an observer can fence a
+  delivery before committing an outcome for it (#1227). An input the delivery
+  was not admitted as is refused with the new
+  `DeliveryTerminalWaitError::InputNotOfDelivery`. Cancelling a staged or
+  applied input cancels its exact run, which also ends any other input
+  batched into that run.
 
 ### Changed
 
@@ -252,6 +286,47 @@ them.
   members the resume settled as Broken. The successor scan never reads
   members' own bound sessions and keeps per-candidate read outcomes, so one
   member's unreadable session cannot abort another member's search.
+- A hard interrupt of a runtime-backed run is no longer rejected by the
+  agent's own turn authority, and it publishes `RunFailed` (error class
+  `cancelled`) (#1233). `Agent::cancel` cleared the runtime execution-kind
+  stamp before applying `CancelNow`/`CancellationObserved`, so every
+  `SessionOwned` agent logged "runtime_execution_kind not set" and skipped its
+  cancel inputs; the stamp and run identity are now cleared last. The dropped
+  run future never reached the failure path, so a run that published
+  `RunStarted` had no terminal event; the session task now publishes the
+  dropped run's `RunFailed` after the events it had queued, for ephemeral and
+  persistent services alike. The event tap and the run's event stream are
+  tracked separately, so each gets at most one terminal and never a terminal
+  without its `RunStarted`, even when the interrupt lands mid-send.
+  Behaviour change: every hard interrupt of a started run now publishes
+  `RunFailed` with error class `cancelled`, including openai-live barge-ins.
+  `TurnTerminalClassifier` maps any `RunFailed` to a `Failed` turn terminal,
+  so an interrupted directed turn now settles on this `RunFailed` (kind
+  `run_failed`) before the runtime's `InteractionFailed`; the outcome is
+  `Failed` either way, and the reason is the cancellation's message.
+- Respawn no longer races the predecessor's inproc route release (#1232, the
+  `cross_host_live` release-validation flake). The predecessor's comms runtime
+  can outlive its archived session in any task still holding it, so its route
+  stayed published and the successor's registration under the same
+  participant name was refused. Member disposal (archive, and the runtime-only
+  release host materializers use) now captures the exact runtime generation
+  first and releases its route once the disposal succeeded; release is
+  generation-exact, so a successor that already holds the name is untouched.
+- fork_relink (#1227): a retiring outcome (`failed`, `max_run_elapsed`)
+  admitted to the forker but not yet committed, which a crash between
+  admission and retirement leaves, now retires its child: the re-link reads
+  the typed outcome the pending input carries and falls back to the committed
+  record once the payload is retired. At the commit ceiling a conclusive
+  `NotTerminal` reading no longer fixes `restart_interrupted` while the job
+  input stays admitted: the exact input is fenced first and the job's outcome
+  is its terminal. An input the fence cannot settle (its run is no longer
+  current, or the cancellation failed) is fenced by retiring the child, and
+  the job gets that input's terminal if one landed first, otherwise
+  `restart_interrupted` with the ceiling's typed reason. A
+  completed receipt found by the last ceiling read is kept when an opt-in
+  `max_run` passes during that read. The Bazel production `meerkat_mob`
+  library no longer compiles the `test-support` hooks; its test variant keeps
+  them.
 
 ## [0.8.48] - 2026-09-28
 

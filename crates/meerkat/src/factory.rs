@@ -472,6 +472,9 @@ pub struct AgentBuildConfig {
     pub peer_meta: Option<meerkat_core::PeerMeta>,
     /// Resume from an existing session instead of starting fresh.
     pub resume_session: Option<Session>,
+    /// Which of a continued session or a pre-assigned mint `resume_session`
+    /// carries (see [`meerkat_core::SessionBuildIntent`]).
+    pub resume_session_intent: meerkat_core::SessionBuildIntent,
     /// Budget limits. If `None`, uses `Config::budget_limits()`.
     pub budget_limits: Option<BudgetLimits>,
     /// Optional event channel for streaming agent events.
@@ -749,6 +752,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("comms_name", &self.comms_name)
             .field("peer_meta", &self.peer_meta)
             .field("resume_session", &self.resume_session.is_some())
+            .field("resume_session_intent", &self.resume_session_intent)
             .field("budget_limits", &self.budget_limits)
             .field("event_tx", &self.event_tx.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
@@ -860,6 +864,7 @@ impl AgentBuildConfig {
             comms_name: None,
             peer_meta: None,
             resume_session: None,
+            resume_session_intent: meerkat_core::SessionBuildIntent::default(),
             budget_limits: None,
             event_tx: None,
             llm_client_override: None,
@@ -990,6 +995,7 @@ impl AgentBuildConfig {
         self.comms_name = build.comms_name.clone();
         self.peer_meta = build.peer_meta.clone();
         self.resume_session = build.resume_session.clone();
+        self.resume_session_intent = build.resume_session_intent;
         self.budget_limits = build.budget_limits.clone();
         self.provider_params = build.provider_params.clone();
         self.external_tools = build.external_tools.clone();
@@ -1070,6 +1076,7 @@ impl AgentBuildConfig {
             comms_name: self.comms_name.clone(),
             peer_meta: self.peer_meta.clone(),
             resume_session: self.resume_session.clone(),
+            resume_session_intent: self.resume_session_intent,
             budget_limits: self.budget_limits.clone(),
             provider_params: self.provider_params.clone(),
             external_tools: self.external_tools.clone(),

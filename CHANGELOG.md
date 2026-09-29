@@ -609,9 +609,12 @@ them.
     `load_whole_blob_store_authority` equals that authority; any other
     authority takes the authoritative read.
     - Only store decodes are cached, never a caller's in-memory session.
-    - An entry is dropped as soon as the service commits or observes a newer
-      authority. In practice that is the create-time save that follows actor
+    - An entry is dropped as soon as the service commits, acknowledges, or
+      observes a newer authority for that session: actor turn boundaries,
+      promotions, checkpoints, synchronization, and apply-path checks. In
+      practice that is the create-time save that follows actor
       materialization, so nothing outlives the resume window.
+    - Eviction under the budget is least-recently-served first.
     - Retention is bounded by committed document bytes (see Added).
   - The compaction checkpoint verifies the caller's bytes against the
     authority digest instead of decoding the stored body. The startup

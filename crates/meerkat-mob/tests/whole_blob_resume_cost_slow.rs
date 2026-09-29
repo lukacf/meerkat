@@ -22,7 +22,12 @@
 //! saw) and checks that the service's verified-body cache retains nothing
 //! past the resume window.
 //!
-//! Multi-second, hence the `_slow` binary name (Bazel `slow` tag).
+//! Multi-second, hence the `_slow` binary name. Which lane enforces it:
+//! Cargo's `fast` nextest profile (`make test`, `make test-int`, and the
+//! nightly `workspace-int` lane) still runs this binary, because that profile
+//! excludes only the dedicated e2e binaries. Only Bazel's `fast_tests` suite
+//! skips it, since the Bazel generator tags it `slow`. PR CI runs
+//! `--lib --bins` only, so like every integration test it runs nightly.
 //!
 //! Scale: MEERKAT_WHOLE_BLOB_GENERATIONS, MEERKAT_WHOLE_BLOB_GENERATION_MESSAGES.
 
@@ -505,6 +510,26 @@ async fn whole_blob_cold_resume_with_deep_rewrite_history() {
     let retained_after_first = service_2.whole_blob_body_cache_retained_bytes();
     eprintln!(
         "[whole-blob resume] verified-body cache after first turns: {retained_after_first} bytes"
+    );
+
+    // Fill the verified-body cache through a read of each live member (an
+    // observation read, outside every measured window). The turns below must
+    // evict those bodies as they commit newer authorities, not leave them as
+    // dead copies until budget eviction.
+    for session_id in session_ids.iter().take(LARGE_MEMBER_IDS.len()) {
+        service_2
+            .observe_authoritative_session_body(session_id)
+            .await
+            .expect("observe committed body")
+            .expect("committed body present");
+    }
+    let retained_after_reads = service_2.whole_blob_body_cache_retained_bytes();
+    eprintln!(
+        "[whole-blob resume] verified-body cache after observation reads: {retained_after_reads} bytes"
+    );
+    assert!(
+        retained_after_reads > 0,
+        "the observation reads must populate the cache for this check to mean anything"
     );
 
     // Steady state: by now every committed head was written by a per-turn

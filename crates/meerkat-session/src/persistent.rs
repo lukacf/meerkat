@@ -4591,6 +4591,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await
                 .map_err(|error| whole_blob_read_error_to_session_error(session_id, role, error))?;
             if current.as_ref() == Some(&cached.authority) {
+                self.touch_whole_blob_body(session_id);
                 return Ok(Some((cached.session.as_ref().clone(), cached.authority)));
             }
         }
@@ -4659,6 +4660,41 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .shift_remove(session_id);
     }
 
+    /// Mark a retained body most recently used, so budget eviction takes the
+    /// least recently served entry first.
+    fn touch_whole_blob_body(&self, session_id: &SessionId) {
+        let mut bodies = self
+            .whole_blob_bodies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = bodies.get_index_of(session_id) {
+            let last = bodies.len().saturating_sub(1);
+            bodies.move_index(index, last);
+        }
+    }
+
+    /// Drop the retained body for `session_id` unless it belongs to exactly
+    /// `authority`. Called wherever this service commits or acknowledges a
+    /// WholeBlob authority (actor turn boundaries, promotions, checkpoints,
+    /// synchronization), so a body the committed document has moved past
+    /// never lingers as a dead copy.
+    fn forget_whole_blob_body_unless_current(
+        &self,
+        session_id: &SessionId,
+        authority: &WholeBlobStoreAuthority,
+    ) {
+        let mut bodies = self
+            .whole_blob_bodies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if bodies
+            .get(session_id)
+            .is_some_and(|cached| &cached.authority != authority)
+        {
+            bodies.shift_remove(session_id);
+        }
+    }
+
     /// Transcript revision and message count of the committed WholeBlob
     /// document, without reading its body.
     ///
@@ -4689,6 +4725,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if current.session_id() != session_id {
             return Ok(None);
         }
+        // Evict first: a retained body for an older authority can never be
+        // served again, whichever source answers below.
+        self.forget_whole_blob_body_unless_current(session_id, &current);
         if let Some(facts) = self
             .runtime_store
             .session_authority_ops()
@@ -4699,15 +4738,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 facts.message_count(),
             )));
         }
-        let Some(cached) = self.cached_whole_blob_body(session_id) else {
+        let Some(cached) = self
+            .cached_whole_blob_body(session_id)
+            .filter(|cached| cached.authority == current)
+        else {
             return Ok(None);
         };
-        if cached.authority != current {
-            // The committed document moved on; the retained body can never be
-            // served again.
-            self.forget_whole_blob_body(session_id);
-            return Ok(None);
-        }
         let (Ok(revision), Ok(message_count)) = (
             cached.session.transcript_content_digest(),
             u64::try_from(cached.session.messages().len()),
@@ -5256,6 +5292,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // receipt descended from it would make the next turn reject the
             // durable state it just synchronized.
             *checkpointer.latest_run_checkpoint_receipt.lock().await = None;
+            self.forget_whole_blob_body_unless_current(id, &authority);
             *checkpointer.whole_blob_base_authority.lock().map_err(|_| {
                 SessionError::Agent(AgentError::InternalError(format!(
                     "WholeBlob actor base authority lock is poisoned for session {id}"
@@ -10254,6 +10291,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .cloned()
             .and_then(|checkpointer| checkpointer.upgrade())
         {
+            self.forget_whole_blob_body_unless_current(id, &durable_authority);
             *checkpointer.whole_blob_base_authority.lock().map_err(|_| {
                 SessionError::Agent(AgentError::InternalError(format!(
                     "WholeBlob actor base authority lock is poisoned for session {id}"
@@ -11064,6 +11102,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "committed WholeBlob authority changed before executor acknowledgement for session {id}"
             ))));
         }
+        // An actor turn boundary committed a newer document; a retained body
+        // for an older one can never be served again.
+        self.forget_whole_blob_body_unless_current(id, &authority);
         if let Some(checkpointer) = self
             .live_checkpointers
             .lock()
@@ -11137,6 +11178,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             "promoted WholeBlob boundary has no exact live checkpointer for session {id}"
                         )))
                     })?;
+                self.forget_whole_blob_body_unless_current(id, &authority);
                 *checkpointer.whole_blob_base_authority.lock().map_err(|_| {
                     SessionError::Agent(AgentError::InternalError(format!(
                         "WholeBlob actor base authority lock is poisoned for session {id}"
@@ -12423,6 +12465,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         result.session_id
                     )))
                 })?;
+            self.forget_whole_blob_body_unless_current(&result.session_id, &authority);
             *checkpointer.whole_blob_base_authority.lock().map_err(|_| {
                 SessionError::Agent(AgentError::InternalError(format!(
                     "WholeBlob actor base authority lock is poisoned for session {}",

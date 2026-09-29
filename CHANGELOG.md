@@ -408,6 +408,18 @@ them.
 
 ### Fixed
 
+- `meerkat-runtime` built with default features, or with only one of `live`
+  and `sqlite-store`, emitted 54 dead-code warnings (and so failed
+  `clippy -D warnings` and the feature-matrix lanes): live-context mirror
+  and live execution authority items used only by `live` code, and
+  HeadCanonical provisional-tail, recovery-codec and commit-payload items
+  used only by the SQLite RuntimeStore adapter. Each item is now gated on
+  the feature of its real users; the two SQLite-only field groups on types
+  every backend constructs carry a narrow, documented
+  `cfg_attr(not(feature = "sqlite-store"), allow(dead_code))`. The blanket
+  wasm32 `allow(dead_code)` on the live-context mirror is gone, and the
+  crate's self dev-dependency enables `live` so package-scoped test lanes
+  still run the live-only unit tests.
 - A `fork_off` child re-billed the forker's whole transcript whenever the
   forker's turn started on a cold cache (#1235). The child's first request is
   the forker's transcript up to its previous turn end, but every provider

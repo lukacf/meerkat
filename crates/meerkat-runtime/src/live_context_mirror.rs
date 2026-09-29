@@ -1,15 +1,17 @@
 //! Sealed bridge from exact committed session rows into generated live-context authority.
 
-#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
-
 #[cfg(all(target_arch = "wasm32", feature = "live"))]
 use crate::tokio;
+use meerkat_core::SessionId;
+use meerkat_core::generated::session_document::LiveContextCommittedRowDisposition;
+#[cfg(feature = "live")]
 use meerkat_core::generated::session_document::{
-    LiveContextCommittedRowDisposition, LiveContextCommittedRowKind,
-    LiveContextCommittedTextProvenance, SessionDocumentEffect, SessionDocumentKey,
-    SessionDocumentMachineAuthority,
+    LiveContextCommittedRowKind, LiveContextCommittedTextProvenance, SessionDocumentEffect,
+    SessionDocumentKey, SessionDocumentMachineAuthority,
 };
-use meerkat_core::{AssistantBlock, Message, SessionId};
+#[cfg(feature = "live")]
+use meerkat_core::{AssistantBlock, Message};
+#[cfg(feature = "live")]
 use sha2::{Digest, Sha256};
 
 use crate::live_execution::{
@@ -182,10 +184,12 @@ pub struct CommittedLiveContextRow {
     disposition: LiveContextCommittedRowDisposition,
     provider_context: Option<String>,
     causal_context: Option<String>,
+    #[cfg(feature = "live")]
     observation_id: Option<meerkat_core::LiveContextObservationId>,
 }
 
 impl CommittedLiveContextRow {
+    #[cfg(feature = "live")]
     pub(crate) fn classify(
         session_id: &SessionId,
         canonical_row_sequence: u64,
@@ -331,6 +335,7 @@ impl CommittedLiveContextRow {
             .or(self.provider_context.as_deref())
     }
 
+    #[cfg(feature = "live")]
     pub(crate) fn payload_availability(
         &self,
     ) -> crate::meerkat_machine::dsl::LiveContextPayloadAvailability {
@@ -341,11 +346,13 @@ impl CommittedLiveContextRow {
         }
     }
 
+    #[cfg(feature = "live")]
     pub(crate) fn observation_id(&self) -> Option<&meerkat_core::LiveContextObservationId> {
         self.observation_id.as_ref()
     }
 }
 
+#[cfg(feature = "live")]
 pub(crate) fn classify_committed_boundary_rows_after(
     session_id: &SessionId,
     committed: &meerkat_core::lifecycle::core_executor::BoundSessionCommit,
@@ -428,6 +435,7 @@ pub(crate) fn classify_committed_boundary_rows_after(
 
 #[derive(serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg(feature = "live")]
 enum LiveAssistantContextBlock<'a> {
     Text {
         text: &'a str,
@@ -439,11 +447,13 @@ enum LiveAssistantContextBlock<'a> {
 }
 
 #[derive(serde::Serialize)]
+#[cfg(feature = "live")]
 struct LiveAssistantContext<'a> {
     role: &'static str,
     blocks: Vec<LiveAssistantContextBlock<'a>>,
 }
 
+#[cfg(feature = "live")]
 fn context_projection(
     message: &Message,
 ) -> Result<(LiveContextCommittedRowKind, Option<String>), String> {
@@ -489,6 +499,7 @@ fn context_projection(
     }
 }
 
+#[cfg(feature = "live")]
 fn causal_context_projection(message: &Message) -> Result<Option<String>, String> {
     let Message::BlockAssistant(assistant) = message else {
         return Ok(None);
@@ -524,7 +535,9 @@ fn causal_context_projection(message: &Message) -> Result<Option<String>, String
     .map_err(|error| error.to_string())
 }
 
-#[cfg(test)]
+// These tests exercise the live-only classification path. The crate's
+// self dev-dependency enables `live`, so package-scoped test lanes run them.
+#[cfg(all(test, feature = "live"))]
 mod tests {
     use super::*;
     use meerkat_core::UserMessage;

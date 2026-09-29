@@ -16,7 +16,8 @@ use std::process::Stdio;
 use meerkat_integration_tests::voice_fixtures::{
     LIVE_AUDIO_FRAME_MS, LIVE_AUDIO_PRESERVED_INTERNAL_SILENCE_MS, LIVE_AUDIO_TRAILING_SILENCE_MS,
     OPENAI_TTS_DEFAULT_VOICE, OPENAI_TTS_MODEL, cached_openai_tts_pcm, chunk_pcm_bytes,
-    live_audio_cache_key, live_pcm_bytes_per_ms, pcm_has_non_silence, prepare_tts_pcm_for_live_vad,
+    committed_live_adapter_utterance, live_audio_cache_key, live_pcm_bytes_per_ms,
+    pcm_has_non_silence, prepare_tts_pcm_for_live_vad,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -4459,18 +4460,20 @@ fn normalized_text_contains_any(text: &str, variants: &[&str]) -> bool {
         .any(|variant| text.contains(&normalize_semantic_text(variant)))
 }
 
-/// VAD-prepared TTS speech for the live-adapter smokes, cached under
-/// `target/e2e-live-tts-cache` (see `meerkat_integration_tests::voice_fixtures`).
+/// VAD-prepared speech for the live-adapter smokes. The default model and
+/// voice read the committed utterance fixtures
+/// (`meerkat_integration_tests::voice_fixtures::LIVE_ADAPTER_FIXTURE_DIR`),
+/// so a smoke never waits on the speech API for its own input; an explicit
+/// model or voice override synthesizes through the cache under
+/// `target/e2e-live-tts-cache`.
 async fn openai_tts_pcm(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let model = openai_tts_model();
+    let voice = openai_tts_voice();
+    if model == OPENAI_TTS_MODEL && voice == OPENAI_TTS_DEFAULT_VOICE {
+        return Ok(committed_live_adapter_utterance(&workspace_root(), text)?);
+    }
     let api_key = openai_api_key().ok_or("OpenAI API key is required for live audio smokes")?;
-    Ok(cached_openai_tts_pcm(
-        &api_key,
-        &live_tts_cache_dir(),
-        &openai_tts_model(),
-        &openai_tts_voice(),
-        text,
-    )
-    .await?)
+    Ok(cached_openai_tts_pcm(&api_key, &live_tts_cache_dir(), &model, &voice, text).await?)
 }
 
 // ---------------------------------------------------------------------------

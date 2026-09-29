@@ -31,6 +31,11 @@ pub const LIVE_AUDIO_PRESERVED_INTERNAL_SILENCE_MS: usize = 80;
 /// Repository-relative directory of the browser-peer WAV fixtures.
 pub const FIXTURE_DIR: &str = "tests/live_smoke/browser/fixtures/gpt_live_client";
 pub const MANIFEST_FILE: &str = "manifest.json";
+/// Repository-relative directory of the live-adapter smoke utterances (the
+/// `smoke_shared_realm` live scenarios). Minted with no trailing-silence
+/// floor: the streaming chunker appends it, so each WAV holds exactly the
+/// VAD-prepared PCM the synthesized path produced.
+pub const LIVE_ADAPTER_FIXTURE_DIR: &str = "tests/integration/fixtures/live_adapter_tts";
 /// A verified fixture's decoded duration may differ from the manifest by at
 /// most this much (covers WAV chunk padding and header rounding, not a
 /// re-mint).
@@ -606,6 +611,42 @@ pub async fn mint_fixture(
     Ok(wav)
 }
 
+/// The committed live-adapter utterance for `text` in the default voice:
+/// the manifest entry with that exact script, its WAV checked against the
+/// manifest digest, decoded to PCM. A script without a committed fixture is
+/// a typed error naming the mint command, never a live synthesis, so a smoke
+/// run does not depend on the speech API.
+pub fn committed_live_adapter_utterance(
+    workspace_root: &Path,
+    text: &str,
+) -> Result<Vec<u8>, VoiceFixtureError> {
+    let dir = workspace_root.join(LIVE_ADAPTER_FIXTURE_DIR);
+    let manifest = FixtureManifest::load(&dir.join(MANIFEST_FILE))?;
+    let entry = manifest
+        .fixtures
+        .iter()
+        .find(|entry| entry.text == text && entry.voice == OPENAI_TTS_DEFAULT_VOICE)
+        .ok_or_else(|| {
+            VoiceFixtureError::UnknownFixture(format!(
+                "{text:?} (declare it in {LIVE_ADAPTER_FIXTURE_DIR}/{MANIFEST_FILE} and run \
+                 `voice_fixtures mint --missing --manifest {LIVE_ADAPTER_FIXTURE_DIR}/{MANIFEST_FILE}`)"
+            ))
+        })?;
+    let path = dir.join(&entry.file);
+    let bytes = std::fs::read(&path).map_err(|source| VoiceFixtureError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let sha256 = sha256_hex(&bytes);
+    if sha256 != entry.sha256 {
+        return Err(VoiceFixtureError::Verification(vec![format!(
+            "{}: sha256 {sha256} != manifest {}",
+            entry.name, entry.sha256
+        )]));
+    }
+    Ok(decode_wav(&path, &bytes)?.pcm)
+}
+
 /// Workspace root: `MEERKAT_WORKSPACE_ROOT`, else the nearest ancestor of
 /// the current directory (falling back to this crate's manifest directory)
 /// that holds the browser fixture tree.
@@ -651,6 +692,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The live-adapter smoke utterances verify like the browser fixtures,
+    /// carry no baked-in trailing-silence floor (the streaming chunker adds
+    /// it), and each resolves by its exact script in the default voice.
+    #[test]
+    fn committed_live_adapter_utterances_match_their_manifest() {
+        let root = workspace_root().expect("workspace root");
+        let dir = root.join(LIVE_ADAPTER_FIXTURE_DIR);
+        let manifest = FixtureManifest::load(&dir.join(MANIFEST_FILE)).unwrap();
+        assert_eq!(manifest.mint_trailing_silence_ms, 0);
+        let verified = manifest
+            .verify(&dir)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(verified.len(), manifest.fixtures.len());
+        for entry in &manifest.fixtures {
+            assert_eq!(entry.voice, OPENAI_TTS_DEFAULT_VOICE, "{}", entry.name);
+            let pcm = committed_live_adapter_utterance(&root, &entry.text)
+                .unwrap_or_else(|error| panic!("{}: {error}", entry.name));
+            assert!(pcm_has_non_silence(&pcm), "{}", entry.name);
+        }
+        assert!(matches!(
+            committed_live_adapter_utterance(&root, "a script nobody minted"),
+            Err(VoiceFixtureError::UnknownFixture(_))
+        ));
     }
 
     #[test]

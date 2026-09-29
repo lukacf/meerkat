@@ -1,0 +1,50 @@
+{
+  "sample_rate_hz": 24000,
+  "mint_trailing_silence_ms": 0,
+  "fixtures": [
+    {
+      "name": "s71-remember-amber-lantern",
+      "file": "s71-remember-amber-lantern.wav",
+      "voice": "alloy",
+      "text": "Remember the codeword amber lantern.",
+      "sha256": "ca29d90bc79ed28b2e2060e07cdc0a4d609570136026c0e1606a425ba97524e1",
+      "duration_ms": 2194,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 75,
+      "notes": "OpenAI gpt-4o-mini-tts, voice alloy, VAD-prepared (internal pauses compressed), no trailing-silence floor; minted by `voice_fixtures mint`."
+    },
+    {
+      "name": "s71-say-codeword-once",
+      "file": "s71-say-codeword-once.wav",
+      "voice": "alloy",
+      "text": "Say only the codeword once.",
+      "sha256": "515189eaaab44255cd3c945c17de1fe23dbe0245fb8aa229d0534b52462a89b0",
+      "duration_ms": 2476,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 80,
+      "notes": "OpenAI gpt-4o-mini-tts, voice alloy, VAD-prepared (internal pauses compressed), no trailing-silence floor; minted by `voice_fixtures mint`."
+    },
+    {
+      "name": "s71-stop",
+      "file": "s71-stop.wav",
+      "voice": "alloy",
+      "text": "Stop.",
+      "sha256": "88ddb0dea93358c22593e27709fe1c8d31e7f37fdb377683628239134e7c4d10",
+      "duration_ms": 729,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 80,
+      "notes": "OpenAI gpt-4o-mini-tts, voice alloy, VAD-prepared (internal pauses compressed), no trailing-silence floor; minted by `voice_fixtures mint`."
+    },
+    {
+      "name": "s72-say-pine-river",
+      "file": "s72-say-pine-river.wav",
+      "voice": "alloy",
+      "text": "Say only pine river.",
+      "sha256": "0fbfb2b56001cc088a719c80ba9de90c8f6ebc8407ae937f427c7468dc61e1c4",
+      "duration_ms": 2259,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 80,
+      "notes": "OpenAI gpt-4o-mini-tts, voice alloy, VAD-prepared (internal pauses compressed), no trailing-silence floor; minted by `voice_fixtures mint`."
+    }
+  ]
+}

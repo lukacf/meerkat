@@ -229,6 +229,9 @@ mod identity_recovery_test_support;
 mod live_bridge_operation;
 #[cfg(any(test, feature = "test-support"))]
 mod member_status_test_support;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use handle::ForkSupervisorExitForTest;
 pub(crate) use handle::MemberTurnLlmIdentityAppliedSender;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use identity_recovery_test_support::trigger_identity_recovery_fail_stop;

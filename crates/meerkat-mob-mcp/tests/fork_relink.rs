@@ -2615,8 +2615,16 @@ async fn fork_held_child(
         )
         .await
         .expect("fork");
-    // The custodian dies with the "old process".
-    drop(run);
+    // The custodian dies with the "old process": its supervisor ends where it
+    // waits, before the held turn reaches an outcome, so nothing but the
+    // re-link acts on the turn's end (a live supervisor would retire a child
+    // whose turn fails, racing what the re-link decides). The child, its
+    // session and the runtime stay, as a restart finds them.
+    assert_eq!(
+        run.end_supervisor_as_process_exit_for_test().await,
+        meerkat_mob::ForkSupervisorExitForTest::EndedBeforeOutcome,
+        "the held turn has no outcome yet"
+    );
     gate.wait_entered(1).await;
     let child = AgentIdentity::from(child);
     let child_session = handle

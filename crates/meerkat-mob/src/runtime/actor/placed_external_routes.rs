@@ -344,12 +344,31 @@ impl MobActor {
         if self.roster.read().await.get(&local).is_none() {
             return Err(MobError::MemberNotFound(local));
         }
+        // The host route must be recordable before the edge commits: a
+        // committed edge whose install the machine refuses (host not Bound,
+        // carrier binding inactive) would leave nothing pending and a
+        // route_installs() that falsely reads complete. Refuse typed instead.
         if self
-            .external_route_obligation_for_edge(&edge, mob_dsl::RouteObligationKind::Install)
+            .ensure_placed_carrier_binding_active(&local, "wire_placed_external_peer")?
             .is_none()
         {
             return Err(MobError::Internal(format!(
                 "placed external wire for '{local}' found no machine placement"
+            )));
+        }
+        // The host keys trust rows by peer id: a second edge to the same peer
+        // id under another name would share (and on unwire, drop) one row.
+        if let Some(existing) = self
+            .machine_external_peer_edges_for(&local)
+            .into_iter()
+            .find(|existing| {
+                existing.endpoint.peer_id == edge.endpoint.peer_id
+                    && existing.endpoint.name != edge.endpoint.name
+            })
+        {
+            return Err(MobError::WiringError(format!(
+                "placed member '{local}' is already wired to external peer id '{}' as '{}'; one peer id maps to one host trust row",
+                edge.endpoint.peer_id.0, existing.endpoint.name.0
             )));
         }
         let authority = self.apply_wire_external_peer_idempotent(&key, &edge)?;
@@ -392,23 +411,42 @@ impl MobActor {
             return Ok(());
         };
         let key = Self::external_peer_key_for_edge(&edge);
-        let removal = self
-            .external_route_obligation_for_edge(&edge, mob_dsl::RouteObligationKind::Remove)
-            .ok_or_else(|| {
-                MobError::Internal(format!(
-                    "placed external unwire for '{local}' found no machine placement"
-                ))
-            })?;
-        self.authorize_external_route_removal_before_unwire(&removal)?;
-        self.realize_external_route(&removal).await?;
-        self.rollback_superseded_external_installs(&edge)?;
-        if self
-            .apply_unwire_external_peer_idempotent(&key, &edge)?
-            .is_none()
-        {
-            return Err(MobError::WiringError(format!(
-                "external unwire for '{local}' -> '{peer_name}' was not authorized by MobMachine"
-            )));
+        if self.confirmed_revoked_placed_host(&local).is_none() {
+            let removal = self
+                .external_route_obligation_for_edge(&edge, mob_dsl::RouteObligationKind::Remove)
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "placed external unwire for '{local}' found no machine placement"
+                    ))
+                })?;
+            self.authorize_external_route_removal_before_unwire(&removal)?;
+            if let Err(error) = self.realize_external_route(&removal).await {
+                // A rejected or timed-out removal leaves the edge wired, and
+                // the host may already have dropped the row: reinstall it so
+                // route_installs() never reads complete while a wired edge
+                // lacks host trust.
+                self.fold_external_route_install_after_wire(&edge).await;
+                return Err(error);
+            }
+        }
+        // Otherwise an exact revoke tombstone proves the host (and its trust
+        // store) is gone: there is no row to remove and no ACK to await, as
+        // for member-member routes on a confirmed-revoked host.
+        let committed = self
+            .rollback_superseded_external_installs(&edge)
+            .and_then(|()| {
+                self.apply_unwire_external_peer_idempotent(&key, &edge)?
+                    .map(|_| ())
+                    .ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "external unwire for '{local}' -> '{peer_name}' was not authorized by MobMachine"
+                        ))
+                    })
+            });
+        if let Err(error) = committed {
+            // The host row is gone but the edge is still wired: reinstall it.
+            self.fold_external_route_install_after_wire(&edge).await;
+            return Err(error);
         }
         let event = NewMobEvent {
             mob_id: self.definition.id.clone(),

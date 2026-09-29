@@ -1131,6 +1131,25 @@ execution, session history, credentials, compaction, and memory. A remote
 member therefore uses its host's realm even when the controller has a realm
 with the same name.
 
+A placed member can also be wired to an external peer (`mob/wire` with an
+external peer descriptor). The edge is the same controller-owned external
+edge as for a local member; its trust row is installed on the member's host,
+tracked as a route-install obligation (`mob/route_installs` reports it under
+`outstanding_external` until the host acknowledges it), and reinstalled after
+a host restart, a member revival, or a controller restart. Unwiring removes
+the host row before the edge is committed as unwired. Read a placed member's
+dialable endpoint (address and key) with `MobHandle::member_endpoint_status`
+or `member_peer_endpoint`.
+
+Security note: wiring a placed member to an external peer makes that member's
+runtime on the member host trust the descriptor and dial its address. Only a
+caller with wiring authority over the mob can do this (the same admission as
+wiring a local member), but treat external descriptors as trusted input: the
+member host will connect to whatever address the controller installs. A wire
+is refused when the member's host is not bound or its carrier binding is
+inactive, and when the member is already wired to the same peer id under a
+different name.
+
 The placed session id is diagnostic identity in the owning member-host realm,
 not a controller-local `session/*` handle. Drive the member by
 `agent_identity`, and read its transcript with `mob/member_history`. Generic

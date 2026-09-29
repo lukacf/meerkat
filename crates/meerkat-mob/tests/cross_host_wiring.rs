@@ -1916,10 +1916,10 @@ async fn placed_member_external_edge_retirement_converges() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn placed_member_external_edge_is_reestablished_after_host_and_controlling_restart() {
+async fn placed_member_external_edge_is_reestablished_after_member_host_restart() {
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;
-    let scenario = placed_external_scenario("xhw-pext-restart").await;
-    assert_placed_external_delivers_both_ways(&scenario, "before restarts").await;
+    let scenario = placed_external_scenario("xhw-pext-host-restart").await;
+    assert_placed_external_delivers_both_ways(&scenario, "before the host restart").await;
     let PlacedExternalScenario {
         controlling,
         fixture,
@@ -1928,36 +1928,9 @@ async fn placed_member_external_edge_is_reestablished_after_host_and_controlling
         external_runtime,
         b2_session,
     } = scenario;
-
-    // Controlling cold restart: the durable edge and placement recover, the
-    // route ledger is re-derived, and delivery keeps working.
-    let controlling = controlling.restart().await;
-    wait_until(
-        "external route installs to settle after the controlling restart",
-        || external_route_installs_at_rest(&controlling),
-    )
-    .await;
-    let scenario = PlacedExternalScenario {
-        controlling,
-        fixture,
-        host_id,
-        external,
-        external_runtime,
-        b2_session,
-    };
-    assert_placed_external_delivers_both_ways(&scenario, "after controlling restart").await;
-
-    // Member-host restart: the revived member holds no volatile trust rows;
-    // the new host incarnation re-derives and reinstalls the external route
-    // without a manual drive.
-    let PlacedExternalScenario {
-        controlling,
-        fixture,
-        host_id,
-        external,
-        external_runtime,
-        b2_session,
-    } = scenario;
+    // The revived member holds no volatile trust rows: the new host
+    // incarnation re-derives and reinstalls the external route without a
+    // manual drive.
     let fixture = fixture.partition().await.restore().await;
     wait_until("public readiness after the member-host restart", || async {
         public_remote_member_ready(&controlling, "b2", &host_id, &b2_session).await
@@ -1980,8 +1953,203 @@ async fn placed_member_external_edge_is_reestablished_after_host_and_controlling
         external_runtime,
         b2_session,
     };
-    assert_placed_external_delivers_both_ways(&scenario, "after host restart").await;
+    assert_placed_external_delivers_both_ways(&scenario, "after the host restart").await;
     scenario.fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_member_external_unwire_on_a_confirmed_revoked_host_commits_without_removal() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scenario = placed_external_scenario("xhw-pext-revoked").await;
+    scenario
+        .controlling
+        .handle
+        .revoke_host(&scenario.host_id)
+        .await
+        .expect("revoke the host");
+    // A wire to another peer is refused typed: the host is not bound.
+    let other = spawn_peer_comms_endpoint("xhw-pext-revoked-other", true, None).await;
+    let refused = scenario
+        .controlling
+        .handle
+        .wire(
+            identity("b2"),
+            meerkat_mob::PeerTarget::External(other.self_descriptor()),
+        )
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(MobError::BridgeCommandRejected {
+                cause: BridgeRejectionCause::NotBound,
+                ..
+            })
+        ),
+        "a wire on a revoked host is refused typed before the edge commits, got {refused:?}"
+    );
+    // The revoked host's trust store is gone, so the existing edge unwires
+    // without a removal ACK and without retiring the member.
+    scenario
+        .controlling
+        .handle
+        .unwire(
+            identity("b2"),
+            meerkat_mob::PeerTarget::External(scenario.external.self_descriptor()),
+        )
+        .await
+        .expect("unwire commits on a confirmed-revoked host");
+    assert!(external_route_installs_at_rest(&scenario.controlling).await);
+    let unwired = scenario
+        .controlling
+        .storage_events
+        .replay_all()
+        .await
+        .expect("replay mob events")
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::ExternalPeerUnwired { local, .. } if local.as_str() == "b2"
+            )
+        })
+        .count();
+    assert_eq!(unwired, 1);
+    scenario.fixture.shutdown().await;
+}
+
+struct ScriptedExternalScenario {
+    controlling: ControllingMob,
+    scripted: ScriptedHostPeer,
+    external_descriptor: meerkat_core::comms::TrustedPeerDescriptor,
+}
+
+async fn scripted_external_scenario(label: &str) -> ScriptedExternalScenario {
+    let scripted = spawn_scripted_host_peer(&format!("{label}-host")).await;
+    let probe = Arc::new(spawn_peer_comms_endpoint(&format!("{label}-b2"), true, None).await);
+    scripted.script_member_identity("b2", member_identity_of(&probe));
+    scripted.bind_member_endpoint("b2", Arc::clone(&probe));
+    let controlling = create_controlling_mob(label).await;
+    let report = controlling.bind_scripted(&scripted).await;
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("b2 placed on the scripted host");
+    let external = spawn_peer_comms_endpoint(&format!("{label}-ext"), true, None).await;
+    let external_descriptor = external.self_descriptor();
+    controlling
+        .handle
+        .wire(
+            identity("b2"),
+            meerkat_mob::PeerTarget::External(external_descriptor.clone()),
+        )
+        .await
+        .expect("wire the placed member to the external peer");
+    assert!(external_route_installs_at_rest(&controlling).await);
+    ScriptedExternalScenario {
+        controlling,
+        scripted,
+        external_descriptor,
+    }
+}
+
+fn installs_for(scripted: &ScriptedHostPeer, peer_id: &str) -> usize {
+    scripted
+        .received_install_peer_trust_payloads()
+        .iter()
+        .filter(|payload| payload.agent_identity == "b2" && payload.peer.peer_id == peer_id)
+        .count()
+}
+
+async fn b2_wired_to(controlling: &ControllingMob, name: &str) -> bool {
+    controlling
+        .handle
+        .get_member(&identity("b2"))
+        .await
+        .expect("get b2")
+        .is_some_and(|entry| entry.wired_to.iter().any(|peer| peer.as_str() == name))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_member_external_route_is_rederived_after_a_controller_restart() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scenario = scripted_external_scenario("xhw-pext-ctl-restart").await;
+    let peer_id = scenario.external_descriptor.peer_id.to_string();
+    let before = installs_for(&scenario.scripted, &peer_id);
+    let controlling = scenario.controlling.restart().await;
+    // Cold recovery re-derives the external route from durable facts; the
+    // drain realizes it again on the host (a fresh InstallPeerTrust).
+    controlling
+        .handle
+        .drive_route_installs()
+        .await
+        .expect("drive the recovered ledger");
+    wait_until(
+        "the recovered external route to be reinstalled on the host",
+        || async { installs_for(&scenario.scripted, &peer_id) > before },
+    )
+    .await;
+    assert!(external_route_installs_at_rest(&controlling).await);
+    assert!(b2_wired_to(&controlling, scenario.external_descriptor.name.as_str()).await);
+    scenario.scripted.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_member_external_removal_timeout_keeps_the_edge_and_reinstalls_trust() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scenario = scripted_external_scenario("xhw-pext-remove-timeout").await;
+    let peer_id = scenario.external_descriptor.peer_id.to_string();
+    let before = installs_for(&scenario.scripted, &peer_id);
+    // Drop the removal reply and its one resend: the outcome is unknown.
+    scenario.scripted.drop_next_remove_peer_trust_replies(2);
+    let timed_out = scenario
+        .controlling
+        .handle
+        .unwire(
+            identity("b2"),
+            meerkat_mob::PeerTarget::External(scenario.external_descriptor.clone()),
+        )
+        .await;
+    assert!(
+        timed_out.is_err(),
+        "a timed-out removal is an unwire failure"
+    );
+    assert!(
+        b2_wired_to(
+            &scenario.controlling,
+            scenario.external_descriptor.name.as_str()
+        )
+        .await,
+        "the edge stays wired"
+    );
+    wait_until("the host row to be reinstalled", || async {
+        installs_for(&scenario.scripted, &peer_id) > before
+    })
+    .await;
+    assert!(
+        external_route_installs_at_rest(&scenario.controlling).await,
+        "complete only once the reinstall is acknowledged"
+    );
+    scenario.scripted.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_member_duplicate_external_peer_id_is_refused_typed() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scenario = scripted_external_scenario("xhw-pext-dup").await;
+    let mut alias = scenario.external_descriptor.clone();
+    alias.name =
+        meerkat_core::comms::PeerName::new("xhw-pext-dup-alias".to_string()).expect("alias name");
+    let refused = scenario
+        .controlling
+        .handle
+        .wire(identity("b2"), meerkat_mob::PeerTarget::External(alias))
+        .await;
+    assert!(
+        matches!(refused, Err(MobError::WiringError(_))),
+        "a second name for the same peer id is refused typed, got {refused:?}"
+    );
+    assert!(!b2_wired_to(&scenario.controlling, "xhw-pext-dup-alias").await);
+    scenario.scripted.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2054,8 +2222,18 @@ async fn placed_member_external_install_and_removal_rejections_are_typed() {
         )
         .await;
     assert!(
-        rejected.is_err(),
-        "a rejected host removal is a typed unwire failure"
+        matches!(
+            rejected,
+            Err(MobError::BridgeCommandRejected {
+                cause: BridgeRejectionCause::Unavailable,
+                ..
+            })
+        ),
+        "a rejected host removal is a typed unwire failure, got {rejected:?}"
+    );
+    assert!(
+        b2_wired_to(&controlling, external_descriptor.name.as_str()).await,
+        "the machine edge stays wired after a rejected removal"
     );
     let removals_before = scripted.received_remove_peer_trust_payloads().len();
     controlling

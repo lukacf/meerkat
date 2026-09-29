@@ -2091,13 +2091,20 @@ export interface WireHostCapabilityFlags {
 export interface MobRouteInstallsResult {
   complete: boolean;
   outstanding: WireRouteInstallObligation[];
-  outstanding_external?: Record<string, unknown>[];
+  outstanding_external?: WireExternalRouteInstallObligation[];
 }
 
 export interface WireRouteInstallObligation {
   edge_a: string;
   edge_b: string;
   host: WireHostRef;
+}
+
+export interface WireExternalRouteInstallObligation {
+  host: WireHostRef;
+  local: string;
+  peer_id: string;
+  peer_name: string;
 }
 
 export interface MobBindHostParams {

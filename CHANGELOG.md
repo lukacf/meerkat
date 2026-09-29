@@ -81,7 +81,9 @@ them.
   and `RollbackExternalRouteInstall`, and effect
   `ExternalRouteInstallRequested` (`MobMachineInput::*`,
   `MobMachineInputVariant::*`, `MobMachineEffect::*`, `MobMachineCatalogInput::*`
-  and kernel `Input::*` / `InputKind::*` / `Effect::*` discriminants move).
+  and kernel `Input::*` / `InputKind::*` / `Effect::*` / `EffectKind::*` /
+  `TransitionId::*` discriminants move; `ExternalRouteInstallRequested` lands
+  mid-enum in `EffectKind`).
   `meerkat_contracts::wire::MobRouteInstallsResult` gains the field
   `outstanding_external: Vec<WireExternalRouteInstallObligation>` (serde
   default, omitted when empty, so the wire stays compatible); code that
@@ -239,7 +241,16 @@ them.
   cold-boot recovery). Unwire removes the host row synchronously before it
   commits, and a rejected removal leaves the edge wired with a typed error.
   Retiring a placed member converges its external edges (its host rows die
-  with `ReleaseMember`) instead of failing.
+  with `ReleaseMember`) instead of failing. A wire whose host route cannot
+  be recorded (host not Bound, carrier binding inactive) is refused typed
+  (`BridgeCommandRejected { cause: NotBound }`) before the edge commits; a
+  second edge to an already-wired peer id under another name is refused (the
+  host keys trust rows by peer id); a failed or timed-out host removal
+  reinstalls the row; and unwire on a confirmed-revoked host commits without
+  a removal. Security: wiring a placed member to an external peer makes its
+  host's member runtime accept and dial the descriptor's address, so only a
+  caller with the mob's wiring authority can do it (the same admission as
+  local external wiring).
 - `MobHandle::member_peer_endpoint(&identity)` returns a member's canonical
   comms endpoint as a `MobMemberPeerEndpoint`: the exact generation
   endpoint MobMachine holds for its current incarnation (name, peer id,

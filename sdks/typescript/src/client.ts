@@ -221,6 +221,7 @@ import type {
   WireHostBindingDescriptor as RpcWireHostBindingDescriptor,
   WireHostCapabilityFlags as RpcWireHostCapabilityFlags,
   WireRouteInstallObligation as RpcWireRouteInstallObligation,
+  WireExternalRouteInstallObligation as RpcWireExternalRouteInstallObligation,
   ExportAtifParams as RpcExportAtifParams,
   ProvisionApiKeyParams as RpcProvisionApiKeyParams,
   ReadSessionHistoryParams as RpcReadSessionHistoryParams,
@@ -2675,6 +2676,19 @@ export class MeerkatClient {
         `${context}: outstanding[${index}]`,
       ),
     );
+    // Omitted on the wire when empty (and by servers that predate it).
+    if (result.outstanding_external !== undefined) {
+      const outstandingExternal = MeerkatClient.requireRecordArray(
+        result.outstanding_external,
+        `${context}: outstanding_external`,
+      );
+      outstandingExternal.forEach((row, index) =>
+        MeerkatClient.parseExternalRouteInstallObligation(
+          row,
+          `${context}: outstanding_external[${index}]`,
+        ),
+      );
+    }
     MeerkatClient.requireBooleanField(result, "complete", context);
     return result as unknown as RpcMobRouteInstallsResult;
   }
@@ -5304,6 +5318,18 @@ export class MeerkatClient {
     MeerkatClient.requireStringField(obligation, "edge_b", context);
     MeerkatClient.requireStringField(obligation, "host", context);
     return obligation as unknown as RpcWireRouteInstallObligation;
+  }
+
+  private static parseExternalRouteInstallObligation(
+    raw: unknown,
+    context: string,
+  ): RpcWireExternalRouteInstallObligation {
+    const obligation = MeerkatClient.requireRecord(raw, "obligation", context);
+    MeerkatClient.requireStringField(obligation, "local", context);
+    MeerkatClient.requireStringField(obligation, "peer_id", context);
+    MeerkatClient.requireStringField(obligation, "peer_name", context);
+    MeerkatClient.requireStringField(obligation, "host", context);
+    return obligation as unknown as RpcWireExternalRouteInstallObligation;
   }
 
   private static requireBooleanField(

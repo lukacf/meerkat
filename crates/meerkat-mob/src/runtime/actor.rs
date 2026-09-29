@@ -14059,6 +14059,15 @@ impl MobActor {
             // committed operation; drop that exact binding so nothing stays
             // bound to it. The committed operation itself survives with the
             // (now Broken) member.
+            //
+            // The mismatched host runtime is deliberately LEFT IN PLACE,
+            // untrusted: the only release verb (`ReleaseMember`) is durable
+            // disposal, which would destroy the Broken member's session and
+            // history and pre-empt its retirement. It is harmless meanwhile:
+            // the member is recorded Broken, publishes no endpoint, delivery
+            // to it is refused (`MemberRestoreFailed`), and no peer ever
+            // installs trust for the new key. Retire or respawn releases it
+            // through the normal path.
             if let Err(error) = self
                 .provisioner
                 .clear_placed_member_binding_exact(

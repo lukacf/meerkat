@@ -539,11 +539,6 @@ pub(crate) fn recovery_member_edge_trust_is_desired(
     })
 }
 
-/// Single owner of the §6.2 route-install derivation rule (multi-host mobs
-/// ADJ-P4-1): every eligible wired edge endpoint placed on a BOUND host yields
-/// an `Install` obligation. Called from controlling recovery (bare authority,
-/// before the actor exists) and from the actor's rebind/drive re-derivation
-/// (optionally host-scoped) — one rule, two call sites, zero drift.
 /// Install obligations for external-peer edges whose local member is placed
 /// on a bound host (optionally one host). Same posture as
 /// [`derive_install_obligations`]: every input is durable and over-recording
@@ -584,6 +579,11 @@ pub(crate) fn derive_external_install_obligations(
     derived
 }
 
+/// Single owner of the §6.2 route-install derivation rule (multi-host mobs
+/// ADJ-P4-1): every eligible wired edge endpoint placed on a BOUND host yields
+/// an `Install` obligation. Called from controlling recovery (bare authority,
+/// before the actor exists) and from the actor's rebind/drive re-derivation
+/// (optionally host-scoped) — one rule, two call sites, zero drift.
 pub(crate) fn derive_install_obligations(
     state: &crate::machines::mob_machine::MobMachineState,
     host_filter: Option<&crate::machines::mob_machine::HostId>,

@@ -177,6 +177,7 @@ from .generated.types import (
     WireProjectionProvenance,
     WireReachability,
     WireMemberPreviewUnavailable,
+    WireExternalRouteInstallObligation,
     WireRouteInstallObligation,
     WireRuntimeBinding,
     WireToolAccessPolicy,
@@ -3118,9 +3119,24 @@ class MeerkatClient:
             )
             for index, row in enumerate(outstanding)
         ]
+        # Omitted on the wire when empty (and by servers that predate it).
+        outstanding_external_raw = result.get("outstanding_external", [])
+        if not isinstance(outstanding_external_raw, list):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: outstanding_external must be a list",
+            )
+        external_obligations = [
+            self._parse_external_route_install_obligation(
+                row,
+                f"{context}: outstanding_external[{index}]",
+            )
+            for index, row in enumerate(outstanding_external_raw)
+        ]
         return MobRouteInstallsResult(
             complete=self._require_bool_field(result, "complete", context),
             outstanding=obligations,
+            outstanding_external=external_obligations,
         )
 
     async def bind_mob_host(
@@ -6503,6 +6519,19 @@ class MeerkatClient:
                 "edge_b",
                 context,
             ),
+            host=MeerkatClient._require_string_field(obligation, "host", context),
+        )
+
+    @staticmethod
+    def _parse_external_route_install_obligation(
+        raw: Any,
+        context: str,
+    ) -> WireExternalRouteInstallObligation:
+        obligation = MeerkatClient._require_dict(raw, "obligation", context)
+        return WireExternalRouteInstallObligation(
+            local=MeerkatClient._require_string_field(obligation, "local", context),
+            peer_id=MeerkatClient._require_string_field(obligation, "peer_id", context),
+            peer_name=MeerkatClient._require_string_field(obligation, "peer_name", context),
             host=MeerkatClient._require_string_field(obligation, "host", context),
         )
 

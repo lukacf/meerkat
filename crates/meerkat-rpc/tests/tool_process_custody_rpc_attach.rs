@@ -489,4 +489,38 @@ async fn a_run_with_a_provisional_tail_is_left_to_durable_tail_recovery() {
         1,
         "the finished tool was re-run: {ran:?}"
     );
+
+    // The committed transcript holds the interrupted run once, as committed
+    // by durable-tail recovery (its tool results included), and no
+    // interrupted-run notice.
+    let history = runtime
+        .session_service()
+        .read_history(
+            &meerkat_core::SessionId::parse(&session_id).unwrap(),
+            SessionHistoryQuery::default(),
+        )
+        .await
+        .expect("read history");
+    let prompts = history
+        .messages
+        .iter()
+        .filter(|message| {
+            matches!(message, Message::User(user) if user.text_content().contains(INTERRUPTED_PROMPT))
+        })
+        .count();
+    assert_eq!(prompts, 1, "the interrupted request appears exactly once");
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|message| matches!(message, Message::ToolResults { .. })),
+        "the recovered run's committed turn is in the transcript"
+    );
+    assert!(
+        !history.messages.iter().any(|message| matches!(
+            message,
+            Message::SystemNotice(notice) if notice.kind == SystemNoticeKind::ToolProcessRecovery
+        )),
+        "no interrupted-run notice for a run durable-tail recovery committed"
+    );
 }

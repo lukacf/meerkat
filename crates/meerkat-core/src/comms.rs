@@ -2043,7 +2043,7 @@ impl SessionEventEpoch {
         let (high, low) = self.0.as_u64_pair();
         uuid::Uuid::from_u64_pair(
             high ^ position.rotate_left(17),
-            low ^ dropped.rotate_left(41) ^ 0x5eed_0f_ca7_u64,
+            low ^ dropped.rotate_left(41) ^ 0x0005_eed0_fca7_u64,
         )
     }
 }

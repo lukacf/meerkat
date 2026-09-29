@@ -1290,7 +1290,8 @@ mod session_event_stream_tests {
     /// contention with other allocations every sequence is still unique and
     /// every batch contiguous.
     #[test]
-    fn terminal_batches_under_allocation_contention_stay_unique_and_contiguous() {
+    fn terminal_batches_under_allocation_contention_stay_unique_and_contiguous()
+    -> Result<(), String> {
         const THREADS: usize = 4;
         const ROUNDS: usize = 200;
         let line = Arc::new(SessionEventLine::new());
@@ -1325,8 +1326,7 @@ mod session_event_stream_tests {
         for worker in workers {
             let batches = worker
                 .join()
-                .unwrap_or_else(|_| Err("worker panicked".to_string()))
-                .unwrap_or_else(|error| panic!("{error}"));
+                .unwrap_or_else(|_| Err("worker panicked".to_string()))?;
             for batch in batches {
                 assert!(
                     batch.windows(2).all(|pair| pair[1] == pair[0] + 1),
@@ -1340,6 +1340,7 @@ mod session_event_stream_tests {
         all.dedup();
         assert_eq!(all.len(), total, "no sequence is allocated twice");
         assert_eq!(line.allocated(), u64::try_from(total).unwrap_or(u64::MAX));
+        Ok(())
     }
 
     /// Replay and live delivery never overlap or leave a gap, whenever a
@@ -1360,7 +1361,6 @@ mod session_event_stream_tests {
         );
         let publisher = {
             let journal = Arc::clone(&journal);
-            let session_id = session_id.clone();
             std::thread::spawn(move || {
                 for _ in 0..EVENTS {
                     publish_next(&journal, &session_id);

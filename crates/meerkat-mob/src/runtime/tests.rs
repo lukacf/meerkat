@@ -46286,18 +46286,36 @@ async fn test_stop_member_run_without_adapter_is_rejected() {
     );
 }
 
-/// The local member lane of the run-fenced Stop: a member session with no
-/// current run reports `NotCurrent`, never an error and never an interrupt.
+/// The local member lane of the run-fenced Stop: a registered member session
+/// with no current run reports `NotCurrent`, never an interrupt; a session the
+/// local runtime does not hold is a typed refusal, never a `NotCurrent` the
+/// local machine cannot vouch for.
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
-async fn test_stop_member_run_of_a_session_without_a_current_run_is_not_current() {
+async fn test_stop_member_run_lane_is_not_current_when_registered_and_refuses_unregistered() {
     let service = Arc::new(MockSessionService::new());
     let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
-    let provisioner = super::provisioner::SessionBackend::new(service, Some(adapter), None);
-    let member_ref = MemberRef::from_bridge_session_id(SessionId::new());
+    let provisioner =
+        super::provisioner::SessionBackend::new(service, Some(Arc::clone(&adapter)), None);
+    let session_id = SessionId::new();
     let run_id = meerkat_core::lifecycle::RunId::new();
+
+    let unregistered = MemberRef::from_bridge_session_id(session_id.clone());
+    let error = provisioner
+        .stop_member_run(&unregistered, &run_id, "stop")
+        .await
+        .expect_err("an unregistered session is refused");
+    assert!(
+        matches!(error, MobError::SessionError(SessionError::NotRunning { ref id }) if id == &session_id),
+        "{error:?}"
+    );
+
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register member session");
     let receipt = provisioner
-        .stop_member_run(&member_ref, &run_id, "stale stop")
+        .stop_member_run(&unregistered, &run_id, "stale stop")
         .await
         .expect("stale stop is a typed receipt");
     assert_eq!(
@@ -46355,8 +46373,20 @@ async fn test_handle_stop_member_run_is_not_current_for_a_stale_run_and_rejects_
         .await
         .expect_err("unknown member");
     assert!(
-        !matches!(error, MobError::Internal(_)),
-        "unknown member is a typed rejection, got {error:?}"
+        matches!(error, MobError::MemberNotFound(ref missing) if missing.as_str() == "missing-member"),
+        "unknown member is MemberNotFound, got {error:?}"
+    );
+    let hard_cancel_error = handle
+        .hard_cancel_member(
+            crate::control_policy::MobControlPrincipal::Owner,
+            AgentIdentity::from("missing-member"),
+            "hard cancel",
+        )
+        .await
+        .expect_err("unknown member hard cancel");
+    assert!(
+        matches!(hard_cancel_error, MobError::MemberNotFound(ref missing) if missing.as_str() == "missing-member"),
+        "unknown member hard cancel is MemberNotFound, got {hard_cancel_error:?}"
     );
 }
 

@@ -33952,6 +33952,13 @@ impl MobActor {
         reason: String,
         reply_tx: oneshot::Sender<Result<meerkat_contracts::WireRunStopReceipt, MobError>>,
     ) {
+        // Unknown identity is a typed `MemberNotFound` from machine truth,
+        // not a generic invalid transition from the admission preview.
+        let projection = self.machine_projection_for_identity(&agent_identity);
+        if projection.runtime_id.is_none() {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        }
         if let Err(error) = self.ensure_placed_carrier_binding_active(&agent_identity, "run stop") {
             let _ = reply_tx.send(Err(error));
             return;
@@ -33969,7 +33976,11 @@ impl MobActor {
                 return;
             }
         };
-        if !Self::force_cancel_interrupt_authorized(&prepared) {
+        // Only a member with no live runtime has no current run: that is the
+        // one case the machine answers `NotCurrent` here. A retiring member
+        // (ForceCancel's AlreadyRetiring arm) may still be draining a run, so
+        // it falls through and its runtime answers under the run fence.
+        if !Self::force_cancel_interrupt_authorized(&prepared) && !projection.live_runtime {
             let _ = reply_tx.send(Ok(meerkat_contracts::WireRunStopReceipt::NotCurrent {
                 run_id: run_id.to_string(),
                 current_run_id: None,
@@ -34049,6 +34060,14 @@ impl MobActor {
         reason: String,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     ) {
+        if self
+            .machine_projection_for_identity(&agent_identity)
+            .runtime_id
+            .is_none()
+        {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        }
         if let Err(error) =
             self.ensure_placed_carrier_binding_active(&agent_identity, "hard cancel")
         {

@@ -397,6 +397,14 @@ impl SessionAgent for FactoryAgent {
             .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
     }
 
+    fn append_system_notice_control(
+        &mut self,
+        notice: meerkat_core::types::SystemNoticeMessage,
+    ) -> Result<meerkat_core::service::AppendSystemContextStatus, meerkat_core::error::AgentError>
+    {
+        Ok(self.agent.session_mut().append_system_notice_once(notice))
+    }
+
     fn activate_instruction_control(
         &mut self,
         request: meerkat_core::InstructionActivationRequest,

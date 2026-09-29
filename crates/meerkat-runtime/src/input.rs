@@ -387,47 +387,6 @@ impl PromptInput {
         }
     }
 
-    /// Tell the model that a run interrupted by an abrupt host stop was not
-    /// re-run because tool processes it started were settled by the host's
-    /// process-custody recovery.
-    ///
-    /// The typed `ToolProcessRecovery` system notice is the turn's only
-    /// content, carried as a runtime append with no user text, exactly like
-    /// [`Self::detached_job_completed`]: an idle session runs one turn that
-    /// sees it; a running turn takes it as a durable steer. `idempotency_key`
-    /// names the interrupted run, so the notice is admitted and written once
-    /// however often delivery is retried.
-    pub fn interrupted_tool_process(
-        idempotency_key: impl Into<String>,
-        notice: meerkat_core::types::SystemNoticeMessage,
-    ) -> Self {
-        Self {
-            header: InputHeader {
-                id: meerkat_core::lifecycle::InputId::new(),
-                timestamp: chrono::Utc::now(),
-                source: InputOrigin::System,
-                durability: InputDurability::Durable,
-                visibility: InputVisibility::default(),
-                idempotency_key: Some(IdempotencyKey::new(idempotency_key)),
-                supersession_key: None,
-                correlation_id: None,
-            },
-            content: ContentInput::Text(String::new()),
-            typed_turn_appends: vec![ConversationAppend {
-                runtime_source: None,
-                role: ConversationAppendRole::SystemNotice,
-                content: CoreRenderable::SystemNotice {
-                    kind: notice.kind,
-                    body: notice.body,
-                    blocks: notice.blocks,
-                },
-                identity: None,
-            }],
-            injected_context: Vec::new(),
-            turn_metadata: Some(crate::runtime_loop::for_interrupted_tool_process()),
-        }
-    }
-
     /// Create a prompt from `ContentInput` (text or multimodal blocks).
     pub fn from_content_input(
         input: ContentInput,

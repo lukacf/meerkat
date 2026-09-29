@@ -143,19 +143,6 @@ pub(crate) fn for_detached_job_completed()
     }
 }
 
-/// Canonical turn metadata of an interrupted tool process notice (see
-/// `PromptInput::interrupted_tool_process`): `Steer` handling and nothing
-/// else, so a running turn takes it as a steer and an idle session runs one
-/// turn that sees it. Lives HERE because this file is the single sanctioned
-/// construction site for `RuntimeTurnMetadata`.
-pub(crate) fn for_interrupted_tool_process()
--> meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-        handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
-        ..Default::default()
-    }
-}
-
 /// Merge the per-input turn metadata carried by a staged batch into a single
 /// typed carrier. Scalar conflicts (two inputs disagreeing on e.g. `model`)
 /// are refused with a typed error so caller policy is not silently replaced by
@@ -4473,6 +4460,73 @@ impl RuntimeLoopAuthorityBinding {
         }
     }
 
+    /// Record the typed interrupted-run notices owed to this session's model
+    /// in the durable transcript through the executor's transcript-notice
+    /// endpoint, without a turn, then acknowledge their evidence. Called at
+    /// the pre-dequeue position (boundary held, actor idle, next input not
+    /// dequeued), so the notices are part of the next real turn's transcript.
+    /// Notices that cannot be recorded yet stay owed for a later lap.
+    async fn record_interrupted_tool_notices(
+        &self,
+        executor: &dyn meerkat_core::lifecycle::CoreExecutor,
+    ) {
+        let Some(machine) = self.machine.upgrade() else {
+            return;
+        };
+        let Some(notices) = machine
+            .take_interrupted_tool_notices(&self.session_id)
+            .await
+        else {
+            return;
+        };
+        let Some(handle) = executor.transcript_notice_handle() else {
+            tracing::warn!(
+                session_id = %self.session_id,
+                "executor cannot record interrupted-run notices; they stay owed"
+            );
+            machine
+                .restore_interrupted_tool_notices(&self.session_id, notices)
+                .await;
+            return;
+        };
+        let mut recorded: Vec<uuid::Uuid> = Vec::new();
+        for (notice, entry_ids) in notices.run_notices() {
+            if let Err(error) = handle
+                .append_system_notice_under_turn_finalization_boundary(notice)
+                .await
+            {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    %error,
+                    "failed to record an interrupted-run notice; it stays owed"
+                );
+                let remaining = crate::meerkat_machine::InterruptedToolNotices {
+                    evidence: std::sync::Arc::clone(&notices.evidence),
+                    calls: notices
+                        .calls
+                        .iter()
+                        .filter(|call| !recorded.contains(&call.entry_id))
+                        .cloned()
+                        .collect(),
+                };
+                machine
+                    .restore_interrupted_tool_notices(&self.session_id, remaining)
+                    .await;
+                return;
+            }
+            if let Err(error) = notices.evidence.acknowledge(&entry_ids).await {
+                // The notice is in the transcript; a later materialization
+                // re-records it as a duplicate (no-op) and acknowledges.
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    %error,
+                    "interrupted-run notice recorded; evidence acknowledgement will be retried"
+                );
+            }
+            recorded.extend(entry_ids);
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     async fn run_before_queue_authority_test_hook(&self) {
         if let Some(machine) = self.machine.upgrade() {
@@ -6042,6 +6096,13 @@ async fn process_queue(
         // dequeue would serve the pending input with the identity the handoff
         // was committed to replace, which is the exact off-by-one-turn bug this
         // seam exists to prevent.
+        // Record interrupted-run notices owed to the model at the same
+        // position: they become part of the transcript this next real turn
+        // sees, with no turn of their own.
+        authority_binding
+            .record_interrupted_tool_notices(&*executor)
+            .await;
+
         if let Some(pre_dequeue) = executor.pre_dequeue_handle()
             && let Err(error) = pre_dequeue
                 .realize_committed_handoffs_under_turn_finalization_boundary()

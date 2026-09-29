@@ -1364,6 +1364,13 @@ enum SessionCommand {
             Result<meerkat_core::service::AppendSystemContextStatus, AgentError>,
         >,
     },
+    #[cfg_attr(not(feature = "session-store"), allow(dead_code))]
+    AppendSystemNoticeControl {
+        notice: meerkat_core::types::SystemNoticeMessage,
+        reply_tx: oneshot::Sender<
+            Result<meerkat_core::service::AppendSystemContextStatus, AgentError>,
+        >,
+    },
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     ActivateInstructionControl {
         request: meerkat_core::InstructionActivationRequest,
@@ -2289,6 +2296,17 @@ pub trait SessionAgent: Send {
         Err(AgentError::ConfigError(
             "ordinary System-message control append is not supported by this session agent"
                 .to_string(),
+        ))
+    }
+
+    /// Append one typed system notice to the canonical Session document once
+    /// (no turn).
+    fn append_system_notice_control(
+        &mut self,
+        _notice: meerkat_core::types::SystemNoticeMessage,
+    ) -> Result<meerkat_core::service::AppendSystemContextStatus, AgentError> {
+        Err(AgentError::ConfigError(
+            "typed system-notice control append is not supported by this session agent".to_string(),
         ))
     }
 
@@ -4564,6 +4582,39 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         reply_rx
             .await
             .map_err(|_| SessionError::Agent(meerkat_core::error::AgentError::Cancelled))?
+            .map_err(SessionError::Agent)
+    }
+
+    #[cfg_attr(not(feature = "session-store"), allow(dead_code))]
+    pub(crate) async fn append_system_notice_control(
+        &self,
+        id: &SessionId,
+        notice: meerkat_core::types::SystemNoticeMessage,
+    ) -> Result<meerkat_core::service::AppendSystemContextStatus, SessionError> {
+        let command_tx = self
+            .sessions
+            .read()
+            .await
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+            .command_tx
+            .clone();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::AppendSystemNoticeControl { notice, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
             .map_err(SessionError::Agent)
     }
 
@@ -7034,6 +7085,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::AppendSystemMessageControl { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
             }
+            SessionCommand::AppendSystemNoticeControl { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(AgentError::Cancelled));
+            }
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             SessionCommand::ActivateInstructionControl { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
@@ -8385,6 +8439,23 @@ async fn session_task<A: SessionAgent>(
                 reply_tx,
             } => {
                 let _ = reply_tx.send(agent.update_mob_tool_authority_context(authority_context));
+            }
+            SessionCommand::AppendSystemNoticeControl { notice, reply_tx } => {
+                let result = match control.archive_snapshot_gate.enter_apply() {
+                    Ok(_gate) => agent.append_system_notice_control(notice),
+                    Err(error) => Err(AgentError::InternalError(error.to_string())),
+                };
+                if result.is_ok() {
+                    let snap = agent.snapshot();
+                    control.publish_summary(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                }
+                let _ = reply_tx.send(result);
             }
             SessionCommand::AppendSystemMessageControl { req, reply_tx } => {
                 let result = match control.archive_snapshot_gate.enter_apply() {

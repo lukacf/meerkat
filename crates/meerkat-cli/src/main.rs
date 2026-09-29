@@ -10136,6 +10136,24 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         }
     }
 
+    fn transcript_notice_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle>> {
+        #[cfg(feature = "session-store")]
+        {
+            self.persistent_service.as_ref().map(|service| {
+                meerkat::surface::persistent_runtime_transcript_notice_handle(
+                    Arc::clone(service),
+                    self.session_id.clone(),
+                )
+            })
+        }
+        #[cfg(not(feature = "session-store"))]
+        {
+            None
+        }
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -14071,6 +14089,19 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
+    async fn append_system_notice_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        notice: meerkat_core::types::SystemNoticeMessage,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        meerkat_mob::MobSessionService::append_system_notice_under_runtime_turn_boundary(
+            self.inner.as_ref(),
+            session_id,
+            notice,
+        )
+        .await
+    }
+
     /// The wrapped persistent service owns the durable session bodies, so it
     /// is the source runtime for forked council participants.
     fn forked_participant_source_runtime(

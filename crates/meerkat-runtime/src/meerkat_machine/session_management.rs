@@ -458,6 +458,12 @@ impl meerkat_core::lifecycle::CoreExecutor for MachineManagedPostStopExecutor {
         self.inner.pre_dequeue_handle()
     }
 
+    fn transcript_notice_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle>> {
+        self.inner.transcript_notice_handle()
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -2121,6 +2127,7 @@ impl MeerkatMachine {
             runtime_stop_cleanup_coordinator: None,
             reload_required_discard_coordinator: None,
             pending_revival_lifecycle_persist: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            interrupted_tool_notices: Arc::default(),
             pending_unregister_finalization: None,
             unregister_teardown_observations: Arc::new(
                 UnregisterTeardownMechanicalObservations::new(),
@@ -2305,6 +2312,7 @@ impl MeerkatMachine {
             runtime_stop_cleanup_coordinator: None,
             reload_required_discard_coordinator: None,
             pending_revival_lifecycle_persist: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            interrupted_tool_notices: Arc::default(),
             pending_unregister_finalization: None,
             unregister_teardown_observations: Arc::new(
                 UnregisterTeardownMechanicalObservations::new(),
@@ -2524,6 +2532,7 @@ impl MeerkatMachine {
             runtime_stop_cleanup_coordinator: None,
             reload_required_discard_coordinator: None,
             pending_revival_lifecycle_persist: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            interrupted_tool_notices: Arc::default(),
             pending_unregister_finalization: None,
             unregister_teardown_observations: recovered_teardown_observations,
             publication_handle: None,
@@ -4300,6 +4309,7 @@ impl MeerkatMachine {
                         pending_revival_lifecycle_persist: Arc::new(
                             std::sync::atomic::AtomicBool::new(false),
                         ),
+                        interrupted_tool_notices: Arc::default(),
                         pending_unregister_finalization: None,
                         unregister_teardown_observations: recovered_teardown_observations,
                         publication_handle: None,

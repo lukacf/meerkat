@@ -1044,6 +1044,21 @@ pub(crate) fn durable_fork_unsupported() -> SessionError {
 pub trait MobSessionService:
     SessionServiceCommsExt + SessionServiceControlExt + SessionServiceHistoryExt
 {
+    /// Record a typed system notice in the live session's durable transcript
+    /// without a turn (no model call). The caller holds the runtime
+    /// turn-finalization boundary and the actor is idle. Services without
+    /// durable sessions keep the default, and the runtime keeps the notice
+    /// owed for a later materialization.
+    async fn append_system_notice_under_runtime_turn_boundary(
+        &self,
+        _session_id: &SessionId,
+        _notice: meerkat_core::types::SystemNoticeMessage,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "typed system-notice append is not supported by this session service".to_string(),
+        ))
+    }
+
     /// Commit one provider-final client-delegation transcript through the
     /// canonical session actor, SessionDocument authority, and runtime-backed
     /// persistent projection.
@@ -2533,6 +2548,18 @@ impl<B> MobSessionService for meerkat_session::PersistentSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    async fn append_system_notice_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        notice: meerkat_core::types::SystemNoticeMessage,
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::append_system_notice_under_runtime_turn_boundary(
+            self, session_id, notice,
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn publish_boundary_appends_discarded_for_actor(
         &self,
         actor_witness: &meerkat_session::LiveSessionActorWitness,

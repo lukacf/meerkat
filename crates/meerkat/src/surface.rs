@@ -124,6 +124,7 @@ pub use runtime_backed::{
     persistent_runtime_post_stop_cleanup_handle_for_actor_slot,
     persistent_runtime_pre_dequeue_handle, persistent_runtime_publication_handle,
     persistent_runtime_publication_handle_for_actor_slot,
+    persistent_runtime_transcript_notice_handle,
     persistent_runtime_turn_finalization_boundary_handle,
     run_runtime_backed_initial_turn_with_machine, split_runtime_backed_eager_create_request,
 };

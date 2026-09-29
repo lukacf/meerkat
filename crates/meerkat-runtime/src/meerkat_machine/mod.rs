@@ -1545,6 +1545,10 @@ struct RuntimeSessionEntry {
     /// has not yet committed its replacement attachment. The next exact
     /// attachment commit owns the matching durable lifecycle publication.
     pending_revival_lifecycle_persist: Arc<std::sync::atomic::AtomicBool>,
+    /// Typed interrupted-run notices owed to the model. The runtime loop
+    /// records them in the transcript at its next pre-dequeue position (no
+    /// turn of their own), then acknowledges their evidence.
+    interrupted_tool_notices: Arc<std::sync::Mutex<Option<InterruptedToolNotices>>>,
     /// Retry witness installed before the final generated UnregisterSession
     /// transition. If an owned saga panics after that transition changes the
     /// live projection to Queuing/session_id=None, the next saga resumes the
@@ -2481,82 +2485,82 @@ pub struct PendingRuntimeExecutorAttachment {
 
 /// Interrupted-run evidence whose inputs are settled and whose model notice
 /// is still owed.
-struct InterruptedToolNotices {
-    evidence: Arc<dyn meerkat_core::tool_process::InterruptedToolEvidence>,
-    calls: Vec<meerkat_core::tool_process::InterruptedToolCall>,
+pub(crate) struct InterruptedToolNotices {
+    pub(crate) evidence: Arc<dyn meerkat_core::tool_process::InterruptedToolEvidence>,
+    pub(crate) calls: Vec<meerkat_core::tool_process::InterruptedToolCall>,
 }
 
-/// Deliver the owed interrupted-run notices, one idempotent input per run,
-/// and acknowledge each run's evidence once its notice is admitted. Runs
-/// detached after the attachment serves; a failure leaves the evidence for
-/// the next materialization to deliver again.
-fn spawn_interrupted_tool_notice_delivery(
-    machine: Arc<MeerkatMachine>,
-    session_id: SessionId,
-    notices: InterruptedToolNotices,
-) {
-    crate::tokio::spawn(async move {
-        let InterruptedToolNotices { evidence, calls } = notices;
+impl MeerkatMachine {
+    /// Take the interrupted-run notices owed to `session_id`'s model, if any.
+    pub(crate) async fn take_interrupted_tool_notices(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<InterruptedToolNotices> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id)?;
+        entry
+            .interrupted_tool_notices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// Put back interrupted-run notices that could not be recorded yet.
+    pub(crate) async fn restore_interrupted_tool_notices(
+        &self,
+        session_id: &SessionId,
+        notices: InterruptedToolNotices,
+    ) {
+        let sessions = self.sessions.read().await;
+        if let Some(entry) = sessions.get(session_id) {
+            let mut slot = entry
+                .interrupted_tool_notices
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot.is_none() {
+                *slot = Some(notices);
+            }
+        }
+    }
+}
+
+impl InterruptedToolNotices {
+    /// Group the owed notices by interrupted run: one typed
+    /// `ToolProcessRecovery` notice per run, with the evidence entries it
+    /// settles.
+    pub(crate) fn run_notices(
+        &self,
+    ) -> Vec<(meerkat_core::types::SystemNoticeMessage, Vec<uuid::Uuid>)> {
         let mut runs: Vec<RunId> = Vec::new();
-        for call in &calls {
+        for call in &self.calls {
             if !runs.contains(&call.run_id) {
                 runs.push(call.run_id.clone());
             }
         }
-        for run_id in runs {
-            let run_calls: Vec<&meerkat_core::tool_process::InterruptedToolCall> =
-                calls.iter().filter(|call| call.run_id == run_id).collect();
-            let blocks = run_calls
-                .iter()
-                .map(
-                    |call| meerkat_core::types::SystemNoticeBlock::ToolProcessInterrupted {
-                        tool_call_id: call.tool_call_id.clone(),
-                        spawner: call.spawner.clone(),
-                        cessation: call.cessation,
-                    },
+        runs.into_iter()
+            .map(|run_id| {
+                let run_calls: Vec<&meerkat_core::tool_process::InterruptedToolCall> = self
+                    .calls
+                    .iter()
+                    .filter(|call| call.run_id == run_id)
+                    .collect();
+                let blocks = run_calls
+                    .iter()
+                    .map(
+                        |call| meerkat_core::types::SystemNoticeBlock::ToolProcessInterrupted {
+                            tool_call_id: call.tool_call_id.clone(),
+                            spawner: call.spawner.clone(),
+                            cessation: call.cessation,
+                        },
+                    )
+                    .collect();
+                (
+                    meerkat_core::types::SystemNoticeMessage::tool_process_interrupted(blocks),
+                    run_calls.iter().map(|call| call.entry_id).collect(),
                 )
-                .collect();
-            let notice = meerkat_core::types::SystemNoticeMessage::tool_process_interrupted(blocks);
-            let input =
-                crate::input::Input::Prompt(crate::input::PromptInput::interrupted_tool_process(
-                    format!("tool-process-interrupted:{run_id}"),
-                    notice,
-                ));
-            match machine
-                .accept_input_with_completion(&session_id, input)
-                .await
-            {
-                Ok((
-                    crate::AcceptOutcome::Accepted { .. }
-                    | crate::AcceptOutcome::Deduplicated { .. },
-                    _,
-                )) => {
-                    let entry_ids: Vec<uuid::Uuid> =
-                        run_calls.iter().map(|call| call.entry_id).collect();
-                    if let Err(error) = evidence.acknowledge(&entry_ids).await {
-                        tracing::warn!(
-                            %session_id,
-                            %run_id,
-                            %error,
-                            "interrupted-run notice delivered; evidence acknowledgement will be retried"
-                        );
-                    }
-                }
-                Ok((outcome, _)) => tracing::warn!(
-                    %session_id,
-                    %run_id,
-                    ?outcome,
-                    "interrupted-run notice was not admitted; it will be delivered at the next materialization"
-                ),
-                Err(error) => tracing::warn!(
-                    %session_id,
-                    %run_id,
-                    %error,
-                    "interrupted-run notice delivery failed; it will be retried at the next materialization"
-                ),
-            }
-        }
-    });
+            })
+            .collect()
+    }
 }
 
 /// Exact post-startup publication fence retained by a surface until its own
@@ -3109,11 +3113,16 @@ impl PendingRuntimeExecutorAttachment {
             .try_commit_publication(on_committed, retain_mutation_guard, replaces_predecessor)
             .await?;
         if let Some(notices) = self.interrupted_tool_notices.take() {
-            spawn_interrupted_tool_notice_delivery(
-                Arc::clone(&self.machine),
-                witness.session_id().clone(),
-                notices,
-            );
+            // Owed to the model, recorded at the loop's next pre-dequeue
+            // position so the notice joins the next real turn's transcript
+            // without a turn of its own.
+            let sessions = self.machine.sessions.read().await;
+            if let Some(entry) = sessions.get(witness.session_id()) {
+                *entry
+                    .interrupted_tool_notices
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(notices);
+            }
         }
         Ok(witness)
     }

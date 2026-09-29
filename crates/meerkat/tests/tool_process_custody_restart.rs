@@ -10,8 +10,9 @@
 //! - settle the interrupted run's recovered input as
 //!   `ToolProcessInterrupted` instead of replaying it (the scripted model
 //!   would call the tool again on a replay, repeating the effect);
-//! - tell the model through a typed `ToolProcessInterrupted` notice that
-//!   lands in the transcript.
+//! - record a typed `ToolProcessInterrupted` notice in the transcript
+//!   without a model call of its own: the model sees it on the next real
+//!   turn.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -48,6 +49,8 @@ mod tests {
     struct ScriptedShellClient {
         command: String,
         tool_calls: AtomicUsize,
+        requests: AtomicUsize,
+        requests_seeing_notice: AtomicUsize,
     }
 
     impl ScriptedShellClient {
@@ -55,6 +58,8 @@ mod tests {
             Self {
                 command,
                 tool_calls: AtomicUsize::new(0),
+                requests: AtomicUsize::new(0),
+                requests_seeing_notice: AtomicUsize::new(0),
             }
         }
     }
@@ -66,13 +71,22 @@ mod tests {
         }
 
         fn stream<'a>(&'a self, request: &'a LlmRequest) -> meerkat_llm_core::LlmStream<'a> {
-            let answered = request.messages.iter().any(|message| match message {
-                Message::ToolResults { .. } => true,
-                Message::SystemNotice(notice) => {
-                    notice.kind == SystemNoticeKind::ToolProcessRecovery
-                }
-                _ => false,
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            let sees_notice = request.messages.iter().any(|message| {
+                matches!(
+                    message,
+                    Message::SystemNotice(notice)
+                        if notice.kind == SystemNoticeKind::ToolProcessRecovery
+                )
             });
+            if sees_notice {
+                self.requests_seeing_notice.fetch_add(1, Ordering::SeqCst);
+            }
+            let answered = sees_notice
+                || request
+                    .messages
+                    .iter()
+                    .any(|message| matches!(message, Message::ToolResults { .. }));
             let mut events = Vec::new();
             let stop_reason = if answered {
                 events.push(LlmEvent::TextDelta {
@@ -287,23 +301,44 @@ mod tests {
             .expect("session survives the gateway");
         materialize(&service, &adapter, resume).await;
 
-        // The typed notice reaches the transcript through its own turn.
-        let blocks = tokio::time::timeout(Duration::from_secs(60), async {
-            loop {
-                let session = service
-                    .load_authoritative_session(&session_id)
-                    .await
-                    .expect("load")
-                    .expect("session");
-                let blocks = interrupted_notice_blocks(&session);
-                if !blocks.is_empty() {
-                    break blocks;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
+        // Settling the interrupted run costs no model call, and the notice
+        // is not a turn of its own.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            client.requests.load(Ordering::SeqCst),
+            0,
+            "recovery must not start a model turn"
+        );
+
+        // The next real turn: its one model call already sees the typed
+        // notice, recorded ahead of the new prompt.
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(
+                &session_id,
+                Input::Prompt(PromptInput::new("what happened?", None)),
+            )
+            .await
+            .expect("accept prompt");
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            handle.expect("completion handle").wait(),
+        )
         .await
-        .expect("the interrupted-run notice must reach the transcript");
+        .expect("turn completes")
+        .expect("completion resolves");
+        assert_eq!(client.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            client.requests_seeing_notice.load(Ordering::SeqCst),
+            1,
+            "the next real turn sees the interrupted-run notice"
+        );
+
+        let session = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load")
+            .expect("session");
+        let blocks = interrupted_notice_blocks(&session);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             SystemNoticeBlock::ToolProcessInterrupted {
@@ -319,6 +354,26 @@ mod tests {
             }
             other => panic!("unexpected notice block {other:?}"),
         }
+        let notice_position = session
+            .messages()
+            .iter()
+            .position(|message| {
+                matches!(message, Message::SystemNotice(notice)
+                    if notice.kind == SystemNoticeKind::ToolProcessRecovery)
+            })
+            .expect("notice in transcript");
+        let prompt_position = session
+            .messages()
+            .iter()
+            .position(|message| {
+                matches!(message, Message::User(user)
+                    if user.text_content().contains("what happened?"))
+            })
+            .expect("prompt in transcript");
+        assert!(
+            notice_position < prompt_position,
+            "the notice precedes the next prompt"
+        );
 
         // No replay: the interrupted input never reached the model again.
         assert_eq!(

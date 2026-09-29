@@ -5637,6 +5637,29 @@ impl Session {
         Ok(crate::service::AppendSystemContextStatus::Applied)
     }
 
+    /// Append a typed system notice once.
+    ///
+    /// A notice whose kind and typed blocks equal a notice already in the
+    /// transcript is a duplicate (the blocks carry the notice's typed
+    /// identity), so retried delivery converges. No turn is started.
+    pub fn append_system_notice_once(
+        &mut self,
+        notice: crate::types::SystemNoticeMessage,
+    ) -> crate::service::AppendSystemContextStatus {
+        let duplicate = self.messages().iter().any(|message| {
+            matches!(
+                message,
+                Message::SystemNotice(existing)
+                    if existing.kind == notice.kind && existing.blocks == notice.blocks
+            )
+        });
+        if duplicate {
+            return crate::service::AppendSystemContextStatus::Duplicate;
+        }
+        self.push(Message::SystemNotice(notice));
+        crate::service::AppendSystemContextStatus::Applied
+    }
+
     /// Clone the active ordered transcript for a model request.
     ///
     /// Ordinary System messages remain ordered durable rows. For an explicitly

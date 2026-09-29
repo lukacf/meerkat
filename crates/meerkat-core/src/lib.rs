@@ -287,11 +287,11 @@ pub use lifecycle::{
     CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor, CoreExecutorBoundaryHandle,
     CoreExecutorError, CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle,
     CoreExecutorPreDequeueHandle, CoreExecutorPublicationHandle, CoreExecutorTeardownReason,
-    CoreExecutorTurnFinalizationBoundaryHandle, CoreExecutorTurnFinalizationGuard,
-    CoreInteractionTerminalPublicationReceipt, CorePreDequeueOutcome, CoreRenderable,
-    DurableTurnBoundaryAppends, DurableTurnBoundaryAppendsError, InputId, RunApplyBoundary,
-    RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput,
-    TurnBoundaryDelivery,
+    CoreExecutorTranscriptNoticeHandle, CoreExecutorTurnFinalizationBoundaryHandle,
+    CoreExecutorTurnFinalizationGuard, CoreInteractionTerminalPublicationReceipt,
+    CorePreDequeueOutcome, CoreRenderable, DurableTurnBoundaryAppends,
+    DurableTurnBoundaryAppendsError, InputId, RunApplyBoundary, RunBoundaryReceipt,
+    RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput, TurnBoundaryDelivery,
 };
 pub use live_execution::{
     AmbiguousDeliveryNoRetryEvidence, CanonicalContextRevision, CanonicalTranscriptPrefixDigest,

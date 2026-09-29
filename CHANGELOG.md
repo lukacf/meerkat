@@ -161,9 +161,11 @@ them.
   input whose run had a tool process that durable process custody proved had
   started (killed by recovery, or already exited). The input is abandoned
   with the typed `meerkat_runtime::InputAbandonReason::ToolProcessInterrupted`
-  before the attachment serves, and the model receives one
-  `ToolProcessRecovery` notice turn per interrupted run (idempotent per run).
-  Inputs of runs without such evidence still replay as before.
+  before the attachment serves. One typed `ToolProcessRecovery` system notice
+  per interrupted run is recorded in the durable transcript without a model
+  call, at the runtime loop's pre-dequeue position, so it is part of the
+  transcript the next real turn sees. Inputs of runs without such evidence
+  still replay as before.
 - Behaviour-only (not measured by the gate): on Linux and macOS, every
   `AgentFactory` agent build under a realm `runtime_root` now settles the
   session's earlier-incarnation tool processes (shell calls, background
@@ -476,9 +478,17 @@ them.
   `InterruptedToolEvidenceSlot`), and
   `SessionRuntimeBindings::interrupted_tool_evidence`, the hand-off from agent
   construction to runtime materialization.
-- `meerkat_runtime::PendingRuntimeExecutorAttachment::abandon_interrupted_run_inputs`,
-  `meerkat_runtime::PromptInput::interrupted_tool_process`, and
-  `meerkat_core::SystemNoticeMessage::tool_process_interrupted`.
+- `meerkat_runtime::PendingRuntimeExecutorAttachment::abandon_interrupted_run_inputs`
+  and `meerkat_core::SystemNoticeMessage::tool_process_interrupted`.
+- Typed system notices recorded without a turn:
+  `meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle` with
+  `CoreExecutor::transcript_notice_handle` (default `None`),
+  `meerkat_core::Session::append_system_notice_once`,
+  `PersistentSessionService::append_system_notice_under_runtime_turn_boundary`,
+  `meerkat::surface::persistent_runtime_transcript_notice_handle` (returned by
+  the facade, REST, RPC, CLI and MCP executors), and the defaulted
+  `meerkat_mob::MobSessionService::append_system_notice_under_runtime_turn_boundary`
+  (used by mob member executors).
 - `meerkat_tools::builtin::shell::ProcessCustody` and its vocabulary
   (`ProcessCustodyScope`, `ProcessCustodyRecoveryReport`,
   `RecoveredToolProcess`, `ToolProcessCessation`, `ProcessCustodyError`,
@@ -829,8 +839,10 @@ them.
   Broken placed member publishes nothing.
 - A plain (non-mob) session whose gateway was SIGKILLed mid-tool no longer
   re-runs the interrupted input on restart, so a tool effect that already
-  happened is not repeated unknowingly; the model is told with a typed
-  `ToolProcessInterrupted` notice instead. Background shell jobs, monitors and
+  happened is not repeated unknowingly; a typed `ToolProcessInterrupted`
+  notice is recorded in the transcript instead, without an extra model call,
+  and the model sees it on the next real turn. Monitors submitted in a run
+  are covered too. Background shell jobs, monitors and
   command hooks of a dead host incarnation are killed (or proven gone) before
   new work for the session, and a realm sweep settles sessions that are never
   resumed (#1265).

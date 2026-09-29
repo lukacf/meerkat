@@ -1522,6 +1522,45 @@ pub fn persistent_runtime_post_stop_cleanup_handle_for_actor_slot<
 /// calls.
 pub use meerkat_runtime::persistent_runtime_pre_dequeue_handle;
 
+/// Build the endpoint that records typed system notices in one session's
+/// durable transcript without a turn.
+///
+/// The runtime calls it at the pre-dequeue position (turn-finalization
+/// boundary held, actor idle), for example to record that a run interrupted
+/// by an abrupt host stop was settled instead of replayed, so the model sees
+/// it on the next real turn without an extra model call. Every runtime-backed
+/// surface returns this one implementation.
+pub fn persistent_runtime_transcript_notice_handle<B: SessionAgentBuilder + 'static>(
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+) -> Arc<dyn meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle> {
+    Arc::new(PersistentRuntimeTranscriptNoticeHandle {
+        service,
+        session_id,
+    })
+}
+
+struct PersistentRuntimeTranscriptNoticeHandle<B: SessionAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl<B: SessionAgentBuilder + 'static> meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle
+    for PersistentRuntimeTranscriptNoticeHandle<B>
+{
+    async fn append_system_notice_under_turn_finalization_boundary(
+        &self,
+        notice: meerkat_core::types::SystemNoticeMessage,
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .append_system_notice_under_runtime_turn_boundary(&self.session_id, notice)
+            .await
+            .map(|_| ())
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+}
+
 /// Build the stable outer mutation boundary shared by runtime-loop, direct,
 /// and non-turn session writers for one SessionId.
 pub fn persistent_runtime_turn_finalization_boundary_handle<B: SessionAgentBuilder + 'static>(
@@ -1920,6 +1959,15 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>> {
         Some(persistent_runtime_pre_dequeue_handle(
             Arc::clone(&self.adapter),
+            self.session_id.clone(),
+        ))
+    }
+
+    fn transcript_notice_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle>> {
+        Some(persistent_runtime_transcript_notice_handle(
+            Arc::clone(&self.service),
             self.session_id.clone(),
         ))
     }

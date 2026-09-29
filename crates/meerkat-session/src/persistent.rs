@@ -7070,6 +7070,38 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .map(|(message_count, _revision)| message_count)
     }
 
+    /// Record a typed system notice in the live session's durable transcript
+    /// without a turn (no model call), once.
+    ///
+    /// The caller holds the runtime turn-finalization boundary and the actor
+    /// is idle (the runtime's pre-dequeue position), so the notice is part of
+    /// the transcript the next real turn sees. A notice already present is a
+    /// duplicate and is not persisted again.
+    pub async fn append_system_notice_under_runtime_turn_boundary(
+        &self,
+        id: &SessionId,
+        notice: meerkat_core::types::SystemNoticeMessage,
+    ) -> Result<meerkat_core::service::AppendSystemContextStatus, SessionError> {
+        let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
+        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        if let Some(session) = self.load_authoritative_session_base(id).await? {
+            self.reject_if_archived_session(id, &session)
+                .await
+                .map_err(crate::control_error_into_session_error)?;
+        }
+        let status = self.inner.append_system_notice_control(id, notice).await?;
+        if status == meerkat_core::service::AppendSystemContextStatus::Duplicate {
+            return Ok(status);
+        }
+        if let Err(error) = self.persist_full_session(id).await {
+            // The live actor already holds the notice; drop it so the next
+            // materialization reloads committed truth and delivery retries.
+            let _ = self.discard_live_session_unfenced(id).await;
+            return Err(error);
+        }
+        Ok(status)
+    }
+
     pub async fn apply_runtime_session_tool_visibility_state_under_runtime_turn_boundary(
         &self,
         id: &SessionId,

@@ -637,6 +637,7 @@ impl AnthropicClient {
         let mut leading_system_prefix = true;
         let projected_messages =
             project_anthropic_system_message_order(&request.model, &request.messages)?;
+        let turn_anchor = Self::anthropic_turn_anchor_index(&request.messages, &projected_messages);
 
         for msg in projected_messages {
             match msg {
@@ -891,6 +892,21 @@ impl AnthropicClient {
 
         if matches!(cache_control, AnthropicCacheControlPolicy::Automatic) {
             body["cache_control"] = Self::anthropic_cache_control_value(cache_ttl);
+            // The request-wide breakpoint writes only at the end of this
+            // request. Keep one explicit breakpoint at the end of the
+            // previous run's output so the run's first request writes an
+            // entry there and every later request refreshes it: a `fork_off`
+            // child cut at that boundary reads it even when the run started
+            // on a cold cache.
+            if let Some(anchor) = turn_anchor
+                && let Some(message) = body
+                    .get_mut("messages")
+                    .and_then(Value::as_array_mut)
+                    .and_then(|messages| messages.get_mut(anchor))
+            {
+                let _ =
+                    Self::author_anthropic_anchor_breakpoint(&mut message["content"], cache_ttl);
+            }
         }
 
         if matches!(
@@ -898,9 +914,19 @@ impl AnthropicClient {
             AnthropicCacheControlPolicy::SystemAndConversation
         ) && let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut)
         {
-            for message in messages.iter_mut().rev().take(3) {
+            // Anthropic accepts four breakpoints: the system prefix, the
+            // previous run's output (see the automatic arm), and the most
+            // recent conversation boundaries.
+            let recent_start = messages.len().saturating_sub(3);
+            let anchor = turn_anchor.filter(|anchor| *anchor < recent_start);
+            let recent = if anchor.is_some() { 2 } else { 3 };
+            for message in messages.iter_mut().rev().take(recent) {
                 let _ =
                     Self::author_anthropic_content_breakpoint(&mut message["content"], cache_ttl);
+            }
+            if let Some(message) = anchor.and_then(|anchor| messages.get_mut(anchor)) {
+                let _ =
+                    Self::author_anthropic_anchor_breakpoint(&mut message["content"], cache_ttl);
             }
         }
 
@@ -1099,6 +1125,42 @@ impl AnthropicClient {
             return true;
         }
         false
+    }
+
+    /// Lowered `messages` index of the previous run's last output message
+    /// ([`meerkat_core::prior_run_cache_anchor`]) in the order this client
+    /// renders the projected transcript, whose leading System rows lower to
+    /// the top-level `system` field.
+    fn anthropic_turn_anchor_index(messages: &[Message], projected: &[&Message]) -> Option<usize> {
+        let anchor = messages.get(meerkat_core::prior_run_cache_anchor(messages)?)?;
+        let leading_system = projected
+            .iter()
+            .take_while(|message| matches!(message, Message::System(_)))
+            .count();
+        projected
+            .iter()
+            .position(|message| std::ptr::eq(*message, anchor))?
+            .checked_sub(leading_system)
+    }
+
+    /// Mark the last block of an assistant message that can carry a
+    /// breakpoint. Thinking blocks cannot, so they are skipped.
+    fn author_anthropic_anchor_breakpoint(
+        content: &mut Value,
+        cache_ttl: AnthropicCacheTtl,
+    ) -> bool {
+        let Some(block) = content.as_array_mut().and_then(|blocks| {
+            blocks.iter_mut().rev().find(|block| {
+                !matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("thinking" | "redacted_thinking")
+                )
+            })
+        }) else {
+            return false;
+        };
+        block["cache_control"] = Self::anthropic_cache_control_value(cache_ttl);
+        true
     }
 
     fn contains_cache_control(value: &Value) -> bool {

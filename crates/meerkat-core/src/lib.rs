@@ -74,6 +74,7 @@ pub use generated::session_document;
 pub mod pending_continuation;
 pub mod placement;
 pub mod prompt;
+pub mod prompt_cache_anchor;
 pub mod provider;
 pub mod provider_evidence;
 pub mod provider_matrix;
@@ -343,6 +344,7 @@ pub use persistence_contract::{
 };
 pub use placement::{ExecutionPlacement, ExecutionPlacementIdentity, PlacementError};
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
+pub use prompt_cache_anchor::prior_run_cache_anchor;
 pub use provider::Provider;
 pub use provider_evidence::{
     AuthoredCacheBreakpoint, AuthoredCacheBreakpointRetention, CacheBreakpointBoundary,

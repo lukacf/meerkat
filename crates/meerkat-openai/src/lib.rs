@@ -41,6 +41,8 @@ mod structured_output_request_tests;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod text_adapter;
 pub mod tool_schema;
+#[cfg(test)]
+mod turn_cache_anchor_tests;
 pub mod web_search;
 
 pub use client::{AzureOpenAiWireConfig, OpenAiClient};

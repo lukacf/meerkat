@@ -526,7 +526,7 @@ fn system_and_conversation_skips_a_trailing_thinking_block_within_four_slots() {
         Message::BlockAssistant(message) => message.identity.run_id.clone().unwrap(),
         other => panic!("expected the fork_off call, got {other:?}"),
     };
-    let mut messages = fork.forker_round.clone();
+    let mut messages = fork.forker_round;
     // A recent tool round whose assistant message ends in a thinking block.
     messages.push(stamped(
         &forker_run,

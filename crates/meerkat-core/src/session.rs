@@ -8594,7 +8594,10 @@ mod tests {
                     tool_call_id: Some("call-1".to_owned()),
                     spawner: ToolProcessSpawner::ShellCall,
                     cessation: ToolProcessCessation::KilledByRecovery { members: 1 },
-                    disposition: InterruptedToolRunDisposition::InputsSettled { inputs: 1 },
+                    disposition: InterruptedToolRunDisposition::InputsSettled {
+                        inputs: 1,
+                        unrestored: Vec::new(),
+                    },
                 },
             ]),
         };

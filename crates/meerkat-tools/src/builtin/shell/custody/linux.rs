@@ -366,6 +366,28 @@ fn running_from_proc(pid: i32) -> io::Result<bool> {
 /// Whether exactly this process is still running. A pidfd becomes readable
 /// only once the whole thread group has exited, so a zombie main thread with
 /// live threads still counts as running.
+/// Whether `flock(2)` on files under `path` is a reliable liveness proof
+/// across processes of this kernel: a local filesystem, not a network or
+/// userspace one (NFS, SMB/CIFS, 9P, AFS, Ceph, FUSE), where lock semantics
+/// can be emulated, advisory per client, or lost across a reconnect.
+pub(super) fn lock_filesystem_is_local(path: &std::path::Path) -> io::Result<bool> {
+    const NFS: i64 = 0x6969;
+    const SMB: i64 = 0x517B;
+    const CIFS: i64 = 0xFF53_4D42;
+    const SMB2: i64 = 0xFE53_4D42;
+    const V9FS: i64 = 0x0102_1997;
+    const AFS: i64 = 0x5346_414F;
+    const CEPH: i64 = 0x00C3_6400;
+    const FUSE: i64 = 0x6573_5546;
+    // `fs_type_t` is a signed or unsigned long depending on the libc target.
+    #[allow(clippy::unnecessary_cast)]
+    let kind = nix::sys::statfs::statfs(path)
+        .map_err(io::Error::from)?
+        .filesystem_type()
+        .0 as i64;
+    Ok(![NFS, SMB, CIFS, SMB2, V9FS, AFS, CEPH, FUSE].contains(&kind))
+}
+
 pub(super) fn is_running(identity: &ProcessIdentity) -> io::Result<bool> {
     match pin(identity)? {
         Pinned::NotRunning => Ok(false),

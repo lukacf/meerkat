@@ -345,9 +345,12 @@ export type InteractionId = string;
 
 export type InteractionStreamAbandonReason = "send_failed" | "admission_rejected" | "response_rejected" | "terminal_delivery_failed";
 
+export type InterruptedInputKind = "prompt" | "peer" | "flow_step" | "external_event" | "continuation" | "operation" | "unknown";
+
 export type InterruptedToolRunDisposition = {
   inputs: number;
   kind: "inputs_settled";
+  unrestored?: InterruptedInputKind[];
 } | {
   kind: "run_completed";
 } | {
@@ -848,6 +851,8 @@ export type ToolProcessCessation = {
   kind: "prior_environment_ended";
 } | {
   kind: "exited_before_commit";
+} | {
+  kind: "foreign_incarnation_ended";
 } | {
   kind: "unknown";
 };

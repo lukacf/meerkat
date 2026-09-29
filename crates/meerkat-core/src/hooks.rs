@@ -818,7 +818,8 @@ pub struct HookInvocation {
     /// agent fills it in from its bound run; a host that keeps durable
     /// process custody records it with the hook's process, so a hook
     /// interrupted by an abrupt host stop settles its run instead of letting
-    /// the run replay.
+    /// the run replay. Post-commit observations carry none: their run has
+    /// already committed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<crate::RunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

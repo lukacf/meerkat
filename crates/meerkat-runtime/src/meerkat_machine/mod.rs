@@ -2497,15 +2497,12 @@ pub(crate) struct InterruptedToolNotices {
 pub(crate) struct OwedInterruptedToolNotice {
     pub(crate) call: meerkat_core::tool_process::InterruptedToolCall,
     pub(crate) disposition: meerkat_core::tool_process::InterruptedToolRunDisposition,
-    pub(crate) requests: Vec<meerkat_core::types::ContentInput>,
+    pub(crate) requests: Vec<meerkat_core::tool_process::InterruptedRequest>,
 }
 
-/// A recovered, non-terminal input of an evidenced run.
-struct InterruptedRunInput {
-    run_id: RunId,
-    /// The user request content, for prompt inputs.
-    request: Option<meerkat_core::types::ContentInput>,
-}
+/// Upper bound on the user request content one interrupted run copies into
+/// its evidence. Requests past it are not restored; the notice names them.
+const INTERRUPTED_REQUEST_CONTENT_BOUND: usize = 64 * 1024;
 
 impl MeerkatMachine {
     /// Take the interrupted-run notices owed to `session_id`'s model, if any.
@@ -2569,7 +2566,7 @@ impl InterruptedToolNotices {
                             tool_call_id: owed.call.tool_call_id.clone(),
                             spawner: owed.call.spawner.clone(),
                             cessation: owed.call.cessation,
-                            disposition: owed.disposition,
+                            disposition: owed.disposition.clone(),
                         },
                     )
                     .collect();
@@ -2580,14 +2577,11 @@ impl InterruptedToolNotices {
                         owed.requests
                             .iter()
                             .map(|request| meerkat_core::types::UserMessage {
-                                content: request.clone().into_blocks(),
-                                render_metadata: None,
-                                identity: meerkat_core::types::TranscriptMessageIdentity {
-                                    run_id: Some(run_id.clone()),
-                                    ..Default::default()
-                                },
+                                content: request.content.clone().into_blocks(),
+                                render_metadata: request.render_metadata.clone(),
+                                identity: request.identity.clone().with_run_id(run_id.clone()),
                                 transcript_role: meerkat_core::types::TranscriptUserRole::default(),
-                                created_at: meerkat_core::types::message_timestamp_now(),
+                                created_at: request.created_at,
                             })
                             .collect()
                     })
@@ -2809,45 +2803,94 @@ impl PendingRuntimeExecutorAttachment {
         Ok((entry.driver.clone(), entry.completions.clone()))
     }
 
-    /// Recovered non-terminal inputs whose last run is one of `runs`, in
-    /// admission order, with the user request content of prompt inputs that
-    /// never reached the committed transcript (no recorded boundary).
+    /// Recovered queued inputs whose last run is one of `runs`, per run in
+    /// admission order, as the typed inputs the settlement records. User
+    /// requests that never reached the committed transcript (no recorded
+    /// boundary: a durably applied input records the boundary that owns it)
+    /// are copied with their original transcript facts, up to
+    /// [`INTERRUPTED_REQUEST_CONTENT_BOUND`] bytes of content per run.
     async fn interrupted_run_inputs(
         &self,
         runs: &[RunId],
-    ) -> Result<Vec<InterruptedRunInput>, RuntimeDriverError> {
+    ) -> Result<Vec<(RunId, meerkat_core::tool_process::InterruptedRunInput)>, RuntimeDriverError>
+    {
+        use meerkat_core::tool_process::{
+            InterruptedInputKind, InterruptedRequest, InterruptedRunInput,
+        };
+
         if runs.is_empty() {
             return Ok(Vec::new());
         }
         let (driver, _) = self.exact_pending_driver("interrupted-run lookup").await?;
         let driver = driver.lock().await;
-        let mut inputs: Vec<(Option<u64>, InterruptedRunInput)> = driver
-            .as_driver()
-            .active_input_ids()
+        let mut queued: Vec<(Option<u64>, RunId, crate::input_state::StoredInputState)> =
+            driver
+                .as_driver()
+                .active_input_ids()
+                .into_iter()
+                .filter_map(|input_id| {
+                    let run_id = driver.input_last_run_id(&input_id)?;
+                    if !runs.contains(&run_id) {
+                        return None;
+                    }
+                    // Only queued inputs are settled (abandoned); others are left
+                    // as is and not counted.
+                    let stored = driver.as_driver().stored_input_state(&input_id)?;
+                    (stored.seed.phase == crate::input_state::InputLifecycleState::Queued)
+                        .then_some((stored.seed.admission_sequence, run_id, stored))
+                })
+                .collect();
+        queued.sort_by_key(|(admission, _, _)| *admission);
+        let mut copied: Vec<(RunId, usize)> = Vec::new();
+        Ok(queued
             .into_iter()
-            .filter_map(|input_id| {
-                let run_id = driver.input_last_run_id(&input_id)?;
-                if !runs.contains(&run_id) {
-                    return None;
-                }
-                let stored = driver.as_driver().stored_input_state(&input_id);
-                let admission = stored
-                    .as_ref()
-                    .and_then(|stored| stored.seed.admission_sequence);
-                // A durably applied input records the boundary sequence that
-                // owns it, so its content already reached the committed
-                // transcript: it is not captured again.
-                let request = stored
-                    .filter(|stored| stored.seed.last_boundary_sequence.is_none())
-                    .and_then(|stored| match stored.state.persisted_input {
-                        Some(crate::input::Input::Prompt(prompt)) => Some(prompt.content),
-                        _ => None,
-                    });
-                Some((admission, InterruptedRunInput { run_id, request }))
+            .map(|(_, run_id, stored)| {
+                let applied = stored.seed.last_boundary_sequence.is_some();
+                let (kind, request) = match stored.state.persisted_input {
+                    Some(crate::input::Input::Prompt(prompt)) => {
+                        let bytes = serde_json::to_vec(&prompt.content)
+                            .map(|encoded| encoded.len())
+                            .unwrap_or(usize::MAX);
+                        let used = copied
+                            .iter()
+                            .find(|(run, _)| run == &run_id)
+                            .map_or(0, |(_, used)| *used);
+                        let fits = used
+                            .checked_add(bytes)
+                            .is_some_and(|total| total <= INTERRUPTED_REQUEST_CONTENT_BOUND);
+                        let request = (!applied && fits).then(|| {
+                            match copied.iter_mut().find(|(run, _)| run == &run_id) {
+                                Some((_, used)) => *used += bytes,
+                                None => copied.push((run_id.clone(), bytes)),
+                            }
+                            let metadata = prompt.turn_metadata.unwrap_or_default();
+                            InterruptedRequest {
+                                content: prompt.content,
+                                created_at: prompt.header.timestamp,
+                                identity: metadata.transcript_identity,
+                                render_metadata: metadata.render_metadata,
+                            }
+                        });
+                        (InterruptedInputKind::Prompt, request)
+                    }
+                    Some(crate::input::Input::Peer(_)) => (InterruptedInputKind::Peer, None),
+                    Some(crate::input::Input::FlowStep(_)) => {
+                        (InterruptedInputKind::FlowStep, None)
+                    }
+                    Some(crate::input::Input::ExternalEvent(_)) => {
+                        (InterruptedInputKind::ExternalEvent, None)
+                    }
+                    Some(crate::input::Input::Continuation(_)) => {
+                        (InterruptedInputKind::Continuation, None)
+                    }
+                    Some(crate::input::Input::Operation(_)) => {
+                        (InterruptedInputKind::Operation, None)
+                    }
+                    None => (InterruptedInputKind::Unknown, None),
+                };
+                (run_id, InterruptedRunInput { kind, request })
             })
-            .collect();
-        inputs.sort_by_key(|(admission, _)| *admission);
-        Ok(inputs.into_iter().map(|(_, input)| input).collect())
+            .collect())
     }
 
     /// Settle, before this attachment serves, the recovered inputs of runs
@@ -2961,23 +3004,35 @@ impl PendingRuntimeExecutorAttachment {
             }
         }
         let in_flight = self.interrupted_run_inputs(&runs).await?;
-        let run_inputs = |run_id: &RunId| {
-            let run: Vec<&InterruptedRunInput> = in_flight
+        let run_inputs = |run_id: &RunId| InterruptedRunInputs {
+            inputs: in_flight
                 .iter()
-                .filter(|input| &input.run_id == run_id)
-                .collect();
-            InterruptedRunInputs {
-                inputs: u32::try_from(run.len()).unwrap_or(u32::MAX),
-                requests: run
-                    .into_iter()
-                    .filter_map(|input| input.request.clone())
-                    .collect(),
-            }
+                .filter(|(run, _)| run == run_id)
+                .map(|(_, input)| input.clone())
+                .collect(),
         };
+        // A run whose provisional tail the store holds is committed by
+        // durable-tail recovery (which may run after this attachment, when
+        // the host builds the agent lazily). Settling it here would capture
+        // and abandon inputs that recovery then commits anyway, so its
+        // evidence is left for a later materialization, where the run is no
+        // longer in flight.
+        let provisional_run = self
+            .machine
+            .provisional_tail_run(self.witness.session_id())
+            .await?;
         let mut owed = Vec::new();
         let mut silently_moot = Vec::new();
         let mut settled_runs: Vec<RunId> = Vec::new();
         for run_id in &runs {
+            if provisional_run.as_ref() == Some(run_id) {
+                tracing::info!(
+                    session_id = %self.witness.session_id(),
+                    %run_id,
+                    "interrupted run has a provisional tail; leaving its evidence to durable-tail recovery"
+                );
+                continue;
+            }
             let run_calls: Vec<&meerkat_core::tool_process::InterruptedToolCall> =
                 calls.iter().filter(|call| &call.run_id == run_id).collect();
             let recorded_inputs = run_calls
@@ -3001,7 +3056,7 @@ impl PendingRuntimeExecutorAttachment {
                 }
                 None => {
                     let settled = run_inputs(run_id);
-                    if settled.inputs == 0 {
+                    if settled.inputs.is_empty() {
                         None
                     } else {
                         // Durable before the inputs (and their payloads) are
@@ -3022,9 +3077,10 @@ impl PendingRuntimeExecutorAttachment {
                     owed.extend(run_calls.into_iter().map(|call| OwedInterruptedToolNotice {
                         call: call.clone(),
                         disposition: InterruptedToolRunDisposition::InputsSettled {
-                            inputs: settled.inputs,
+                            inputs: settled.count(),
+                            unrestored: settled.unrestored(),
                         },
-                        requests: settled.requests.clone(),
+                        requests: settled.requests().cloned().collect(),
                     }));
                 }
                 None => {
@@ -3063,6 +3119,9 @@ impl PendingRuntimeExecutorAttachment {
                 evidence,
                 calls: owed,
             });
+            // Wake the loop at commit so the notices are recorded right away,
+            // even for an idle session with no queued input.
+            self.should_wake = true;
         }
         Ok(())
     }
@@ -9089,6 +9148,35 @@ impl MeerkatMachine {
                 .as_ref()
                 .and_then(|bindings| bindings.interrupted_tool_evidence().get())
         })
+    }
+
+    /// The run whose provisional (uncommitted) tail the runtime store holds
+    /// for `session_id`, if any.
+    pub(crate) async fn provisional_tail_run(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<RunId>, RuntimeDriverError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
+        let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(session_id);
+        let store_error = |error: crate::store::RuntimeStoreError| {
+            RuntimeDriverError::Internal(format!(
+                "session {session_id} provisional tail lookup failed: {error}"
+            ))
+        };
+        match store.session_persistence_profile() {
+            crate::store::RuntimeSessionPersistenceProfile::WholeBlobV1 => Ok(store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .map_err(store_error)?
+                .map(|tail| tail.authority().run_id().clone())),
+            crate::store::RuntimeSessionPersistenceProfile::HeadCanonicalV1 => Ok(store
+                .load_head_canonical_provisional_tail(&runtime_id)
+                .await
+                .map_err(store_error)?
+                .map(|authority| authority.run_id().clone())),
+        }
     }
 
     /// The session's interrupted-run evidence store: the one installed in the

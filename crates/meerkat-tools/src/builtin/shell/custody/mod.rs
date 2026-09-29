@@ -18,8 +18,8 @@
 //!    are written, and only then is the gate released.
 //! 4. **Settle** - after the in-process guard proves containment the record
 //!    is removed, or, for a process spawned inside a run, replaced by an
-//!    `Exited` marker kept until the run's boundary commits
-//!    ([`InterruptedToolEvidence::run_committed`]): until then a host crash
+//!    `Exited` marker kept until the run reaches a durable terminal
+//!    ([`InterruptedToolEvidence::run_ended`]): until then a host crash
 //!    would replay the run and repeat the tool, so the marker is the evidence
 //!    that the run already executed it.
 //! 5. **Recover** - a later incarnation opening the same scope must first
@@ -41,11 +41,31 @@
 //! liveness is decided first (pid plus kernel start stamp, which cannot be
 //! reused), so a live host's record is left untouched and reported as
 //! [`ProcessCustodyError::PriorIncarnationAlive`], and a record that host
-//! removes is never resurrected. A record from the same boot but another pid
-//! namespace (another container sharing the root) cannot be probed from
-//! here at all, so it fails closed with
-//! [`ProcessCustodyError::ForeignPidNamespace`] instead of being assumed
-//! ended; only a changed boot proves an environment ended.
+//! removes is never resurrected.
+//!
+//! **Other pid namespaces.** A record from the same boot but another pid
+//! namespace (a container restarted without a host reboot, or a sibling
+//! container sharing the root) names pids that cannot be probed or signalled
+//! from here. Liveness is instead proven through the kernel: every host
+//! incarnation holds an exclusive `flock(2)` on
+//! `<root>/.incarnations/<incarnation>.lock` for its whole lifetime (created
+//! under a temporary name, locked, then renamed, so the file is never visible
+//! unlocked), and flock works across pid namespaces on one kernel and
+//! filesystem. Recovery takes that lock without blocking:
+//!
+//! - acquired: the kernel released the owner's lock, so the host process has
+//!   exited. Its tools ran in its container, which a restart tears down with
+//!   every process in its pid namespace, so the record is settled as
+//!   [`ToolProcessCessation::ForeignIncarnationEnded`] without signalling;
+//! - held: a live sibling host owns the record, which fails closed with
+//!   [`ProcessCustodyError::ForeignPidNamespace`] (`Running`);
+//! - lock file missing (a record written before incarnation locks), or the
+//!   root on a network or userspace filesystem where flock is not a reliable
+//!   proof: fail closed with `Unverifiable`.
+//!
+//! Lock files of ended incarnations that no unsettled record names any more
+//! are removed by the realm sweep. Only a changed boot proves an environment
+//! ended without a lock.
 //!
 //! **Durability.** Records must survive the death of the host *process*, and
 //! the page cache already guarantees that: a file written and renamed by a
@@ -95,12 +115,18 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use super::custody_types::{
-    ProcessCustodyError, ProcessCustodyRecoveryReport, ProcessCustodySweepReport,
-    RecoveredToolProcess, ScopeSweep, ToolProcessCessation, ToolProcessSpawner,
+    ForeignIncarnationLiveness, ProcessCustodyError, ProcessCustodyRecoveryReport,
+    ProcessCustodySweepReport, RecoveredToolProcess, ScopeSweep, ToolProcessCessation,
+    ToolProcessSpawner,
 };
 
 /// Directory, under a realm runtime root, that holds custody records.
 pub const PROCESS_CUSTODY_DIR: &str = "tool_process_custody";
+
+/// Directory, under a custody root, of per-incarnation liveness locks. Its
+/// name is not a valid scope, so sweeps never treat it as a session.
+const INCARNATIONS_DIR: &str = ".incarnations";
+const LOCK_EXTENSION: &str = "lock";
 
 const RECORD_EXTENSION: &str = "json";
 const TEMP_EXTENSION: &str = "tmp";
@@ -205,8 +231,8 @@ enum HostEnvironment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnvironmentRelation {
     Same,
-    /// Provably another boot or pid namespace: everything recorded there has
-    /// ended, and its pids name nothing here.
+    /// Provably another boot (or another operating system): everything
+    /// recorded there has ended, and its pids name nothing here.
     Ended,
     /// Not provably the same or different (an identity was not recorded).
     /// Recovery proceeds with per-process checks, which classify reused and
@@ -468,17 +494,29 @@ fn scope_lock(dir: &Path) -> Arc<Mutex<()>> {
     )
 }
 
+/// Name of a scope's settlement lock file, inside the scope directory. It is
+/// neither a record nor a temporary file, so listings ignore it.
+const SCOPE_LOCK_FILE: &str = ".lock";
+
 /// Take the cross-process half of a scope's settlement lock: `flock(2)` on
-/// the scope directory itself. Callers hold the in-process [`scope_lock`]
-/// first. Returns `None` when the directory does not exist (the scope holds
-/// no records). The lock is re-validated against the directory's identity,
-/// so a directory removed (and possibly recreated) while this caller waited
-/// is locked afresh.
+/// the scope's lock file, opened for writing so the lock also works where
+/// flock is emulated with POSIX locks (NFS). Callers hold the in-process
+/// [`scope_lock`] first. Returns `None` when the scope directory does not
+/// exist (the scope holds no records). The lock is re-validated against the
+/// lock file's identity, so a scope removed (and possibly recreated) while
+/// this caller waited is locked afresh.
 fn lock_scope_dir(dir: &Path) -> std::io::Result<Option<nix::fcntl::Flock<std::fs::File>>> {
-    use std::os::unix::fs::MetadataExt as _;
+    let path = dir.join(SCOPE_LOCK_FILE);
     loop {
-        let mut file = match std::fs::File::open(dir) {
+        let mut file = match std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
             Ok(file) => file,
+            // The scope directory does not exist: nothing to settle.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
@@ -489,27 +527,53 @@ fn lock_scope_dir(dir: &Path) -> std::io::Result<Option<nix::fcntl::Flock<std::f
                 Err((_, errno)) => return Err(std::io::Error::from(errno)),
             }
         };
-        let held = locked.metadata()?;
-        match std::fs::metadata(dir) {
-            Ok(current) if current.dev() == held.dev() && current.ino() == held.ino() => {
-                return Ok(Some(locked));
+        match scope_lock_is_current(&path, &locked) {
+            Ok(true) => return Ok(Some(locked)),
+            // Replaced while we waited: lock the current file.
+            Ok(false) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !dir.exists() {
+                    return Ok(None);
+                }
             }
-            // Replaced while we waited: lock the current directory.
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         }
     }
 }
 
+/// Whether the locked file is still the one at `path`.
+fn scope_lock_is_current(path: &Path, locked: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+    let held = locked.metadata()?;
+    let current = std::fs::metadata(path)?;
+    Ok(current.dev() == held.dev() && current.ino() == held.ino())
+}
+
+/// Remove a scope directory that holds nothing but its lock file. Call while
+/// holding the scope's settlement lock: waiters on the removed lock file
+/// re-validate and find the scope gone. A concurrent reservation recreates
+/// the directory (see `write_record_blocking`).
+fn remove_scope_dir_if_empty(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let only_lock = entries
+        .filter_map(Result::ok)
+        .all(|entry| entry.file_name() == SCOPE_LOCK_FILE);
+    if only_lock {
+        let _ = std::fs::remove_file(dir.join(SCOPE_LOCK_FILE));
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
 /// Live custody-bound spawns inside runs, per scope directory and run, and
-/// whether that run's boundary has already committed. A spawn that finishes
-/// after its run committed leaves no `Exited` marker; entries only exist
-/// while such spawns are live.
+/// whether that run has already ended (reached a durable terminal). A spawn
+/// that finishes after its run ended leaves no `Exited` marker; entries only
+/// exist while such spawns are live.
 #[derive(Debug, Default)]
 struct RunSpawns {
     live: usize,
-    committed: bool,
+    ended: bool,
 }
 
 type RunSpawnKey = (PathBuf, meerkat_core::RunId);
@@ -528,27 +592,26 @@ fn run_spawn_started(dir: &Path, run_id: &meerkat_core::RunId) {
         .live += 1;
 }
 
-/// One spawn of `run_id` finished; returns whether the run already
-/// committed.
+/// One spawn of `run_id` finished; returns whether the run already ended.
 fn run_spawn_finished(dir: &Path, run_id: &meerkat_core::RunId) -> bool {
     let mut spawns = run_spawns();
     let key = (dir.to_path_buf(), run_id.clone());
     let Some(entry) = spawns.get_mut(&key) else {
         return false;
     };
-    let committed = entry.committed;
+    let ended = entry.ended;
     entry.live = entry.live.saturating_sub(1);
     if entry.live == 0 {
         spawns.remove(&key);
     }
-    committed
+    ended
 }
 
 /// The owner proved the record's process group exited (or the command never
 /// ran, when `ran` is false). Remove the record, or keep an `Exited` marker
-/// for a process that ran inside a run that has not committed yet. Holds the
+/// for a process that ran inside a run that has not ended yet. Holds the
 /// in-process scope lock so it serializes with
-/// [`InterruptedToolEvidence::run_committed`].
+/// [`InterruptedToolEvidence::run_ended`].
 fn finish_record_blocking(
     dir: &Path,
     path: &Path,
@@ -560,8 +623,8 @@ fn finish_record_blocking(
     let Some(run_id) = record.run_id.as_ref() else {
         return remove_record(path);
     };
-    let committed = run_spawn_finished(dir, run_id);
-    if committed || !ran {
+    let ended = run_spawn_finished(dir, run_id);
+    if ended || !ran {
         return remove_record(path);
     }
     let mut marker = record.clone();
@@ -569,6 +632,183 @@ fn finish_record_blocking(
     let bytes = serde_json::to_vec(&marker).map_err(std::io::Error::other)?;
     let temp = temp_path(dir, marker.entry_id, marker.incarnation);
     write_record_blocking(dir, path, &temp, &bytes)
+}
+
+/// Incarnation locks this process holds, per custody root, for its lifetime.
+static HELD_INCARNATION_LOCKS: Mutex<BTreeMap<PathBuf, nix::fcntl::Flock<std::fs::File>>> =
+    Mutex::new(BTreeMap::new());
+
+fn incarnation_lock_path(root: &Path, incarnation: Uuid) -> PathBuf {
+    root.join(INCARNATIONS_DIR)
+        .join(format!("{incarnation}.{LOCK_EXTENSION}"))
+}
+
+/// Hold this incarnation's liveness lock under `root` for the rest of the
+/// process lifetime. The file is created and locked under a temporary name,
+/// then renamed into place, so a visible lock file is always locked by its
+/// owner from the moment it appears.
+fn hold_incarnation_lock(root: &Path, incarnation: &CustodyIncarnation) -> std::io::Result<()> {
+    let mut held = HELD_INCARNATION_LOCKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if held.contains_key(root) {
+        return Ok(());
+    }
+    let dir = root.join(INCARNATIONS_DIR);
+    let path = incarnation_lock_path(root, incarnation.id);
+    let temp = dir.join(format!(
+        "{}.{LOCK_EXTENSION}.{TEMP_EXTENSION}",
+        incarnation.id
+    ));
+    loop {
+        std::fs::create_dir_all(&dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temp)?;
+        // Blocking: a concurrent sweep may hold (and is about to reap) the
+        // not yet locked temporary file; the rename below then retries.
+        let mut file = file;
+        let locked = loop {
+            match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive) {
+                Ok(locked) => break locked,
+                Err((returned, nix::errno::Errno::EINTR)) => file = returned,
+                Err((_, errno)) => return Err(std::io::Error::from(errno)),
+            }
+        };
+        match std::fs::rename(&temp, &path) {
+            Ok(()) => {
+                held.insert(root.to_path_buf(), locked);
+                return Ok(());
+            }
+            // A sweep reaped the temporary file before it was locked: retry.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// What an incarnation's liveness lock shows.
+enum IncarnationLock {
+    /// The lock was free: its owner has exited (the kernel releases a flock
+    /// only when every descriptor of it is closed).
+    Released,
+    /// A live process holds it.
+    Held,
+    /// No lock can prove anything: the file is missing (written before
+    /// incarnation locks), or `root` is on a filesystem where flock is not a
+    /// reliable cross-process proof.
+    Unprovable,
+}
+
+fn foreign_incarnation_lock(root: &Path, incarnation: Uuid) -> std::io::Result<IncarnationLock> {
+    if !sys::lock_filesystem_is_local(root)? {
+        return Ok(IncarnationLock::Unprovable);
+    }
+    try_incarnation_lock(&incarnation_lock_path(root, incarnation))
+        .map(|lock| match lock {
+            Some(_released) => IncarnationLock::Released,
+            None => IncarnationLock::Held,
+        })
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(IncarnationLock::Unprovable)
+            } else {
+                Err(error)
+            }
+        })
+}
+
+/// Take a lock file without blocking: `Some` when it was free (the caller
+/// now holds it), `None` when another holder has it.
+fn try_incarnation_lock(path: &Path) -> std::io::Result<Option<nix::fcntl::Flock<std::fs::File>>> {
+    // Opened for writing, so the lock also works where flock is emulated
+    // with POSIX locks.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    loop {
+        match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+            Ok(locked) => return Ok(Some(locked)),
+            Err((_, nix::errno::Errno::EWOULDBLOCK)) => return Ok(None),
+            Err((returned, nix::errno::Errno::EINTR)) => file = returned,
+            Err((_, errno)) => return Err(std::io::Error::from(errno)),
+        }
+    }
+}
+
+/// Remove the lock files (and interrupted lock creations) of incarnations
+/// that have ended and that no unsettled record under `root` names any more.
+/// Runs after a sweep settled every scope it could.
+fn reap_ended_incarnation_locks(root: &Path, current: Uuid) -> std::io::Result<()> {
+    let dir = root.join(INCARNATIONS_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let named = incarnations_named_by_unsettled_records(root)?;
+    for entry in entries {
+        let path = entry?.path();
+        let Some(owner) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.split('.').next())
+            .and_then(|stem| Uuid::parse_str(stem).ok())
+        else {
+            continue;
+        };
+        if owner == current || named.contains(&owner) {
+            continue;
+        }
+        match try_incarnation_lock(&path) {
+            // Held while removed: no one can be waiting on an ended owner.
+            Ok(Some(_ended)) => remove_record(&path)?,
+            Ok(None) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Incarnations named by records under `root` that still need their owner's
+/// liveness decided (every phase but settled interrupted-run evidence).
+fn incarnations_named_by_unsettled_records(root: &Path) -> std::io::Result<BTreeSet<Uuid>> {
+    let mut named = BTreeSet::new();
+    for scope in std::fs::read_dir(root)? {
+        let scope = scope?.path();
+        if !scope.is_dir() {
+            continue;
+        }
+        let records = match std::fs::read_dir(&scope) {
+            Ok(records) => records,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for record in records {
+            let path = record?.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some(RECORD_EXTENSION) {
+                continue;
+            }
+            match read_listed_record(&path) {
+                Ok(ListedRecord::Current(record))
+                    if matches!(record.phase, CustodyPhase::Interrupted { .. }) => {}
+                Ok(ListedRecord::Current(record)) => {
+                    named.insert(record.incarnation);
+                }
+                Ok(ListedRecord::OtherVersion(envelope)) => {
+                    named.insert(envelope.incarnation);
+                }
+                Ok(ListedRecord::Gone) => {}
+                // An unreadable record may name anyone: keep every lock.
+                Err(error) => return Err(std::io::Error::other(error.to_string())),
+            }
+        }
+    }
+    Ok(named)
 }
 
 /// Custody roots already swept by this process.
@@ -658,6 +898,9 @@ fn sweep_blocking(root: &Path) -> Result<ProcessCustodySweepReport, ProcessCusto
             outcome,
         });
     }
+    if let Err(error) = reap_ended_incarnation_locks(root, incarnation.id) {
+        tracing::warn!(%error, "custody sweep could not reap ended incarnation locks");
+    }
     Ok(report)
 }
 
@@ -712,9 +955,9 @@ enum CustodyPhase {
         settlement: InterruptedToolSettlement,
     },
     /// The process, spawned inside a run, exited and its owner proved the
-    /// whole group gone, but the run's boundary has not committed yet. Kept
-    /// as evidence that the run already executed the tool until the run
-    /// commits; no process is associated with it any more.
+    /// whole group gone, but the run has not ended yet. Kept as evidence
+    /// that the run already executed the tool until the run reaches a
+    /// durable terminal; no process is associated with it any more.
     Exited,
 }
 
@@ -793,6 +1036,15 @@ impl ProcessCustody {
         if let Some(open) = open_scope(&dir) {
             return Ok((open, ProcessCustodyRecoveryReport::default()));
         }
+        // Held before any record of this incarnation can exist under `root`,
+        // so other pid namespaces can prove whether this host still runs.
+        let lock_root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || hold_incarnation_lock(&lock_root, incarnation))
+            .await
+            .map_err(|error| {
+                ProcessCustodyError::io("join incarnation lock", std::io::Error::other(error))
+            })?
+            .map_err(|error| ProcessCustodyError::io("hold incarnation lock", error))?;
         let recovery_dir = dir.clone();
         let report = tokio::task::spawn_blocking(move || {
             recover_scope_blocking(
@@ -1079,10 +1331,18 @@ impl Drop for CustodyReservation {
         };
         match self.leader() {
             None => {
-                // The gate was never released: nothing ran.
-                if let Err(error) = finish_record_blocking(&self.dir, &path, &self.record, false) {
-                    tracing::warn!(%error, "failed to remove unreleased shell custody reservation");
-                }
+                // The gate was never released: nothing ran. The removal is
+                // file I/O; keep it off the async worker running this drop.
+                let dir = self.dir.clone();
+                let record = self.record.clone();
+                run_off_async_worker(move || {
+                    if let Err(error) = finish_record_blocking(&dir, &path, &record, false) {
+                        tracing::warn!(
+                            %error,
+                            "failed to remove unreleased shell custody reservation"
+                        );
+                    }
+                });
             }
             // Cancelled after spawn: the in-process guard kills the group;
             // keep it registered (and the record for recovery) until its
@@ -1092,6 +1352,15 @@ impl Drop for CustodyReservation {
                 release_when_group_exits(leader.pid, Some(leader.start), Some(watched));
             }
         }
+    }
+}
+
+/// Run blocking custody file I/O without blocking an async worker: on the
+/// runtime's blocking pool when called from a runtime, inline otherwise.
+fn run_off_async_worker(work: impl FnOnce() + Send + 'static) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => drop(handle.spawn_blocking(work)),
+        Err(_) => work(),
     }
 }
 
@@ -1191,6 +1460,12 @@ fn recover_scope_blocking(
     incarnation: &CustodyIncarnation,
     deadline: Instant,
 ) -> Result<ProcessCustodyRecoveryReport, ProcessCustodyError> {
+    let root = dir.parent().ok_or_else(|| {
+        ProcessCustodyError::io(
+            "locate custody root",
+            std::io::Error::from(std::io::ErrorKind::InvalidInput),
+        )
+    })?;
     let lock = scope_lock(dir);
     let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(_dir_lock) = lock_scope_dir(dir)
@@ -1236,7 +1511,7 @@ fn recover_scope_blocking(
                     // evidence awaiting the runtime.
                     continue;
                 }
-                let cessation = settle_prior_record(&record, incarnation, deadline)?;
+                let cessation = settle_prior_record(root, &record, incarnation, deadline)?;
                 // Settled only once its host is proven gone.
                 ended_incarnations.insert(record.incarnation);
                 let recovered = RecoveredToolProcess {
@@ -1310,10 +1585,8 @@ fn recover_scope_blocking(
             })?;
         }
     }
-    // Drop the scope directory once it is empty. A concurrent reservation
-    // recreates it (see `write_record_blocking`); a non-empty directory is
-    // left as is.
-    let _ = std::fs::remove_dir(dir);
+    // Drop the scope directory once it holds nothing but its lock file.
+    remove_scope_dir_if_empty(dir);
     Ok(report)
 }
 
@@ -1321,6 +1594,7 @@ fn recover_scope_blocking(
 /// anything else, so a record whose host still runs is never rewritten or
 /// removed (that host may still settle or delete it).
 fn settle_prior_record(
+    root: &Path,
     record: &CustodyRecord,
     current: &CustodyIncarnation,
     deadline: Instant,
@@ -1329,12 +1603,31 @@ fn settle_prior_record(
         // Pids and sessions from another boot name nothing here; comparing or
         // signalling them could only hit strangers.
         EnvironmentRelation::Ended => return Ok(ToolProcessCessation::PriorEnvironmentEnded),
-        // Another pid namespace of this boot: neither its host nor its group
-        // can be observed from here, and nothing proves they ended.
+        // Another pid namespace of this boot: its pids name nothing here.
+        // Only the incarnation's kernel-held lock can prove its host ended.
         EnvironmentRelation::ForeignNamespace => {
+            let liveness = match foreign_incarnation_lock(root, record.incarnation)
+                .map_err(|error| ProcessCustodyError::io("probe incarnation lock", error))?
+            {
+                IncarnationLock::Released => {
+                    return Ok(match record.phase {
+                        CustodyPhase::Exited => ToolProcessCessation::ExitedBeforeCommit,
+                        _ => ToolProcessCessation::ForeignIncarnationEnded,
+                    });
+                }
+                // An `Exited` marker guards no process, so no pid needs
+                // observing: unless its host provably still runs (and may
+                // still commit the run), it settles in any namespace.
+                IncarnationLock::Unprovable if matches!(record.phase, CustodyPhase::Exited) => {
+                    return Ok(ToolProcessCessation::ExitedBeforeCommit);
+                }
+                IncarnationLock::Held => ForeignIncarnationLiveness::Running,
+                IncarnationLock::Unprovable => ForeignIncarnationLiveness::Unverifiable,
+            };
             return Err(ProcessCustodyError::ForeignPidNamespace {
                 entry_id: record.entry_id,
                 incarnation: record.incarnation,
+                liveness,
             });
         }
         EnvironmentRelation::Same | EnvironmentRelation::Unknown => {}
@@ -1694,9 +1987,9 @@ impl InterruptedToolEvidence for ProcessCustody {
         tokio::task::spawn_blocking(move || {
             let lock = scope_lock(&dir);
             let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
-            if lock_scope_dir(&dir)?.is_none() {
+            let Some(_dir_lock) = lock_scope_dir(&dir)? else {
                 return Ok(());
-            }
+            };
             for path in paths {
                 remove_record(&path)?;
             }
@@ -1707,7 +2000,7 @@ impl InterruptedToolEvidence for ProcessCustody {
         .map_err(evidence_error)
     }
 
-    async fn run_committed(
+    async fn run_ended(
         &self,
         run_id: &meerkat_core::RunId,
     ) -> Result<(), InterruptedToolEvidenceError> {
@@ -1719,7 +2012,7 @@ impl InterruptedToolEvidence for ProcessCustody {
             let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
             // Spawns of the run still live finish without a marker.
             if let Some(spawns) = run_spawns().get_mut(&(dir.clone(), run_id.clone())) {
-                spawns.committed = true;
+                spawns.ended = true;
             }
             let entries = match std::fs::read_dir(&dir) {
                 Ok(entries) => entries,
@@ -1741,7 +2034,7 @@ impl InterruptedToolEvidence for ProcessCustody {
                     && record.run_id.as_ref() == Some(&run_id)
                 {
                     remove_record(&path).map_err(|error| {
-                        ProcessCustodyError::io("remove committed run marker", error)
+                        ProcessCustodyError::io("remove ended run marker", error)
                     })?;
                 }
             }

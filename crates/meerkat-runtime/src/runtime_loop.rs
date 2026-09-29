@@ -4460,16 +4460,11 @@ impl RuntimeLoopAuthorityBinding {
         }
     }
 
-    /// Record the typed interrupted-run notices owed to this session's model
-    /// in the durable transcript through the executor's transcript-notice
-    /// endpoint, without a turn, then acknowledge their evidence. Called at
-    /// the pre-dequeue position (boundary held, actor idle, next input not
-    /// dequeued), so the notices are part of the next real turn's transcript.
-    /// Notices that cannot be recorded yet stay owed for a later lap.
-    /// Tell the session's interrupted-run evidence store that `run_id`'s
-    /// boundary committed durably, off the loop's critical path. Best effort:
-    /// a marker left behind is moot at the next recovery.
-    fn release_committed_run_tool_markers(&self, run_id: &RunId) {
+    /// Tell the session's interrupted-run evidence store that `run_id`
+    /// reached a durable terminal (committed, failed, cancelled or stopped),
+    /// off the loop's critical path. Best effort: a marker left behind is
+    /// moot at the next recovery.
+    fn release_ended_run_tool_markers(&self, run_id: &RunId) {
         let Some(machine) = self.machine.upgrade() else {
             return;
         };
@@ -4479,17 +4474,23 @@ impl RuntimeLoopAuthorityBinding {
             let Some(evidence) = machine.bound_interrupted_tool_evidence(&session_id).await else {
                 return;
             };
-            if let Err(error) = evidence.run_committed(&run_id).await {
+            if let Err(error) = evidence.run_ended(&run_id).await {
                 tracing::warn!(
                     %session_id,
                     %run_id,
                     %error,
-                    "could not release completed-tool markers of a committed run"
+                    "could not release completed-tool markers of an ended run"
                 );
             }
         });
     }
 
+    /// Record the typed interrupted-run notices owed to this session's model
+    /// in the durable transcript through the executor's transcript-notice
+    /// endpoint, without a turn, then acknowledge their evidence. Called at
+    /// the pre-dequeue position (boundary held, actor idle, next input not
+    /// dequeued), so the notices are part of the next real turn's transcript.
+    /// Notices that cannot be recorded yet stay owed for a later lap.
     async fn record_interrupted_tool_notices(
         &self,
         executor: &dyn meerkat_core::lifecycle::CoreExecutor,
@@ -6105,6 +6106,15 @@ async fn process_queue(
             Err(_) => return true,
         }
 
+        // Record interrupted-run notices owed to the model while the
+        // turn-finalization boundary is held and the actor is idle, whether or
+        // not input is queued: they join the transcript the next real turn
+        // sees (an idle session gets them at attach), with no turn of their
+        // own.
+        authority_binding
+            .record_interrupted_tool_notices(&*executor)
+            .await;
+
         // A handoff is defined to move the next admitted input, not to mutate
         // an otherwise idle attachment. Returning to the outer wake loop when
         // no queue entry exists also closes the observation race: an input
@@ -6122,13 +6132,6 @@ async fn process_queue(
         // dequeue would serve the pending input with the identity the handoff
         // was committed to replace, which is the exact off-by-one-turn bug this
         // seam exists to prevent.
-        // Record interrupted-run notices owed to the model at the same
-        // position: they become part of the transcript this next real turn
-        // sees, with no turn of their own.
-        authority_binding
-            .record_interrupted_tool_notices(&*executor)
-            .await;
-
         if let Some(pre_dequeue) = executor.pre_dequeue_handle()
             && let Err(error) = pre_dequeue
                 .realize_committed_handoffs_under_turn_finalization_boundary()
@@ -6500,7 +6503,9 @@ async fn process_queue(
                                 }
                             };
                         match terminalization_outcome {
-                            OwnedRuntimeLoopTerminalizationOutcome::Persisted => {}
+                            OwnedRuntimeLoopTerminalizationOutcome::Persisted => {
+                                authority_binding.release_ended_run_tool_markers(&run_id);
+                            }
                             OwnedRuntimeLoopTerminalizationOutcome::Rejected(error) => {
                                 tracing::error!(
                                     %run_id,
@@ -6641,7 +6646,9 @@ async fn process_queue(
                             }
                         };
                     match terminalization_outcome {
-                        OwnedRuntimeLoopTerminalizationOutcome::Persisted => {}
+                        OwnedRuntimeLoopTerminalizationOutcome::Persisted => {
+                            authority_binding.release_ended_run_tool_markers(&run_id);
+                        }
                         OwnedRuntimeLoopTerminalizationOutcome::Rejected(terminalization_error) => {
                             tracing::error!(
                                 %run_id,
@@ -7026,7 +7033,7 @@ async fn process_queue(
 
                         // The run's inputs can no longer be replayed: the
                         // host may drop its completed-tool markers for it.
-                        authority_binding.release_committed_run_tool_markers(&run_id);
+                        authority_binding.release_ended_run_tool_markers(&run_id);
 
                         // Acknowledge the exact store commit before any
                         // derived compaction projection advances that same
@@ -7503,7 +7510,9 @@ async fn process_queue(
                                 }
                             };
                         match terminalization_outcome {
-                            OwnedRuntimeLoopTerminalizationOutcome::Persisted => {}
+                            OwnedRuntimeLoopTerminalizationOutcome::Persisted => {
+                                authority_binding.release_ended_run_tool_markers(&run_id);
+                            }
                             OwnedRuntimeLoopTerminalizationOutcome::Rejected(error) => {
                                 tracing::error!(
                                     %run_id,

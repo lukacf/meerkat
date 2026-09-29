@@ -521,7 +521,10 @@ mod tests {
                 );
                 assert_eq!(
                     disposition,
-                    &InterruptedToolRunDisposition::InputsSettled { inputs: 1 }
+                    &InterruptedToolRunDisposition::InputsSettled {
+                        inputs: 1,
+                        unrestored: Vec::new(),
+                    }
                 );
             }
             other => panic!("unexpected notice block {other:?}"),
@@ -575,9 +578,26 @@ mod tests {
         let client = Arc::new(ScriptedShellClient::new(tool_command(root)));
         let (service, adapter) = recover(root, Arc::clone(&client), &session_id).await;
 
-        // Settling the interrupted run costs no model call, and the notice
-        // is not a turn of its own.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // An idle session gets the notice at attach, without queued input
+        // and without a model call: the notice is not a turn of its own.
+        let recorded = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let session = service
+                    .load_authoritative_session(&session_id)
+                    .await
+                    .expect("load")
+                    .expect("session");
+                if !interrupted_notice_blocks(&session).is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            recorded.is_ok(),
+            "the idle session's notice was not recorded"
+        );
         assert_eq!(
             client.requests.load(Ordering::SeqCst),
             0,

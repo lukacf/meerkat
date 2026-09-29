@@ -157,10 +157,12 @@ them.
   disposition }`: the typed transcript record that tool processes of an
   earlier run were settled by process custody after an abrupt host stop, and
   what that did to the run (`InterruptedToolRunDisposition::InputsSettled {
-  inputs }`: the run was in flight and its request, plus `inputs - 1`
-  messages absorbed into it while it ran, were not re-run; `RunCompleted`:
-  the run had completed and only the process outlived it). The run id is
-  part of the block, so a notice delivered twice is a typed duplicate.
+  inputs, unrestored }`: the run was in flight and its request, plus
+  `inputs - 1` inputs absorbed into it while it ran, were not re-run, and
+  `unrestored` names by `InterruptedInputKind` those not restored to the
+  transcript (peer messages, flow steps, and the like); `RunCompleted`: the
+  run had completed and only the process outlived it). The run id is part of
+  the block, so a notice delivered twice is a typed duplicate.
 - The machine vocabulary `InputAbandonReason` gains the variant
   `ToolProcessInterrupted` in `meerkat_machine_kernels::generated::meerkat::InputAbandonReason`,
   `meerkat_runtime::meerkat_machine::dsl::InputAbandonReason` and
@@ -182,38 +184,62 @@ them.
   the machine settles the session's custody through the host's
   `InterruptedToolEvidenceSource` when it creates the pending attachment,
   before anything recovered is served and even when no agent was built yet.
-  The input is abandoned with the typed
+  The run's queued inputs are abandoned with the typed
   `meerkat_runtime::InputAbandonReason::ToolProcessInterrupted` (an input
-  recovery did not hand back as queued is left as is and logged). One typed
+  recovery did not hand back as queued is left as is, logged and not
+  counted). A run whose provisional tail the runtime store holds is left to
+  durable-tail recovery, which commits it (for example when RPC builds the
+  agent on its first turn), instead of being settled too. One typed
   `ToolProcessRecovery` system notice per settled run is recorded in the
-  durable transcript without a model call, at the runtime loop's pre-dequeue
-  position, so it is part of the transcript the next real turn sees. It is
-  preceded, once and atomically with it, by the run's user requests: the run
-  never committed, so they never reached the transcript. They are captured
-  with the evidence before the inputs are abandoned, and an input that was
-  already durably applied is not repeated. A
+  durable transcript without a model call, as soon as the runtime loop is
+  idle under the turn-finalization boundary (at attach for an idle session,
+  otherwise before the next input is dequeued), so it is part of the
+  transcript the next real turn sees. It is preceded, once and atomically
+  with it, by the run's user requests with their original timestamp,
+  transcript identity and render metadata: the run never committed, so they
+  never reached the transcript. Their content is copied into the custody
+  evidence before the inputs are abandoned (at most 64 KiB per run, deleted
+  with the evidence), and an input that was already durably applied is not
+  repeated. A notice also reaches a session with no live actor yet, and an
+  RPC-hosted mob member. A
   process of an already completed run that recovery killed (for example a
   background job) is reported the same way with the `RunCompleted`
   disposition instead of being dropped. Inputs of runs without such evidence
   still replay as before.
 - Behaviour-only (not measured by the gate): a custody-bound process spawned
   inside a run (foreground shell call, background job attempt, monitor,
-  command hook) that exits before its run commits now leaves an `Exited`
+  command hook) that exits before its run ends now leaves an `Exited`
   marker instead of removing its custody record; the runtime drops the
-  run's markers once its boundary commits. A crash in between no longer
-  replays the run (repeating a tool that already ran): recovery settles the
-  run with cessation `ToolProcessCessation::ExitedBeforeCommit`.
+  run's markers once the run reaches a durable terminal (committed, failed,
+  cancelled or stopped), and a process that exits after that leaves none
+  (post-commit hook invocations carry no run id). A crash in between no
+  longer replays the run (repeating a tool that already ran): recovery
+  settles the run with cessation `ToolProcessCessation::ExitedBeforeCommit`.
+  A marker guards no process, so one from another pid namespace settles
+  unless its host provably still runs.
 - Behaviour-only (not measured by the gate): process custody recovery is
   safe across host processes sharing a realm root, not only within one.
   Every recoverer read-modify-write of a scope (recovery, the realm sweep,
   interrupted-run evidence) holds an in-process lock plus `flock(2)` on the
-  scope directory; a record whose host still runs is never rewritten or
+  scope's lock file (opened for writing, so it also works where flock is
+  emulated with POSIX locks, as on NFS); a record whose host still runs is
+  never rewritten or
   removed (host liveness is checked first), so a record that host deletes is
-  never resurrected; and a record from another pid namespace of the same
-  boot now fails closed with `ProcessCustodyError::ForeignPidNamespace`
-  instead of being settled as `PriorEnvironmentEnded` (only a changed boot
-  proves an environment ended). Opening a session scope this process already
-  holds open reuses the open custody instead of recovering it again.
+  never resurrected. A record from another pid namespace of the same boot is
+  no longer assumed ended from the namespace change alone: every host
+  incarnation now holds an exclusive `flock(2)` on
+  `<runtime_root>/tool_process_custody/.incarnations/<incarnation>.lock` for
+  its lifetime, and recovery settles such a record (new cessation
+  `ToolProcessCessation::ForeignIncarnationEnded`, nothing signalled) only
+  when that lock is free, which proves the host exited, as on a container
+  restart. A held lock (a live sibling host), a missing lock file (a record
+  written before this change) or a custody root on a network or userspace
+  filesystem (NFS, SMB/CIFS, 9P, AFS, Ceph, FUSE), where flock is not a
+  reliable proof, fails closed with the new
+  `ProcessCustodyError::ForeignPidNamespace { liveness }`. The realm sweep
+  removes lock files of ended incarnations that no unsettled record names.
+  Opening a session scope this process already holds open reuses the open
+  custody instead of recovering it again.
 - Behaviour-only (not measured by the gate): on Linux and macOS, every
   `AgentFactory` agent build under a realm `runtime_root` now settles the
   session's earlier-incarnation tool processes (shell calls, background
@@ -246,9 +272,10 @@ them.
   newer release in the same boot, for example after a rollback) - run the
   newer release again, or confirm the tool is not running and delete the
   file; `ForeignPidNamespace` (a record written in this boot by a host in
-  another pid namespace, for example another container sharing the realm
-  root; nothing is signalled) - confirm that container has stopped, then
-  delete the record (a reboot also settles it); `ExitNotificationUnavailable` (Linux without
+  another pid namespace whose incarnation lock does not prove it ended;
+  nothing is signalled) - for `Running`, stop the other host; for
+  `Unverifiable` (no lock file, or a network filesystem), confirm that
+  container has stopped, then delete the record (a reboot also settles it); `ExitNotificationUnavailable` (Linux without
   `pidfd_open`: kernel before 5.3 or a blocking seccomp profile; nothing is
   signalled) - run the host where pidfds are available, or end the named
   group manually and delete its record; `Io` - fix the named I/O condition. A reused
@@ -526,11 +553,15 @@ them.
   `meerkat_tools::builtin::shell`; both, and `InterruptedToolRunDisposition`,
   decode variants written by a newer version as `Unknown`), interrupted-run
   evidence (`InterruptedToolCall`, `InterruptedToolSettlement`,
-  `InterruptedToolRunDisposition`, `InterruptedToolEvidence`,
+  `InterruptedRunInputs`, `InterruptedRunInput`, `InterruptedRequest`,
+  `InterruptedInputKind`, `InterruptedToolRunDisposition`,
+  `InterruptedToolEvidence`,
   `InterruptedToolEvidenceError`, `InterruptedToolEvidenceSlot`,
   `InterruptedToolEvidenceSource`), and
   `SessionRuntimeBindings::interrupted_tool_evidence`, the hand-off from agent
   construction to runtime materialization.
+- `meerkat_tools::builtin::shell::ForeignIncarnationLiveness` (carried by
+  `ProcessCustodyError::ForeignPidNamespace`).
 - `meerkat_runtime::MeerkatMachine::set_interrupted_tool_evidence_source`
   (installed by `meerkat::surface::build_runtime_backed_service*` when the
   factory has a realm `runtime_root`),

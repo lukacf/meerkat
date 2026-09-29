@@ -7148,11 +7148,15 @@ class ContentBlockSkillContext(TypedDict, total=False):
 
 ContentBlock = ContentBlockText | ContentBlockImageInline | ContentBlockImageBlob | ContentBlockVideoInline | ContentBlockVideoUri | ContentBlockStructured | ContentBlockSkillContext
 
+# What kind of input an interrupted run had in flight.
+InterruptedInputKind = Literal['prompt', 'peer', 'flow_step', 'external_event', 'continuation', 'operation', 'unknown']
+
 # What settling interrupted-run evidence did to the run the process belonged
 # to, as told to the model.
 class InterruptedToolRunDispositionInputsSettled(TypedDict, total=False):
     inputs: Required[int]
     kind: Required[Literal['inputs_settled']]
+    unrestored: NotRequired[list[InterruptedInputKind]]
 
 class InterruptedToolRunDispositionRunCompleted(TypedDict, total=False):
     kind: Required[Literal['run_completed']]
@@ -7212,10 +7216,13 @@ class ToolProcessCessationPriorEnvironmentEnded(TypedDict, total=False):
 class ToolProcessCessationExitedBeforeCommit(TypedDict, total=False):
     kind: Required[Literal['exited_before_commit']]
 
+class ToolProcessCessationForeignIncarnationEnded(TypedDict, total=False):
+    kind: Required[Literal['foreign_incarnation_ended']]
+
 class ToolProcessCessationUnknown(TypedDict, total=False):
     kind: Required[Literal['unknown']]
 
-ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded | ToolProcessCessationExitedBeforeCommit | ToolProcessCessationUnknown
+ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded | ToolProcessCessationExitedBeforeCommit | ToolProcessCessationForeignIncarnationEnded | ToolProcessCessationUnknown
 
 # Which kind of owned process a custody entry guards.
 class ToolProcessSpawnerShellCall(TypedDict, total=False):

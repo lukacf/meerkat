@@ -2753,7 +2753,7 @@ impl SystemNoticeBlock {
                 let spawner = spawner.description();
                 let cessation = cessation.description();
                 match disposition {
-                    InterruptedToolRunDisposition::InputsSettled { inputs } => {
+                    InterruptedToolRunDisposition::InputsSettled { inputs, unrestored } => {
                         let absorbed = inputs.saturating_sub(1);
                         let request = if absorbed == 0 {
                             "The interrupted request was".to_owned()
@@ -2763,11 +2763,21 @@ impl SystemNoticeBlock {
                                  it while it was running, were"
                             )
                         };
+                        let unrestored = if unrestored.is_empty() {
+                            String::new()
+                        } else {
+                            let kinds: Vec<&str> =
+                                unrestored.iter().map(|kind| kind.description()).collect();
+                            format!(
+                                " Not shown above (not user requests, or too large): {}.",
+                                kinds.join(", ")
+                            )
+                        };
                         format!(
                             "A previous run was interrupted when the host stopped abruptly. Its \
                              {spawner}{call} {cessation}. {request} not re-run automatically; \
                              effects may be partial or complete. Verify the current state before \
-                             repeating the action."
+                             repeating the action.{unrestored}"
                         )
                     }
                     InterruptedToolRunDisposition::RunCompleted => format!(

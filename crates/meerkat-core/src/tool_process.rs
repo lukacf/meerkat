@@ -53,6 +53,11 @@ pub enum ToolProcessCessation {
     /// gone, but the host stopped before the run that started it committed,
     /// so the run's result (including the tool's) was not committed.
     ExitedBeforeCommit,
+    /// The earlier incarnation ran in another pid namespace of this boot (a
+    /// container since restarted) and its host has exited, as proven by the
+    /// kernel releasing its incarnation lock; its tools ended with that
+    /// container. Nothing was signalled.
+    ForeignIncarnationEnded,
     /// A cessation recorded by a newer version that this version does not
     /// recognize. The process has ceased; how is unknown here.
     #[serde(other)]
@@ -79,6 +84,9 @@ impl ToolProcessCessation {
                 "ended with the host's previous boot; its result was lost"
             }
             Self::ExitedBeforeCommit => "had exited, but its run's result was not committed",
+            Self::ForeignIncarnationEnded => {
+                "ended with the host's previous container; its result was lost"
+            }
             Self::Unknown => "has ceased; its result was lost",
         }
     }
@@ -141,33 +149,128 @@ impl InterruptedToolSettlement {
     }
 }
 
-/// An interrupted run's in-flight inputs, as settled.
+/// An interrupted run's in-flight inputs, as settled: the run's request plus
+/// every input absorbed into it while it was in flight (steering), in
+/// admission order.
 ///
-/// The run never committed, so none of its inputs reached the transcript.
-/// The user requests among them are kept with the evidence (captured before
-/// the inputs were abandoned) so the transcript can hold each of them once,
-/// followed by the notice, instead of losing them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The run never committed, so inputs that were never durably applied never
+/// reached the transcript. The user requests among them are copied here
+/// (captured before the inputs and their payloads were abandoned, bounded in
+/// size, and deleted with the evidence) so the transcript can hold each of
+/// them once, followed by the notice, instead of losing them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterruptedRunInputs {
-    /// How many inputs the run had: its request plus every input absorbed
-    /// into it while it was in flight (steering).
-    pub inputs: u32,
-    /// The user request content among them, in admission order.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub requests: Vec<crate::types::ContentInput>,
+    pub inputs: Vec<InterruptedRunInput>,
+}
+
+impl InterruptedRunInputs {
+    /// How many inputs the run had.
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        u32::try_from(self.inputs.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The requests restored to the transcript, in admission order.
+    pub fn requests(&self) -> impl Iterator<Item = &InterruptedRequest> {
+        self.inputs
+            .iter()
+            .filter_map(|input| input.request.as_ref())
+    }
+
+    /// Kinds of the inputs whose content is not restored to the transcript
+    /// (not a user request, already in the transcript, or over the size
+    /// bound), in admission order.
+    #[must_use]
+    pub fn unrestored(&self) -> Vec<InterruptedInputKind> {
+        self.inputs
+            .iter()
+            .filter(|input| input.request.is_none())
+            .map(|input| input.kind)
+            .collect()
+    }
+}
+
+/// One in-flight input of an interrupted run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterruptedRunInput {
+    pub kind: InterruptedInputKind,
+    /// The user request to restore to the transcript, when the input is a
+    /// prompt that never reached the committed transcript and its content
+    /// fits the evidence size bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<InterruptedRequest>,
+}
+
+/// A user request of an interrupted run, with the original transcript facts
+/// it would have been committed with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterruptedRequest {
+    pub content: crate::types::ContentInput,
+    /// When the request was admitted.
+    pub created_at: crate::types::MessageTimestamp,
+    /// The transcript identity the run would have stamped on it.
+    #[serde(default)]
+    pub identity: crate::types::TranscriptMessageIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_metadata: Option<crate::types::RenderMetadata>,
+}
+
+/// What kind of input an interrupted run had in flight.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InterruptedInputKind {
+    /// A user or operator prompt.
+    Prompt,
+    /// A peer (comms) message.
+    Peer,
+    /// A mob flow step.
+    FlowStep,
+    /// An external event.
+    ExternalEvent,
+    /// Runtime continuation work.
+    Continuation,
+    /// A non-content operation.
+    Operation,
+    /// A kind recorded by a newer version.
+    #[serde(other)]
+    Unknown,
+}
+
+impl InterruptedInputKind {
+    /// Human-readable description for model-facing projections.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Prompt => "request",
+            Self::Peer => "peer message",
+            Self::FlowStep => "flow step",
+            Self::ExternalEvent => "external event",
+            Self::Continuation => "continuation",
+            Self::Operation => "operation",
+            Self::Unknown => "input",
+        }
+    }
 }
 
 /// What settling interrupted-run evidence did to the run the process belonged
 /// to, as told to the model.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum InterruptedToolRunDisposition {
     /// The run was still in flight. Its `inputs` (the request plus every
     /// input absorbed into the run while it ran) were settled as interrupted
-    /// and not re-run.
-    InputsSettled { inputs: u32 },
+    /// and not re-run. User requests among them are restored to the
+    /// transcript right before the notice; `unrestored` names the kinds of
+    /// the others (for example peer messages or flow steps), in order.
+    InputsSettled {
+        inputs: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unrestored: Vec<InterruptedInputKind>,
+    },
     /// The run had already completed; only the process outlived it. Nothing
     /// was re-run or settled.
     RunCompleted,
@@ -226,11 +329,12 @@ pub trait InterruptedToolEvidence: Send + Sync {
     /// flight).
     async fn acknowledge(&self, entry_ids: &[Uuid]) -> Result<(), InterruptedToolEvidenceError>;
 
-    /// The run's boundary committed durably in this host incarnation: its
-    /// inputs can no longer be replayed, so the host may discard the
-    /// completed-tool markers it kept for the run. Best effort; a marker left
-    /// behind is moot at the next recovery.
-    async fn run_committed(&self, run_id: &RunId) -> Result<(), InterruptedToolEvidenceError>;
+    /// The run reached a durable terminal in this host incarnation
+    /// (committed, failed, cancelled or stopped): its inputs can no longer be
+    /// replayed, so the host may discard the completed-tool markers it kept
+    /// for the run. Best effort; a marker left behind is moot at the next
+    /// recovery.
+    async fn run_ended(&self, run_id: &RunId) -> Result<(), InterruptedToolEvidenceError>;
 }
 
 /// Host-side provider of interrupted-run evidence, installed on a runtime
@@ -303,7 +407,10 @@ mod tests {
                 job_id: "job-1".to_owned(),
             },
             cessation: ToolProcessCessation::KilledByRecovery { members: 2 },
-            disposition: InterruptedToolRunDisposition::InputsSettled { inputs: 1 },
+            disposition: InterruptedToolRunDisposition::InputsSettled {
+                inputs: 2,
+                unrestored: vec![InterruptedInputKind::Peer],
+            },
         };
         let value = serde_json::to_value(&block).unwrap();
         assert_eq!(
@@ -316,7 +423,7 @@ mod tests {
         );
         assert_eq!(
             value["disposition"],
-            serde_json::json!({ "kind": "inputs_settled", "inputs": 1 })
+            serde_json::json!({ "kind": "inputs_settled", "inputs": 2, "unrestored": ["peer"] })
         );
         let back: SystemNoticeBlock = serde_json::from_value(value).unwrap();
         assert_eq!(back, block);

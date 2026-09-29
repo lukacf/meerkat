@@ -53,6 +53,29 @@ pub struct ProcessCustodySweepReport {
     pub scopes: Vec<ScopeSweep>,
 }
 
+/// What the incarnation lock of a host in another pid namespace shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ForeignIncarnationLiveness {
+    /// A live process holds the host's incarnation lock: a sibling host
+    /// still owns the record.
+    Running,
+    /// Nothing can prove it either way: the lock file is missing (a record
+    /// written before incarnation locks), or the custody root is on a
+    /// network or userspace filesystem where `flock(2)` is not a reliable
+    /// cross-process proof.
+    Unverifiable,
+}
+
+impl std::fmt::Display for ForeignIncarnationLiveness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Running => "still running",
+            Self::Unverifiable => "not verifiable from here",
+        })
+    }
+}
+
 /// Errors establishing or recovering process custody.
 ///
 /// Every error fails closed: no custody handle is produced, so no new work
@@ -100,16 +123,21 @@ pub enum ProcessCustodyError {
         host_pid: i32,
     },
     /// The entry was written in this boot but in another pid namespace (for
-    /// example another container sharing the realm root). Neither its host
-    /// nor its process group can be observed from here, and nothing proves
-    /// they ended, so nothing was signalled or settled. Operator action:
-    /// confirm the container that wrote it has stopped (or settle the scope
-    /// from inside it), then delete the entry's record and retry. A reboot
-    /// also settles it.
+    /// example another container sharing the realm root), and its host
+    /// incarnation's liveness lock does not prove the host ended (see
+    /// [`ForeignIncarnationLiveness`]). Its pids cannot be observed from
+    /// here, so nothing was signalled or settled. Operator action: for
+    /// `Running`, stop the other host (or let it settle its own session);
+    /// for `Unverifiable`, confirm the container that wrote it has stopped,
+    /// then delete the entry's record and retry. A reboot also settles it.
     #[error(
-        "custody entry {entry_id} of host incarnation {incarnation} was written in another pid namespace of this boot and cannot be verified from here"
+        "custody entry {entry_id} of host incarnation {incarnation} was written in another pid namespace of this boot, and its host is {liveness}"
     )]
-    ForeignPidNamespace { entry_id: Uuid, incarnation: Uuid },
+    ForeignPidNamespace {
+        entry_id: Uuid,
+        incarnation: Uuid,
+        liveness: ForeignIncarnationLiveness,
+    },
     /// Recovery SIGKILLed the group but some member did not exit before the
     /// deadline (a process stuck in an uninterruptible kernel wait), or the
     /// kernel refused to let this host signal a member (EPERM, for example a

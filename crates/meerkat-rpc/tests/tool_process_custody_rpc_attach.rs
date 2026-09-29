@@ -38,6 +38,11 @@ const CHILD_TEST: &str = "rpc_custody_gateway_child";
 const TOOL_CALL_ID: &str = "call-rpc-crash";
 const INTERRUPTED_PROMPT: &str = "create the effect file";
 const NEXT_PROMPT: &str = "what happened?";
+const PHASE_GATEWAY: &str = "gateway";
+/// Run a quick tool, then pause the run's terminal commit (the turn is
+/// terminal in its agent, its provisional tail written, its boundary not
+/// committed) and wait to be killed.
+const PHASE_BEFORE_COMMIT: &str = "before-commit";
 
 /// Scripted model: on a fresh request (no tool results, no interrupted-run
 /// notice) it calls the shell tool; otherwise it answers.
@@ -126,6 +131,34 @@ fn tool_command(root: &Path) -> String {
         root.join("started.fifo").display(),
         root.join("effect").display()
     )
+}
+
+/// A tool that finishes at once, appending one line per execution.
+fn quick_tool_command(root: &Path) -> String {
+    format!("echo ran >> '{}'", root.join("ran").display())
+}
+
+fn spawn_child(root: &Path, phase: &str) -> std::process::Child {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
+        .env(PHASE_ENV, phase)
+        .env(ROOT_ENV, root)
+        .env("MEERKAT_DISABLE_GRAPH_DECODE_MEMO", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn child")
+}
+
+/// Block (no polling) until a child writes a line into `fifo`.
+async fn read_fifo(fifo: PathBuf) -> Option<String> {
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        tokio::task::spawn_blocking(move || std::fs::read_to_string(fifo)),
+    )
+    .await
+    .ok()
+    .map(|joined| joined.unwrap().unwrap())
 }
 
 fn mkfifo(path: &Path) {
@@ -243,12 +276,16 @@ async fn rpc_custody_gateway_child() {
     let Some(root) = std::env::var_os(ROOT_ENV).map(PathBuf::from) else {
         return;
     };
-    if std::env::var_os(PHASE_ENV).is_none() {
+    let Some(phase) = std::env::var(PHASE_ENV).ok() else {
         return;
-    }
-    let client = Arc::new(ScriptedShellClient::new(tool_command(&root)));
+    };
+    let command = match phase.as_str() {
+        PHASE_BEFORE_COMMIT => quick_tool_command(&root),
+        _ => tool_command(&root),
+    };
+    let client = Arc::new(ScriptedShellClient::new(command));
     let runtime = build_runtime(&root, client).await;
-    let mut rpc = RpcClient::serve(runtime);
+    let mut rpc = RpcClient::serve(Arc::clone(&runtime));
     let created = rpc
         .call(
             "session/create",
@@ -257,12 +294,29 @@ async fn rpc_custody_gateway_child() {
         .await;
     let session_id = created["session_id"].as_str().expect("session id");
     std::fs::write(root.join("session-id"), format!("{session_id}\n")).expect("session id");
-    // The turn blocks in the tool until the parent kills this process.
+    let paused = (phase == PHASE_BEFORE_COMMIT).then(|| {
+        runtime
+            .runtime_adapter()
+            .arm_runtime_loop_before_terminal_commit_test_hook(
+                meerkat_core::SessionId::parse(session_id).unwrap(),
+            )
+    });
+    // The turn blocks in the tool (or at its terminal commit) until the
+    // parent kills this process.
     rpc.send(
         "turn/start",
         serde_json::json!({ "session_id": session_id, "prompt": INTERRUPTED_PROMPT }),
     )
     .await;
+    if let Some((entered, _release)) = paused {
+        entered.await.expect("terminal commit reached");
+        let fifo = root.join("phase.fifo");
+        tokio::task::spawn_blocking(move || std::fs::write(fifo, "held\n"))
+            .await
+            .unwrap()
+            .unwrap();
+        std::future::pending::<()>().await;
+    }
     std::future::pending::<()>().await;
 }
 
@@ -272,15 +326,7 @@ async fn rpc_on_demand_attach_settles_an_interrupted_run_instead_of_replaying_it
     let root = temp.path();
     mkfifo(&root.join("started.fifo"));
 
-    let mut gateway = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
-        .env(PHASE_ENV, "gateway")
-        .env(ROOT_ENV, root)
-        .env("MEERKAT_DISABLE_GRAPH_DECODE_MEMO", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn gateway");
+    let mut gateway = spawn_child(root, PHASE_GATEWAY);
     // Block (no polling) until the tool itself reports it is running.
     let fifo = root.join("started.fifo");
     let started = tokio::time::timeout(
@@ -371,5 +417,72 @@ async fn rpc_on_demand_attach_settles_an_interrupted_run_instead_of_replaying_it
     assert!(
         !root.join("effect").exists(),
         "the interrupted tool's effect happened"
+    );
+}
+
+/// Crash window: the run finished (its tool ran once) and its provisional
+/// tail was written, but the host died before the run's boundary committed.
+/// Durable-tail recovery owns that run (it commits it when the host rebuilds
+/// the agent), so the on-demand attach must not also settle it: its evidence
+/// stays unsettled (no request captured, no input abandoned, no notice) and
+/// the finished tool is not re-run.
+///
+/// The turn that follows is not asserted: on this path the RPC host's lazy
+/// resume currently rejects the session with a transcript revision mismatch
+/// whether or not process custody is enabled, which is outside custody.
+#[tokio::test]
+async fn a_run_with_a_provisional_tail_is_left_to_durable_tail_recovery() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    mkfifo(&root.join("phase.fifo"));
+    let mut gateway = spawn_child(root, PHASE_BEFORE_COMMIT);
+    let held = read_fifo(root.join("phase.fifo")).await;
+    gateway.kill().unwrap();
+    gateway.wait().unwrap();
+    assert_eq!(held.as_deref().map(str::trim), Some("held"));
+    let session_id = std::fs::read_to_string(root.join("session-id"))
+        .expect("session id")
+        .trim()
+        .to_string();
+    let scope = root
+        .join("realm")
+        .join("tool_process_custody")
+        .join(&session_id);
+
+    let client = Arc::new(ScriptedShellClient::new(quick_tool_command(root)));
+    let runtime = build_runtime(root, Arc::clone(&client)).await;
+    let mut rpc = RpcClient::serve(Arc::clone(&runtime));
+    let id = rpc
+        .send(
+            "turn/start",
+            serde_json::json!({ "session_id": session_id, "prompt": NEXT_PROMPT }),
+        )
+        .await;
+    let _response = rpc.response(id).await;
+
+    let records: Vec<serde_json::Value> = std::fs::read_dir(&scope)
+        .expect("custody scope")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
+        .map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["phase"], "interrupted");
+    assert_eq!(records[0]["cessation"]["kind"], "exited_before_commit");
+    assert_eq!(
+        records[0]["settlement"]["settlement"], "pending",
+        "the run with a provisional tail must not be settled: {}",
+        records[0]
+    );
+    assert_eq!(
+        client.requests_seeing_notice.load(Ordering::SeqCst),
+        0,
+        "no interrupted-run notice for a run durable-tail recovery owns"
+    );
+    let ran = std::fs::read_to_string(root.join("ran")).unwrap_or_default();
+    assert_eq!(
+        ran.lines().count(),
+        1,
+        "the finished tool was re-run: {ran:?}"
     );
 }

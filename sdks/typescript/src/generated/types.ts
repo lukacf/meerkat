@@ -6219,9 +6219,12 @@ export type BackgroundJobTerminalStatus = "completed" | "failed" | "aborted" | "
 
 export type CommsNoticeKind = string;
 
+export type InterruptedInputKind = "prompt" | "peer" | "flow_step" | "external_event" | "continuation" | "operation" | "unknown";
+
 export interface InterruptedToolRunDispositionInputsSettled {
   inputs: number;
   kind: "inputs_settled";
+  unrestored?: InterruptedInputKind[];
 }
 
 export interface InterruptedToolRunDispositionRunCompleted {
@@ -6261,11 +6264,15 @@ export interface ToolProcessCessationExitedBeforeCommit {
   kind: "exited_before_commit";
 }
 
+export interface ToolProcessCessationForeignIncarnationEnded {
+  kind: "foreign_incarnation_ended";
+}
+
 export interface ToolProcessCessationUnknown {
   kind: "unknown";
 }
 
-export type ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded | ToolProcessCessationExitedBeforeCommit | ToolProcessCessationUnknown;
+export type ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded | ToolProcessCessationExitedBeforeCommit | ToolProcessCessationForeignIncarnationEnded | ToolProcessCessationUnknown;
 
 export interface ToolProcessSpawnerShellCall {
   kind: "shell_call";

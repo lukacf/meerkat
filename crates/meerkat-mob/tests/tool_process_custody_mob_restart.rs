@@ -355,7 +355,7 @@ async fn mob_member_interrupted_by_host_death_is_settled_not_replayed_on_resume(
             blocks[0],
             SystemNoticeBlock::ToolProcessInterrupted {
                 tool_call_id: Some(id),
-                disposition: InterruptedToolRunDisposition::InputsSettled { inputs: 1 },
+                disposition: InterruptedToolRunDisposition::InputsSettled { inputs: 1, .. },
                 ..
             } if id == TOOL_CALL_ID
         ),

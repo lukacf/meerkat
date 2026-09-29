@@ -8882,11 +8882,51 @@
           }
         ]
       },
+      "InterruptedInputKind": {
+        "description": "What kind of input an interrupted run had in flight.",
+        "oneOf": [
+          {
+            "const": "prompt",
+            "description": "A user or operator prompt.",
+            "type": "string"
+          },
+          {
+            "const": "peer",
+            "description": "A peer (comms) message.",
+            "type": "string"
+          },
+          {
+            "const": "flow_step",
+            "description": "A mob flow step.",
+            "type": "string"
+          },
+          {
+            "const": "external_event",
+            "description": "An external event.",
+            "type": "string"
+          },
+          {
+            "const": "continuation",
+            "description": "Runtime continuation work.",
+            "type": "string"
+          },
+          {
+            "const": "operation",
+            "description": "A non-content operation.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "A kind recorded by a newer version.",
+            "type": "string"
+          }
+        ]
+      },
       "InterruptedToolRunDisposition": {
         "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
         "oneOf": [
           {
-            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run. User requests among them are restored to the\ntranscript right before the notice; `unrestored` names the kinds of\nthe others (for example peer messages or flow steps), in order.",
             "properties": {
               "inputs": {
                 "format": "uint32",
@@ -8896,6 +8936,12 @@
               "kind": {
                 "const": "inputs_settled",
                 "type": "string"
+              },
+              "unrestored": {
+                "items": {
+                  "$ref": "#/$defs/InterruptedInputKind"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -13102,6 +13148,19 @@
             "properties": {
               "kind": {
                 "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in another pid namespace of this boot (a\ncontainer since restarted) and its host has exited, as proven by the\nkernel releasing its incarnation lock; its tools ended with that\ncontainer. Nothing was signalled.",
+            "properties": {
+              "kind": {
+                "const": "foreign_incarnation_ended",
                 "type": "string"
               }
             },
@@ -20016,11 +20075,51 @@
         ],
         "type": "object"
       },
+      "InterruptedInputKind": {
+        "description": "What kind of input an interrupted run had in flight.",
+        "oneOf": [
+          {
+            "const": "prompt",
+            "description": "A user or operator prompt.",
+            "type": "string"
+          },
+          {
+            "const": "peer",
+            "description": "A peer (comms) message.",
+            "type": "string"
+          },
+          {
+            "const": "flow_step",
+            "description": "A mob flow step.",
+            "type": "string"
+          },
+          {
+            "const": "external_event",
+            "description": "An external event.",
+            "type": "string"
+          },
+          {
+            "const": "continuation",
+            "description": "Runtime continuation work.",
+            "type": "string"
+          },
+          {
+            "const": "operation",
+            "description": "A non-content operation.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "A kind recorded by a newer version.",
+            "type": "string"
+          }
+        ]
+      },
       "InterruptedToolRunDisposition": {
         "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
         "oneOf": [
           {
-            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run. User requests among them are restored to the\ntranscript right before the notice; `unrestored` names the kinds of\nthe others (for example peer messages or flow steps), in order.",
             "properties": {
               "inputs": {
                 "format": "uint32",
@@ -20030,6 +20129,12 @@
               "kind": {
                 "const": "inputs_settled",
                 "type": "string"
+              },
+              "unrestored": {
+                "items": {
+                  "$ref": "#/$defs/InterruptedInputKind"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -20926,6 +21031,19 @@
             "properties": {
               "kind": {
                 "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in another pid namespace of this boot (a\ncontainer since restarted) and its host has exited, as proven by the\nkernel releasing its incarnation lock; its tools ended with that\ncontainer. Nothing was signalled.",
+            "properties": {
+              "kind": {
+                "const": "foreign_incarnation_ended",
                 "type": "string"
               }
             },
@@ -22567,11 +22685,51 @@
         ],
         "type": "string"
       },
+      "InterruptedInputKind": {
+        "description": "What kind of input an interrupted run had in flight.",
+        "oneOf": [
+          {
+            "const": "prompt",
+            "description": "A user or operator prompt.",
+            "type": "string"
+          },
+          {
+            "const": "peer",
+            "description": "A peer (comms) message.",
+            "type": "string"
+          },
+          {
+            "const": "flow_step",
+            "description": "A mob flow step.",
+            "type": "string"
+          },
+          {
+            "const": "external_event",
+            "description": "An external event.",
+            "type": "string"
+          },
+          {
+            "const": "continuation",
+            "description": "Runtime continuation work.",
+            "type": "string"
+          },
+          {
+            "const": "operation",
+            "description": "A non-content operation.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "A kind recorded by a newer version.",
+            "type": "string"
+          }
+        ]
+      },
       "InterruptedToolRunDisposition": {
         "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
         "oneOf": [
           {
-            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run. User requests among them are restored to the\ntranscript right before the notice; `unrestored` names the kinds of\nthe others (for example peer messages or flow steps), in order.",
             "properties": {
               "inputs": {
                 "format": "uint32",
@@ -22581,6 +22739,12 @@
               "kind": {
                 "const": "inputs_settled",
                 "type": "string"
+              },
+              "unrestored": {
+                "items": {
+                  "$ref": "#/$defs/InterruptedInputKind"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -23299,6 +23463,19 @@
             "properties": {
               "kind": {
                 "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in another pid namespace of this boot (a\ncontainer since restarted) and its host has exited, as proven by the\nkernel releasing its incarnation lock; its tools ended with that\ncontainer. Nothing was signalled.",
+            "properties": {
+              "kind": {
+                "const": "foreign_incarnation_ended",
                 "type": "string"
               }
             },
@@ -36796,11 +36973,51 @@
         ],
         "type": "object"
       },
+      "InterruptedInputKind": {
+        "description": "What kind of input an interrupted run had in flight.",
+        "oneOf": [
+          {
+            "const": "prompt",
+            "description": "A user or operator prompt.",
+            "type": "string"
+          },
+          {
+            "const": "peer",
+            "description": "A peer (comms) message.",
+            "type": "string"
+          },
+          {
+            "const": "flow_step",
+            "description": "A mob flow step.",
+            "type": "string"
+          },
+          {
+            "const": "external_event",
+            "description": "An external event.",
+            "type": "string"
+          },
+          {
+            "const": "continuation",
+            "description": "Runtime continuation work.",
+            "type": "string"
+          },
+          {
+            "const": "operation",
+            "description": "A non-content operation.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "A kind recorded by a newer version.",
+            "type": "string"
+          }
+        ]
+      },
       "InterruptedToolRunDisposition": {
         "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
         "oneOf": [
           {
-            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run. User requests among them are restored to the\ntranscript right before the notice; `unrestored` names the kinds of\nthe others (for example peer messages or flow steps), in order.",
             "properties": {
               "inputs": {
                 "format": "uint32",
@@ -36810,6 +37027,12 @@
               "kind": {
                 "const": "inputs_settled",
                 "type": "string"
+              },
+              "unrestored": {
+                "items": {
+                  "$ref": "#/$defs/InterruptedInputKind"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -37706,6 +37929,19 @@
             "properties": {
               "kind": {
                 "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in another pid namespace of this boot (a\ncontainer since restarted) and its host has exited, as proven by the\nkernel releasing its incarnation lock; its tools ended with that\ncontainer. Nothing was signalled.",
+            "properties": {
+              "kind": {
+                "const": "foreign_incarnation_ended",
                 "type": "string"
               }
             },

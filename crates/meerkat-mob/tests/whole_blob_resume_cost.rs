@@ -46,18 +46,22 @@ const DEFAULT_GENERATION_MESSAGES: usize = 16;
 const MESSAGE_FILLER_BYTES: usize = 1024;
 const NO_COMPACTION_THRESHOLD: u64 = 50_000_000;
 
-/// Resume may decode each committed document once for the store-owned
-/// durable-tail recovery (the verified read every other consumer reuses) and
-/// once more for the startup compaction-outbox refresh, whose identity
-/// re-commit the store validates. Measured before the reuse: 8 decodes and 8
+/// Resume decodes each committed document once, for the store-owned
+/// durable-tail recovery. Every later consumer reuses that verified body, and
+/// the startup compaction-outbox refresh re-commits bytes the store already
+/// holds a verified session for. Measured before the reuse: 8 decodes and 8
 /// rewrite-graph validations per rewritten member (60 and 120 generations
 /// alike).
-const MAX_RESUME_DECODES_PER_SESSION: u64 = 2;
+const MAX_RESUME_DECODES_PER_SESSION: u64 = 1;
 
-/// Digest bytes at resume relative to the committed documents: two decodes'
-/// graph replay plus the create-time encode. Measured 8.70x before, 2.87x
-/// after.
-const MAX_RESUME_DIGEST_MULTIPLE: f64 = 3.5;
+/// Digest bytes at resume relative to the committed documents: one decode's
+/// graph replay plus the create-time encode audit. Measured 8.70x before,
+/// 1.89x after.
+const MAX_RESUME_DIGEST_MULTIPLE: f64 = 2.25;
+
+/// Digest bytes for the first turn after resume: the turn commit's own encode
+/// audit, with no decode. Measured 2.90x before, 0.90x after.
+const MAX_FIRST_TURN_DIGEST_MULTIPLE: f64 = 1.25;
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -510,5 +514,12 @@ async fn whole_blob_cold_resume_with_deep_rewrite_history() {
     assert_eq!(
         first.graph_validations, 0,
         "the first turn after a resume must not re-validate an unchanged rewrite graph"
+    );
+    let first_turn_digest_budget = (document_bytes as f64 * MAX_FIRST_TURN_DIGEST_MULTIPLE) as u64;
+    assert!(
+        first.digest_bytes <= first_turn_digest_budget,
+        "the first turn after a resume hashed {} content-digest bytes for {document_bytes} \
+         committed document bytes (budget {first_turn_digest_budget})",
+        first.digest_bytes
     );
 }

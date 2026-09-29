@@ -580,13 +580,12 @@ them.
   (lukacf/meerkat-mobkit#488). Stored strand names are read back from rows,
   never recomputed, so strands already written under revision names stay
   readable, and a rewrite refused this way succeeds on its next replay.
-- WholeBlob cold resume decodes each committed document twice instead of
-  about eight times (#1273): once for the store-owned recovery, whose
-  verified body every later consumer reuses, and once when the store
-  validates the startup compaction refresh's re-commit. Every WholeBlob
-  decode re-parses the document and re-runs its rewrite-graph validation and
-  semantic replay, so the cost grew with rewrite generations times
-  transcript size, per consumer.
+- WholeBlob cold resume decodes each committed document once instead of
+  about eight times (#1273). The one decode is the store-owned recovery,
+  and every later consumer reuses its verified body. Every WholeBlob decode
+  re-parses the document and re-runs its rewrite-graph validation and
+  semantic replay, so the cost used to grow with rewrite generations times
+  transcript size, once per consumer.
   - Resume preparation adopts the store-owned recovery's verified committed
     snapshot under the same observation bracket as HeadCanonical (new
     additive `meerkat_runtime::recovery::recover_durable_tail_retaining_committed_whole_blob`).
@@ -599,19 +598,25 @@ them.
     authority digest instead of decoding the stored body. The startup
     compaction refresh re-commits verified raw bytes instead of decoding
     them first.
-  - `SqliteRuntimeStore::commit_session_snapshot_checked` decodes the
-    incoming snapshot once instead of twice.
+  - `SqliteRuntimeStore` keeps the typed sessions it verified from a load
+    or a receipt-less control-plane commit, keyed by the exact row sha256 of
+    their bytes (at most 64). `commit_session_snapshot_checked` reuses an
+    entry only for incoming bytes with the same digest, which is the refresh
+    re-commit. Every guard still runs on the typed session. It also decodes
+    other incoming snapshots once instead of twice. Per-turn receipt
+    boundaries are not retained, so the actor's transcript vector is never
+    shared across turns.
   - `persist_full_session` takes its checkpoint digest from the retained
     midstate.
 
-  Every store-authority check still runs once per decode. With 60 and 120
-  rewrite generations, resume went from 24 decodes and 16 graph
-  validations to 6 and 4, and digest bytes from 8.70x to 2.87x of the
-  committed documents (7.41 s to 2.60 s at 120 generations). The first
-  turn after resume went from 5 decodes to 0 (2.29 s to 0.55 s).
-  `whole_blob_resume_cost` pins the bounds. Hidden
-  `global_whole_blob_decodes` and `global_transcript_graph_validations`
-  counters expose the cost.
+  Every store-authority check still runs. With 60 and 120 rewrite
+  generations, resume went from 24 decodes and 16 graph validations to 3
+  and 2 (one per session), and digest bytes went from 8.70x to 1.89x of the
+  committed documents. At 120 generations resume time went from 7.41 s to
+  1.76 s. The first turn after resume went from 5 decodes to 0, and from
+  2.29 s to 0.51 s at 120 generations. `whole_blob_resume_cost` pins the
+  bounds. Hidden `global_whole_blob_decodes` and
+  `global_transcript_graph_validations` counters expose the cost.
 
 - Cold resume verifies each committed session head once instead of five
   times (#1258). HeadCanonical resume preparation now brackets the

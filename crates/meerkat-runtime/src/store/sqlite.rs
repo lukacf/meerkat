@@ -9521,10 +9521,72 @@ ORDER BY runtime_id";
         })
     }
 
+    /// Most sessions [`VerifiedWholeBlobSessions`] keeps. Entries only
+    /// replace a decode of byte-identical input, so eviction costs a decode,
+    /// never correctness.
+    const VERIFIED_WHOLE_BLOB_SESSION_CAPACITY: usize = 64;
+
+    /// Typed WholeBlob sessions this store has already verified or encoded,
+    /// keyed by runtime and by the exact `row-sha256` digest of their bytes.
+    ///
+    /// A WholeBlob decode re-parses the document and re-runs its rewrite-graph
+    /// validation and semantic replay. When a caller hands this store bytes
+    /// whose digest equals an entry's digest, those bytes are exactly the
+    /// document the entry was decoded from (or encodes to), so the entry is
+    /// reused instead of decoding them again. Every guard that inspects the
+    /// typed session still runs on it; only the redundant decode is skipped.
+    /// A digest mismatch, or no entry, decodes as before.
+    #[derive(Debug, Default)]
+    struct VerifiedWholeBlobSessions {
+        entries: std::sync::Mutex<
+            indexmap::IndexMap<LogicalRuntimeId, (String, Arc<meerkat_core::Session>)>,
+        >,
+    }
+
+    impl VerifiedWholeBlobSessions {
+        fn matching(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            blob_sha256: &str,
+        ) -> Option<Arc<meerkat_core::Session>> {
+            let entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            entries
+                .get(runtime_id)
+                .filter(|(digest, session)| {
+                    digest == blob_sha256
+                        && &LogicalRuntimeId::for_session(session.id()) == runtime_id
+                })
+                .map(|(_, session)| Arc::clone(session))
+        }
+
+        fn remember(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            blob_sha256: &str,
+            session: Arc<meerkat_core::Session>,
+        ) {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            entries.shift_remove(runtime_id);
+            entries.insert(runtime_id.clone(), (blob_sha256.to_string(), session));
+            while entries.len() > VERIFIED_WHOLE_BLOB_SESSION_CAPACITY {
+                entries.shift_remove_index(0);
+            }
+        }
+    }
+
     /// SQLite-backed runtime store sharing the same sqlite file as `SqliteSessionStore`.
     pub struct SqliteRuntimeStore {
         path: PathBuf,
         session_persistence_profile: RuntimeSessionPersistenceProfile,
+        /// Typed sessions this store verified, keyed by the exact WholeBlob
+        /// row digest they were verified or encoded from.
+        verified_whole_blob_sessions: Arc<VerifiedWholeBlobSessions>,
         #[cfg(test)]
         unregister_finalization_fault: AtomicU8,
         /// Candidate bytes shipped into the snapshot byte-equality probe.
@@ -9628,6 +9690,7 @@ ORDER BY runtime_id";
             Ok(Self {
                 path,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::WholeBlobV1,
+                verified_whole_blob_sessions: Arc::default(),
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
                 #[cfg(test)]
@@ -9729,6 +9792,7 @@ ORDER BY runtime_id";
             Ok(Self {
                 path,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+                verified_whole_blob_sessions: Arc::default(),
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
                 #[cfg(test)]
@@ -9793,12 +9857,30 @@ ORDER BY runtime_id";
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
+            let verified_sessions = Arc::clone(&self.verified_whole_blob_sessions);
             #[cfg(test)]
             let snapshot_byte_probe_bytes = std::sync::Arc::clone(&self.snapshot_byte_probe_bytes);
             tokio::task::spawn_blocking(move || {
-                let incoming: meerkat_core::Session =
-                    meerkat_core::Session::from_persisted_bytes(&session_delta.session_snapshot)
-                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                // Bytes whose digest matches a session this store already
+                // verified are exactly that document: reuse it rather than
+                // decoding and re-validating its rewrite graph. The startup
+                // compaction refresh re-commits the committed bytes verbatim,
+                // so this is the common case there.
+                use sha2::Digest as _;
+                let incoming_sha256 = format!(
+                    "row-sha256:{:x}",
+                    sha2::Sha256::digest(session_delta.session_snapshot.as_ref())
+                );
+                let incoming: Arc<meerkat_core::Session> =
+                    match verified_sessions.matching(&runtime_id, &incoming_sha256) {
+                        Some(session) => session,
+                        None => Arc::new(
+                            meerkat_core::Session::from_persisted_bytes(
+                                &session_delta.session_snapshot,
+                            )
+                            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?,
+                        ),
+                    };
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 refuse_whole_blob_write_under_head_authority(
@@ -9855,6 +9937,7 @@ ORDER BY runtime_id";
                     clear_runtime_projection_quarantine(&tx, &runtime_id)?;
                     tx.commit()
                         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                    verified_sessions.remember(&runtime_id, &incoming_sha256, incoming);
                     return Ok(());
                 }
                 let previous = tx
@@ -9880,6 +9963,7 @@ ORDER BY runtime_id";
                 )?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                verified_sessions.remember(&runtime_id, &incoming_sha256, incoming);
                 Ok(())
             })
             .await
@@ -9936,6 +10020,22 @@ ORDER BY runtime_id";
                 ));
             }
 
+            // Only receipt-less control-plane snapshots (create, direct
+            // persistence) are remembered, as a clone: the caller may still
+            // own the Arc it sealed. A per-turn boundary is not remembered,
+            // because a retained clone shares the live transcript vector and
+            // would make the actor's next append copy it on every turn.
+            let remembered =
+                prepared_session
+                    .as_ref()
+                    .filter(|_| receipt.is_none())
+                    .map(|prepared| {
+                        (
+                            Arc::new(prepared.session().clone()),
+                            prepared.blob_sha256().to_string(),
+                        )
+                    });
+            let remembered_runtime_id = runtime_id.clone();
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let lifecycle_expected = machine_lifecycle
@@ -9946,7 +10046,7 @@ ORDER BY runtime_id";
                 .into_iter()
                 .map(InputStatePersistenceRecord::into_stored_and_expected)
                 .collect::<Vec<_>>();
-            tokio::task::spawn_blocking(move || {
+            let authority = tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 refuse_whole_blob_write_under_head_authority(
@@ -10001,7 +10101,18 @@ ORDER BY runtime_id";
                 Ok(authority)
             })
             .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))??;
+            if let (Some(authority), Some((session, blob_sha256))) =
+                (authority.as_ref(), remembered)
+                && authority.blob_sha256() == blob_sha256
+            {
+                self.verified_whole_blob_sessions.remember(
+                    &remembered_runtime_id,
+                    &blob_sha256,
+                    session,
+                );
+            }
+            Ok(authority)
         }
 
         async fn commit_whole_blob_provisional_promotion(
@@ -12410,6 +12521,7 @@ ORDER BY runtime_id";
             )?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
+            let verified_sessions = Arc::clone(&self.verified_whole_blob_sessions);
             tokio::task::spawn_blocking(move || {
                 let observed = {
                     let mut conn = open_runtime_connection(&path)?;
@@ -12443,11 +12555,19 @@ ORDER BY runtime_id";
                 // The pair comes from one snapshot. Decode and hash its owned
                 // bytes after releasing SQLite, not under a writer reservation
                 // or a read snapshot that pins WAL reclamation.
-                observed
+                let snapshot = observed
                     .map(|(bytes, authority)| {
                         CommittedWholeBlobSnapshot::new(Arc::new(bytes), authority)
                     })
-                    .transpose()
+                    .transpose()?;
+                if let Some(snapshot) = snapshot.as_ref() {
+                    verified_sessions.remember(
+                        &runtime_id,
+                        snapshot.authority().blob_sha256(),
+                        snapshot.session_arc(),
+                    );
+                }
+                Ok(snapshot)
             })
             .await
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
@@ -12474,9 +12594,15 @@ ORDER BY runtime_id";
             }
             let compaction_projection_intents =
                 crate::store::validated_compaction_projection_intents(candidate_session.as_ref())?;
+            // A clone, never the caller's Arc: the caller may still own it.
+            let remembered = (
+                Arc::new(candidate_session.as_ref().clone()),
+                candidate_blob_sha256.clone(),
+            );
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            let cas_runtime_id = runtime_id.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 refuse_whole_blob_write_under_head_authority(
@@ -12524,7 +12650,17 @@ ORDER BY runtime_id";
                 Ok(WholeBlobSnapshotCasOutcome::Committed(authority))
             })
             .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))??;
+            if let WholeBlobSnapshotCasOutcome::Committed(authority) = &outcome
+                && authority.blob_sha256() == remembered.1
+            {
+                self.verified_whole_blob_sessions.remember(
+                    &cas_runtime_id,
+                    &remembered.1,
+                    remembered.0,
+                );
+            }
+            Ok(outcome)
         }
 
         async fn write_prepared_whole_blob_provisional_tail(
@@ -19667,6 +19803,49 @@ ORDER BY runtime_id";
             let mut out = bytes.to_vec();
             out[position..position + needle.len()].copy_from_slice(replacement);
             out
+        }
+
+        #[tokio::test]
+        async fn byte_identical_recommit_reuses_the_verified_session_instead_of_decoding() {
+            let (_dir, store) = temp_store();
+            let mut session = Session::new();
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            session.push(Message::User(UserMessage::text("first turn".to_string())));
+            let committed = serde_json::to_vec(&session).unwrap();
+            let commit = |bytes: Vec<u8>| {
+                store.commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: bytes.into(),
+                    },
+                )
+            };
+            commit(committed.clone()).await.unwrap();
+
+            // The startup compaction refresh shape: the committed bytes,
+            // loaded verbatim and re-committed.
+            let decodes = meerkat_core::global_whole_blob_decodes();
+            commit(committed.clone()).await.unwrap();
+            assert_eq!(
+                meerkat_core::global_whole_blob_decodes(),
+                decodes,
+                "bytes whose digest matches a session this store verified are not decoded again"
+            );
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(Arc::new(committed.clone()))
+            );
+
+            // Different bytes always take the full decode.
+            session.push(Message::User(UserMessage::text("second turn".to_string())));
+            let grown = serde_json::to_vec(&session).unwrap();
+            let decodes = meerkat_core::global_whole_blob_decodes();
+            commit(grown.clone()).await.unwrap();
+            assert_eq!(meerkat_core::global_whole_blob_decodes(), decodes + 1);
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(Arc::new(grown))
+            );
         }
 
         #[tokio::test]

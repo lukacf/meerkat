@@ -4606,6 +4606,61 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .shift_remove(session_id);
     }
 
+    /// Transcript revision and message count of the committed WholeBlob
+    /// document, without reading its body.
+    ///
+    /// One fresh body-free authority observation is taken. The facts are
+    /// served only for exactly that authority: from the store's record for
+    /// it, or from the verified body this service holds for it. Anything
+    /// else (no authority, another session, nothing recorded) returns `None`,
+    /// and the caller compares full bodies.
+    async fn bounded_whole_blob_transcript_facts(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<(String, u64)>, SessionError> {
+        let runtime_id = Self::runtime_id_for_session(session_id);
+        let Some(current) = self
+            .runtime_store
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .map_err(|error| {
+                whole_blob_read_error_to_session_error(
+                    session_id,
+                    "live session authority classification",
+                    error,
+                )
+            })?
+        else {
+            return Ok(None);
+        };
+        if current.session_id() != session_id {
+            return Ok(None);
+        }
+        if let Some(facts) = self
+            .runtime_store
+            .session_authority_ops()
+            .recorded_whole_blob_transcript_facts(&current)
+        {
+            return Ok(Some((
+                facts.transcript_revision().to_string(),
+                facts.message_count(),
+            )));
+        }
+        let Some(cached) = self
+            .cached_whole_blob_body(session_id)
+            .filter(|cached| cached.authority == current)
+        else {
+            return Ok(None);
+        };
+        let (Ok(revision), Ok(message_count)) = (
+            cached.session.transcript_content_digest(),
+            u64::try_from(cached.session.messages().len()),
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some((revision, message_count)))
+    }
+
     async fn load_committed_runtime_session_for_body(
         &self,
         id: &SessionId,
@@ -4840,6 +4895,65 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                 reason,
                             });
                         }
+                    }
+                }
+            }
+
+            // WholeBlob counterpart of the bounded path above. The committed
+            // document's transcript revision and message count are known
+            // without its body when the store recorded them for exactly the
+            // current authority, or when this service holds the verified body
+            // for exactly that authority. They are then the same inputs the
+            // full-body comparison below derives, so the verdict is identical,
+            // and neither document is exported or decoded. Only a
+            // DurableAuthoritative verdict loads the committed body.
+            if self.runtime_store.session_persistence_profile()
+                == RuntimeSessionPersistenceProfile::WholeBlobV1
+                && let Some((stored_revision, stored_message_count)) =
+                    self.bounded_whole_blob_transcript_facts(id).await?
+            {
+                let stored_transcript_diverged =
+                    stored_revision.as_str() != live_authority.transcript_revision();
+                let live_has_uncommitted_transcript = u64::try_from(live_authority.message_count())
+                    .is_ok_and(|live| live > stored_message_count);
+                let stored_is_archived =
+                    self.session_archived_by_runtime_store_authority(id).await?;
+                let (kind, reason) = Self::classify_live_session_authority_observations(
+                    id,
+                    stored_transcript_diverged,
+                    live_has_uncommitted_transcript,
+                    stored_is_archived,
+                )?;
+                match kind {
+                    LiveSessionAuthorityKind::LiveAuthoritative => {
+                        return Ok(LiveSessionAuthority::LiveAuthoritative {
+                            snapshot: live_authority,
+                        });
+                    }
+                    LiveSessionAuthorityKind::DurableAuthoritative => {
+                        let Some(stored) = self
+                            .load_committed_runtime_session_for_body(
+                                id,
+                                "live session authority classification",
+                            )
+                            .await?
+                        else {
+                            return Ok(LiveSessionAuthority::LiveAuthoritative {
+                                snapshot: live_authority,
+                            });
+                        };
+                        tracing::debug!(
+                            session_id = %id,
+                            ?reason,
+                            live_message_count = live_authority.message_count(),
+                            stored_message_count,
+                            stored_transcript_diverged,
+                            "live session authority classified durable from bounded WholeBlob facts"
+                        );
+                        return Ok(LiveSessionAuthority::DurableAuthoritative {
+                            session: Box::new(stored),
+                            reason,
+                        });
                     }
                 }
             }

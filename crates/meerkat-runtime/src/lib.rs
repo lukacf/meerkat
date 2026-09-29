@@ -1093,7 +1093,7 @@ pub use store::{
     RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
     RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
     RuntimeStoreWriteFenceOutcome, SerializedSessionSnapshot, VerifiedCommittedWholeBlobPayload,
-    WholeBlobProvisionalTailAuthority, WholeBlobStoreAuthority,
+    WholeBlobCommittedTranscriptFacts, WholeBlobProvisionalTailAuthority, WholeBlobStoreAuthority,
     reuse_or_load_committed_whole_blob_snapshot,
 };
 pub use traits::{

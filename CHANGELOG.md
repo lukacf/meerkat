@@ -299,6 +299,14 @@ them.
     already-materialized artifact without encoding.
 
   All of these are additive.
+- `RuntimeSessionAuthorityOps::recorded_whole_blob_transcript_facts(&authority)`
+  is a provided method whose default is `None` (#1273). It returns a
+  `WholeBlobCommittedTranscriptFacts` (the transcript revision and message
+  count) for the committed WholeBlob document an exact authority
+  identifies, without reading its body. `SqliteRuntimeStore` records these
+  facts whenever it writes a document: prepared boundaries, snapshot CAS,
+  snapshot commits, and provisional tails. They are keyed by the row sha256,
+  and the store answers only for an authority with that exact digest.
 
 - `IncrementalSessionStore::verify_current_head` (provided method): a
   body-free proof that a head is still the store's current physical head,
@@ -617,6 +625,21 @@ them.
   2.29 s to 0.51 s at 120 generations. `whole_blob_resume_cost` pins the
   bounds. Hidden `global_whole_blob_decodes` and
   `global_transcript_graph_validations` counters expose the cost.
+
+- The WholeBlob `live_session_authority` passes on every turn's apply path
+  no longer export the live session or decode the committed document
+  (#1273). These are the workgraph-overlay read and
+  `discard_stale_live_session_if_needed`. As on HeadCanonical, they classify
+  from bounded facts. The inputs are the actor's transcript authority and
+  the committed revision and message count, which come from the store's
+  recorded facts or the service's verified body for exactly the fresh
+  authority. They are the same inputs as the full-body comparison, so the
+  verdict is unchanged. Only a DurableAuthoritative verdict loads the body.
+  With 60 and 120 rewrite generations, two steady-state turns per member
+  went from 4 decodes and 4 graph validations to 0, and digest bytes went
+  from 3.78x to 1.82x of the committed documents. At 120 generations the
+  time went from 2.48 s to 0.92 s. `whole_blob_resume_cost` bounds the
+  steady-state turns at zero decodes.
 
 - Cold resume verifies each committed session head once instead of five
   times (#1258). HeadCanonical resume preparation now brackets the

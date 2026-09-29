@@ -1418,6 +1418,52 @@ impl CommittingWholeBlobSession {
     }
 }
 
+/// Bounded transcript facts of one exact committed WholeBlob document: its
+/// transcript revision (the content digest) and live message count.
+///
+/// These are the WholeBlob counterpart of the head revision and message count
+/// a HeadCanonical authority carries. They are a pure function of the
+/// document bytes, so a store may serve them for any authority whose row
+/// digest equals the digest they were recorded for (see
+/// [`RuntimeSessionAuthorityOps::recorded_whole_blob_transcript_facts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WholeBlobCommittedTranscriptFacts {
+    transcript_revision: String,
+    message_count: u64,
+}
+
+impl WholeBlobCommittedTranscriptFacts {
+    // The constructors' only users record facts in the SQLite store.
+    #[cfg(feature = "sqlite-store")]
+    pub(crate) fn new(transcript_revision: String, message_count: u64) -> Self {
+        Self {
+            transcript_revision,
+            message_count,
+        }
+    }
+
+    /// Facts of the document `session` encodes to. The digest comes from the
+    /// session's retained midstate, so a live session pays only its delta.
+    #[cfg(feature = "sqlite-store")]
+    pub(crate) fn from_session(session: &meerkat_core::Session) -> Option<Self> {
+        let transcript_revision = session.transcript_content_digest().ok()?;
+        let message_count = u64::try_from(session.messages().len()).ok()?;
+        Some(Self::new(transcript_revision, message_count))
+    }
+
+    /// Transcript content digest of the committed document.
+    #[must_use]
+    pub fn transcript_revision(&self) -> &str {
+        &self.transcript_revision
+    }
+
+    /// Live message count of the committed document.
+    #[must_use]
+    pub const fn message_count(&self) -> u64 {
+        self.message_count
+    }
+}
+
 /// Reuse a snapshot bound at commit time while it is still the committed
 /// state, or read the committed state authoritatively.
 ///
@@ -7963,6 +8009,23 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
     fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile;
 
     fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost;
+
+    /// Bounded transcript facts of the committed WholeBlob document that
+    /// `authority` identifies, when this store already knows them without
+    /// reading the body.
+    ///
+    /// A store may answer only for facts it recorded from a typed session
+    /// whose encoding has exactly `authority`'s row digest (for example at
+    /// commit time). The answer is then exact for that authority, and `None`
+    /// means unknown: the caller reads the committed body. The default knows
+    /// nothing.
+    fn recorded_whole_blob_transcript_facts(
+        &self,
+        authority: &WholeBlobStoreAuthority,
+    ) -> Option<WholeBlobCommittedTranscriptFacts> {
+        let _ = authority;
+        None
+    }
 
     /// Consume one exact store-verified physical activation proof and align
     /// the matching runtime HeadCanonical authority atomically.

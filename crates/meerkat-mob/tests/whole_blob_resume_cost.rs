@@ -59,6 +59,9 @@ const MAX_RESUME_DECODES_PER_SESSION: u64 = 1;
 /// 1.89x after.
 const MAX_RESUME_DIGEST_MULTIPLE: f64 = 2.25;
 
+/// Turns per member after the first, measured as the steady state.
+const STEADY_TURNS_PER_MEMBER: usize = 2;
+
 /// Digest bytes for the first turn after resume: the turn commit's own encode
 /// audit, with no decode. Measured 2.90x before, 0.90x after.
 const MAX_FIRST_TURN_DIGEST_MULTIPLE: f64 = 1.25;
@@ -484,6 +487,28 @@ async fn whole_blob_cold_resume_with_deep_rewrite_history() {
     );
     first.report("first-turn", member_count, document_bytes);
 
+    // Steady state: by now every committed head was written by a per-turn
+    // runtime boundary the session service never saw, so any consumer that
+    // still needs the committed body has to decode it.
+    let steady_start = CostMark::now();
+    let steady_clock = Instant::now();
+    for round in 0..STEADY_TURNS_PER_MEMBER {
+        for member in LARGE_MEMBER_IDS {
+            run_turn(
+                &handle_2,
+                member,
+                format!("steady turn {round} after resume for {member}"),
+            )
+            .await;
+        }
+    }
+    let steady = CostMark::now().since(steady_start);
+    eprintln!(
+        "[whole-blob resume] steady turns ({STEADY_TURNS_PER_MEMBER} per member): {:?}",
+        steady_clock.elapsed()
+    );
+    steady.report("steady-turns", member_count, document_bytes);
+
     handle_2.shutdown().await.expect("final shutdown");
 
     let sessions = member_count as u64;
@@ -514,6 +539,21 @@ async fn whole_blob_cold_resume_with_deep_rewrite_history() {
     assert_eq!(
         first.graph_validations, 0,
         "the first turn after a resume must not re-validate an unchanged rewrite graph"
+    );
+    assert_eq!(
+        steady.decodes, 0,
+        "a steady-state turn must classify live/committed authority from bounded facts, \
+         not decode the committed document"
+    );
+    assert_eq!(steady.graph_validations, 0);
+    let steady_digest_budget = (document_bytes as f64
+        * MAX_FIRST_TURN_DIGEST_MULTIPLE
+        * STEADY_TURNS_PER_MEMBER as f64) as u64;
+    assert!(
+        steady.digest_bytes <= steady_digest_budget,
+        "{STEADY_TURNS_PER_MEMBER} steady turns per member hashed {} content-digest bytes for \
+         {document_bytes} committed document bytes (budget {steady_digest_budget})",
+        steady.digest_bytes
     );
     let first_turn_digest_budget = (document_bytes as f64 * MAX_FIRST_TURN_DIGEST_MULTIPLE) as u64;
     assert!(

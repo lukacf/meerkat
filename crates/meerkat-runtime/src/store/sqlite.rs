@@ -9580,6 +9580,58 @@ ORDER BY runtime_id";
         }
     }
 
+    /// Most runtimes [`RecordedWholeBlobTranscriptFacts`] keeps. Entries are a
+    /// digest string and a count, so the bound is generous.
+    const RECORDED_WHOLE_BLOB_FACTS_CAPACITY: usize = 1024;
+
+    /// Bounded transcript facts of WholeBlob documents this store wrote,
+    /// keyed by runtime and by the exact row digest of the document.
+    ///
+    /// Facts are a pure function of the document bytes, so an entry can never
+    /// be stale: it is served only for an authority whose row digest equals the
+    /// recorded one, and any other authority reads the body.
+    #[derive(Debug, Default)]
+    struct RecordedWholeBlobTranscriptFacts {
+        entries: std::sync::Mutex<
+            indexmap::IndexMap<
+                LogicalRuntimeId,
+                (String, crate::store::WholeBlobCommittedTranscriptFacts),
+            >,
+        >,
+    }
+
+    impl RecordedWholeBlobTranscriptFacts {
+        fn record(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            blob_sha256: &str,
+            facts: crate::store::WholeBlobCommittedTranscriptFacts,
+        ) {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            entries.shift_remove(runtime_id);
+            entries.insert(runtime_id.clone(), (blob_sha256.to_string(), facts));
+            while entries.len() > RECORDED_WHOLE_BLOB_FACTS_CAPACITY {
+                entries.shift_remove_index(0);
+            }
+        }
+
+        fn for_authority(
+            &self,
+            authority: &WholeBlobStoreAuthority,
+        ) -> Option<crate::store::WholeBlobCommittedTranscriptFacts> {
+            let runtime_id = LogicalRuntimeId::for_session(authority.session_id());
+            self.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&runtime_id)
+                .filter(|(digest, _)| digest == authority.blob_sha256())
+                .map(|(_, facts)| facts.clone())
+        }
+    }
+
     /// SQLite-backed runtime store sharing the same sqlite file as `SqliteSessionStore`.
     pub struct SqliteRuntimeStore {
         path: PathBuf,
@@ -9587,6 +9639,8 @@ ORDER BY runtime_id";
         /// Typed sessions this store verified, keyed by the exact WholeBlob
         /// row digest they were verified or encoded from.
         verified_whole_blob_sessions: Arc<VerifiedWholeBlobSessions>,
+        /// Transcript facts of the WholeBlob documents this store wrote.
+        whole_blob_transcript_facts: Arc<RecordedWholeBlobTranscriptFacts>,
         #[cfg(test)]
         unregister_finalization_fault: AtomicU8,
         /// Candidate bytes shipped into the snapshot byte-equality probe.
@@ -9691,6 +9745,7 @@ ORDER BY runtime_id";
                 path,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::WholeBlobV1,
                 verified_whole_blob_sessions: Arc::default(),
+                whole_blob_transcript_facts: Arc::default(),
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
                 #[cfg(test)]
@@ -9793,6 +9848,7 @@ ORDER BY runtime_id";
                 path,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::HeadCanonicalV1,
                 verified_whole_blob_sessions: Arc::default(),
+                whole_blob_transcript_facts: Arc::default(),
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
                 #[cfg(test)]
@@ -9858,6 +9914,7 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let verified_sessions = Arc::clone(&self.verified_whole_blob_sessions);
+            let recorded_facts = Arc::clone(&self.whole_blob_transcript_facts);
             #[cfg(test)]
             let snapshot_byte_probe_bytes = std::sync::Arc::clone(&self.snapshot_byte_probe_bytes);
             tokio::task::spawn_blocking(move || {
@@ -9937,6 +9994,11 @@ ORDER BY runtime_id";
                     clear_runtime_projection_quarantine(&tx, &runtime_id)?;
                     tx.commit()
                         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                    if let Some(facts) =
+                        crate::store::WholeBlobCommittedTranscriptFacts::from_session(&incoming)
+                    {
+                        recorded_facts.record(&runtime_id, &incoming_sha256, facts);
+                    }
                     verified_sessions.remember(&runtime_id, &incoming_sha256, incoming);
                     return Ok(());
                 }
@@ -9963,6 +10025,11 @@ ORDER BY runtime_id";
                 )?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                if let Some(facts) =
+                    crate::store::WholeBlobCommittedTranscriptFacts::from_session(&incoming)
+                {
+                    recorded_facts.record(&runtime_id, &incoming_sha256, facts);
+                }
                 verified_sessions.remember(&runtime_id, &incoming_sha256, incoming);
                 Ok(())
             })
@@ -10036,6 +10103,10 @@ ORDER BY runtime_id";
                         )
                     });
             let remembered_runtime_id = runtime_id.clone();
+            let recorded_facts = prepared_session.as_ref().and_then(|prepared| {
+                crate::store::WholeBlobCommittedTranscriptFacts::from_session(prepared.session())
+                    .map(|facts| (prepared.blob_sha256().to_string(), facts))
+            });
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let lifecycle_expected = machine_lifecycle
@@ -10102,6 +10173,16 @@ ORDER BY runtime_id";
             })
             .await
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))??;
+            if let (Some(authority), Some((blob_sha256, facts))) =
+                (authority.as_ref(), recorded_facts)
+                && authority.blob_sha256() == blob_sha256
+            {
+                self.whole_blob_transcript_facts.record(
+                    &remembered_runtime_id,
+                    &blob_sha256,
+                    facts,
+                );
+            }
             if let (Some(authority), Some((session, blob_sha256))) =
                 (authority.as_ref(), remembered)
                 && authority.blob_sha256() == blob_sha256
@@ -10629,6 +10710,13 @@ ORDER BY runtime_id";
     impl crate::store::RuntimeSessionAuthorityOps for SqliteRuntimeStore {
         fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
             self.session_persistence_profile
+        }
+
+        fn recorded_whole_blob_transcript_facts(
+            &self,
+            authority: &WholeBlobStoreAuthority,
+        ) -> Option<crate::store::WholeBlobCommittedTranscriptFacts> {
+            self.whole_blob_transcript_facts.for_authority(authority)
         }
 
         fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost {
@@ -12602,6 +12690,8 @@ ORDER BY runtime_id";
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let cas_runtime_id = runtime_id.clone();
+            let recorded_facts =
+                crate::store::WholeBlobCommittedTranscriptFacts::from_session(&candidate_session);
             let outcome = tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
@@ -12654,6 +12744,10 @@ ORDER BY runtime_id";
             if let WholeBlobSnapshotCasOutcome::Committed(authority) = &outcome
                 && authority.blob_sha256() == remembered.1
             {
+                if let Some(facts) = recorded_facts {
+                    self.whole_blob_transcript_facts
+                        .record(&cas_runtime_id, &remembered.1, facts);
+                }
                 self.verified_whole_blob_sessions.remember(
                     &cas_runtime_id,
                     &remembered.1,
@@ -12693,6 +12787,17 @@ ORDER BY runtime_id";
                     "WholeBlob provisional artifact/catalog does not bind this runtime/session authority",
                 ));
             }
+            // The candidate's facts are a pure function of its bytes; recording
+            // them before the write is safe because they are served only for
+            // an authority whose row digest is exactly this candidate's.
+            self.whole_blob_transcript_facts.record(
+                runtime_id,
+                authority.candidate_blob_sha256(),
+                crate::store::WholeBlobCommittedTranscriptFacts::new(
+                    conversation_digest.clone(),
+                    message_count,
+                ),
+            );
             let catalog_json = serde_json::to_vec(&catalog_entry)
                 .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
             let compaction_intents_json = serde_json::to_vec(&compaction_projection_intents)
@@ -19803,6 +19908,79 @@ ORDER BY runtime_id";
             let mut out = bytes.to_vec();
             out[position..position + needle.len()].copy_from_slice(replacement);
             out
+        }
+
+        #[tokio::test]
+        async fn recorded_whole_blob_facts_answer_only_for_their_exact_authority() {
+            let (_dir, store) = temp_store();
+            let mut session = Session::new();
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            session.push(Message::User(UserMessage::text("first turn".to_string())));
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&session).unwrap().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let first = RuntimeStore::load_whole_blob_store_authority(&store, &runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let facts = store
+                .session_authority_ops()
+                .recorded_whole_blob_transcript_facts(&first)
+                .expect("a commit records the facts of the document it wrote");
+            assert_eq!(
+                facts.transcript_revision(),
+                session.transcript_content_digest().unwrap()
+            );
+            assert_eq!(facts.message_count(), 1);
+
+            let foreign_digest = WholeBlobStoreAuthority::issued(
+                session.id().clone(),
+                first.store_revision(),
+                "row-sha256:not-this-document".to_string(),
+            )
+            .unwrap();
+            assert!(
+                store
+                    .session_authority_ops()
+                    .recorded_whole_blob_transcript_facts(&foreign_digest)
+                    .is_none(),
+                "facts are never served for another row digest"
+            );
+
+            session.push(Message::User(UserMessage::text("second turn".to_string())));
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&session).unwrap().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let second = RuntimeStore::load_whole_blob_store_authority(&store, &runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                store
+                    .session_authority_ops()
+                    .recorded_whole_blob_transcript_facts(&second)
+                    .map(|facts| facts.message_count()),
+                Some(2)
+            );
+            assert!(
+                store
+                    .session_authority_ops()
+                    .recorded_whole_blob_transcript_facts(&first)
+                    .is_none(),
+                "a superseded authority is not answered"
+            );
         }
 
         #[tokio::test]

@@ -172,6 +172,7 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//:live_smoke_browser_fixtures",
         "//:repo_governance_files",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
@@ -992,6 +993,7 @@ rust_test(
     ],
     data = [
         ":package_runfiles",
+        "//:live_smoke_browser_fixtures",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
     ],

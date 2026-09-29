@@ -60,6 +60,14 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Committed browser-peer voice fixtures and their manifest, for tests that
+# read them (tests/live_smoke/browser is not a Bazel package).
+filegroup(
+    name = "live_smoke_browser_fixtures",
+    srcs = glob(["tests/live_smoke/browser/fixtures/**"]),
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "meerkat_platform_skill_files",
     srcs = [

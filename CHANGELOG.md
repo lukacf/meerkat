@@ -774,6 +774,11 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   first is retired as Unmeasured by design and never commits, so the harness
   confirms the newer output and measures the settlement bound from that
   confirmation.
+- `scripts/generate-bazel-rust-builds.mjs` owns the Turbo S web WASM bundle
+  rules (the root BUILD.bazel carried them only as hand edits, so a
+  regeneration would have dropped them), and tests that read the committed
+  browser voice fixtures declare `//:live_smoke_browser_fixtures`, so the
+  integration crate's unit test finds them in remote runfiles.
 - The placed-member external-edge route inputs (`RecordExternalRouteInstall`,
   `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`,
   `RollbackExternalRouteInstall`) are now declared runtime-internal in the

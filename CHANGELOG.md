@@ -56,6 +56,17 @@ them.
   `InputLifecycleEvent::Abandoned` emitted by a staged-rollback abandonment
   now carries the reason the generated arm chose. Before, it was always
   `MaxAttemptsExhausted`; a stopped run's contributors now report `Cancelled`.
+- `meerkat_core::event::SkillResolutionFailureReason` (re-exported as
+  `meerkat_core::SkillResolutionFailureReason`) gains the variant
+  `NoSkillEngine { requested: Vec<SkillKey> }`, declared before `Unknown`
+  (so `SkillResolutionFailureReason::Unknown`'s implicit discriminant moves;
+  `SkillResolutionFailureReason::*`); exhaustive matches must handle it.
+  The wire form is `reason_type: "no_skill_engine"`; older
+  decoders fold it to `Unknown`. Behaviour: an explicit, nonempty
+  per-turn skill selection on an agent built without a skill engine now
+  fails the turn with `AgentError::SkillResolutionFailed` and the native
+  `AgentEvent::SkillResolutionFailed` before any provider call, instead of
+  silently running as an ordinary turn (#1263).
 - `meerkat_mob::MemberReloadDisposition` gains the variant `Reattached`
   (appended last, so existing discriminants do not move); exhaustive matches
   must handle it. `MobHandle::reload_member_registration` returns it when a
@@ -149,6 +160,17 @@ them.
   `RunStopReceipt::NotStoppable { run_id, state }`. Once the stop is
   committed, a failed or unconfirmed interrupt dispatch does not fail the
   call; it returns at the stopped run's terminal.
+- `MobHandle::submit_host_human_input_with_options_bounded` and
+  `MobHandle::start_host_human_input_with_options_bounded` carry host-owned
+  `MemberTurnOptions` (for example `with_skill_references`) on the fenced
+  host-human seam. Selected skills resolve natively on the exact target
+  member (typed `SkillsResolved` / `SkillResolutionFailed`, durable
+  `SkillContext`), and the options join the runtime's exact replay
+  identity: a retry with the same delivery identity and options returns
+  the original admission, and a changed selection is
+  `MobError::WorkInputIdempotencyConflict`. The existing
+  `submit_host_human_input_bounded` / `start_host_human_input_bounded`
+  delegate with default options and keep their replay identity (#1264).
 - `meerkat_runtime::RuntimeSessionAttachmentState` (`Unregistered`,
   `Attached`, `ReloadRequired { registration, attachment }`,
   `Detached { registration, unregister }`), `RuntimeDetachedUnregister`

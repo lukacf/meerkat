@@ -114,6 +114,15 @@ after runtime admission, not after an LLM response.
 `submit_host_human_input_for_identity_bounded` resolves an identity once before
 the same fenced admission. A host already holding a delivery lease should pass
 its exact runtime and fence instead of resolving a replacement.
+`submit_host_human_input_with_options_bounded` and
+`start_host_human_input_with_options_bounded` add host-owned
+`MemberTurnOptions` to the same fenced admission. Selected skills
+(`MemberTurnOptions::with_skill_references`) resolve natively on that exact
+member, with typed `SkillsResolved` / `SkillResolutionFailed` events and a
+durable `SkillContext`. The options are part of the runtime's exact replay
+identity, so a retry with the same delivery identity and options returns the
+original admission and a changed selection is
+`MobError::WorkInputIdempotencyConflict`.
 
 This is a Rust-only designation, not a serializable `WorkSpec` role or an
 agent-tool flag. The host must authenticate the human before opting in.

@@ -1243,12 +1243,22 @@ class SkillResolutionFailureReasonRemapCycle(TypedDict, total=False):
     source_uuid: Required[str]
 
 
+class SkillResolutionFailureReasonNoSkillEngine(TypedDict, total=False):
+    """The turn carried an explicit, nonempty skill selection but the agent
+    was built without a skill engine, so the selection cannot resolve.
+    The turn fails before any provider call instead of silently running
+    as an ordinary turn without the selected skills.
+    """
+    reason_type: Required[Literal['no_skill_engine']]
+    requested: Required[list[SkillKey]]
+
+
 class SkillResolutionFailureReasonUnknown(TypedDict, total=False):
     message: Required[str]
     reason_type: Required[Literal['unknown']]
 
 
-SkillResolutionFailureReason = SkillResolutionFailureReasonNotFound | SkillResolutionFailureReasonCapabilityUnavailable | SkillResolutionFailureReasonLoad | SkillResolutionFailureReasonParse | SkillResolutionFailureReasonSourceUuidCollision | SkillResolutionFailureReasonSourceUuidMutationWithoutLineage | SkillResolutionFailureReasonMissingSkillRemaps | SkillResolutionFailureReasonRemapWithoutLineage | SkillResolutionFailureReasonUnknownSkillAlias | SkillResolutionFailureReasonRemapCycle | SkillResolutionFailureReasonUnknown
+SkillResolutionFailureReason = SkillResolutionFailureReasonNotFound | SkillResolutionFailureReasonCapabilityUnavailable | SkillResolutionFailureReasonLoad | SkillResolutionFailureReasonParse | SkillResolutionFailureReasonSourceUuidCollision | SkillResolutionFailureReasonSourceUuidMutationWithoutLineage | SkillResolutionFailureReasonMissingSkillRemaps | SkillResolutionFailureReasonRemapWithoutLineage | SkillResolutionFailureReasonUnknownSkillAlias | SkillResolutionFailureReasonRemapCycle | SkillResolutionFailureReasonNoSkillEngine | SkillResolutionFailureReasonUnknown
 
 
 # Why the model stopped generating

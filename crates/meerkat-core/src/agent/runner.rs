@@ -2828,11 +2828,6 @@ where
         &mut self,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) -> Result<Vec<crate::types::ContentBlock>, AgentError> {
-        let engine = match &self.skill_engine {
-            Some(e) => e.clone(),
-            None => return Ok(Vec::new()),
-        };
-
         let mut skill_blocks: Vec<crate::types::ContentBlock> = Vec::new();
 
         // Consume pending_skill_references (from wire format / API)
@@ -2840,6 +2835,27 @@ where
             && !refs.is_empty()
         {
             let canonical_keys: Vec<crate::skills::SkillKey> = refs.into_iter().collect();
+            // An explicit selection never silently downgrades to an ordinary
+            // turn: without an engine it fails typed, before any provider call.
+            let Some(engine) = self.skill_engine.clone() else {
+                let skill_key = canonical_keys.first().cloned();
+                let reason = crate::event::SkillResolutionFailureReason::NoSkillEngine {
+                    requested: canonical_keys,
+                };
+                let _ = crate::event_tap::tap_emit(
+                    &self.event_tap,
+                    event_tx,
+                    AgentEvent::SkillResolutionFailed {
+                        skill_key: skill_key.clone(),
+                        reason: reason.clone(),
+                    },
+                )
+                .await;
+                return Err(AgentError::SkillResolutionFailed {
+                    skill_key,
+                    reason: Box::new(reason),
+                });
+            };
             match engine.resolve_and_render(&canonical_keys).await {
                 Ok(resolved) => {
                     // Typed activation effect: resolved skills are observable as
@@ -4017,6 +4033,110 @@ mod skill_activation_effect_tests {
             .with_runtime_execution_kind_for_test(
                 crate::lifecycle::RuntimeExecutionKind::ContentTurn,
             )
+    }
+
+    struct CountingLlmClient {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for CountingLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            tools: &[Arc<ToolDef>],
+            max_tokens: u32,
+            temperature: Option<f32>,
+            provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::super::LlmStreamResult, AgentError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            StaticLlmClient
+                .stream_response(messages, tools, max_tokens, temperature, provider_params)
+                .await
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    /// An explicit, nonempty skill selection on an agent built without a skill
+    /// engine fails with the typed `NoSkillEngine` reason, emits the native
+    /// `SkillResolutionFailed` event, and never reaches the provider. The old
+    /// behavior returned an empty activation and ran an ordinary turn.
+    #[tokio::test]
+    async fn explicit_skill_selection_without_engine_fails_typed_before_provider() {
+        let client = Arc::new(CountingLlmClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        let first = fixture_skill_key("email-extractor");
+        let second = fixture_skill_key("other-skill");
+        agent.pending_skill_references = Some(vec![first.clone(), second.clone()]);
+        let before = agent.session().messages().to_vec();
+
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
+        let err = agent
+            .run_with_events("selected prompt".into(), tx)
+            .await
+            .expect_err("explicit selection without an engine must fail");
+
+        let expected_reason = crate::event::SkillResolutionFailureReason::NoSkillEngine {
+            requested: vec![first.clone(), second],
+        };
+        match &err {
+            AgentError::SkillResolutionFailed { skill_key, reason } => {
+                assert_eq!(skill_key.as_ref(), Some(&first));
+                assert_eq!(reason.as_ref(), &expected_reason);
+            }
+            other => panic!("expected typed SkillResolutionFailed, got {other:?}"),
+        }
+        assert_eq!(
+            client.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provider must not be called for an unresolvable selection"
+        );
+        assert!(agent.pending_skill_references.is_none());
+        assert_eq!(agent.session().messages(), before);
+
+        let mut failures = 0;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                AgentEvent::SkillResolutionFailed { skill_key, reason } => {
+                    failures += 1;
+                    assert_eq!(skill_key, Some(first.clone()));
+                    assert_eq!(reason, expected_reason);
+                }
+                AgentEvent::SkillsResolved { .. } => panic!("no activation without an engine"),
+                _ => {}
+            }
+        }
+        assert_eq!(failures, 1);
+    }
+
+    /// Without an engine, a turn that selects no skills still runs normally.
+    #[tokio::test]
+    async fn empty_skill_selection_without_engine_runs_ordinary_turn() {
+        let client = Arc::new(CountingLlmClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.pending_skill_references = Some(Vec::new());
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+        agent
+            .run_with_events("plain prompt".into(), tx)
+            .await
+            .expect("an empty selection is an ordinary turn");
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// Row #65: a failing `skill_references` resolution emits the typed

@@ -389,7 +389,11 @@ impl MobActor {
                 )));
                 let _ = command_tx
                     .send(RoutedMobCommand::internal(
-                        MobCommand::ResumeLifecycleMemberUnproven { work, failure },
+                        MobCommand::ResumeLifecycleMemberUnproven {
+                            work,
+                            failure,
+                            stage: UnprovenResumeCustodyStage::BeforeAcceptance,
+                        },
                     ))
                     .await;
             }
@@ -533,7 +537,7 @@ impl MobActor {
         self.continue_explicit_resume_after_rebuild().await;
     }
 
-    pub(super) fn explicit_resume_member_cleanup_held(
+    pub(super) async fn explicit_resume_member_cleanup_held(
         &mut self,
         work: Arc<ExplicitResumeMemberWork>,
         retry_tx: oneshot::Sender<()>,
@@ -549,24 +553,75 @@ impl MobActor {
         );
         if attempts == 1 && automatic_retry {
             if retry_tx.send(()).is_err() {
-                self.explicit_resume_member_unproven(
+                Box::pin(self.explicit_resume_member_unproven(
                     work,
                     ProvisionAttemptFailure::unproven(MobError::Internal(
                         "resume cleanup owner disappeared before retry".to_string(),
                     )),
-                );
+                    UnprovenResumeCustodyStage::BeforeAcceptance,
+                ))
+                .await;
             }
             return;
         }
+        let reason = format!(
+            "explicit resume of bridge session '{}' retains uncertified cleanup of its own attempt: {error}; the member is Broken until retired or respawned (repair required: retire or respawn the member); the retained cleanup obligation is retried separately on the next lifecycle control",
+            work.rebuild.bridge_session_id
+        );
         self.retained_resume_cleanup
             .push(RetainedExplicitResumeCleanup {
-                work,
+                work: Arc::clone(&work),
                 retry_tx,
                 error,
             });
+        // Isolation (#1251): the retained custody stays parked and is retried
+        // on lifecycle control, but this member's work settles as a typed
+        // failure so the mob-wide Resume continues for every other member.
+        Box::pin(self.explicit_resume_member_settled(
+            work,
+            ExplicitResumeMemberCompletion::Failed(MobError::Internal(reason)),
+        ))
+        .await;
     }
 
-    pub(super) fn explicit_resume_member_unproven(
+    /// Park an attempt whose own effects cannot be certified, then settle the
+    /// member's resume work as a typed failure.
+    ///
+    /// The parked custody keeps the effect obligation visible and is reported
+    /// on every lifecycle control. Settling the work records the member as
+    /// Broken (with a repair diagnostic) instead of leaving it pending, which
+    /// used to stall the whole mob-wide Resume until the inactivity watchdog
+    /// fired (#1251).
+    pub(super) async fn explicit_resume_member_unproven(
+        &mut self,
+        work: Arc<ExplicitResumeMemberWork>,
+        failure: ProvisionAttemptFailure,
+        stage: UnprovenResumeCustodyStage,
+    ) {
+        if stage == UnprovenResumeCustodyStage::AfterAcceptance {
+            // The member was accepted and is live; only the provision guard's
+            // custody is uncertain. Park that obligation and settle the member
+            // accepted, so the mob-wide Resume continues (#1251 isolation).
+            self.park_unproven_resume_cleanup(Arc::clone(&work), failure);
+            Box::pin(
+                self.explicit_resume_member_settled(work, ExplicitResumeMemberCompletion::Accepted),
+            )
+            .await;
+            return;
+        }
+        let reason = format!(
+            "explicit resume of bridge session '{}' could not certify cleanup of its own attempt: {failure}; the member is Broken until retired or respawned (repair required: retire or respawn the member); the parked cleanup obligation is reported separately on each lifecycle control",
+            work.rebuild.bridge_session_id
+        );
+        self.park_unproven_resume_cleanup(Arc::clone(&work), failure);
+        Box::pin(self.explicit_resume_member_settled(
+            work,
+            ExplicitResumeMemberCompletion::Failed(MobError::Internal(reason)),
+        ))
+        .await;
+    }
+
+    fn park_unproven_resume_cleanup(
         &mut self,
         work: Arc<ExplicitResumeMemberWork>,
         failure: ProvisionAttemptFailure,
@@ -574,7 +629,7 @@ impl MobActor {
         tracing::error!(
             agent_identity = %work.rebuild.entry.agent_identity,
             error = %failure,
-            "explicit resume cannot certify member cleanup; authority remains pending"
+            "explicit resume cannot certify member cleanup; custody remains parked"
         );
         self.unproven_resume_cleanup
             .push(UnprovenExplicitResumeCleanup { work, failure });
@@ -588,7 +643,9 @@ impl MobActor {
                 "retrying retained exact resume cleanup after lifecycle control"
             );
             if retained.retry_tx.send(()).is_err() {
-                self.explicit_resume_member_unproven(
+                // The member's work already settled when this custody was
+                // parked; only the effect obligation moves.
+                self.park_unproven_resume_cleanup(
                     retained.work,
                     ProvisionAttemptFailure::unproven(MobError::Internal(
                         "resume cleanup owner is unavailable".to_string(),
@@ -606,6 +663,20 @@ impl MobActor {
     }
 }
 
+/// #1251 test seam: sessions whose failed attempt is reported as retained
+/// cleanup custody held by the actor.
+#[cfg(test)]
+pub(in crate::runtime) static CLEANUP_HELD_TEST_SESSIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<SessionId>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// #1251 test seam: notified when a member refused by an occupied claim
+/// starts awaiting the claim-release event.
+#[cfg(test)]
+pub(in crate::runtime) static CLAIM_RELEASE_WAIT_TEST_HOOKS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
 async fn provision_explicit_resume_member(
     work: &ExplicitResumeMemberWork,
     recipe: Option<Box<DeferredResumeProvision>>,
@@ -614,34 +685,69 @@ async fn provision_explicit_resume_member(
     readiness: DetachedMemberReadinessContext,
 ) -> ExplicitResumeProvisionResult {
     let custody = if let Some(recipe) = recipe {
-        let mut request = match recipe.into_request(service).await {
-            Ok(request) => request,
-            Err(error) => return ExplicitResumeProvisionResult::NotProvisioned(error),
-        };
-        request.runtime_revival_intent =
-            crate::runtime::provisioner::RuntimeRevivalIntent::MissingLiveMaterialization;
-        #[cfg(feature = "runtime-adapter")]
-        if let Some(adapter) = readiness.runtime_adapter.as_ref() {
-            match adapter
-                .update_peer_ingress_context(&work.rebuild.bridge_session_id, false, None)
-                .await
-            {
-                Ok(_)
-                | Err(
-                    meerkat_runtime::RuntimeDriverError::NotFound { .. }
-                    | meerkat_runtime::RuntimeDriverError::Destroyed
-                    | meerkat_runtime::RuntimeDriverError::NotReady { .. },
-                ) => {}
-                Err(error) => {
-                    return ExplicitResumeProvisionResult::NotProvisioned(MobError::Internal(
-                        format!("failed detaching stale resume ingress: {error}"),
-                    ));
+        // An attempt refused because another owner holds this session's
+        // materialization claim created nothing (typed `NoEffect`) and is
+        // transient: the owner releases the claim. Re-attempt on the typed
+        // claim-release event, never on a timer (#1251). Every other outcome
+        // settles the member as before.
+        let receipt = loop {
+            let mut request = match recipe.clone().into_request(Arc::clone(&service)).await {
+                Ok(request) => request,
+                Err(error) => return ExplicitResumeProvisionResult::NotProvisioned(error),
+            };
+            request.runtime_revival_intent =
+                crate::runtime::provisioner::RuntimeRevivalIntent::MissingLiveMaterialization;
+            #[cfg(feature = "runtime-adapter")]
+            if let Some(adapter) = readiness.runtime_adapter.as_ref() {
+                match adapter
+                    .update_peer_ingress_context(&work.rebuild.bridge_session_id, false, None)
+                    .await
+                {
+                    Ok(_)
+                    | Err(
+                        meerkat_runtime::RuntimeDriverError::NotFound { .. }
+                        | meerkat_runtime::RuntimeDriverError::Destroyed
+                        | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+                    ) => {}
+                    Err(error) => {
+                        return ExplicitResumeProvisionResult::NotProvisioned(MobError::Internal(
+                            format!("failed detaching stale resume ingress: {error}"),
+                        ));
+                    }
                 }
             }
-        }
-        let receipt = match provisioner.provision_member_settled(request).await {
-            Ok(receipt) => receipt,
-            Err(failure) => return ExplicitResumeProvisionResult::ProvisionFailed(failure),
+            match provisioner.provision_member_settled(request).await {
+                Ok(receipt) => break receipt,
+                Err(failure)
+                    if failure.settlement()
+                        == crate::runtime::provisioner::ProvisionEffectSettlement::NoEffect(
+                            crate::runtime::provisioner::PreEffectRefusal::RegistrationOwned,
+                        ) =>
+                {
+                    #[cfg(feature = "runtime-adapter")]
+                    if let Some(adapter) = readiness.runtime_adapter.as_ref() {
+                        tracing::info!(
+                            agent_identity = %work.rebuild.entry.agent_identity,
+                            session_id = %work.rebuild.bridge_session_id,
+                            "explicit resume member awaits the materialization claim release before re-attempting"
+                        );
+                        #[cfg(test)]
+                        if let Some(entered) = CLAIM_RELEASE_WAIT_TEST_HOOKS
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&work.rebuild.bridge_session_id)
+                        {
+                            entered.notify_one();
+                        }
+                        adapter
+                            .materialization_claim_released(&work.rebuild.bridge_session_id)
+                            .await;
+                        continue;
+                    }
+                    return ExplicitResumeProvisionResult::ProvisionFailed(failure);
+                }
+                Err(failure) => return ExplicitResumeProvisionResult::ProvisionFailed(failure),
+            }
         };
         let provision = PendingProvision::new(
             receipt.member_ref,
@@ -749,6 +855,7 @@ async fn deliver_explicit_resume_provision(
                                 MobCommand::ResumeLifecycleMemberUnproven {
                                     work,
                                     failure: ProvisionAttemptFailure::unproven(error),
+                                    stage: UnprovenResumeCustodyStage::AfterAcceptance,
                                 },
                             ))
                             .await;
@@ -779,6 +886,29 @@ async fn deliver_explicit_resume_provision(
             .await;
         }
         ExplicitResumeProvisionResult::ProvisionFailed(failure) => {
+            #[cfg(test)]
+            if CLEANUP_HELD_TEST_SESSIONS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&work.rebuild.bridge_session_id)
+            {
+                // Model a retained cleanup whose automatic retry already
+                // failed: the actor holds the retry trigger.
+                let (retry_tx, retry_rx) = oneshot::channel();
+                let _ = command_tx
+                    .send(RoutedMobCommand::internal(
+                        MobCommand::ResumeLifecycleMemberCleanupHeld {
+                            work,
+                            retry_tx,
+                            error: failure.error().to_string(),
+                            attempts: 2,
+                            automatic_retry: false,
+                        },
+                    ))
+                    .await;
+                let _ = retry_rx.await;
+                return;
+            }
             if failure.requires_further_cleanup() {
                 if failure.retained_effects().is_some() {
                     let (error, _, retained) = failure.into_parts();
@@ -800,7 +930,11 @@ async fn deliver_explicit_resume_provision(
                     }
                 } else if command_tx
                     .send(RoutedMobCommand::internal(
-                        MobCommand::ResumeLifecycleMemberUnproven { work, failure },
+                        MobCommand::ResumeLifecycleMemberUnproven {
+                            work,
+                            failure,
+                            stage: UnprovenResumeCustodyStage::BeforeAcceptance,
+                        },
                     ))
                     .await
                     .is_err()

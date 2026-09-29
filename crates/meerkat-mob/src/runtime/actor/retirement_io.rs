@@ -904,10 +904,10 @@ impl MobActor {
             self.finish_retirement(continuation, Err(error)).await;
             return;
         }
-        (*slot).fail(&format!(
-            "spawn canceled for '{}': retire command received",
-            continuation.entry.agent_identity
-        ));
+        (*slot).fail_with(MobError::SpawnCanceled {
+            member_id: continuation.entry.agent_identity.clone(),
+            reason: "retire command received".to_string(),
+        });
         self.retirement_next_pending_slot(continuation).await;
     }
 

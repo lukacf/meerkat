@@ -14074,10 +14074,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Load the authoritative durable session metadata view.
     ///
-    /// RuntimeStore is the singular authority. WholeBlob reads the exact
-    /// store-verified committed body; HeadCanonical projects directly from
-    /// the small committed head and therefore does not materialize transcript
-    /// rows. A SessionStore-only row is not a recovery source.
+    /// RuntimeStore is the singular authority. WholeBlob partially decodes
+    /// the exact store-verified committed body (metadata only; transcript
+    /// rows are skipped), falling back to the full snapshot only for stores
+    /// that cannot serve raw committed bytes; HeadCanonical projects directly
+    /// from the small committed head. Neither materializes transcript rows.
+    /// A SessionStore-only row is not a recovery source.
     pub async fn load_authoritative_session_metadata(
         &self,
         id: &SessionId,
@@ -14106,20 +14108,41 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
         match authority {
             RuntimeSessionAuthority::WholeBlob(_) => {
+                let disappeared = || {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "WholeBlob metadata authority disappeared for session {id}"
+                    )))
+                };
+                let load_error = |error: RuntimeStoreError| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to load exact WholeBlob metadata authority for session {id}: {error}"
+                    )))
+                };
+                // Metadata-only partial decode of the exact committed body:
+                // realm scans must not decode, validate, and replay every
+                // transcript just to read ownership facts (#1250).
+                match self
+                    .runtime_store
+                    .load_committed_whole_blob_metadata(&runtime_id)
+                    .await
+                {
+                    Ok(Some(metadata)) => {
+                        return metadata
+                            .into_document()
+                            .try_into_view()
+                            .map(Some)
+                            .map_err(corrupt_metadata_error);
+                    }
+                    Ok(None) => return Err(disappeared()),
+                    Err(RuntimeStoreError::Unsupported(_)) => {}
+                    Err(error) => return Err(load_error(error)),
+                }
                 let snapshot = self
                     .runtime_store
                     .load_committed_whole_blob_snapshot(&runtime_id)
                     .await
-                    .map_err(|error| {
-                        SessionError::Agent(AgentError::InternalError(format!(
-                            "failed to load exact WholeBlob metadata authority for session {id}: {error}"
-                        )))
-                    })?
-                    .ok_or_else(|| {
-                        SessionError::Agent(AgentError::InternalError(format!(
-                            "WholeBlob metadata authority disappeared for session {id}"
-                        )))
-                    })?;
+                    .map_err(load_error)?
+                    .ok_or_else(disappeared)?;
                 meerkat_core::PersistedSessionMetadataView::try_from_session(snapshot.session())
                     .map(Some)
                     .map_err(corrupt_metadata_error)

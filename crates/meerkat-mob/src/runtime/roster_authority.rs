@@ -34,6 +34,10 @@ pub(crate) trait RosterMutator: sealed::Sealed {
 #[derive(Debug, Clone)]
 pub(crate) struct RosterAuthority {
     roster: Roster,
+    /// Bumped by every projection mutation, so the actor can tell a
+    /// roster-only change from a no-op when deciding whether to wake
+    /// machine-state watchers.
+    revision: u64,
 }
 
 impl sealed::Sealed for RosterAuthority {}
@@ -43,12 +47,25 @@ impl RosterAuthority {
     pub(crate) fn new() -> Self {
         Self {
             roster: Roster::new(),
+            revision: 0,
         }
     }
 
     /// Create an authority from an existing roster snapshot/projection.
     pub(crate) fn from_roster(roster: Roster) -> Self {
-        Self { roster }
+        Self {
+            roster,
+            revision: 0,
+        }
+    }
+
+    /// Monotone mutation revision of this projection.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn bump(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Snapshot the current roster for read-only surfaces.
@@ -86,6 +103,7 @@ impl RosterAuthority {
     /// projection fields (e.g. `wired_to`) in sync. Mirrors the replay
     /// path's `Roster::apply` — same match arms, same mutations.
     pub(crate) fn apply_event(&mut self, event: &MobEvent) {
+        self.bump();
         self.roster.apply(event);
     }
 
@@ -99,6 +117,7 @@ impl RosterAuthority {
             meerkat_contracts::wire::supervisor_bridge::BridgeDirectMemberFence,
         >,
     ) -> Vec<(AgentIdentity, Generation, [u8; 32])> {
+        self.bump();
         self.roster.replace_backend_peer_binding_for_identities(
             identities,
             next_peer_id,
@@ -111,10 +130,12 @@ impl RosterAuthority {
 
 impl RosterMutator for RosterAuthority {
     fn add_member(&mut self, entry: RosterAddEntry) -> bool {
+        self.bump();
         self.roster.add(entry)
     }
 
     fn remove_member(&mut self, agent_identity: &AgentIdentity) -> bool {
+        self.bump();
         if self.roster.get(agent_identity).is_some() {
             self.roster.remove(agent_identity);
             true
@@ -128,6 +149,7 @@ impl RosterMutator for RosterAuthority {
         agent_identity: &AgentIdentity,
         kickoff: Option<MobMemberKickoffSnapshot>,
     ) -> bool {
+        self.bump();
         self.roster.set_kickoff(agent_identity, kickoff)
     }
 }

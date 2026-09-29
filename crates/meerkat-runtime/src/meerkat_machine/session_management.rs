@@ -4350,7 +4350,9 @@ impl MeerkatMachine {
                         };
                     }
                     Err(reason) => {
-                        sessions.remove(&session_id);
+                        if let Some(removed) = sessions.remove(&session_id) {
+                            removed.notify_registration_removed();
+                        }
                         break ExistingExecutorClaim::Rejected(reason);
                     }
                 }
@@ -5082,6 +5084,58 @@ impl MeerkatMachine {
     /// when it has not published a live executor. All process-local ownership
     /// fields are therefore read from the same registration entry, and the
     /// materialization claim is inspected under its own synchronous lock.
+    /// Complete once `session_id`'s registration no longer holds an actor
+    /// materialization claim: the claim was released to vacant, or the
+    /// registration left the registry. Resolves immediately when no claim is
+    /// held.
+    ///
+    /// This is the typed claim-release event a caller refused with
+    /// [`RuntimeBindingsError::RegistrationOwned`](crate::RuntimeBindingsError::RegistrationOwned) awaits before re-attempting
+    /// materialization. It waits on the claim's own change notification; it
+    /// never polls or times out. A replacement registration is observed
+    /// afresh.
+    pub async fn materialization_claim_released(&self, session_id: &SessionId) {
+        loop {
+            let changed = {
+                let sessions = self.sessions.read().await;
+                let Some(entry) = sessions.get(session_id) else {
+                    return;
+                };
+                let state = entry
+                    .materialization_claim_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.current.is_none()
+                    && state.phase == crate::RuntimeActorMaterializationClaimPhase::Vacant
+                {
+                    return;
+                }
+                Arc::clone(&state.changed)
+            };
+            let notified = changed.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            // Re-check after registering: a release between the observation
+            // above and `enable` must not be missed.
+            let released = {
+                let sessions = self.sessions.read().await;
+                sessions.get(session_id).is_none_or(|entry| {
+                    let state = entry
+                        .materialization_claim_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    !Arc::ptr_eq(&state.changed, &changed)
+                        || (state.current.is_none()
+                            && state.phase == crate::RuntimeActorMaterializationClaimPhase::Vacant)
+                })
+            };
+            if released {
+                continue;
+            }
+            notified.await;
+        }
+    }
+
     pub async fn registration_is_current_without_runtime_owner(
         &self,
         witness: &RuntimeSessionRegistrationWitness,
@@ -10010,6 +10064,7 @@ impl MeerkatMachine {
         let removed_entry = sessions.remove(session_id);
         if let Some(entry) = removed_entry.as_ref() {
             entry.post_commit_hooks.shutdown();
+            entry.notify_registration_removed();
         }
         drop(sessions);
         drop(mutation_guard);

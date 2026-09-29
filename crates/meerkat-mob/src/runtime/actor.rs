@@ -11,7 +11,7 @@ use super::terminalization::{FlowFailureCause, TerminalizationOutcome, Terminali
 use super::transaction::LifecycleRollback;
 use super::*;
 
-mod explicit_resume;
+pub(super) mod explicit_resume;
 #[cfg(feature = "openai-live")]
 pub(super) mod live_durable_source_loads;
 pub(super) mod member_effect_lane;
@@ -26,6 +26,7 @@ mod resume_topology_control;
 mod retirement_io;
 pub(super) mod spawn_activation;
 mod spawn_admission_io;
+pub(super) mod spawn_preparation;
 pub(super) mod wiring_io;
 
 use member_effect_lane::MemberIncarnationFence;
@@ -2707,7 +2708,74 @@ struct ActorInlineStep {
     command_kind: &'static str,
     step: &'static str,
     started: Instant,
+    /// Start of the current (refined) step.
+    step_started: Instant,
+    /// Completed steps of this command with their elapsed time, in order.
+    completed_steps: Vec<(&'static str, Duration)>,
     warned: bool,
+}
+
+impl ActorInlineStep {
+    /// Per-stage timing of this command so far, the running step last.
+    fn stage_timings(&self) -> Vec<(&'static str, u64)> {
+        self.completed_steps
+            .iter()
+            .map(|(step, elapsed)| (*step, elapsed.as_millis() as u64))
+            .chain(std::iter::once((
+                self.step,
+                self.step_started.elapsed().as_millis() as u64,
+            )))
+            .collect()
+    }
+}
+
+/// Typed stages of the inline `Spawn` command step (#1249).
+///
+/// The inline-step watchdog names the running stage and, for a step that
+/// exceeds its budget, reports the elapsed time of every stage, so a slow
+/// spawn identifies its slow part instead of logging only
+/// `step="dispatch_command"`. Session reads, resume-authority checks, and
+/// agent config builds are not inline stages: they run in the supervised
+/// spawn preparation task off the actor loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SpawnInlineStage {
+    /// Spec customization and fail-closed shape checks.
+    SpecValidation,
+    /// Machine command-admission probe.
+    CommandAdmission,
+    /// Mob-definition or realm profile resolution.
+    ProfileResolution,
+    /// Machine-owned profile-material authorization.
+    ProfileAuthorization,
+    /// Fork-source location planning and preparation task dispatch.
+    PreparationDispatch,
+    /// Re-admission of a settled preparation against current machine state.
+    PreparedAdmission,
+    /// Resume fast path: owner context, operation, and rollback authority.
+    ResumeFinalize,
+    /// Spawn-ladder admission preview, staging, and custody bookkeeping.
+    ProvisionAdmission,
+    /// External direct-bind intent reservation.
+    DirectBindReservation,
+    /// Pending-spawn insertion and provisioning task dispatch.
+    ProvisionDispatch,
+}
+
+impl SpawnInlineStage {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::SpecValidation => "spawn_spec_validation",
+            Self::CommandAdmission => "spawn_command_admission",
+            Self::ProfileResolution => "spawn_profile_resolution",
+            Self::ProfileAuthorization => "spawn_profile_authorization",
+            Self::PreparationDispatch => "spawn_preparation_dispatch",
+            Self::PreparedAdmission => "spawn_prepared_admission",
+            Self::ResumeFinalize => "spawn_resume_finalize",
+            Self::ProvisionAdmission => "spawn_provision_admission",
+            Self::DirectBindReservation => "spawn_direct_bind_reservation",
+            Self::ProvisionDispatch => "spawn_provision_dispatch",
+        }
+    }
 }
 
 /// Inline-step watchdog (#1102 observability). The loop marks the start of
@@ -2751,6 +2819,8 @@ impl ActorInlineStepWatchdog {
                         command_kind = step.command_kind,
                         step = step.step,
                         elapsed_ms = step.started.elapsed().as_millis() as u64,
+                        step_elapsed_ms = step.step_started.elapsed().as_millis() as u64,
+                        stage_timings_ms = ?step.stage_timings(),
                         budget_ms = ACTOR_INLINE_STEP_BUDGET.as_millis() as u64,
                         "actor inline step exceeded its budget; every later command is queued behind it"
                     );
@@ -2760,19 +2830,23 @@ impl ActorInlineStepWatchdog {
     }
 
     fn begin(&self, command_kind: &'static str, step: &'static str) {
+        let now = Instant::now();
         *self
             .current
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ActorInlineStep {
             command_kind,
             step,
-            started: Instant::now(),
+            started: now,
+            step_started: now,
+            completed_steps: Vec::new(),
             warned: false,
         });
     }
 
     /// Refine the step name of the running command (the command kind and
-    /// start time are retained).
+    /// start time are retained). The previous step's elapsed time is kept
+    /// for the per-stage timing report.
     pub(super) fn set_step(&self, step: &'static str) {
         if let Some(current) = self
             .current
@@ -2780,8 +2854,17 @@ impl ActorInlineStepWatchdog {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()
         {
-            current.step = step;
+            let now = Instant::now();
+            let previous = std::mem::replace(&mut current.step, step);
+            let previous_elapsed = now.saturating_duration_since(current.step_started);
+            current.completed_steps.push((previous, previous_elapsed));
+            current.step_started = now;
         }
+    }
+
+    /// Enter one typed `Spawn` stage (#1249).
+    pub(super) fn set_spawn_stage(&self, stage: SpawnInlineStage) {
+        self.set_step(stage.as_str());
     }
 
     fn end(&self, mob_id: &MobId) {
@@ -2793,11 +2876,20 @@ impl ActorInlineStepWatchdog {
         if let Some(step) = finished
             && step.started.elapsed() >= ACTOR_INLINE_STEP_BUDGET
         {
+            let stage_timings = step.stage_timings();
+            let (slowest_step, slowest_step_ms) = stage_timings
+                .iter()
+                .copied()
+                .max_by_key(|(_, elapsed_ms)| *elapsed_ms)
+                .unwrap_or((step.step, 0));
             tracing::warn!(
                 mob_id = %mob_id,
                 command_kind = step.command_kind,
                 step = step.step,
                 elapsed_ms = step.started.elapsed().as_millis() as u64,
+                slowest_step,
+                slowest_step_ms,
+                stage_timings_ms = ?stage_timings,
                 "actor inline step completed after exceeding its budget"
             );
         }
@@ -5023,6 +5115,10 @@ enum SpawnProvisionInput {
     DeferredResume(Box<DeferredResumeProvision>),
 }
 
+/// Cloneable so an explicit-resume member refused by an occupied
+/// materialization claim can rebuild its request after the claim-release
+/// event (#1251).
+#[derive(Clone)]
 struct DeferredResumeProvision {
     definition: Arc<MobDefinition>,
     profile_name: ProfileName,
@@ -5299,6 +5395,147 @@ struct RemoteSpawnFinalize {
 struct RemoteSpawnFailureOutcome {
     error: MobError,
     cleanup_completed: bool,
+}
+
+/// Durable forked-participant association evidence for one fork session
+/// (see `MobActor::forked_participant_association_evidence`). A pure store
+/// read, so a spawn preparation can run it off the actor loop.
+async fn forked_participant_association_evidence(
+    runtime_metadata: &dyn crate::store::MobRuntimeMetadataStore,
+    mob_id: &MobId,
+    fork_session_id: &SessionId,
+) -> Result<Option<crate::forked_participant::LocalAssociationEvidence>, MobError> {
+    Ok(runtime_metadata
+        .list_forked_participant_member_associations(mob_id)
+        .await?
+        .into_iter()
+        .find(|record| record.association.capability.fork_session_id() == fork_session_id)
+        .map(
+            |record| crate::forked_participant::LocalAssociationEvidence {
+                member: record.agent_identity,
+                capability: record.association.capability,
+            },
+        ))
+}
+
+/// Where one fork source's history lives, resolved on the actor from
+/// machine placement and roster state (see
+/// `MobActor::plan_fork_source_history_read`).
+enum ForkSourceHistoryLocation {
+    Remote {
+        supervisor_bridge: Arc<super::MobSupervisorBridge>,
+        peer: meerkat_core::comms::TrustedPeerDescriptor,
+        placement: mob_dsl::HostId,
+        expected_member: super::bridge_protocol::BridgeMemberIncarnation,
+    },
+    Local {
+        source_session_id: SessionId,
+    },
+}
+
+/// A resolved fork-source history read. Performing it is pure I/O, so a spawn
+/// preparation can run it off the actor loop (#1249).
+pub(super) struct ForkSourceHistoryRead {
+    source_member_id: AgentIdentity,
+    fork_context: crate::launch::ForkContext,
+    location: ForkSourceHistoryLocation,
+}
+
+impl ForkSourceHistoryRead {
+    fn source_member_id(&self) -> &AgentIdentity {
+        &self.source_member_id
+    }
+
+    async fn read_rows(
+        &self,
+        session_service: &dyn MobSessionService,
+    ) -> Result<Vec<meerkat_contracts::wire::WireHistoryRow>, MobError> {
+        let source_member_id = &self.source_member_id;
+        let source_session_id = match &self.location {
+            ForkSourceHistoryLocation::Remote {
+                supervisor_bridge,
+                peer,
+                placement,
+                expected_member,
+            } => {
+                let page = match &self.fork_context {
+                    crate::launch::ForkContext::FullHistory => {
+                        super::member_history_proxy::read_remote_member_full_history(
+                            supervisor_bridge,
+                            peer,
+                            placement.clone(),
+                            expected_member.clone(),
+                        )
+                        .await
+                    }
+                    crate::launch::ForkContext::LastMessages { count } => {
+                        super::member_history_proxy::read_remote_member_history_tail(
+                            supervisor_bridge,
+                            peer,
+                            placement.clone(),
+                            expected_member.clone(),
+                            *count,
+                        )
+                        .await
+                    }
+                }
+                .map_err(|error| {
+                    tracing::warn!(
+                        source_member_id = %source_member_id,
+                        error = %error,
+                        "remote fork-source history read failed"
+                    );
+                    MobError::ForkSourceUnavailable {
+                        source_member_id: source_member_id.to_string(),
+                        cause: crate::error::ForkSourceUnavailableCause::RemoteReadUnavailable,
+                    }
+                })?;
+                return Ok(page.page.messages);
+            }
+            ForkSourceHistoryLocation::Local { source_session_id } => source_session_id,
+        };
+        let query = match &self.fork_context {
+            crate::launch::ForkContext::FullHistory => {
+                meerkat_core::service::SessionHistoryQuery::default()
+            }
+            crate::launch::ForkContext::LastMessages { count } => {
+                let view = session_service
+                    .read(source_session_id)
+                    .await
+                    .map_err(|e| {
+                        MobError::Internal(format!(
+                            "failed to read source session metadata for fork from '{source_member_id}': {e}"
+                        ))
+                    })?;
+                let total = view.state.message_count;
+                let count = *count as usize;
+                meerkat_core::service::SessionHistoryQuery {
+                    offset: total.saturating_sub(count),
+                    limit: Some(count),
+                }
+            }
+        };
+        let history = meerkat_core::service::SessionServiceHistoryExt::read_history(
+            session_service,
+            source_session_id,
+            query,
+        )
+        .await
+        .map_err(|e| {
+            MobError::Internal(format!(
+                "failed to read source session history for fork from '{source_member_id}': {e}"
+            ))
+        })?;
+        Ok(
+            meerkat_contracts::wire::WireMemberHistoryPageBody::try_from_history_page(&history)
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to project source member history page: {error}"
+                    ))
+                })?
+                .messages,
+        )
+    }
 }
 
 fn observe_spawn_exec_facts(
@@ -6496,6 +6733,17 @@ pub(super) enum ExplicitResumeMemberDecision {
     Rollback(ExplicitResumeCleanupReason),
 }
 
+/// Where an explicit-resume member stood when its own custody became
+/// uncertifiable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UnprovenResumeCustodyStage {
+    /// Before the actor accepted the rebuilt member: the member fails.
+    BeforeAcceptance,
+    /// After acceptance: the member is live and settles accepted; only the
+    /// custody obligation is parked.
+    AfterAcceptance,
+}
+
 pub(super) enum ExplicitResumeMemberCompletion {
     Accepted,
     Failed(MobError),
@@ -6664,6 +6912,8 @@ pub(super) struct MobActor {
     /// Uses `AtomicU64` so `&self` methods (batch finalization) can issue tokens.
     pub(super) next_fence_token: std::sync::atomic::AtomicU64,
     pub(super) pending_spawns: PendingSpawnLineage,
+    /// In-flight off-loop local spawn preparations (#1249).
+    pub(super) spawn_preparations: spawn_preparation::SpawnPreparations,
     pub(super) pending_spawn_cleanup_anchors: BTreeMap<u64, PendingSpawnCleanupAnchor>,
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<Result<(), MobError>>,
@@ -6919,6 +7169,8 @@ pub(super) struct MobActor {
     /// surfaces. The actor is the sole writer; handles can borrow the latest
     /// state without enqueueing behind long shell cleanup work.
     pub(super) machine_state_watch_tx: tokio::sync::watch::Sender<mob_dsl::MobMachineState>,
+    /// Roster projection revision last published to machine-state watchers.
+    pub(super) published_roster_revision: std::sync::atomic::AtomicU64,
     pub(super) reachability_observations: Arc<super::handle::ReachabilityObservations>,
     /// Terminal-phase projection for external observers. Written by the
     /// actor after every DSL phase transition and once more right before
@@ -11142,14 +11394,33 @@ impl MobActor {
     /// tick between wakes; a mutation path that bypasses this publish
     /// degrades their convergence latency to that safety interval. Any new
     /// commit path must call this function after mutating `dsl_authority`.
+    /// Publish the machine state to watchers only when it, or the actor's
+    /// roster projection, changed.
+    ///
+    /// An applied input that leaves both unchanged (a no-op observation, an
+    /// idempotent retry) must not clone the full state and wake every
+    /// watcher: under cold-boot retry storms that turned each no-op input into
+    /// a forwarder and health-monitor reconcile (#1250). A roster-only change
+    /// (for example a projected backend-peer binding) still wakes watchers,
+    /// because list projections combine both.
     fn publish_machine_state_projection(&self) {
-        self.dsl_topology_epoch.store(
-            self.dsl_authority.state().topology_epoch,
-            std::sync::atomic::Ordering::Release,
-        );
-        let _ = self
-            .machine_state_watch_tx
-            .send(self.dsl_authority.state().clone());
+        let state = self.dsl_authority.state();
+        self.dsl_topology_epoch
+            .store(state.topology_epoch, std::sync::atomic::Ordering::Release);
+        // A roster write in progress cannot be observed; wake conservatively.
+        let roster_changed = self.roster.try_read().map_or(true, |roster| {
+            let revision = roster.revision();
+            self.published_roster_revision
+                .swap(revision, std::sync::atomic::Ordering::AcqRel)
+                != revision
+        });
+        self.machine_state_watch_tx.send_if_modified(|published| {
+            let state_changed = published != state;
+            if state_changed {
+                published.clone_from(state);
+            }
+            state_changed || roster_changed
+        });
     }
 
     fn apply_dsl_input(
@@ -17725,6 +17996,11 @@ impl ExplicitResumePreparationContext {
         let member_total = candidates.len();
         let mut rebuild = Vec::new();
         let mut listed_sessions = None;
+        let mut successor_index = None;
+        let member_bound_sessions = candidates
+            .iter()
+            .map(|(_, _, session_id)| session_id.clone())
+            .collect::<std::collections::HashSet<_>>();
         for (member_index, (entry, member_ref, session_id)) in candidates.into_iter().enumerate() {
             let member_position = member_index + 1;
             progress.awaiting_member(
@@ -17808,13 +18084,28 @@ impl ExplicitResumePreparationContext {
             }
             let resume_from_role = resume_from_role.clone();
 
-            let current_snapshot_present = self.session_service.supports_persistent_sessions()
-                && self
+            // Post-preparation work reports progress at every durable read so
+            // the explicit-resume watchdog observes an advancing resume rather
+            // than a stall (#1250).
+            let current_snapshot_present = if self.session_service.supports_persistent_sessions() {
+                progress.awaiting_member(
+                    &entry.agent_identity,
+                    super::state::LifecycleProgressStage::MemberSessionMetadataProbe,
+                );
+                let present = self
                     .session_service
                     .load_persisted_session_metadata(&session_id)
                     .await
                     .map_err(MobError::SessionError)?
                     .is_some();
+                progress.member_progress(
+                    &entry.agent_identity,
+                    super::state::LifecycleProgressStage::MemberSessionMetadataProbe,
+                );
+                present
+            } else {
+                false
+            };
             if current_snapshot_present || !self.session_service.supports_persistent_sessions() {
                 rebuild.push(ExplicitResumeMemberRebuild {
                     entry,
@@ -17828,6 +18119,13 @@ impl ExplicitResumePreparationContext {
                 continue;
             }
 
+            // The realm is listed and its metadata scanned ONCE for every
+            // member of this resume; each member's successor match then runs
+            // over the in-memory index (#1250).
+            progress.awaiting_member(
+                &entry.agent_identity,
+                super::state::LifecycleProgressStage::MemberSuccessorSessionScan,
+            );
             if listed_sessions.is_none() {
                 listed_sessions = Some(
                     self.session_service
@@ -17835,17 +18133,38 @@ impl ExplicitResumePreparationContext {
                         .await
                         .map_err(MobError::SessionError)?,
                 );
+                progress.member_progress(
+                    &entry.agent_identity,
+                    super::state::LifecycleProgressStage::MemberSuccessorSessionScan,
+                );
             }
-            let replacement = super::builder::latest_persisted_session_for_member(
+            let index = super::builder::PersistedMemberSessionIndex::scan_once(
+                &mut successor_index,
                 self.session_service.as_ref(),
                 listed_sessions.as_deref().unwrap_or_default(),
-                &session_id,
-                &self.definition.id,
-                &entry.role,
-                &entry.agent_identity,
-                resume_from_role.as_ref(),
+                &member_bound_sessions,
+                || {
+                    progress.member_progress(
+                        &entry.agent_identity,
+                        super::state::LifecycleProgressStage::MemberSuccessorSessionScan,
+                    );
+                },
             )
             .await?;
+            let replacement = index
+                .latest_for_member(
+                    self.session_service.as_ref(),
+                    &session_id,
+                    &self.definition.id,
+                    &entry.role,
+                    &entry.agent_identity,
+                    resume_from_role.as_ref(),
+                )
+                .await?;
+            progress.member_progress(
+                &entry.agent_identity,
+                super::state::LifecycleProgressStage::MemberSuccessorSessionScan,
+            );
             let Some((replacement_session_id, _replacement_session)) = replacement else {
                 // No canonical persisted successor exists. Let the ordinary
                 // machine-owned classification record this exact binding as
@@ -22129,7 +22448,7 @@ impl MobActor {
         identity: &AgentIdentity,
         intent: &crate::identity::IdentityIntentRecord,
     ) -> crate::identity::IdentityResourceObservation {
-        if self.pending_spawns.contains_member(identity) {
+        if self.member_materialization_in_flight(identity) {
             return crate::identity::IdentityResourceObservation::Unavailable {
                 detail: "member materialization is in flight".to_string(),
             };
@@ -22776,7 +23095,7 @@ impl MobActor {
                 // no async completion owns it and no typed disposition
                 // replaced the deadline, release it back to the timer without
                 // resetting the accumulated failure debt.
-                if !self.pending_spawns.contains_member(&identity)
+                if !self.member_materialization_in_flight(&identity)
                     && let Some(backoff) = self.identity_reconcile_backoff.get_mut(&identity)
                     && backoff.retry_enqueued
                 {
@@ -23847,11 +24166,32 @@ impl MobActor {
                     // reshaping the handler.
                     Box::pin(self.handle_spawn_provisioned_batch(completions)).await;
                 }
+                MobCommand::SpawnPreparationSettled { ticket, outcome } => {
+                    self.inline_step_watchdog
+                        .set_step("spawn_preparation_settled");
+                    Box::pin(self.spawn_preparation_settled(ticket, *outcome)).await;
+                }
                 MobCommand::MemberTurnAdmissionSettled {
                     agent_identity,
                     ticket,
                 } => {
                     self.settle_member_turn_admission(&agent_identity, ticket);
+                }
+                #[cfg(test)]
+                MobCommand::BeginStopQuiesceForTest { reply_tx } => {
+                    let result = self
+                        .begin_placed_completion_lifecycle_quiesce(
+                            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop,
+                        )
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
+                #[cfg(test)]
+                MobCommand::SpawnPreparationProbe {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let _ = reply_tx.send(self.spawn_preparation_census(&agent_identity));
                 }
                 #[cfg(test)]
                 MobCommand::SpawnActivationCustodyProbe { reply_tx } => {
@@ -23961,16 +24301,21 @@ impl MobActor {
                     attempts,
                     automatic_retry,
                 } => {
-                    self.explicit_resume_member_cleanup_held(
+                    Box::pin(self.explicit_resume_member_cleanup_held(
                         work,
                         retry_tx,
                         error,
                         attempts,
                         automatic_retry,
-                    );
+                    ))
+                    .await;
                 }
-                MobCommand::ResumeLifecycleMemberUnproven { work, failure } => {
-                    self.explicit_resume_member_unproven(work, failure);
+                MobCommand::ResumeLifecycleMemberUnproven {
+                    work,
+                    failure,
+                    stage,
+                } => {
+                    Box::pin(self.explicit_resume_member_unproven(work, failure, stage)).await;
                 }
                 MobCommand::ResumeLifecycleRollbackStep { attempt } => {
                     Box::pin(self.drive_explicit_resume_rollback(attempt)).await;
@@ -27932,6 +28277,9 @@ impl MobActor {
     /// the obligation is volatile (like the trust it tracks) and clears on
     /// restart. Only a provision RESULT (success or failure) closes it.
     async fn fail_all_pending_spawns(&mut self, reason: &str) -> Result<(), MobError> {
+        // Preparations still running off the loop are pending spawns that
+        // have not reached the machine yet; they fail with the same reason.
+        Box::pin(self.cancel_spawn_preparations(reason)).await;
         self.drain_pending_spawn_cleanup_anchors(reason).await?;
         if self.pending_spawns.is_empty() {
             if let Some(message) = self.pending_spawn_alignment_violation() {
@@ -27993,9 +28341,10 @@ impl MobActor {
                         &identity,
                         &pending_carrier,
                         true,
-                        MobError::Internal(format!(
-                            "spawn canceled for '{agent_identity}': {reason}"
-                        )),
+                        MobError::SpawnCanceled {
+                            member_id: identity.clone(),
+                            reason: reason.to_string(),
+                        },
                         "materialize_canceled".to_string(),
                         "fail_all_pending_spawns_remote",
                     )
@@ -28023,7 +28372,10 @@ impl MobActor {
                 ));
             }
             if may_reply {
-                slot.fail(&format!("spawn canceled for '{agent_identity}': {reason}"));
+                slot.fail_with(MobError::SpawnCanceled {
+                    member_id: AgentIdentity::from(agent_identity.as_str()),
+                    reason: reason.to_string(),
+                });
             }
             tracing::debug!(
                 spawn_ticket,
@@ -28265,6 +28617,8 @@ impl MobActor {
                     restore_wiring,
                 ),
             };
+        self.inline_step_watchdog
+            .set_spawn_stage(SpawnInlineStage::SpecValidation);
         let requested_identity = AgentIdentity::from(spec.identity.as_str());
         macro_rules! reject_spawn_before_custody {
             ($stage:literal, $error:expr) => {{
@@ -28314,6 +28668,15 @@ impl MobActor {
             && let Err(error) = self.customize_spawn_spec(spawn_source, spawner.as_ref(), &mut spec)
         {
             reject_spawn_before_custody!("customize_spawn_spec", error);
+        }
+        // A local preparation for this identity is still running off the
+        // actor loop; it owns the identity exactly like a staged pending
+        // spawn, on either lane (#1249).
+        if self.spawn_preparation_in_flight(&AgentIdentity::from(spec.identity.as_str())) {
+            reject_spawn_before_custody!(
+                "preparation_in_flight",
+                MobError::MemberAlreadyExists(AgentIdentity::from(spec.identity.as_str()))
+            );
         }
         if spec.placement.is_some() && spec.compaction_curator_override.is_some() {
             reject_spawn_before_custody!(
@@ -28467,6 +28830,8 @@ impl MobActor {
             fork_build_inheritance: _,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
+        self.inline_step_watchdog
+            .set_spawn_stage(SpawnInlineStage::CommandAdmission);
         if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
             reject_spawn_before_custody!("command_admission", error);
         }
@@ -28480,7 +28845,7 @@ impl MobActor {
             } => Some((source_member_id, fork_context)),
             _ => None,
         };
-        let prepare_result = async {
+        let inline_preparation = async {
             if agent_identity.is_system_reserved() && !allow_reserved_flow_identity {
                 return Err(MobError::WiringError(format!(
                     "meerkat id '{agent_identity}' uses reserved system identifier namespace"
@@ -28516,6 +28881,8 @@ impl MobActor {
 
             // Use override_profile if provided (from SpawnTooling::Profile resolution),
             // otherwise resolve from the mob definition.
+            self.inline_step_watchdog
+                .set_spawn_stage(SpawnInlineStage::ProfileResolution);
             let mut profile = if let Some(p) = override_profile {
                 p
             } else {
@@ -28559,6 +28926,8 @@ impl MobActor {
                 profile = %profile_name,
                 "MobActor::enqueue_spawn authorizing profile material"
             );
+            self.inline_step_watchdog
+                .set_spawn_stage(SpawnInlineStage::ProfileAuthorization);
             let authorized_profile_material = self.authorize_spawn_profile_material(
                 &agent_identity,
                 &profile_name,
@@ -28574,13 +28943,75 @@ impl MobActor {
 
             let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
             let profile_external_addressable = authorized_profile_material.external_addressable;
-            tracing::debug!(
-                mob_id = %self.definition.id,
-                agent_identity = %agent_identity,
-                profile = %profile_name,
-                "MobActor::enqueue_spawn resolving external tools"
-            );
+            Ok((
+                profile,
+                effective_model_override,
+                effective_profile_override,
+                observations,
+                authorized_profile_material,
+                selected_runtime_mode,
+                profile_external_addressable,
+            ))
+        }
+        .await;
+        let (
+            profile,
+            effective_model_override,
+            effective_profile_override,
+            observations,
+            authorized_profile_material,
+            selected_runtime_mode,
+            profile_external_addressable,
+        ) = match inline_preparation {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                reject_spawn_before_custody!("prepare", error);
+            }
+        };
 
+        // ---------- Off-loop preparation (#1249) ----------
+        // Everything below reads durable/session state or builds agent config
+        // (session reads that can decode a whole document or wait behind a
+        // busy session task, resume-authority checks, fork-source history,
+        // skill files). None of it needs actor-owned mutable state, so it runs
+        // in a supervised, concurrency-bounded task. The actor keeps custody
+        // of the reply and origin, and the typed completion re-enters the
+        // loop as `SpawnPreparationSettled`, where admission is re-checked.
+        self.inline_step_watchdog
+            .set_spawn_stage(SpawnInlineStage::PreparationDispatch);
+        let fork_source_read = match fork_spec {
+            Some((source_member_id, fork_context)) => match self
+                .plan_fork_source_history_read(&source_member_id, fork_context)
+                .await
+            {
+                Ok(read) => Some(read),
+                Err(error) => {
+                    reject_spawn_before_custody!("prepare", error);
+                }
+            },
+            None => None,
+        };
+        let precomputed_external_tools =
+            self.external_tools_for_profile(&profile, per_spawn_external_tools.clone());
+        let fallback_prompt = self.fallback_spawn_prompt(&profile_name, &agent_identity);
+        let preparation_context = spawn_preparation::LocalSpawnPreparationContext::from_actor(self);
+        let preparation_identity = agent_identity.clone();
+        let carry = spawn_preparation::SpawnPreparationCarry {
+            requested_identity,
+            spawn_source,
+            identity_member_permit,
+            respawn_origin,
+            restore_wiring,
+            reply_tx,
+            suppress_autonomous_initial_prompt,
+            spawned_by,
+            fork_job,
+            fork_source: fork_source.clone(),
+            fork_overlay,
+            owner_bridge_session_id: owner_bridge_session_id.clone(),
+            ops_registry: ops_registry.clone(),
+        };
+        let preparation = spawn_preparation::typed_preparation(async move {
             // ---------- Resume bridge-session fast-path ----------
             // When resume_bridge_session_id is set, skip provisioning and go
             // straight to finalization. The bridge session must already exist
@@ -28593,7 +29024,7 @@ impl MobActor {
                 // holds the association. The verdict itself is not decided
                 // here: the proof is handed to the one containment rule the
                 // host path uses too, so the two surfaces cannot drift.
-                if let Some(store) = self.forked_participant_store.as_ref() {
+                if let Some(store) = preparation_context.forked_participant_store.as_ref() {
                     let protection = store
                         .load_by_fork_session_id(&resume_id)
                         .await?
@@ -28610,7 +29041,12 @@ impl MobActor {
                         // association row is written as part of it.
                         None
                     } else {
-                        self.forked_participant_association_evidence(&resume_id).await?
+                        forked_participant_association_evidence(
+                            preparation_context.runtime_metadata.as_ref(),
+                            &preparation_context.definition.id,
+                            &resume_id,
+                        )
+                        .await?
                     };
                     let proof = if association.is_none()
                         && !matches!(
@@ -28644,7 +29080,7 @@ impl MobActor {
                 // is false. Ordinary same-role resume keeps its established
                 // live-session fast path below.
                 if let Some(declared_predecessor_role) = resume_from_role.as_ref()
-                    && self.session_service.has_live_session(&resume_id).await?
+                    && preparation_context.session_service.has_live_session(&resume_id).await?
                 {
                     return Err(MobError::MemberRoleMigrationRejected {
                         member_id: agent_identity.clone(),
@@ -28656,7 +29092,7 @@ impl MobActor {
                 }
 
                 // Validate the session exists and is active.
-                let is_active = self
+                let is_active = preparation_context
                     .provisioner
                     .is_member_active(&member_ref)
                     .await
@@ -28677,7 +29113,7 @@ impl MobActor {
                     }
                     // Validate interaction-scoped injection for autonomous mode.
                     if selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost
-                        && self.provisioner.interaction_event_injector(&resume_id).await.is_none()
+                        && preparation_context.provisioner.interaction_event_injector(&resume_id).await.is_none()
                     {
                         return Err(MobError::MissingMemberCapability {
                             member_id: agent_identity.clone(),
@@ -28687,10 +29123,10 @@ impl MobActor {
                     }
 
                     // Validate comms if wiring rules exist.
-                    let has_wiring = self.definition.wiring.auto_wire_orchestrator
-                        || !self.definition.wiring.role_wiring.is_empty();
+                    let has_wiring = preparation_context.definition.wiring.auto_wire_orchestrator
+                        || !preparation_context.definition.wiring.role_wiring.is_empty();
                     if has_wiring
-                        && self
+                        && preparation_context
                             .provisioner
                             .comms_runtime(&member_ref)
                             .await
@@ -28702,7 +29138,7 @@ impl MobActor {
                     }
 
                     let prompt = initial_message.clone().unwrap_or_else(|| {
-                        ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
+                        ContentInput::from(fallback_prompt.clone())
                     });
                     let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
                     let resolved_labels = labels.unwrap_or_default();
@@ -28729,34 +29165,31 @@ impl MobActor {
                     ));
                 }
 
-                if self.session_service.supports_persistent_sessions() {
+                if preparation_context.session_service.supports_persistent_sessions() {
                     let selected_binding = resolve_binding(
                         binding.clone(),
                         backend,
                         profile.backend,
-                        self.definition.backend.default,
+                        preparation_context.definition.backend.default,
                         &agent_identity,
                     )?;
                     let selected_runtime_mode =
                         normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
                     let prompt = initial_message.clone().unwrap_or_else(|| {
-                        ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
+                        ContentInput::from(fallback_prompt.clone())
                     });
                     let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
                     let resolved_labels = labels.clone().unwrap_or_default();
                     let peer_name = render_member_comms_name(
-                        self.definition.id.as_str(),
+                        preparation_context.definition.id.as_str(),
                         profile_name.as_str(),
                         agent_identity.as_str(),
                     )?;
 
                     if matches!(&selected_binding, crate::RuntimeBinding::Session) {
-                        let external_tools = self.external_tools_for_profile(
-                            &profile,
-                            per_spawn_external_tools.clone(),
-                        )?;
+                        let external_tools = precomputed_external_tools?;
                         let deferred = DeferredResumeProvision {
-                            definition: self.definition.clone(),
+                            definition: preparation_context.definition.clone(),
                             profile_name: profile_name.clone(),
                             agent_identity: agent_identity.clone(),
                             profile,
@@ -28772,7 +29205,7 @@ impl MobActor {
                             tool_dispatch_admission: tool_dispatch_admission.clone(),
                             web_search_override: tool_category_overrides.web_search,
                             application_tool_policy: application_tool_policy.clone(),
-                            tool_consequence_policy_registry: self
+                            tool_consequence_policy_registry: preparation_context
                                 .tool_consequence_policy_registry
                                 .clone(),
                             system_prompt_override: system_prompt_override.clone(),
@@ -28782,7 +29215,7 @@ impl MobActor {
                             budget_limits: budget_limits.clone(),
                             keep_alive: selected_runtime_mode
                                 == crate::MobRuntimeMode::AutonomousHost,
-                            default_llm_client: self.default_llm_client.clone(),
+                            default_llm_client: preparation_context.default_llm_client.clone(),
                             binding: selected_binding,
                             peer_name,
                             owner_bridge_session_id: owner_bridge_session_id.clone(),
@@ -28816,7 +29249,7 @@ impl MobActor {
                     // preparation order. Their provision opens a machine-owned
                     // recipient-trust obligation, whose cancellation semantics
                     // are deliberately not widened by the session optimization.
-                    let authorized_resume = self
+                    let authorized_resume = preparation_context
                         .session_service
                         .materialize_session_resume_verdict(&resume_id)
                         .await
@@ -28825,18 +29258,15 @@ impl MobActor {
                         .map_err(super::session_service::SessionResumeRejection::into_mob_error)?;
                     let stored_session = *authorized_resume.session.clone();
 
-                    let external_tools = self.external_tools_for_profile(
-                        &profile,
-                        per_spawn_external_tools.clone(),
-                    )?;
+                    let external_tools = precomputed_external_tools?;
                     let mut config = build::build_resumed_agent_config(
                         build::BuildResumedAgentConfigParams {
                             base: build::BuildAgentConfigParams {
-                                mob_id: &self.definition.id,
+                                mob_id: &preparation_context.definition.id,
                                 profile_name: &profile_name,
                                 agent_identity: &agent_identity,
                                 profile: &profile,
-                                definition: &self.definition,
+                                definition: &preparation_context.definition,
                                 external_tools,
                                 compaction_curator_override: compaction_curator_override.clone(),
                                 context,
@@ -28860,9 +29290,9 @@ impl MobActor {
                     config.override_web_search = tool_category_overrides.web_search;
                     config.application_tool_policy = application_tool_policy.clone();
                     config.tool_consequence_policy_registry =
-                        self.tool_consequence_policy_registry.clone();
+                        preparation_context.tool_consequence_policy_registry.clone();
                     config.fork_source = fork_source.clone();
-                    if let Some(ref client) = self.default_llm_client {
+                    if let Some(ref client) = preparation_context.default_llm_client {
                         config.llm_client_override = Some(client.clone());
                     }
 
@@ -28916,29 +29346,29 @@ impl MobActor {
             // a PLACED source routes through the same placement switch as
             // `member_history` (the `ReadMemberHistory` proxy) — the phase-3
             // `RemoteReadUnavailable` shape now means "tried and failed".
-            let fork_context_text = if let Some((source_member_id, fork_context)) = fork_spec {
-                let rows = self
-                    .fork_source_history_rows(&source_member_id, &fork_context)
+            let fork_context_text = if let Some(read) = fork_source_read {
+                let rows = read
+                    .read_rows(preparation_context.session_service.as_ref())
                     .await?;
-                Some(render_fork_context(&source_member_id, &rows))
+                Some(render_fork_context(read.source_member_id(), &rows))
             } else {
                 None
             };
 
             let external_tools =
-                self.external_tools_for_profile(&profile, per_spawn_external_tools.clone())?;
+                precomputed_external_tools?;
             tracing::debug!(
-                mob_id = %self.definition.id,
+                mob_id = %preparation_context.definition.id,
                 agent_identity = %agent_identity,
                 profile = %profile_name,
                 "MobActor::enqueue_spawn external tools resolved"
             );
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
-                mob_id: &self.definition.id,
+                mob_id: &preparation_context.definition.id,
                 profile_name: &profile_name,
                 agent_identity: &agent_identity,
                 profile: &profile,
-                definition: &self.definition,
+                definition: &preparation_context.definition,
                 external_tools,
                 compaction_curator_override,
                 context,
@@ -28953,7 +29383,7 @@ impl MobActor {
             .await?;
             config.tool_dispatch_admission = tool_dispatch_admission.clone();
             tracing::debug!(
-                mob_id = %self.definition.id,
+                mob_id = %preparation_context.definition.id,
                 agent_identity = %agent_identity,
                 profile = %profile_name,
                 "MobActor::enqueue_spawn agent config built"
@@ -28962,11 +29392,11 @@ impl MobActor {
                 selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
             config.override_web_search = tool_category_overrides.web_search;
             config.application_tool_policy = application_tool_policy.clone();
-            config.tool_consequence_policy_registry = self.tool_consequence_policy_registry.clone();
+            config.tool_consequence_policy_registry = preparation_context.tool_consequence_policy_registry.clone();
             // Fork lineage rides only fork seatings, which resume; a fresh
             // spawn carries `None` here.
             config.fork_source = fork_source.clone();
-            if let Some(ref client) = self.default_llm_client {
+            if let Some(ref client) = preparation_context.default_llm_client {
                 config.llm_client_override = Some(client.clone());
             }
             // Deferral §1: per-member auth binding.
@@ -28975,7 +29405,7 @@ impl MobActor {
             }
 
             let base_prompt = initial_message.clone().unwrap_or_else(|| {
-                ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
+                ContentInput::from(fallback_prompt.clone())
             });
             let prompt = if let Some(fork_text) = fork_context_text {
                 let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
@@ -28993,13 +29423,13 @@ impl MobActor {
                 binding,
                 backend,
                 profile.backend,
-                self.definition.backend.default,
+                preparation_context.definition.backend.default,
                 &agent_identity,
             )?;
             let selected_runtime_mode =
                 normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
             let peer_name = render_member_comms_name(
-                self.definition.id.as_str(),
+                preparation_context.definition.id.as_str(),
                 profile_name.as_str(),
                 agent_identity.as_str(),
             )?;
@@ -29036,8 +29466,80 @@ impl MobActor {
                 continuity_intent,
                 observations,
             ))
-        }
+        });
+        self.start_spawn_preparation(preparation_identity, carry, Box::pin(preparation));
+        })
         .await;
+    }
+
+    /// Settle one local spawn preparation on the actor (#1249).
+    ///
+    /// The preparation's durable reads and config build ran off the loop, so
+    /// admission is re-checked against CURRENT machine and roster state before
+    /// the ordinary pre-custody spawn ladder continues exactly as before.
+    async fn finish_local_spawn_preparation(
+        &mut self,
+        carry: spawn_preparation::SpawnPreparationCarry,
+        prepare_result: Result<spawn_preparation::PreparedLocalSpawn, MobError>,
+    ) {
+        let spawn_preparation::SpawnPreparationCarry {
+            requested_identity,
+            spawn_source,
+            identity_member_permit,
+            respawn_origin,
+            restore_wiring,
+            reply_tx,
+            suppress_autonomous_initial_prompt,
+            spawned_by,
+            fork_job,
+            fork_source,
+            fork_overlay,
+            owner_bridge_session_id,
+            ops_registry,
+        } = carry;
+        macro_rules! reject_spawn_before_custody {
+            ($stage:literal, $error:expr) => {{
+                let error = $error;
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %requested_identity,
+                    spawn_source = spawn_source.as_str(),
+                    stage = $stage,
+                    error = %error,
+                    "member spawn rejected before asynchronous spawn custody"
+                );
+                if let Some(origin) = respawn_origin.as_ref()
+                    && let Err(abandon_error) = boxed_arm_future(|| self
+                        .durably_abandon_respawn_topology_if_terminal_exact(&requested_identity, origin))
+                        .await
+                {
+                    self.durable_uncertainty_fail_stop = true;
+                    self.respawn_topology_reply_withheld = true;
+                    tracing::error!(
+                        agent_identity = %requested_identity,
+                        error = %abandon_error,
+                        "respawn pre-custody rejection could not settle exact topology ownership"
+                    );
+                    return;
+                }
+                let reply = Err(error);
+                // The identity-reconcile caller observed custody transfer at
+                // dispatch; a rejection after an off-loop preparation records
+                // its typed disposition here.
+                if let Some(permit) = identity_member_permit.as_ref() {
+                    let authority = IdentityReconcileCompletionAuthority::from_permit(permit);
+                    let disposition = identity_member_actuation_disposition(&reply);
+                    self.record_identity_reconcile_disposition(
+                        &requested_identity,
+                        &authority,
+                        disposition,
+                    )
+                    .await;
+                }
+                let _ = reply_tx.send(reply);
+                return;
+            }};
+        }
 
         let (
             profile_name,
@@ -29064,9 +29566,24 @@ impl MobActor {
                 reject_spawn_before_custody!("prepare", error);
             }
         };
+        self.inline_step_watchdog
+            .set_spawn_stage(SpawnInlineStage::PreparedAdmission);
+        // Actor state may have moved while the preparation ran: the mob may
+        // have stopped, or the identity may have been admitted meanwhile.
+        if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
+            reject_spawn_before_custody!("prepared_command_admission", error);
+        }
+        if self.roster.read().await.get(&agent_identity).is_some() {
+            reject_spawn_before_custody!(
+                "prepared_command_admission",
+                MobError::MemberAlreadyExists(agent_identity.clone())
+            );
+        }
 
         // ---------- Resume fast-path: skip async provisioning ----------
         if let Some(member_ref) = resume_member_ref {
+            self.inline_step_watchdog
+                .set_spawn_stage(SpawnInlineStage::ResumeFinalize);
             let Some(bridge_session_id) = member_ref.bridge_session_id().cloned() else {
                 reject_spawn_before_custody!(
                     "resume_bridge_session",
@@ -29197,6 +29714,8 @@ impl MobActor {
         }
 
         // Normal provisioning path — resume path already returned above.
+        self.inline_step_watchdog
+            .set_spawn_stage(SpawnInlineStage::ProvisionAdmission);
         let Some(mut provision_input) = maybe_provision_input else {
             reject_spawn_before_custody!(
                 "provision_input",
@@ -29271,6 +29790,8 @@ impl MobActor {
                     reject_spawn_before_custody!("direct_bind_generation", error)
                 }
             };
+            self.inline_step_watchdog
+                .set_spawn_stage(SpawnInlineStage::DirectBindReservation);
             let (reserved, incarnation) = match self
                 .reserve_direct_member_bind_intent(
                     &agent_identity,
@@ -29424,6 +29945,9 @@ impl MobActor {
         };
         // Treat pending spawn lifecycle as a single keyed table: pending intent
         // and async task handle must be inserted/removed together.
+        self.inline_step_watchdog
+            .set_spawn_stage(SpawnInlineStage::ProvisionDispatch);
+        let spawn_preparation_permits = self.spawn_preparations.permits();
         let provisioner = self.provisioner.clone();
         let session_service = self.session_service.clone();
         let command_tx = self.command_tx.clone();
@@ -29447,8 +29971,14 @@ impl MobActor {
                 &panic_member_identity,
                 async {
                     let provision_result: Result<_, MobError> = async {
+                        // Deferred-resume request preparation (resume verdict,
+                        // config build) shares the spawn-preparation bound so a
+                        // cold-boot burst cannot run unbounded durable reads.
+                        let preparation_permit =
+                            spawn_preparation_permits.acquire_owned().await.ok();
                         let provision_request =
                             provision_input.into_request(session_service).await?;
+                        drop(preparation_permit);
                         let spawn_receipt =
                             provisioner.provision_member(provision_request).await?;
                         if let Some(bridge_session_id) =
@@ -29595,8 +30125,6 @@ impl MobActor {
             runtime_mode = ?spawn_runtime_mode,
             "MobActor::enqueue_spawn queued provisioning task"
         );
-        })
-        .await;
     }
 
     /// Validate the full machine obligation/carrier tuple and mint the only
@@ -34440,18 +34968,12 @@ impl MobActor {
         // EVIDENCE rather than filtered on here, so a row that belongs to a
         // different member reaches the adjudicator and is refused there with a
         // typed reason instead of silently looking like "no custody".
-        Ok(self
-            .runtime_metadata
-            .list_forked_participant_member_associations(&self.definition.id)
-            .await?
-            .into_iter()
-            .find(|record| record.association.capability.fork_session_id() == fork_session_id)
-            .map(
-                |record| crate::forked_participant::LocalAssociationEvidence {
-                    member: record.agent_identity,
-                    capability: record.association.capability,
-                },
-            ))
+        forked_participant_association_evidence(
+            self.runtime_metadata.as_ref(),
+            &self.definition.id,
+            fork_session_id,
+        )
+        .await
     }
 
     /// Spawn failures that provably happened BEFORE any provisioning task
@@ -37168,6 +37690,20 @@ impl MobActor {
         source_member_id: &AgentIdentity,
         fork_context: &crate::launch::ForkContext,
     ) -> Result<Vec<meerkat_contracts::wire::WireHistoryRow>, MobError> {
+        self.plan_fork_source_history_read(source_member_id, fork_context.clone())
+            .await?
+            .read_rows(self.session_service.as_ref())
+            .await
+    }
+
+    /// Resolve WHERE a fork source's history lives from actor-owned state
+    /// (machine placement and roster), without reading it. The returned plan
+    /// performs the history I/O and can run off the actor loop (#1249).
+    async fn plan_fork_source_history_read(
+        &self,
+        source_member_id: &AgentIdentity,
+        fork_context: crate::launch::ForkContext,
+    ) -> Result<ForkSourceHistoryRead, MobError> {
         let remote_unavailable = || MobError::ForkSourceUnavailable {
             source_member_id: source_member_id.to_string(),
             cause: crate::error::ForkSourceUnavailableCause::RemoteReadUnavailable,
@@ -37179,108 +37715,44 @@ impl MobActor {
             .member_placement
             .get(&source_dsl)
             .cloned();
-        if let Some(placement) = placement {
-            let (peer, expected_member) = {
-                let roster = self.roster.read().await;
-                let entry = roster
-                    .get(source_member_id)
-                    .ok_or_else(|| MobError::MemberNotFound(source_member_id.clone()))?;
-                let peer = self
-                    .member_pump_material(entry)
-                    .map_err(|_| remote_unavailable())?
-                    .peer;
-                let expected_member = self
-                    .placed_member_incarnation(entry)
-                    .map_err(|_| remote_unavailable())?;
-                (peer, expected_member)
-            };
-            let page = match fork_context {
-                crate::launch::ForkContext::FullHistory => {
-                    super::member_history_proxy::read_remote_member_full_history(
-                        &self.supervisor_bridge,
-                        &peer,
-                        placement,
-                        expected_member,
-                    )
-                    .await
-                }
-                crate::launch::ForkContext::LastMessages { count } => {
-                    super::member_history_proxy::read_remote_member_history_tail(
-                        &self.supervisor_bridge,
-                        &peer,
-                        placement,
-                        expected_member,
-                        *count,
-                    )
-                    .await
-                }
+        let location = if let Some(placement) = placement {
+            let roster = self.roster.read().await;
+            let entry = roster
+                .get(source_member_id)
+                .ok_or_else(|| MobError::MemberNotFound(source_member_id.clone()))?;
+            let peer = self
+                .member_pump_material(entry)
+                .map_err(|_| remote_unavailable())?
+                .peer;
+            let expected_member = self
+                .placed_member_incarnation(entry)
+                .map_err(|_| remote_unavailable())?;
+            ForkSourceHistoryLocation::Remote {
+                supervisor_bridge: Arc::clone(&self.supervisor_bridge),
+                peer,
+                placement,
+                expected_member,
             }
-            .map_err(|error| {
-                tracing::warn!(
-                    source_member_id = %source_member_id,
-                    error = %error,
-                    "remote fork-source history read failed"
-                );
-                remote_unavailable()
-            })?;
-            return Ok(page.page.messages);
-        }
-        let source_session_id = {
+        } else {
             let roster = self.roster.read().await;
             let source_entry = roster
                 .get(source_member_id)
                 .ok_or_else(|| MobError::MemberNotFound(source_member_id.clone()))?;
-            source_entry
+            let source_session_id = source_entry
                 .member_ref
                 .bridge_session_id()
                 .cloned()
                 .ok_or_else(|| MobError::ForkSourceUnavailable {
                     source_member_id: source_member_id.to_string(),
                     cause: crate::error::ForkSourceUnavailableCause::NoSession,
-                })?
+                })?;
+            ForkSourceHistoryLocation::Local { source_session_id }
         };
-        let query = match fork_context {
-            crate::launch::ForkContext::FullHistory => {
-                meerkat_core::service::SessionHistoryQuery::default()
-            }
-            crate::launch::ForkContext::LastMessages { count } => {
-                let view = self
-                    .session_service
-                    .read(&source_session_id)
-                    .await
-                    .map_err(|e| {
-                        MobError::Internal(format!(
-                            "failed to read source session metadata for fork from '{source_member_id}': {e}"
-                        ))
-                    })?;
-                let total = view.state.message_count;
-                let count = *count as usize;
-                meerkat_core::service::SessionHistoryQuery {
-                    offset: total.saturating_sub(count),
-                    limit: Some(count),
-                }
-            }
-        };
-        let history = meerkat_core::service::SessionServiceHistoryExt::read_history(
-            self.session_service.as_ref(),
-            &source_session_id,
-            query,
-        )
-        .await
-        .map_err(|e| {
-            MobError::Internal(format!(
-                "failed to read source session history for fork from '{source_member_id}': {e}"
-            ))
-        })?;
-        Ok(
-            meerkat_contracts::wire::WireMemberHistoryPageBody::try_from_history_page(&history)
-                .map_err(|error| {
-                    MobError::Internal(format!(
-                        "failed to project source member history page: {error}"
-                    ))
-                })?
-                .messages,
-        )
+        Ok(ForkSourceHistoryRead {
+            source_member_id: source_member_id.clone(),
+            fork_context,
+            location,
+        })
     }
 
     /// Ensure the member's event pump runs (A17 liveness: subscription

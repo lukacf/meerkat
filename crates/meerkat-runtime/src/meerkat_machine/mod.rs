@@ -316,6 +316,22 @@ pub enum RuntimeBindingsError {
     RegistrationOwned(SessionId),
 }
 
+impl RuntimeBindingsError {
+    /// Whether preparation was refused before this call reserved a
+    /// materialization claim, inserted a registration, or installed handles.
+    ///
+    /// Both registration verdicts are returned only from checks that run
+    /// before any mutation, so a caller may treat such a failed attempt as
+    /// proven no-effect rather than as an unproven cleanup obligation.
+    #[must_use]
+    pub fn rejected_before_effect(&self) -> bool {
+        matches!(
+            self,
+            Self::RegistrationOwned(_) | Self::RegistrationNotCurrent(_)
+        )
+    }
+}
+
 /// Generated public projection for an input-state seed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputPublicStateProjection {
@@ -4527,6 +4543,18 @@ enum RuntimeLoopAttachmentSlot {
 }
 
 impl RuntimeSessionEntry {
+    /// Wake materialization-claim release waiters because this registration
+    /// is leaving the registry (its claim can no longer be held).
+    fn notify_registration_removed(&self) {
+        self.materialization_claim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .changed
+            .notify_waiters();
+    }
+}
+
+impl RuntimeSessionEntry {
     fn require_durability_ready(&self) -> Result<(), DurabilityReloadRequired> {
         match self.durability_health.as_ref() {
             Some(health) => health.require_ready(),
@@ -4923,7 +4951,10 @@ impl RuntimeSessionEntry {
                 return Err(spawned_loop);
             };
             state.legacy_capability_generation = next_legacy_generation;
-            let claim_changed = state.current.take().is_some();
+            // A `RetainedActor` claim has no current id; its release to
+            // Vacant is still a claim change that release waiters observe.
+            let claim_changed = state.current.take().is_some()
+                || state.phase != crate::RuntimeActorMaterializationClaimPhase::Vacant;
             state.phase = crate::RuntimeActorMaterializationClaimPhase::Vacant;
             state.rollback_registration_available = false;
             claim_changed.then(|| Arc::clone(&state.changed))

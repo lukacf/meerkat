@@ -491,6 +491,10 @@ impl LifecycleAdmissionSignal {
 pub(super) enum LifecycleProgressStage {
     LifecycleAuthorityAdmission,
     MemberAttachmentSessionPreparation,
+    /// Metadata-only probe of the member's bound durable session.
+    MemberSessionMetadataProbe,
+    /// Realm-wide (once per resume) successor-session scan and match.
+    MemberSuccessorSessionScan,
     MemberLiveMaterialization,
     MemberCommsReadiness,
     AutonomousRuntimeReadiness,
@@ -507,6 +511,8 @@ impl LifecycleProgressStage {
         match self {
             Self::LifecycleAuthorityAdmission => "lifecycle_authority_admission",
             Self::MemberAttachmentSessionPreparation => "member_attachment_session_preparation",
+            Self::MemberSessionMetadataProbe => "member_session_metadata_probe",
+            Self::MemberSuccessorSessionScan => "member_successor_session_scan",
             Self::MemberLiveMaterialization => "member_live_materialization",
             Self::MemberCommsReadiness => "member_comms_readiness",
             Self::AutonomousRuntimeReadiness => "autonomous_runtime_readiness",
@@ -637,6 +643,11 @@ pub(super) enum MobCommand {
         spawn_ticket: u64,
         result: Result<super::handle::MemberSpawnReceipt, MobError>,
     },
+    /// Typed completion of one off-loop local spawn preparation (#1249).
+    SpawnPreparationSettled {
+        ticket: u64,
+        outcome: Box<super::actor::spawn_preparation::SpawnPreparationOutcome>,
+    },
     /// Internal trigger (multi-host §9, W-D.2): a delivery to a PLACED
     /// member failed on the bridge, or a `HostStatus` sweep reported it
     /// unhealthy/missing. The actor feeds the raw observation to the
@@ -726,6 +737,19 @@ pub(super) enum MobCommand {
     /// This is the exact predicate a graph-scoped lifecycle gate waits on, so
     /// a regression can observe it directly instead of inferring it from
     /// timing.
+    /// Test-only census of off-loop spawn preparations and parked explicit
+    /// resume custody (#1249, #1251).
+    /// Test-only: begin a Stop lifecycle quiesce through the sealed actor
+    /// verb, closing the lifecycle origin without failing pending spawns.
+    #[cfg(test)]
+    BeginStopQuiesceForTest {
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    #[cfg(test)]
+    SpawnPreparationProbe {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<super::actor::spawn_preparation::SpawnPreparationCensus>,
+    },
     #[cfg(test)]
     SpawnActivationCustodyProbe {
         reply_tx:
@@ -827,6 +851,7 @@ pub(super) enum MobCommand {
     ResumeLifecycleMemberUnproven {
         work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
         failure: super::provisioner::ProvisionAttemptFailure,
+        stage: super::actor::UnprovenResumeCustodyStage,
     },
     ResumeLifecycleRollbackStep {
         attempt: mob_dsl::ResumeAttemptId,
@@ -1618,6 +1643,7 @@ impl MobCommand {
         match self {
             Self::Spawn { .. } => "Spawn",
             Self::SpawnProvisioned { .. } => "SpawnProvisioned",
+            Self::SpawnPreparationSettled { .. } => "SpawnPreparationSettled",
             Self::RevivePlacedMember { .. } => "RevivePlacedMember",
             Self::HostStatusPollCompleted { .. } => "HostStatusPollCompleted",
             Self::HostRuntimeIncarnationObserved { .. } => "HostRuntimeIncarnationObserved",
@@ -1630,6 +1656,10 @@ impl MobCommand {
             Self::SpawnActivationStageSettled { .. } => "SpawnActivationStageSettled",
             Self::SpawnCleanupSettled { .. } => "SpawnCleanupSettled",
             Self::PendingSpawnAnchorSettled { .. } => "PendingSpawnAnchorSettled",
+            #[cfg(test)]
+            Self::SpawnPreparationProbe { .. } => "SpawnPreparationProbe",
+            #[cfg(test)]
+            Self::BeginStopQuiesceForTest { .. } => "BeginStopQuiesceForTest",
             #[cfg(test)]
             Self::SpawnActivationCustodyProbe { .. } => "SpawnActivationCustodyProbe",
             #[cfg(test)]

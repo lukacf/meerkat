@@ -46030,12 +46030,15 @@ mod prepared_materialization_transactions {
             .prepare_session_materialization(session_id.clone())
             .await
             .expect("unique preparation");
+        let steal = machine
+            .prepare_session_materialization(session_id.clone())
+            .await
+            .expect_err("a second unique preparation must be refused");
         assert!(
-            machine
-                .prepare_session_materialization(session_id.clone())
-                .await
-                .is_err()
+            matches!(steal, RuntimeBindingsError::RegistrationOwned(ref id) if id == &session_id),
+            "{steal:?}"
         );
+        assert!(steal.rejected_before_effect());
 
         let permit = crate::begin_session_runtime_actor_materialization(prepared.bindings())
             .expect("exact prepared actor claim");
@@ -46051,6 +46054,63 @@ mod prepared_materialization_transactions {
                 .expect("exact rollback should succeed")
         );
         assert!(!machine.contains_session(&session_id).await);
+    }
+
+    /// #1251: a `RetainedActor` claim (an actor committed without an
+    /// executor) makes unique preparation fail with the typed pre-effect
+    /// `RegistrationOwned` verdict, and releasing that exact registration to
+    /// terminal admits a fresh unique preparation.
+    #[tokio::test]
+    async fn retained_actor_claim_refuses_unique_preparation_before_effect_until_released() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("compatibility binding");
+        crate::begin_session_runtime_actor_materialization(&bindings)
+            .expect("claim actor creation")
+            .commit()
+            .expect("retained actor claim");
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("retained registration");
+
+        let refused = machine
+            .prepare_session_materialization(session_id.clone())
+            .await
+            .expect_err("an occupied claim must refuse unique preparation");
+        assert!(
+            matches!(refused, RuntimeBindingsError::RegistrationOwned(ref id) if id == &session_id),
+            "{refused:?}"
+        );
+        assert!(refused.rejected_before_effect());
+        assert_eq!(
+            machine
+                .current_session_registration_witness(&session_id)
+                .await
+                .as_ref(),
+            Some(&registration),
+            "the refused attempt must leave the owner's registration untouched"
+        );
+        assert!(
+            !machine
+                .registration_is_current_without_runtime_owner(&registration)
+                .await
+        );
+
+        assert!(
+            machine
+                .unregister_session_registration_until_terminal_if_current(&registration)
+                .await
+                .expect("release the unattached registration")
+        );
+        let mut prepared = machine
+            .prepare_session_materialization(session_id.clone())
+            .await
+            .expect("a released registration admits a fresh unique preparation");
+        assert!(prepared.rollback_now().await.expect("rollback"));
     }
 
     #[tokio::test]

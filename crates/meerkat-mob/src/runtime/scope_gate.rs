@@ -181,6 +181,7 @@ impl MobCommand {
             // ── Internal / machine-authority plumbing (enumerated so the
             //    closed world stays reviewable) ──
             Self::SpawnProvisioned { .. }
+            | Self::SpawnPreparationSettled { .. }
             // Detached-admission completions and the actor-authority revival
             // re-entry are actor self-sends; the delivery they belong to was
             // admitted on SubmitWork.
@@ -270,6 +271,8 @@ impl MobCommand {
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
             | Self::SpawnActivationCustodyProbe { .. }
+            | Self::SpawnPreparationProbe { .. }
+            | Self::BeginStopQuiesceForTest { .. }
             | Self::MemberStatusLaneProbe { .. }
             | Self::DslT2Snapshot { .. } => None,
         }
@@ -562,6 +565,7 @@ impl MobCommand {
                 tracing::warn!(%error, "internal resume topology command refused by scope gate");
             }
             Self::SpawnProvisioned { .. }
+            | Self::SpawnPreparationSettled { .. }
             | Self::MemberTurnAdmissionSettled { .. }
             | Self::SpawnActivationStageSettled { .. }
             | Self::SpawnCleanupSettled { .. }
@@ -603,6 +607,8 @@ impl MobCommand {
             | Self::OrchestratorSnapshot { .. }
             | Self::LifecycleSnapshot { .. }
             | Self::SpawnActivationCustodyProbe { .. }
+            | Self::SpawnPreparationProbe { .. }
+            | Self::BeginStopQuiesceForTest { .. }
             | Self::MemberStatusLaneProbe { .. }
             | Self::DslT2Snapshot { .. } => {
                 tracing::error!("scope denial reached a test-only command; dropped");

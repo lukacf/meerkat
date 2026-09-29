@@ -1075,10 +1075,11 @@ pub use service_ext::{SessionServiceRuntimeExt, persistent_runtime_pre_dequeue_h
 #[cfg(feature = "sqlite-store")]
 pub use store::SqliteRuntimeStore;
 pub use store::{
-    CommittedRecoveryBoundary, CommittedWholeBlobProvisionalTail, CommittedWholeBlobSnapshot,
-    FencedPreparedRuntimeSessionCommitOutcome, HeadCanonicalProvisionalTailAuthority,
-    HeadCanonicalRuntimeAuthorityActivation, HeadCanonicalStoreAuthority, InMemoryRuntimeStore,
-    InputStateRow, PreparedDurableTailRecoverySource, PreparedHeadCanonicalProvisionalPromotion,
+    CommittedRecoveryBoundary, CommittedWholeBlobMetadata, CommittedWholeBlobProvisionalTail,
+    CommittedWholeBlobSnapshot, FencedPreparedRuntimeSessionCommitOutcome,
+    HeadCanonicalProvisionalTailAuthority, HeadCanonicalRuntimeAuthorityActivation,
+    HeadCanonicalStoreAuthority, InMemoryRuntimeStore, InputStateRow,
+    PreparedDurableTailRecoverySource, PreparedHeadCanonicalProvisionalPromotion,
     PreparedHeadCanonicalProvisionalTail, PreparedRecoveryEvidence,
     PreparedRecoveryReceiptDigestEnrichment, PreparedRecoveryReceiptSource,
     PreparedRuntimeSessionCommit, PreparedRuntimeSessionCommitKind,

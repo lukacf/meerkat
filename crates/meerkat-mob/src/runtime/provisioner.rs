@@ -824,9 +824,10 @@ impl ResumedMemberRollbackAuthority {
 /// What a failed provisioning attempt proved about its OWN effects.
 ///
 /// A provisioning error is never evidence of absence. Only
-/// [`Self::ReleasedByOwner`] is a settled negative outcome; every other value
-/// means owner-created resources may still be serving, so a cancelling caller
-/// must keep its cancellation pending and retry the exact compensation.
+/// [`Self::ReleasedByOwner`] and [`Self::NoEffect`] are settled negative
+/// outcomes, and both are positive recorded facts; every other value means
+/// owner-created resources may still be serving, so a cancelling caller must
+/// keep its cancellation pending and retry the exact compensation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProvisionEffectSettlement {
     /// The process-owned materialization task ran to completion and its exact
@@ -839,16 +840,46 @@ pub enum ProvisionEffectSettlement {
     /// cleanup was detached without an awaited settlement. Effects may still
     /// be serving.
     RetainedUncertain,
+    /// Typed runtime authority refused the attempt before it created any
+    /// runtime registration, materialization claim, actor, attachment, or ops
+    /// row (#1251). This is a recorded positive fact, never inferred from an
+    /// empty ledger: the attempt provably has nothing to compensate.
+    NoEffect(PreEffectRefusal),
     /// This provisioner cannot prove either outcome. Callers must treat it
     /// exactly like [`Self::RetainedUncertain`]; it is never proof of absence.
     Unproven,
 }
 
+/// Why typed runtime authority refused an attempt before any effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreEffectRefusal {
+    /// Another owner holds the session's materialization claim. Transient
+    /// within one process: the owner releases it, and the claim-release event
+    /// (`MeerkatMachine::materialization_claim_released`) is the retry signal.
+    RegistrationOwned,
+    /// The expected registration was replaced before the attempt.
+    RegistrationNotCurrent,
+}
+
+impl PreEffectRefusal {
+    fn from_bindings_error(error: &meerkat_runtime::RuntimeBindingsError) -> Option<Self> {
+        match error {
+            meerkat_runtime::RuntimeBindingsError::RegistrationOwned(_) => {
+                Some(Self::RegistrationOwned)
+            }
+            meerkat_runtime::RuntimeBindingsError::RegistrationNotCurrent(_) => {
+                Some(Self::RegistrationNotCurrent)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl ProvisionEffectSettlement {
     /// Whether the caller must keep compensation open. True for everything
-    /// except a proven owner-side release.
+    /// except a proven owner-side release or a proven no-effect refusal.
     pub fn requires_further_cleanup(self) -> bool {
-        !matches!(self, Self::ReleasedByOwner)
+        !matches!(self, Self::ReleasedByOwner | Self::NoEffect(_))
     }
 }
 
@@ -1165,6 +1196,8 @@ pub(super) struct ProvisionSettlementLedger {
 #[derive(Debug, Default)]
 struct ProvisionSettlementFacts {
     owner_releases: usize,
+    /// Typed runtime authority refused the attempt before any effect.
+    rejected_before_effect: Option<PreEffectRefusal>,
     retained_details: Vec<String>,
     retained_attachment: Option<(SessionId, ResumedMemberRollbackAuthority)>,
     /// Ops anchor captured AT the moment custody was first recorded.
@@ -1212,6 +1245,12 @@ impl ProvisionSettlementLedger {
         self.with_facts(|facts| facts.owner_releases += 1);
     }
 
+    /// Typed runtime authority refused this attempt before it reserved a
+    /// claim, inserted a registration, or installed any handle.
+    pub(super) fn record_rejected_before_effect(&self, refusal: PreEffectRefusal) {
+        self.with_facts(|facts| facts.rejected_before_effect = Some(refusal));
+    }
+
     /// `RetainedUncertain` is sticky: a later release inside the same attempt
     /// cannot erase an earlier failure to certify compensation.
     fn settlement_of(facts: &ProvisionSettlementFacts) -> ProvisionEffectSettlement {
@@ -1219,6 +1258,8 @@ impl ProvisionSettlementLedger {
             ProvisionEffectSettlement::RetainedUncertain
         } else if facts.owner_releases > 0 {
             ProvisionEffectSettlement::ReleasedByOwner
+        } else if let Some(refusal) = facts.rejected_before_effect {
+            ProvisionEffectSettlement::NoEffect(refusal)
         } else {
             ProvisionEffectSettlement::Unproven
         }
@@ -1986,6 +2027,78 @@ static RELOAD_WARM_CLAIM_TEST_HOOKS: std::sync::LazyLock<
 static RELOAD_UNUSED_CLAIM_TEST_HOOKS: std::sync::LazyLock<
     StdMutex<HashMap<SessionId, ReloadWarmClaimTestHook>>,
 > = std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// #1251 fault seam: what the next local materialization preparation of one
+/// session meets.
+#[cfg(all(test, feature = "runtime-adapter"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProvisionPrepareTestFault {
+    /// Another owner occupies the session's runtime materialization claim
+    /// (a `RetainedActor` registration), so the real unique prepare refuses.
+    OccupiedClaim,
+    /// The attempt fails having recorded no settlement fact at all.
+    UnrecordedFailure,
+    /// The attempt leaves a claimed runtime registration behind (residue)
+    /// and then fails with no recorded settlement fact.
+    RegistrationResidueThenUnrecorded,
+}
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+static PROVISION_PREPARE_TEST_FAULTS: std::sync::LazyLock<
+    StdMutex<HashMap<SessionId, ProvisionPrepareTestFault>>,
+> = std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+pub(super) fn arm_provision_prepare_fault_for_test(
+    session_id: SessionId,
+    fault: ProvisionPrepareTestFault,
+) {
+    PROVISION_PREPARE_TEST_FAULTS
+        .lock()
+        .expect("provision prepare fault hook")
+        .insert(session_id, fault);
+}
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+async fn apply_provision_prepare_test_fault(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+) -> Result<(), MobError> {
+    let fault = PROVISION_PREPARE_TEST_FAULTS
+        .lock()
+        .expect("provision prepare fault hook")
+        .remove(session_id);
+    match fault {
+        None => Ok(()),
+        Some(ProvisionPrepareTestFault::UnrecordedFailure) => Err(MobError::Internal(format!(
+            "test-forced provisioning failure for '{session_id}' with no recorded settlement"
+        ))),
+        Some(ProvisionPrepareTestFault::RegistrationResidueThenUnrecorded) => {
+            let bindings = adapter
+                .prepare_bindings(session_id.clone())
+                .await
+                .map_err(|error| MobError::Internal(error.to_string()))?;
+            meerkat_runtime::begin_session_runtime_actor_materialization(&bindings)
+                .map_err(|error| MobError::Internal(error.to_string()))?
+                .commit()
+                .map_err(|error| MobError::Internal(error.to_string()))?;
+            Err(MobError::Internal(format!(
+                "test-forced provisioning failure for '{session_id}' after registration residue"
+            )))
+        }
+        Some(ProvisionPrepareTestFault::OccupiedClaim) => {
+            let bindings = adapter
+                .prepare_bindings(session_id.clone())
+                .await
+                .map_err(|error| MobError::Internal(error.to_string()))?;
+            meerkat_runtime::begin_session_runtime_actor_materialization(&bindings)
+                .map_err(|error| MobError::Internal(error.to_string()))?
+                .commit()
+                .map_err(|error| MobError::Internal(error.to_string()))?;
+            Ok(())
+        }
+    }
+}
 
 #[cfg(all(test, feature = "runtime-adapter"))]
 pub(super) fn arm_reload_unused_claim_cleanup_for_test(
@@ -4187,13 +4300,41 @@ impl SessionBackend {
             let observed_ops_binding = self.ops_adapter.capture_session_binding_witness(session_id);
 
             let Some(witness) = witness else {
+                // Captured under B: the exact registration any discarded
+                // unattached actor was built against. Discarding the actor
+                // alone leaves that registration's materialization claim
+                // occupied (`RetainedActor`, or a stranded `Aborting`), and the
+                // unique prepare below would refuse it as "another owner"
+                // (#1251). Mirror the reoccupation rule of stale live-session
+                // discard: release that exact registration to terminal before
+                // the rebuild. A clean ownerless registration is kept.
+                let registration = adapter
+                    .current_session_registration_witness(session_id)
+                    .await;
                 let discard_result = self
                     .session_service
                     .discard_live_session_under_runtime_turn_boundary(session_id)
                     .await;
+                // The retained provisional cleanup handle reacquires B.
                 drop(boundary);
                 return match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => {
+                        if let Some(registration) = registration
+                            && !adapter
+                                .registration_is_current_without_runtime_owner(&registration)
+                                .await
+                        {
+                            adapter
+                                .unregister_session_registration_until_terminal_if_current(
+                                    &registration,
+                                )
+                                .await
+                                .map_err(|error| {
+                                    MobError::Internal(format!(
+                                        "explicit resume could not release the unattached runtime registration for '{session_id}': {error}"
+                                    ))
+                                })?;
+                        }
                         self.remove_runtime_session_state(session_id, observed_sidecar.as_ref())
                             .await;
                         Self::log_explicit_resume_binding_release(
@@ -4834,6 +4975,18 @@ impl SessionBackend {
             .is_some_and(|current| Arc::ptr_eq(current, expected))
         {
             retained.remove(session_id);
+        }
+    }
+
+    /// Record a typed pre-effect preparation refusal on this attempt's
+    /// settlement ledger, so a failed attempt that created nothing settles as
+    /// proven [`ProvisionEffectSettlement::NoEffect`] instead of `Unproven`
+    /// (#1251).
+    fn record_pre_effect_prepare_rejection(&self, error: &meerkat_runtime::RuntimeBindingsError) {
+        if let Some(refusal) = PreEffectRefusal::from_bindings_error(error)
+            && let Some(ledger) = self.settlement_ledger.as_ref()
+        {
+            ledger.record_rejected_before_effect(refusal);
         }
     }
 
@@ -8005,7 +8158,37 @@ mod tests {
         }
 
         #[test]
-        fn awaited_owner_release_is_the_only_settled_negative_outcome() {
+        fn typed_pre_effect_refusal_is_proven_no_effect() {
+            let ledger = ProvisionSettlementLedger::default();
+            ledger.record_rejected_before_effect(super::super::PreEffectRefusal::RegistrationOwned);
+            let failure = ledger.settle_failure(MobError::Internal(
+                "materialization registration has another owner".to_string(),
+            ));
+
+            assert_eq!(
+                failure.settlement(),
+                ProvisionEffectSettlement::NoEffect(
+                    super::super::PreEffectRefusal::RegistrationOwned
+                )
+            );
+            assert!(!failure.requires_further_cleanup());
+            assert!(failure.retained_effects().is_none());
+        }
+
+        #[test]
+        fn retained_effect_outranks_a_pre_effect_refusal() {
+            let ledger = ProvisionSettlementLedger::default();
+            ledger.record_rejected_before_effect(super::super::PreEffectRefusal::RegistrationOwned);
+            ledger.record_retained("cleanup did not settle");
+
+            assert_eq!(
+                ledger.settlement_for_test(),
+                ProvisionEffectSettlement::RetainedUncertain
+            );
+        }
+
+        #[test]
+        fn awaited_owner_release_is_a_settled_negative_outcome() {
             let ledger = ProvisionSettlementLedger::default();
             ledger.record_owner_release();
             let failure = ledger.settle_failure(MobError::Internal("provision failed".to_string()));
@@ -11056,6 +11239,8 @@ impl MobProvisioner for SessionBackend {
                     "SessionBackend::provision_member prepared actor-only recovery for exact attachment"
                 );
             } else {
+                #[cfg(test)]
+                apply_provision_prepare_test_fault(adapter, &member_bridge_session_id).await?;
                 #[cfg(target_arch = "wasm32")]
                 let mut prepared = {
                     let adapter = Arc::clone(adapter);
@@ -11079,6 +11264,7 @@ impl MobProvisioner for SessionBackend {
                     })?
                 }
                 .map_err(|e| {
+                    backend.record_pre_effect_prepare_rejection(&e);
                     MobError::Internal(format!("prepare local session bindings failed: {e}"))
                 })?;
                 #[cfg(not(target_arch = "wasm32"))]
@@ -11090,6 +11276,7 @@ impl MobProvisioner for SessionBackend {
                     )
                     .await
                     .map_err(|e| {
+                        backend.record_pre_effect_prepare_rejection(&e);
                         MobError::Internal(format!(
                             "prepare local session materialization failed: {e}"
                         ))

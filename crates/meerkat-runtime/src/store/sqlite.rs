@@ -12343,6 +12343,27 @@ ORDER BY runtime_id";
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
         }
 
+        async fn load_committed_whole_blob_metadata(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<crate::store::CommittedWholeBlobMetadata>, RuntimeStoreError> {
+            let observed = self.load_committed_whole_blob_bytes(runtime_id).await?;
+            // Hash and partially decode the owned bytes off the async worker,
+            // like the full snapshot read, but without materializing rows.
+            tokio::task::spawn_blocking(move || {
+                observed
+                    .map(|(bytes, authority)| {
+                        crate::store::CommittedWholeBlobMetadata::from_committed_bytes(
+                            bytes.as_ref(),
+                            authority,
+                        )
+                    })
+                    .transpose()
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
         async fn load_committed_whole_blob_snapshot(
             &self,
             runtime_id: &LogicalRuntimeId,

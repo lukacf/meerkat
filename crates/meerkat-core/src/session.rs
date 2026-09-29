@@ -1571,6 +1571,38 @@ impl DecodedWholeBlobSessionDocument {
     }
 }
 
+/// Metadata-only sibling of [`DecodedWholeBlobSessionDocument`].
+///
+/// The envelope is partially decoded through
+/// [`session_metadata_document_from_slice`], so the transcript rows are
+/// skipped rather than materialized, while the physical identity is still the
+/// digest of the exact observed bytes. Like its full-document sibling this is
+/// an observation, not authority: the owning store must compare
+/// [`Self::row_sha256_token`] with its transaction-issued row token before
+/// exposing the metadata.
+#[derive(Debug)]
+pub struct DecodedWholeBlobMetadataDocument {
+    document: SessionMetadataDocument,
+    row_sha256_token: String,
+}
+
+impl DecodedWholeBlobMetadataDocument {
+    #[must_use]
+    pub fn document(&self) -> &SessionMetadataDocument {
+        &self.document
+    }
+
+    #[must_use]
+    pub fn row_sha256_token(&self) -> &str {
+        &self.row_sha256_token
+    }
+
+    #[must_use]
+    pub fn into_document(self) -> SessionMetadataDocument {
+        self.document
+    }
+}
+
 impl SerializedSessionArtifact {
     fn from_parts(bytes: Vec<u8>, raw_sha256: [u8; 32]) -> Self {
         Self {
@@ -1891,6 +1923,27 @@ impl Session {
         }
         Ok(DecodedWholeBlobSessionDocument {
             session,
+            row_sha256_token: row_sha256_token(sha256_key(serialized)),
+        })
+    }
+
+    /// Metadata-only decode of an observed WholeBlob row plus its exact
+    /// physical identity.
+    ///
+    /// Realm scans (successor search, ownership probes) only need the typed
+    /// session-authority metadata facts. This seam skips the transcript rows
+    /// instead of decoding, validating, and replaying them, which is what
+    /// makes a metadata read of a large WholeBlob document cheap. The same
+    /// envelope-version and released-importer refusals as the full decoder
+    /// apply. As with [`Self::decode_whole_blob_document`], the returned token
+    /// is not trusted here; the owning store must compare it.
+    #[doc(hidden)]
+    pub fn decode_whole_blob_metadata_document(
+        serialized: &[u8],
+    ) -> Result<DecodedWholeBlobMetadataDocument, serde_json::Error> {
+        let document = session_metadata_document_from_slice(serialized)?;
+        Ok(DecodedWholeBlobMetadataDocument {
+            document,
             row_sha256_token: row_sha256_token(sha256_key(serialized)),
         })
     }

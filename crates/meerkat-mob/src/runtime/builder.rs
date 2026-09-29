@@ -2036,99 +2036,210 @@ async fn resolve_seeded_member_runtime_restoration(
     Ok(())
 }
 
-pub(super) async fn latest_persisted_session_for_member(
-    session_service: &dyn MobSessionService,
-    listed_sessions: &[meerkat_core::service::SessionSummary],
-    missing_session_id: &meerkat_core::types::SessionId,
-    mob_id: &crate::ids::MobId,
-    role: &crate::ids::ProfileName,
-    agent_identity: &crate::ids::AgentIdentity,
-    resume_from_role: Option<&crate::ids::ProfileName>,
-) -> Result<
-    Option<(
-        meerkat_core::types::SessionId,
-        super::session_service::AuthorizedSessionResume,
-    )>,
-    MobError,
-> {
-    let canonical_comms_name = super::actor::render_member_comms_name(
-        mob_id.as_str(),
-        role.as_str(),
-        agent_identity.as_str(),
-    )?;
-    let predecessor_comms_name = resume_from_role
-        .map(|predecessor_role| {
-            super::actor::render_member_comms_name(
-                mob_id.as_str(),
-                predecessor_role.as_str(),
-                agent_identity.as_str(),
-            )
-        })
-        .transpose()?;
+/// One realm session's member-identity facts, read once through the
+/// metadata-only seam.
+struct PersistedMemberSessionCandidate {
+    session_id: meerkat_core::types::SessionId,
+    updated_at: meerkat_core::time_compat::SystemTime,
+    metadata: PersistedMemberSessionCandidateMetadata,
+}
 
-    // Candidate matching runs over the metadata-only read seam: the member
-    // identity facts (typed binding, comms name) live on session metadata, so
-    // scanning the realm never materializes full transcripts.
-    let mut best: Option<(
-        u8,
-        meerkat_core::time_compat::SystemTime,
-        meerkat_core::types::SessionId,
-    )> = None;
+/// Outcome of one candidate's metadata read during the shared scan.
+enum PersistedMemberSessionCandidateMetadata {
+    Read(Option<meerkat_core::SessionMetadata>),
+    /// The read failed. The failure belongs only to a member search that
+    /// actually considers this candidate: a member's own rejected session
+    /// must not abort every other member's search (or the whole resume).
+    /// A considering search re-reads it to surface the typed error.
+    ReadFailed,
+}
 
-    for summary in listed_sessions {
-        if &summary.session_id == missing_session_id {
-            continue;
+/// Realm-wide successor-search index (#1250).
+///
+/// A resume that must find a replacement session for several members scans
+/// the realm ONCE: each listed session's typed member-identity facts are read
+/// through the metadata-only seam (which never decodes a WholeBlob
+/// transcript), and every member's successor match then runs over this
+/// in-memory index. Rescanning the realm per member made cold boot
+/// O(members x sessions) full-document reads.
+pub(super) struct PersistedMemberSessionIndex {
+    candidates: Vec<PersistedMemberSessionCandidate>,
+}
+
+impl PersistedMemberSessionIndex {
+    /// Read the metadata of every listed session exactly once.
+    ///
+    /// `on_session_scanned` runs after each session read, so a caller with a
+    /// progress watchdog can report that the scan is advancing.
+    ///
+    /// `member_bound_sessions` are sessions currently bound to members of the
+    /// resume. They are owned by their members and are never another
+    /// member's successor, so they are not read at all: a member's own
+    /// rejected or unreadable session cannot abort any search (#1250).
+    pub(super) async fn scan(
+        session_service: &dyn MobSessionService,
+        listed_sessions: &[meerkat_core::service::SessionSummary],
+        member_bound_sessions: &std::collections::HashSet<meerkat_core::types::SessionId>,
+        mut on_session_scanned: impl FnMut(),
+    ) -> Result<Self, MobError> {
+        let mut candidates = Vec::with_capacity(listed_sessions.len());
+        for summary in listed_sessions {
+            if member_bound_sessions.contains(&summary.session_id) {
+                continue;
+            }
+            let read = session_service
+                .load_persisted_session_metadata(&summary.session_id)
+                .await;
+            on_session_scanned();
+            let metadata = match read {
+                Ok(Some(view)) => {
+                    PersistedMemberSessionCandidateMetadata::Read(view.session_metadata)
+                }
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::debug!(
+                        session_id = %summary.session_id,
+                        %error,
+                        "successor scan could not read session metadata; deferring to searches that consider it"
+                    );
+                    PersistedMemberSessionCandidateMetadata::ReadFailed
+                }
+            };
+            candidates.push(PersistedMemberSessionCandidate {
+                session_id: summary.session_id.clone(),
+                updated_at: summary.updated_at,
+                metadata,
+            });
         }
-        let Some(view) = session_service
-            .load_persisted_session_metadata(&summary.session_id)
-            .await?
-        else {
-            continue;
-        };
-        let Some(match_rank) = persisted_session_member_match_rank(
-            view.session_metadata.as_ref(),
-            mob_id,
-            role,
-            agent_identity,
-            &canonical_comms_name,
-            resume_from_role,
-            predecessor_comms_name.as_deref(),
-        ) else {
-            continue;
-        };
-        let replace = best.as_ref().is_none_or(|(best_rank, updated_at, _)| {
-            match_rank > *best_rank
-                || (match_rank == *best_rank && summary.updated_at > *updated_at)
-        });
-        if replace {
-            best = Some((match_rank, summary.updated_at, summary.session_id.clone()));
-        }
+        Ok(Self { candidates })
     }
 
-    let Some((_, _, winner_session_id)) = best else {
-        return Ok(None);
-    };
-    // Operationally prepare and full-load ONLY the winner. A winner that
-    // vanishes between the metadata match and materialization reads as "no
-    // replacement" (`Ok(None)`) — the caller records the member's restore
-    // failure exactly as if no candidate had matched.
-    let authorized = match session_service
-        .materialize_session_resume_verdict(&winner_session_id)
-        .await?
-    {
-        verdict @ super::session_service::SessionResumeVerdict::ResumeAuthorized { .. } => {
-            verdict.into_authorized().expect("authorized verdict")
+    /// Scan once into `slot` and return the index.
+    pub(super) async fn scan_once<'a>(
+        slot: &'a mut Option<Self>,
+        session_service: &dyn MobSessionService,
+        listed_sessions: &[meerkat_core::service::SessionSummary],
+        member_bound_sessions: &std::collections::HashSet<meerkat_core::types::SessionId>,
+        on_session_scanned: impl FnMut(),
+    ) -> Result<&'a Self, MobError> {
+        if slot.is_none() {
+            *slot = Some(
+                Self::scan(
+                    session_service,
+                    listed_sessions,
+                    member_bound_sessions,
+                    on_session_scanned,
+                )
+                .await?,
+            );
         }
-        super::session_service::SessionResumeVerdict::Rejected(rejection)
-            if rejection.kind == super::session_service::ResumeRejectionKind::Absent =>
-        {
+        slot.as_ref().ok_or_else(|| {
+            MobError::Internal("persisted member session index was not retained".to_string())
+        })
+    }
+
+    /// Select the canonical persisted successor for one member and
+    /// operationally prepare only that winner.
+    pub(super) async fn latest_for_member(
+        &self,
+        session_service: &dyn MobSessionService,
+        missing_session_id: &meerkat_core::types::SessionId,
+        mob_id: &crate::ids::MobId,
+        role: &crate::ids::ProfileName,
+        agent_identity: &crate::ids::AgentIdentity,
+        resume_from_role: Option<&crate::ids::ProfileName>,
+    ) -> Result<
+        Option<(
+            meerkat_core::types::SessionId,
+            super::session_service::AuthorizedSessionResume,
+        )>,
+        MobError,
+    > {
+        let canonical_comms_name = super::actor::render_member_comms_name(
+            mob_id.as_str(),
+            role.as_str(),
+            agent_identity.as_str(),
+        )?;
+        let predecessor_comms_name = resume_from_role
+            .map(|predecessor_role| {
+                super::actor::render_member_comms_name(
+                    mob_id.as_str(),
+                    predecessor_role.as_str(),
+                    agent_identity.as_str(),
+                )
+            })
+            .transpose()?;
+
+        let mut best: Option<(
+            u8,
+            meerkat_core::time_compat::SystemTime,
+            &meerkat_core::types::SessionId,
+        )> = None;
+        for candidate in &self.candidates {
+            if &candidate.session_id == missing_session_id {
+                continue;
+            }
+            let reread;
+            let session_metadata = match &candidate.metadata {
+                PersistedMemberSessionCandidateMetadata::Read(metadata) => metadata.as_ref(),
+                PersistedMemberSessionCandidateMetadata::ReadFailed => {
+                    // Considered by this search: surface its typed read
+                    // failure exactly as a per-member scan did.
+                    reread = session_service
+                        .load_persisted_session_metadata(&candidate.session_id)
+                        .await?;
+                    match reread.as_ref() {
+                        Some(view) => view.session_metadata.as_ref(),
+                        None => continue,
+                    }
+                }
+            };
+            let Some(match_rank) = persisted_session_member_match_rank(
+                session_metadata,
+                mob_id,
+                role,
+                agent_identity,
+                &canonical_comms_name,
+                resume_from_role,
+                predecessor_comms_name.as_deref(),
+            ) else {
+                continue;
+            };
+            let replace = best.as_ref().is_none_or(|(best_rank, updated_at, _)| {
+                match_rank > *best_rank
+                    || (match_rank == *best_rank && candidate.updated_at > *updated_at)
+            });
+            if replace {
+                best = Some((match_rank, candidate.updated_at, &candidate.session_id));
+            }
+        }
+
+        let Some((_, _, winner_session_id)) = best else {
             return Ok(None);
-        }
-        super::session_service::SessionResumeVerdict::Rejected(rejection) => {
-            return Err(rejection.into_mob_error());
-        }
-    };
-    Ok(Some((winner_session_id, authorized)))
+        };
+        let winner_session_id = winner_session_id.clone();
+        // Operationally prepare and full-load ONLY the winner. A winner that
+        // vanishes between the metadata match and materialization reads as
+        // "no replacement" (`Ok(None)`): the caller records the member's
+        // restore failure exactly as if no candidate had matched.
+        let authorized = match session_service
+            .materialize_session_resume_verdict(&winner_session_id)
+            .await?
+        {
+            verdict @ super::session_service::SessionResumeVerdict::ResumeAuthorized { .. } => {
+                verdict.into_authorized().expect("authorized verdict")
+            }
+            super::session_service::SessionResumeVerdict::Rejected(rejection)
+                if rejection.kind == super::session_service::ResumeRejectionKind::Absent =>
+            {
+                return Ok(None);
+            }
+            super::session_service::SessionResumeVerdict::Rejected(rejection) => {
+                return Err(rejection.into_mob_error());
+            }
+        };
+        Ok(Some((winner_session_id, authorized)))
+    }
 }
 
 fn persisted_session_member_match_rank(
@@ -8281,6 +8392,8 @@ impl MobBuilder {
         let listed_sessions = session_service
             .list(meerkat_core::service::SessionQuery::default())
             .await?;
+        // Successor search scans the realm at most once for all members.
+        let mut successor_index: Option<PersistedMemberSessionIndex> = None;
         // Live bridge existence is session-service-owned truth. Do not infer it
         // from SessionSummary presence or `is_active`, because persisted-only
         // summaries are not live and idle live sessions are not "active".
@@ -8295,6 +8408,10 @@ impl MobBuilder {
         }
 
         let mut roster_entries = roster.list().cloned().collect::<Vec<_>>();
+        let member_bound_sessions = roster_entries
+            .iter()
+            .filter_map(|entry| entry.member_ref.bridge_session_id().cloned())
+            .collect::<std::collections::HashSet<_>>();
         // A fork-derived member seated with its source's overlay is restored
         // with the overlay its source is restored with, so every source is
         // restored before its forks (and a fork before the forks of it).
@@ -8565,10 +8682,17 @@ impl MobBuilder {
                         continue;
                     }
                     super::session_service::SessionResumeVerdict::Rejected(_) => {
-                        if let Some((replacement_session_id, replacement_authorized)) =
-                            latest_persisted_session_for_member(
+                        let index = PersistedMemberSessionIndex::scan_once(
+                            &mut successor_index,
+                            session_service.as_ref(),
+                            &listed_sessions,
+                            &member_bound_sessions,
+                            || {},
+                        )
+                        .await?;
+                        if let Some((replacement_session_id, replacement_authorized)) = index
+                            .latest_for_member(
                                 session_service.as_ref(),
-                                &listed_sessions,
                                 &bridge_session_id,
                                 &definition.id,
                                 &entry.role,
@@ -9671,6 +9795,7 @@ impl MobBuilder {
                 // are intentionally resolved.
                 next_fence_token: std::sync::atomic::AtomicU64::new(next_fence_token),
                 pending_spawns: PendingSpawnLineage::new(),
+                spawn_preparations: super::actor::spawn_preparation::SpawnPreparations::new(),
                 pending_spawn_cleanup_anchors: BTreeMap::new(),
                 edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
                 lifecycle_tasks: tokio::task::JoinSet::new(),
@@ -9773,6 +9898,7 @@ impl MobBuilder {
                 dsl_topology_epoch,
                 dsl_authority_owner_token,
                 machine_state_watch_tx,
+                published_roster_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
                 phase_watch_tx: phase_watch_tx_actor,
                 default_external_tools_provider,
                 identity_local_external_tools_provider,

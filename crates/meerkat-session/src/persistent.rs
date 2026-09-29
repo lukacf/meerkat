@@ -14525,11 +14525,94 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// RuntimeStore is the singular session authority. Store-only rows are not
     /// exposed as runtime truth and runtime bodies are never merged with
     /// SessionStore metadata.
+    ///
+    /// This is the operational read that cold attach paths (RPC lazy resume,
+    /// archive and existence prechecks) take before any actor exists. A host
+    /// that died after a run's end-of-run checkpoint wrote its HeadCanonical
+    /// provisional tail, but before the run's boundary committed, leaves the
+    /// physical head ahead of the RuntimeStore authority with no live turn to
+    /// promote it. Durable-tail recovery is the only owner of that tail, so
+    /// the read resolves it through that recovery and reads again, instead of
+    /// failing every cold attach with the stale-parent conflict. See
+    /// [`Self::recover_uncommitted_provisional_tail_for_cold_read`].
     pub async fn load_authoritative_session(
         &self,
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
-        self.load_authoritative_session_base(id).await
+        let result = self.load_authoritative_session_base(id).await;
+        if Self::is_transcript_revision_conflict(&result)
+            && self
+                .recover_uncommitted_provisional_tail_for_cold_read(id)
+                .await?
+        {
+            return self.load_authoritative_session_base(id).await;
+        }
+        result
+    }
+
+    /// Resolve a crash-window HeadCanonical provisional tail through the
+    /// store-owned durable-tail recovery, for a read that found the physical
+    /// head ahead of the RuntimeStore authority.
+    ///
+    /// Runs only when all of these hold:
+    /// - the profile is HeadCanonical (a WholeBlob provisional tail never moves
+    ///   the committed document);
+    /// - no live actor owns the session in this service, so no turn in this
+    ///   process can still promote the tail;
+    /// - the store records a provisional tail for the session.
+    ///
+    /// The recovery is the same machine-authorized, store-owned verb resume
+    /// preparation runs. It promotes the tail or proves it absent. Returns
+    /// `true` when the committed boundary is now aligned and the read should
+    /// be retried. Returns `false` when recovery did not run, or could not
+    /// prove the tail (held or refused, every durable copy retained); the
+    /// caller then surfaces the original conflict unchanged.
+    async fn recover_uncommitted_provisional_tail_for_cold_read(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        if self.runtime_store.session_persistence_profile()
+            != RuntimeSessionPersistenceProfile::HeadCanonicalV1
+        {
+            return Ok(false);
+        }
+        if self.inner.has_live_session(id).await? {
+            return Ok(false);
+        }
+        let provisional_tail = self
+            .runtime_store
+            .load_head_canonical_provisional_tail(&Self::runtime_id_for_session(id))
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to observe the provisional tail of session {id}: {error}"
+                )))
+            })?;
+        if provisional_tail.is_none() {
+            return Ok(false);
+        }
+        match self
+            .recover_committed_boundary_retaining_aligned_body(id)
+            .await
+        {
+            Ok((
+                CommittedBoundaryRecovery::Recovered { .. }
+                | CommittedBoundaryRecovery::AlreadyCommitted,
+                _,
+            )) => Ok(true),
+            Ok((CommittedBoundaryRecovery::Unprovable { reason }, _)) => {
+                tracing::warn!(
+                    session_id = %id,
+                    reason,
+                    "durable-tail recovery could not resolve the provisional tail behind a cold read"
+                );
+                Ok(false)
+            }
+            // An actor went live between the check and the recovery gate; its
+            // turn owns the tail now.
+            Err(SessionError::Busy { .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Observe the exact committed RuntimeStore body without reconciling the

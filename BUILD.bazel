@@ -644,6 +644,7 @@ test_suite(
         "//crates/meerkat-rest:runtime_backed_ingress_test",
         "//crates/meerkat-rpc:atif_export_contract_test",
         "//crates/meerkat-rpc:binary_fatal_error_display_test",
+        "//crates/meerkat-rpc:lazy_resume_uncommitted_terminal_test",
         "//crates/meerkat-rpc:meerkat_rpc_unit_test",
         "//crates/meerkat-rpc:realm_config_ingress_test",
         "//crates/meerkat-rpc:regression_rpc_test",

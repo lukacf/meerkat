@@ -35,6 +35,11 @@ them.
 
 ## [Unreleased]
 
+0.8.48 was tagged but never published to crates.io or GitHub Releases, so
+this is the first published release after 0.8.47. It also carries the 0.8.48
+fix: status polling no longer starves a staged run's start (#1226); see the
+0.8.48 section below.
+
 ### Breaking
 
 - Session event subscriptions can replay from a typed cursor (#1236).
@@ -1231,6 +1236,9 @@ them.
   them.
 
 ## [0.8.48] - 2026-09-28
+
+Tagged only; never published to crates.io or GitHub Releases. Its changes
+first ship in 0.8.49.
 
 ### Fixed
 

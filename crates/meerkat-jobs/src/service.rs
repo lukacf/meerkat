@@ -13,7 +13,6 @@ use crate::{
     PredicateEvaluationReceipt, PredicateObservation, PredicateWatch,
 };
 
-const REQUEST_CANCEL_CONFLICT_BUDGET: usize = 8;
 const DELIVERY_ACK_CONFLICT_BUDGET: usize = 8;
 const PREDICATE_EVALUATION_CONFLICT_BUDGET: usize = 8;
 
@@ -901,8 +900,16 @@ impl DetachedJobService {
         .await
     }
 
+    /// Durably request cancellation of a live job, or return its terminal
+    /// snapshot.
+    ///
+    /// The request is a compare-and-swap against the job's revision, which
+    /// the live attempt keeps advancing (lease heartbeats, progress). A lost
+    /// swap is never an error: the loop re-reads the newer revision and
+    /// re-applies the request. It is driven only by those conflicts, each of
+    /// which proves another writer committed, so it ends once the request
+    /// lands or the job turns terminal (after which no attempt writes).
     pub async fn request_cancel(&self, job_id: &JobId) -> Result<JobSnapshot, DetachedJobError> {
-        let mut conflicts = 0usize;
         loop {
             let current = self.required(job_id).await?;
             if current.terminal_result.is_some() {
@@ -921,11 +928,8 @@ impl DetachedJobService {
                 .await;
             match outcome {
                 Ok((stored, _)) => return job_snapshot(stored),
-                Err(DetachedJobError::StaleRevision { .. })
-                    if conflicts < REQUEST_CANCEL_CONFLICT_BUDGET =>
-                {
-                    conflicts = conflicts.saturating_add(1);
-                }
+                // Another writer committed first: re-read and re-apply.
+                Err(DetachedJobError::StaleRevision { .. }) => {}
                 Err(error) => return Err(error),
             }
         }

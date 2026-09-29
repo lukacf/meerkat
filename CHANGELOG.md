@@ -217,6 +217,13 @@ them.
   settles the run with cessation `ToolProcessCessation::ExitedBeforeCommit`.
   A marker guards no process, so one from another pid namespace settles
   unless its host provably still runs.
+- Behaviour-only (not measured by the gate):
+  `meerkat_jobs::DetachedJobService::request_cancel` no longer fails with
+  `DetachedJobError::StaleRevision` after 8 lost compare-and-swaps against
+  the live attempt's own writes (lease heartbeats, progress). It re-reads
+  and re-applies the request until it lands or the job turns terminal, so a
+  cancellation request from another manager (for example `shell_job_cancel`)
+  can no longer surface a revision conflict as an I/O error on a slow host.
 - Behaviour-only (not measured by the gate): process custody recovery is
   safe across host processes sharing a realm root, not only within one.
   Every recoverer read-modify-write of a scope (recovery, the realm sweep,

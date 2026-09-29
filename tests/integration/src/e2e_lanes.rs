@@ -46,8 +46,33 @@ pub enum E2eSelection {
 pub enum ArtifactRequirement {
     RustBin(RustBinRequirement),
     RustTest(RustTestRequirement),
-    NodeBuild { cwd: String },
+    NodeBuild { cwd: String, setup: NodeSetup },
     PythonEnv { cwd: String },
+}
+
+/// How much of a node workspace a selected spec needs materialized, derived
+/// from the setup commands the spec itself declares. Ordered so the merge of
+/// two specs sharing a workspace is the larger of the two.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeSetup {
+    /// The workspace's own packages (and, for the browser workspace, the
+    /// Playwright browser).
+    Packages,
+    /// Additionally the web SDK packages and its WASM runtime bundle.
+    WebRuntime,
+}
+
+impl NodeSetup {
+    fn for_spec(spec: &Spec) -> Self {
+        if spec.pre_commands.iter().any(|command| {
+            *command == WEB_RUNTIME_BUILD_IF_STALE || command.join(" ").contains("sdks/web")
+        }) {
+            Self::WebRuntime
+        } else {
+            Self::Packages
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
@@ -727,7 +752,7 @@ fn selected_spec_for_smoke_entry(entry: SmokeEntry) -> Result<SelectedSpec, Stri
 fn plan_for_specs(selected: &[SelectedSpec]) -> E2ePlan {
     let mut rust_bins = BTreeMap::<String, RustBinRequirement>::new();
     let mut rust_tests = BTreeMap::<String, RustTestRequirement>::new();
-    let mut node_builds = BTreeSet::<String>::new();
+    let mut node_builds = BTreeMap::<String, NodeSetup>::new();
     let mut python_envs = BTreeSet::<String>::new();
 
     for selected_spec in selected {
@@ -746,7 +771,7 @@ fn plan_for_specs(selected: &[SelectedSpec]) -> E2ePlan {
     requirements.extend(
         node_builds
             .into_iter()
-            .map(|cwd| ArtifactRequirement::NodeBuild { cwd }),
+            .map(|(cwd, setup)| ArtifactRequirement::NodeBuild { cwd, setup }),
     );
     requirements.extend(
         python_envs
@@ -778,9 +803,16 @@ fn collect_spec_requirements(
     spec: &Spec,
     rust_bins: &mut BTreeMap<String, RustBinRequirement>,
     rust_tests: &mut BTreeMap<String, RustTestRequirement>,
-    node_builds: &mut BTreeSet<String>,
+    node_builds: &mut BTreeMap<String, NodeSetup>,
     python_envs: &mut BTreeSet<String>,
 ) {
+    let require_node_build = |node_builds: &mut BTreeMap<String, NodeSetup>| {
+        let setup = NodeSetup::for_spec(spec);
+        node_builds
+            .entry(spec.cwd.to_string())
+            .and_modify(|merged| *merged = (*merged).max(setup))
+            .or_insert(setup);
+    };
     match spec.command {
         CommandSpec::CargoTest {
             package,
@@ -804,7 +836,7 @@ fn collect_spec_requirements(
             python_envs.insert(spec.cwd.to_string());
         }
         CommandSpec::NodeTest { .. } => {
-            node_builds.insert(spec.cwd.to_string());
+            require_node_build(node_builds);
         }
         CommandSpec::Raw { argv, .. } => {
             if let Some(requirement) = parse_cargo_test_requirement(argv) {
@@ -822,7 +854,7 @@ fn collect_spec_requirements(
                 merge_rust_test(rust_tests, requirement);
             }
             if command_mentions_node_setup(argv) {
-                node_builds.insert(spec.cwd.to_string());
+                require_node_build(node_builds);
             }
             if command_mentions_python_setup(argv) {
                 python_envs.insert(spec.cwd.to_string());
@@ -835,7 +867,7 @@ fn collect_spec_requirements(
             merge_rust_bin(rust_bins, requirement);
         }
         if command_mentions_node_setup(command) {
-            node_builds.insert(spec.cwd.to_string());
+            require_node_build(node_builds);
         }
         if command_mentions_python_setup(command) {
             python_envs.insert(spec.cwd.to_string());
@@ -2337,7 +2369,7 @@ pub fn materialize_local_cargo_plan(
                 let path = materialize_rust_test(requirement)?;
                 manifest.rust_tests.insert(requirement.key(), path);
             }
-            ArtifactRequirement::NodeBuild { cwd } => materialize_node_build(cwd)?,
+            ArtifactRequirement::NodeBuild { cwd, setup } => materialize_node_build(cwd, *setup)?,
             ArtifactRequirement::PythonEnv { cwd } => materialize_python_env(cwd)?,
         }
     }
@@ -2403,7 +2435,7 @@ fn materialize_bazel_plan(
                     bazel_rust_test_path(bazel_bin_dir, build_provenance.as_ref(), requirement)?;
                 manifest.rust_tests.insert(requirement.key(), path);
             }
-            ArtifactRequirement::NodeBuild { cwd } => materialize_node_build(cwd)?,
+            ArtifactRequirement::NodeBuild { cwd, setup } => materialize_node_build(cwd, *setup)?,
             ArtifactRequirement::PythonEnv { cwd } => materialize_python_env(cwd)?,
         }
     }
@@ -2842,7 +2874,7 @@ fn run_repo_cargo_json(args: &[String]) -> Result<Vec<serde_json::Value>, String
     Ok(messages)
 }
 
-fn materialize_node_build(cwd: &str) -> Result<(), String> {
+fn materialize_node_build(cwd: &str, setup: NodeSetup) -> Result<(), String> {
     match cwd {
         "sdks/typescript" => {
             run_materialize_command(cwd, &["npm", "install", "--no-audit", "--no-fund"])?;
@@ -2850,22 +2882,27 @@ fn materialize_node_build(cwd: &str) -> Result<(), String> {
         }
         "tests/live_smoke/browser" => {
             run_materialize_command(cwd, &["/bin/sh", "-c", "test -d node_modules || npm ci"])?;
-            run_materialize_command(
-                cwd,
-                &[
-                    "/bin/sh",
-                    "-c",
-                    "test -d ../../../sdks/web/node_modules || npm --prefix ../../../sdks/web install",
-                ],
-            )?;
-            run_materialize_command_with_env(
-                cwd,
-                WEB_RUNTIME_BUILD_IF_STALE,
-                &[
-                    ("CARGO_BUILD_JOBS", "1"),
-                    ("MEERKAT_WEB_WASM_PROFILE", "dev"),
-                ],
-            )?;
+            // The GPT Live browser peer drives a bare page through Playwright;
+            // only the browser raw-session and mobpack specs load the web SDK
+            // and its WASM runtime, so only they pay for building it.
+            if setup == NodeSetup::WebRuntime {
+                run_materialize_command(
+                    cwd,
+                    &[
+                        "/bin/sh",
+                        "-c",
+                        "test -d ../../../sdks/web/node_modules || npm --prefix ../../../sdks/web install",
+                    ],
+                )?;
+                run_materialize_command_with_env(
+                    cwd,
+                    WEB_RUNTIME_BUILD_IF_STALE,
+                    &[
+                        ("CARGO_BUILD_JOBS", "1"),
+                        ("MEERKAT_WEB_WASM_PROFILE", "dev"),
+                    ],
+                )?;
+            }
             run_materialize_command(cwd, &["npx", "playwright", "install", "chromium"])?;
         }
         other => {
@@ -2900,6 +2937,7 @@ fn run_materialize_command_with_env(
         return Err(format!("empty e2e materialize command for {cwd}"));
     };
     eprintln!("e2e materialize setup ({cwd}): {}", command.join(" "));
+    let started = std::time::Instant::now();
     let mut child = StdCommand::new(program);
     child.args(args).current_dir(workspace_root().join(cwd));
     for (key, value) in env {
@@ -2911,6 +2949,11 @@ fn run_materialize_command_with_env(
             command.join(" ")
         )
     })?;
+    eprintln!(
+        "e2e materialize setup done ({cwd}) in {:.3}s: {}",
+        started.elapsed().as_secs_f64(),
+        command.join(" ")
+    );
     if output.status.success() {
         Ok(())
     } else {
@@ -6327,8 +6370,8 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactManifest, ArtifactRequirement, CommandLockMode, CommandSpec, E2eSelection,
-        ExecutionMode, Lane, SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler,
+        ArtifactManifest, ArtifactRequirement, CommandLockMode, CommandSpec, E2ePlan, E2eSelection,
+        ExecutionMode, Lane, NodeSetup, SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler,
         bazel_build_event_provenance, build_commands_for_mode, inherited_cargo_build_context,
         normalize_command_with_env, order_smoke_specs_for_runtime, parse_cargo_build_requirement,
         plan_for_selection, pre_command_lock_mode, repo_cargo,
@@ -7432,6 +7475,41 @@ mod tests {
                 .unwrap(),
             "tests/integration/smoke_model_fallback_test"
         );
+    }
+
+    /// The browser workspace is materialized to the level its selected specs
+    /// declare: the GPT Live peer verticals need the packages and Playwright
+    /// only, the browser raw-session and mobpack specs also need the web SDK
+    /// and its WASM runtime, and a lane selecting both builds the union.
+    #[test]
+    fn browser_node_build_materializes_only_the_declared_setup() {
+        let browser = |plan: &E2ePlan| {
+            plan.requirements
+                .iter()
+                .filter_map(|requirement| match requirement {
+                    ArtifactRequirement::NodeBuild { cwd, setup }
+                        if cwd == "tests/live_smoke/browser" =>
+                    {
+                        Some(*setup)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for scenario in 97..=107 {
+            let plan = plan_for_selection(&E2eSelection::Scenario(scenario)).unwrap();
+            assert_eq!(browser(&plan), [NodeSetup::Packages], "scenario {scenario}");
+        }
+        for scenario in 45..=48 {
+            let plan = plan_for_selection(&E2eSelection::Scenario(scenario)).unwrap();
+            assert_eq!(
+                browser(&plan),
+                [NodeSetup::WebRuntime],
+                "scenario {scenario}"
+            );
+        }
+        let lane = plan_for_selection(&E2eSelection::Lane(Lane::Smoke)).unwrap();
+        assert_eq!(browser(&lane), [NodeSetup::WebRuntime]);
     }
 
     #[test]

@@ -325,6 +325,13 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     definition parse: `ProviderParamsOverride` and `AnthropicProviderTag` are
     both `deny_unknown_fields`, so the misplaced key is rejected before the
     agent boots.
+
+    Under `automatic` and `system_and_conversation`, Meerkat also keeps one
+    explicit breakpoint at the end of the previous run's output on every
+    request of a run. The run's first request writes that entry even on a
+    cold cache and later requests refresh it, so a `fork_off` child, whose
+    first request is the forker's transcript up to its previous turn end,
+    reads the shared prefix from cache.
   </Tab>
   <Tab title="OpenAI">
     ```bash
@@ -333,10 +340,20 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
       "Prove this theorem"
     ```
 
-    The catalog validates each model's reasoning-effort subset. GPT-5.6 also
-    supports `prompt_cache_enabled`, `prompt_cache_key`, and
-    `prompt_cache_options` (`implicit` or `explicit`, with optional
-    `30m` TTL). Use `max`, not `ultra`, as the public provider effort.
+    The catalog validates each model's reasoning-effort subset. GPT-5.6 and
+    the GPT-6 family also support `prompt_cache_enabled`, `prompt_cache_key`,
+    and `prompt_cache_options` (`implicit` or `explicit`, with optional
+    `30m` TTL). On the OpenAI API Meerkat defaults GPT-5.6 to `explicit` and
+    GPT-6 to `implicit`, both with the `30m` TTL. Use `max`, not `ultra`, as
+    the public provider effort.
+
+    Explicit mode marks every input item, so the last input before the
+    previous run's output always carries a breakpoint. In `implicit` mode on
+    those models Meerkat adds one explicit breakpoint there and lowers inputs
+    as content parts, so a run that starts on a cold cache still writes an
+    entry a `fork_off` child cut at the previous turn end can read.
+    `prompt_cache_retention = "in_memory"` is refused for these models when
+    the agent is built; set the lifetime with `prompt_cache_options.ttl`.
 
     Meerkat's default `prompt_cache_key` is one key per model
     (`meerkat:profile:openai:<model>`), shared across sessions so identical

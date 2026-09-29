@@ -591,6 +591,60 @@ async fn e2e_fast_mob_fork_off_child_request_matches_the_forker_byte_for_byte() 
             "input item {index} differs before the fork boundary"
         );
     }
+    // The shared prefix is cacheable where the forker's cache lives (#1235).
+    // The forker's turn started from its previous run's end; every request of
+    // that turn (the one that asked for the fork, and the tool round after
+    // `fork_off` returned) and the child's first request carry an explicit
+    // breakpoint on the last input before the previous run's output (the one
+    // explicit marker implicit mode adds on GPT-6), with identical bytes, so
+    // the forker's first request writes that entry even on a cold cache and
+    // the child reads it.
+    let forker_round = stack.only_body("forker tool round", |body| {
+        last_user_text(body).contains(FORK_PROMPT) && has_tool_output(body)
+    });
+    let anchor_at = inherited
+        .iter()
+        .rposition(|item| item.get().contains(SOURCE_TURN))
+        .expect("the previous run's input");
+    assert!(
+        anchor_at + 1 < inherited.len(),
+        "the previous run's answer follows its input inside the fork prefix"
+    );
+    for (name, body) in [
+        ("forker fork_off", &forker),
+        ("forker tool round", &forker_round),
+        ("child first", &child),
+    ] {
+        let value: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            value["prompt_cache_options"]["mode"], "implicit",
+            "{name}: GPT-6 keeps implicit mode as its catalog default"
+        );
+        let parts = body_parts(body);
+        let marked: Vec<usize> = parts
+            .input
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                item.get()
+                    .contains("prompt_cache_breakpoint")
+                    .then_some(index)
+            })
+            .collect();
+        assert_eq!(
+            marked,
+            vec![anchor_at],
+            "{name}: implicit mode adds exactly one breakpoint, on the anchor input"
+        );
+        for (index, item) in parts.input[..=anchor_at].iter().enumerate() {
+            assert_eq!(
+                item.get(),
+                child_parts.input[index].get(),
+                "{name}: cacheable prefix item {index} differs from the child's"
+            );
+        }
+    }
+
     // Everything but the transcript is the same request: model, tools,
     // reasoning and output settings, byte for byte.
     let forker_fields: BTreeMap<&str, &RawValue> = serde_json::from_str(&forker).unwrap();

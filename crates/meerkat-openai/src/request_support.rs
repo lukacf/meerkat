@@ -87,23 +87,16 @@ pub(crate) fn supports_prompt_cache_ttl(model: &str, value: OpenAiPromptCacheTtl
     })
 }
 
-pub(crate) fn supports_prompt_cache_retention(
+/// Why the cataloged model refuses `retention`, or `None` when it accepts it
+/// (older rows without GPT-5.6-and-later cache capabilities, and uncatalogued
+/// models, keep the existing pass-through).
+pub(crate) fn prompt_cache_retention_rejection(
     model: &str,
-    value: OpenAiPromptCacheRetention,
-) -> Option<bool> {
-    meerkat_models::capabilities_for(Provider::OpenAI, model).map(|caps| {
-        let Some(params) = caps.openai_responses_params else {
-            // Preserve the existing path for older catalog rows. Their
-            // retention matrix predates the GPT-5.6-specific capability set.
-            return true;
-        };
-        match value {
-            OpenAiPromptCacheRetention::InMemory => {
-                params.supports_in_memory_prompt_cache_retention
-            }
-            OpenAiPromptCacheRetention::TwentyFourHours => true,
-        }
-    })
+    retention: OpenAiPromptCacheRetention,
+) -> Option<String> {
+    meerkat_models::capabilities_for(Provider::OpenAI, model)?
+        .openai_responses_params?
+        .prompt_cache_retention_rejection(model, retention)
 }
 
 pub(crate) fn supports_legacy_penalties(model: &str) -> Option<bool> {
@@ -166,16 +159,32 @@ mod tests {
             supports_prompt_cache_ttl("gpt-5.6-sol", OpenAiPromptCacheTtl::ThirtyMinutes),
             Some(true)
         );
-        assert_eq!(
-            supports_prompt_cache_retention("gpt-5.6-sol", OpenAiPromptCacheRetention::InMemory),
-            Some(false)
+        let rejection =
+            prompt_cache_retention_rejection("gpt-5.6-sol", OpenAiPromptCacheRetention::InMemory)
+                .expect("GPT-5.6 refuses in_memory retention");
+        assert!(
+            rejection.contains("prompt_cache_options.ttl ('30m')") && !rejection.contains("24h"),
+            "{rejection}"
         );
         assert_eq!(
-            supports_prompt_cache_retention(
+            prompt_cache_retention_rejection(
                 "gpt-5.6-sol",
                 OpenAiPromptCacheRetention::TwentyFourHours
             ),
-            Some(true)
+            None
+        );
+        assert!(
+            prompt_cache_retention_rejection("gpt-6-astra", OpenAiPromptCacheRetention::InMemory)
+                .is_some()
+        );
+        assert_eq!(
+            prompt_cache_retention_rejection("gpt-5.5", OpenAiPromptCacheRetention::InMemory),
+            None
+        );
+        assert_eq!(
+            supports_prompt_cache_mode("gpt-6-astra", OpenAiPromptCacheMode::Implicit),
+            Some(true),
+            "implicit mode is accepted on GPT-6"
         );
         assert_eq!(supports_legacy_penalties("gpt-5.6-sol"), Some(false));
 

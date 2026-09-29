@@ -219,6 +219,12 @@ them.
   no longer matches the stored head in backends that persist one). The
   default compares recomputed tokens over `load_head`; `SqliteSessionStore`
   and `MemoryStore` override it. Cold-resume body reuse uses it.
+- `MobHandle::member_endpoint_status(&identity)` returns a typed
+  `MobMemberEndpointStatus` (`Local(descriptor)`, `Host(descriptor)`,
+  `LocalUnavailable { reason }`, `HostUnavailable { reason }`), so who owns a
+  member's endpoint stays observable when no usable endpoint exists: a Broken
+  or restore-failed placed member is `HostUnavailable`, never mistaken for a
+  local member. `member_peer_endpoint` is its usable-endpoint view.
 - A placed (host-owned) member can be wired to an external peer (#1269).
   `MobHandle::wire` / `unwire` with `PeerTarget::External` on a placed member
   used to be refused outright. The edge is the ordinary machine-owned

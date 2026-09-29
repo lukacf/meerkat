@@ -14003,6 +14003,8 @@ impl MobActor {
             )));
         }
 
+        let binding_owner = owner_bridge_session_id.clone();
+        let binding_display_name = peer_name.clone();
         let receipt = self
             .provisioner
             .materialize_member(super::provisioner::MaterializeMemberRequest {
@@ -14053,6 +14055,26 @@ impl MobActor {
             "it has no durable host-acknowledged endpoint to verify",
         );
         if let Some(detail) = endpoint_defect {
+            // The ack bound the refused endpoint into the ops registry for the
+            // committed operation; drop that exact binding so nothing stays
+            // bound to it. The committed operation itself survives with the
+            // (now Broken) member.
+            if let Err(error) = self
+                .provisioner
+                .clear_placed_member_binding_exact(
+                    &binding_owner,
+                    &record.provision_operation_id,
+                    &binding_display_name,
+                )
+                .await
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    %error,
+                    "failed to clear the registry binding of a refused revived endpoint"
+                );
+            }
             return Err(MobError::WiringError(
                 super::builder::member_endpoint_broken_reason(agent_identity, &detail),
             ));

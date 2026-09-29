@@ -1549,6 +1549,23 @@ pub enum MobMemberEndpointOwner {
     Host,
 }
 
+/// Where a member's comms endpoint stands, as returned by
+/// [`MobHandle::member_endpoint_status`]. Ownership is observable even when
+/// no usable endpoint exists, so a placed member is never mistaken for a
+/// local one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MobMemberEndpointStatus {
+    /// A local member's registered endpoint.
+    Local(TrustedPeerDescriptor),
+    /// A placed member's host-acknowledged endpoint (real remote address).
+    Host(TrustedPeerDescriptor),
+    /// A local member with no usable endpoint (Broken, or none registered).
+    LocalUnavailable { reason: String },
+    /// A placed member with no usable endpoint (Broken, or none registered).
+    HostUnavailable { reason: String },
+}
+
 /// A member's canonical comms endpoint, as returned by
 /// [`MobHandle::member_peer_endpoint`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8883,36 +8900,77 @@ impl MobHandle {
     /// endpoint, or is Broken (a Broken member publishes no endpoint, exactly
     /// like its roster projection). A Retiring member still returns its
     /// endpoint: retirement cleanup addresses exactly that endpoint until the
-    /// member is retired. A query fault is `Err`, never `None`.
+    /// member is retired. A query fault is `Err`, never `None`. Use
+    /// [`Self::member_endpoint_status`] to also learn who owns an unusable
+    /// endpoint.
     pub async fn member_peer_endpoint(
         &self,
         identity: &AgentIdentity,
     ) -> Result<Option<MobMemberPeerEndpoint>, MobError> {
+        Ok(match self.member_endpoint_status(identity).await? {
+            Some(MobMemberEndpointStatus::Local(descriptor)) => Some(MobMemberPeerEndpoint {
+                descriptor,
+                owner: MobMemberEndpointOwner::Local,
+            }),
+            Some(MobMemberEndpointStatus::Host(descriptor)) => Some(MobMemberPeerEndpoint {
+                descriptor,
+                owner: MobMemberEndpointOwner::Host,
+            }),
+            Some(
+                MobMemberEndpointStatus::LocalUnavailable { .. }
+                | MobMemberEndpointStatus::HostUnavailable { .. },
+            )
+            | None => None,
+        })
+    }
+
+    /// Where a member's comms endpoint stands, including WHO owns it when no
+    /// usable endpoint exists: a Broken or restore-failed placed member is
+    /// [`MobMemberEndpointStatus::HostUnavailable`], never mistaken for a
+    /// local member. `Ok(None)` only for an absent member.
+    pub async fn member_endpoint_status(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<MobMemberEndpointStatus>, MobError> {
         let state = self.query_machine_state().await?;
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
-        if state.member_restore_failures.contains_key(&dsl_identity) {
+        if !state.identity_to_runtime.contains_key(&dsl_identity) {
             return Ok(None);
         }
-        let Some(endpoint) = state.member_peer_endpoints.get(&dsl_identity) else {
-            return Ok(None);
+        let host_owned = super::member_runtime_is_host_owned(&state, identity);
+        let unavailable = |reason: String| {
+            if host_owned {
+                MobMemberEndpointStatus::HostUnavailable { reason }
+            } else {
+                MobMemberEndpointStatus::LocalUnavailable { reason }
+            }
         };
-        let descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
+        if let Some(reason) = state.member_restore_failures.get(&dsl_identity) {
+            return Ok(Some(unavailable(format!("member is Broken: {reason}"))));
+        }
+        let Some(endpoint) = state.member_peer_endpoints.get(&dsl_identity) else {
+            return Ok(Some(unavailable(
+                "member has no registered comms endpoint".to_string(),
+            )));
+        };
+        let descriptor = match TrustedPeerDescriptor::unsigned_with_pubkey(
             endpoint.name.0.clone(),
             endpoint.peer_id.0.clone(),
             endpoint.signing_key.0,
             endpoint.address.0.clone(),
-        )
-        .map_err(|error| {
-            MobError::WiringError(format!(
-                "member '{identity}' has an invalid MobMachine peer endpoint: {error}"
-            ))
-        })?;
-        let owner = if super::member_runtime_is_host_owned(&state, identity) {
-            MobMemberEndpointOwner::Host
-        } else {
-            MobMemberEndpointOwner::Local
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                return Ok(Some(unavailable(format!(
+                    "member has an invalid MobMachine peer endpoint: {error}"
+                ))));
+            }
         };
-        Ok(Some(MobMemberPeerEndpoint { descriptor, owner }))
+        Ok(Some(if host_owned {
+            MobMemberEndpointStatus::Host(descriptor)
+        } else {
+            MobMemberEndpointStatus::Local(descriptor)
+        }))
     }
 
     /// Read the total stored observation for one identity intent row.

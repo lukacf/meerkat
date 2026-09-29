@@ -1921,6 +1921,27 @@ pub trait MobProvisioner: Send + Sync {
         ))
     }
 
+    /// Drop the exact registry binding a placed materialization bound for its
+    /// committed operation, without touching the operation itself. Used when a
+    /// revived runtime's acknowledged endpoint is refused, so no registry row
+    /// stays bound to an endpoint nothing durable vouches for. An absent
+    /// binding is idempotent.
+    async fn clear_placed_member_binding_exact(
+        &self,
+        operation_owner_session_id: &SessionId,
+        provision_operation_id: &OperationId,
+        display_name: &str,
+    ) -> Result<(), MobError> {
+        let _ = (
+            operation_owner_session_id,
+            provision_operation_id,
+            display_name,
+        );
+        Err(MobError::Internal(
+            "this provisioner holds no placed operation bindings".to_string(),
+        ))
+    }
+
     /// Terminalize the exact committed placed operation after durable member
     /// retirement and before carrier deletion.  Missing is restart-idempotent;
     /// this must never reconstruct an active operation.
@@ -14914,6 +14935,19 @@ impl MobProvisioner for MultiBackendProvisioner {
         }
         super::ops_adapter::MobOpsAdapter::ensure_committed_placed_provision_operation_exact(
             bindings.ops_lifecycle().as_ref(),
+            operation_owner_session_id,
+            provision_operation_id,
+            display_name,
+        )
+    }
+
+    async fn clear_placed_member_binding_exact(
+        &self,
+        operation_owner_session_id: &SessionId,
+        provision_operation_id: &OperationId,
+        display_name: &str,
+    ) -> Result<(), MobError> {
+        self.session.ops_adapter.clear_placed_member_binding_exact(
             operation_owner_session_id,
             provision_operation_id,
             display_name,

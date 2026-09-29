@@ -17986,6 +17986,17 @@ async fn assert_running_boot_broke_only(
             .is_none(),
         "a Broken member publishes no durable endpoint"
     );
+    assert!(
+        matches!(
+            handle
+                .member_endpoint_status(broken)
+                .await
+                .expect("query broken endpoint status"),
+            Some(crate::MobMemberEndpointStatus::LocalUnavailable { ref reason })
+                if reason.contains("Broken")
+        ),
+        "a Broken local member keeps its ownership observable"
+    );
     assert_eq!(
         handle
             .member_peer_endpoint(healthy)

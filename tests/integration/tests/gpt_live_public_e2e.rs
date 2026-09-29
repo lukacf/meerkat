@@ -7042,6 +7042,10 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
             )
             .into());
         }
+        // The newer-output side is awaited on the harness's output channel
+        // (an mpsc receive, not a sleep). The 100 ms bound exists only because
+        // a history commit has no push signal to this harness: session/history
+        // is request/response, so it is re-read between waits.
         if let Some(newer_output) = live.poll_output(Duration::from_millis(100)).await? {
             assert_eq!(newer_output["channel_id"], live.channel_id);
             println!(

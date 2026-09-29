@@ -651,11 +651,20 @@ pub fn committed_live_adapter_utterance(
 /// the current directory (falling back to this crate's manifest directory)
 /// that holds the browser fixture tree.
 pub fn workspace_root() -> Option<PathBuf> {
+    workspace_root_holding(FIXTURE_DIR)
+}
+
+/// Workspace root holding `fixture_dir`: `MEERKAT_WORKSPACE_ROOT`, else the
+/// nearest ancestor of the current directory (falling back to this crate's
+/// manifest directory) with a `Cargo.toml` and that fixture directory. On a
+/// remote executor that is the runfiles `_main` directory, whatever the
+/// compile-time manifest path says.
+pub fn workspace_root_holding(fixture_dir: &str) -> Option<PathBuf> {
     if let Some(root) = std::env::var_os("MEERKAT_WORKSPACE_ROOT") {
         return Some(PathBuf::from(root));
     }
     let is_root = |candidate: &Path| {
-        candidate.join("Cargo.toml").is_file() && candidate.join(FIXTURE_DIR).is_dir()
+        candidate.join("Cargo.toml").is_file() && candidate.join(fixture_dir).is_dir()
     };
     std::env::current_dir()
         .ok()
@@ -699,7 +708,7 @@ mod tests {
     /// it), and each resolves by its exact script in the default voice.
     #[test]
     fn committed_live_adapter_utterances_match_their_manifest() {
-        let root = workspace_root().expect("workspace root");
+        let root = workspace_root_holding(LIVE_ADAPTER_FIXTURE_DIR).expect("workspace root");
         let dir = root.join(LIVE_ADAPTER_FIXTURE_DIR);
         let manifest = FixtureManifest::load(&dir.join(MANIFEST_FILE)).unwrap();
         assert_eq!(manifest.mint_trailing_silence_ms, 0);

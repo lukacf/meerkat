@@ -456,6 +456,21 @@ async fn relink_of_a_record_without_a_turn_delivery_reads_the_transcript() {
 }
 
 /// Run one exact turn of `member` with `prompt`.
+/// The custodian dies with the "old process": the run's supervisor ends
+/// where it waits, as a process exit ends it, before the gated turn reaches
+/// an outcome. Nothing but the re-link then acts on the turn's end: a live
+/// supervisor would settle or retire the child itself (for a failed turn,
+/// `retire_failed_fork_child`), racing what the re-link decides. The child,
+/// its session and the runtime stay, as a restart finds them. Every caller
+/// holds the turn in its `TurnGate`, so the supervisor cannot have settled.
+async fn end_old_process_supervisor(run: meerkat_mob::ForkChildRun) {
+    assert_eq!(
+        run.end_supervisor_as_process_exit_for_test().await,
+        meerkat_mob::ForkSupervisorExitForTest::EndedBeforeOutcome,
+        "the gated turn has no outcome yet"
+    );
+}
+
 async fn drive_turn(handle: &meerkat_mob::MobHandle, member: &str, prompt: &str) {
     let spec = meerkat_mob::BoundedResultSpec::new("warm-up", 4096).expect("bounded result spec");
     let work = handle
@@ -521,7 +536,7 @@ async fn relink_rearms_max_run_from_the_original_start() {
         .await
         .expect("fork");
     gate.wait_entered(1).await;
-    drop(run);
+    end_old_process_supervisor(run).await;
 
     // The durable record as a restarted host reads it, with a limit that
     // ends 800 ms from now when measured from the original start.
@@ -721,7 +736,7 @@ async fn relink_past_max_run_retires_a_child_still_running() {
         .await
         .expect("fork");
     gate.wait_entered(1).await;
-    drop(run);
+    end_old_process_supervisor(run).await;
 
     let mut job = handle
         .roster()
@@ -1036,8 +1051,7 @@ async fn relink_of_several_running_children_delivers_each_real_reply() {
             )
             .await
             .expect("fork");
-        // The custodian dies with the "old process".
-        drop(run);
+        end_old_process_supervisor(run).await;
         jobs.push(job_id);
     }
     gate.wait_entered(3).await;
@@ -1122,8 +1136,7 @@ async fn relink_waits_for_a_finished_child_turn_to_commit() {
         )
         .await
         .expect("fork");
-    // The custodian dies with the "old process".
-    drop(run);
+    end_old_process_supervisor(run).await;
     gate.wait_entered(1).await;
     let child_session = handle
         .resolve_bridge_session_id(&AgentIdentity::from(child))
@@ -1234,8 +1247,7 @@ async fn relink_settles_a_running_child_whose_turn_fails() {
         )
         .await
         .expect("fork");
-    // The custodian dies with the "old process".
-    drop(run);
+    end_old_process_supervisor(run).await;
     gate.wait_entered(1).await;
 
     let restarted = Arc::new(meerkat_mob_mcp::MobMcpState::new(
@@ -1265,14 +1277,18 @@ async fn relink_settles_a_running_child_whose_turn_fails() {
             .is_some_and(|error| !error.is_empty()),
         "{outcome}"
     );
+    // The re-link retires the child after it delivers the failed outcome, so
+    // the retirement can trail the completion record. Settle on the mob
+    // actor's machine-state publications (a roster change publishes), with a
+    // deadline that only bounds a broken run.
     let child = AgentIdentity::from("failing-child");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut changes = handle.machine_state_changes();
     while handle.get_member(&child).await.unwrap().is_some() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the failed child is retired"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::select! {
+            changed = changes.changed() => changed.expect("the mob actor outlives the retirement"),
+            () = tokio::time::sleep_until(deadline) => panic!("the failed child is retired"),
+        }
     }
     fixture.teardown().await;
 }
@@ -1451,7 +1467,7 @@ async fn runtime_backed_relink_waits_for_a_finished_child_turn_to_commit() {
         )
         .await
         .expect("fork");
-    drop(run);
+    end_old_process_supervisor(run).await;
     gate.wait_entered(1).await;
     let child_session = handle
         .resolve_bridge_session_id(&AgentIdentity::from(child))
@@ -1539,7 +1555,7 @@ async fn relink_stops_waiting_on_unanswered_commit_reads_without_naming_a_cause(
         )
         .await
         .expect("fork");
-    drop(run);
+    end_old_process_supervisor(run).await;
     gate.wait_entered(1).await;
     let child_session = handle
         .resolve_bridge_session_id(&child)
@@ -2615,16 +2631,7 @@ async fn fork_held_child(
         )
         .await
         .expect("fork");
-    // The custodian dies with the "old process": its supervisor ends where it
-    // waits, before the held turn reaches an outcome, so nothing but the
-    // re-link acts on the turn's end (a live supervisor would retire a child
-    // whose turn fails, racing what the re-link decides). The child, its
-    // session and the runtime stay, as a restart finds them.
-    assert_eq!(
-        run.end_supervisor_as_process_exit_for_test().await,
-        meerkat_mob::ForkSupervisorExitForTest::EndedBeforeOutcome,
-        "the held turn has no outcome yet"
-    );
+    end_old_process_supervisor(run).await;
     gate.wait_entered(1).await;
     let child = AgentIdentity::from(child);
     let child_session = handle
@@ -3431,8 +3438,7 @@ async fn relink_past_max_run_revives_a_member_forker_that_is_not_live() {
         .await
         .expect("fork");
     gate.wait_entered(1).await;
-    // The custodian dies with the "old process".
-    drop(run);
+    end_old_process_supervisor(run).await;
     let entry = handle
         .roster()
         .await
@@ -3536,7 +3542,7 @@ async fn relink_past_max_run_keeps_the_job_while_its_outcome_cannot_be_delivered
         .await
         .expect("fork");
     gate.wait_entered(1).await;
-    drop(run);
+    end_old_process_supervisor(run).await;
     let mut job = handle
         .roster()
         .await
@@ -3650,8 +3656,7 @@ async fn overdue_job(
         )
         .await
         .expect("fork");
-    // The custodian dies with the "old process".
-    drop(run);
+    end_old_process_supervisor(run).await;
     let mut job = handle
         .roster()
         .await
@@ -3866,7 +3871,7 @@ async fn relink_past_max_run_retires_a_child_whose_forker_was_respawned() {
         )
         .await
         .expect("fork a grandchild");
-    drop(grandchild_run);
+    end_old_process_supervisor(grandchild_run).await;
     gate.wait_entered(2).await;
     handle
         .respawn(AgentIdentity::from("forker"), None)
@@ -3951,7 +3956,7 @@ async fn a_job_owner_in_a_mob_inserted_later_is_revived_through_it() {
         )
         .await
         .expect("fork");
-    drop(run);
+    end_old_process_supervisor(run).await;
     gate.wait_entered(1).await;
     let runtime = fixture.runtime_adapter.clone().expect("runtime-backed");
     runtime

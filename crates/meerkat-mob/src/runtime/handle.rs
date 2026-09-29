@@ -4737,6 +4737,8 @@ pub enum ForkSupervisorExitForTest {
     /// The supervisor had already settled the run (and done whatever that
     /// outcome does to the child) before it could be ended.
     AlreadySettled,
+    /// The supervisor task panicked before it could be ended.
+    Panicked,
 }
 
 impl std::fmt::Debug for ForkChildRun {
@@ -4791,8 +4793,9 @@ impl ForkChildRun {
         }
         self.supervisor.abort();
         match (&mut self.supervisor).await {
-            Err(error) if error.is_cancelled() => ForkSupervisorExitForTest::EndedBeforeOutcome,
-            _ => ForkSupervisorExitForTest::AlreadySettled,
+            Ok(()) => ForkSupervisorExitForTest::AlreadySettled,
+            Err(error) if error.is_panic() => ForkSupervisorExitForTest::Panicked,
+            Err(_) => ForkSupervisorExitForTest::EndedBeforeOutcome,
         }
     }
 

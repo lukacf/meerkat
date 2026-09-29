@@ -5681,6 +5681,14 @@ async fn run_s104_handoff_voice_typed_voice(
 /// "Talon") and one typed during the first closure (Kestrel).
 const S106_TOKENS: [&str; 3] = ["saffron", "lisbon", "kestrel"];
 const S106_SEED_TOKEN: &str = "Marlow";
+
+/// The typed seed turn: committed before the first open and counted as the
+/// first typed words the canonical rows must carry.
+fn s106_seed_prompt() -> String {
+    format!(
+        "For the record: the sponsor's name is {S106_SEED_TOKEN}. Just acknowledge in one short sentence."
+    )
+}
 const S106_TYPED_PROMPT: &str = "Typed while the voice call is down: the budget code is Kestrel. Reply with one short sentence.";
 const S106_LONG_HOLD_MS: u64 = 20_000;
 const S106_REOPEN_HOLD_MS: u64 = 4000;
@@ -5906,9 +5914,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         operator_principal: "scenario-106-operator",
         execution_policy: LiveDelegationExecutionPolicy::ExistingMember,
         bootstrap: None,
-        seed_prompt: Some(format!(
-            "For the record: the sponsor's name is {S106_SEED_TOKEN}. Just acknowledge in one short sentence."
-        )),
+        seed_prompt: Some(s106_seed_prompt()),
         evidence: Some(evidence.clone()),
         unmeasured_playback: true,
         executor_instructions: Some(vec![
@@ -5937,9 +5943,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
     // Every user word the session heard or was typed, in order: the typed
     // seed, each channel's input finals, and the typed note of the first
     // closure. Canonical spoken rows must carry exactly these words.
-    let mut user_text = vec![normalize_words(&format!(
-        "For the record: the sponsor's name is {S106_SEED_TOKEN}. Just acknowledge in one short sentence."
-    ))];
+    let mut user_text = vec![normalize_words(&s106_seed_prompt())];
     let mut delegation_windows: Vec<(String, usize)> = Vec::new();
     let mut stage_ms: Vec<(String, u128)> = vec![("connected".to_owned(), connected_ms)];
     let result = async {
@@ -6138,32 +6142,46 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             .rpc
             .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":600}), 30)
             .await?;
-        // Rows the runtime injects itself (a delegation result merged after
-        // its channel closed: "result of the voice request ...") are neither
-        // typed turns nor utterances and are excluded.
-        let all_rows = s100_user_rows(&history);
-        let spoken: Vec<String> = all_rows
-            .spoken
-            .iter()
-            .filter(|row| !row.starts_with("result of the voice request"))
-            .cloned()
-            .collect();
-        let merged_results = all_rows.spoken.len() - spoken.len();
-        let rows = S100UserRows {
-            spoken,
-            executor_inputs: all_rows.executor_inputs,
-        };
+        // Rows the runtime authors itself (a delegation result merged after
+        // its channel closed arrives as injected execution context) are
+        // neither typed turns nor utterances; they are excluded by their
+        // typed transcript role, not by their text.
+        let mut authored = history.clone();
+        let mut merged_results = 0usize;
+        if let Some(messages) = authored["messages"].as_array_mut() {
+            messages.retain(|message| {
+                let injected = message["role"].as_str() == Some("user")
+                    && message["transcript_role"].as_str() == Some("injected_context");
+                merged_results += usize::from(injected);
+                !injected
+            });
+        }
+        let rows = s100_user_rows(&authored);
         let typed_turns = 2usize;
         let utterances = user_text.len() - typed_turns;
         let heard_words = normalize_words(&user_text.join(" "));
         let row_words = normalize_words(&rows.spoken.join(" "));
         println!(
-            "GPT_LIVE_S106_HISTORY spoken_user_rows={} merged_result_rows={merged_results} expected_rows={} (typed {typed_turns} + utterances {utterances}) words_match={} executor_inputs={}",
+            "GPT_LIVE_S106_HISTORY spoken_user_rows={} injected_rows={merged_results} expected_rows={} (typed {typed_turns} + utterances {utterances}) words_match={} executor_inputs={}",
             rows.spoken.len(),
             typed_turns + utterances,
             heard_words == row_words,
             rows.executor_inputs.len()
         );
+        // The row count is evidence, not a verdict: the browser and the
+        // runtime close utterances on separately ordered event streams.
+        record_tolerant(
+            &evidence,
+            channel,
+            "S106",
+            "canonical_row_count_matches_browser_utterances",
+            rows.spoken.len() == typed_turns + utterances,
+            format!(
+                "spoken_rows={} typed={typed_turns} browser_utterances={utterances}",
+                rows.spoken.len()
+            ),
+            &mut tolerant_failures,
+        )?;
         if heard_words != row_words {
             deterministic_failures.push(format!(
                 "canonical spoken user rows do not carry exactly the typed turns and heard utterances;\n    rows:  {row_words:?}\n    heard: {heard_words:?}"

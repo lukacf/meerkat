@@ -110,10 +110,58 @@ pub struct OpenAiResponsesParamCapabilities {
     pub reasoning_contexts: &'static [OpenAiReasoningContext],
     pub text_verbosity_levels: &'static [OpenAiTextVerbosity],
     pub prompt_cache_modes: &'static [OpenAiPromptCacheMode],
+    /// The prompt-cache mode Meerkat requests by default on the OpenAI API
+    /// when the caller sets none. Must be one of `prompt_cache_modes`.
+    pub default_prompt_cache_mode: Option<OpenAiPromptCacheMode>,
     pub prompt_cache_ttls: &'static [OpenAiPromptCacheTtl],
     /// Whether deprecated `prompt_cache_retention: "in_memory"` is accepted.
-    /// GPT-5.6 permits only the independent `24h` retention policy.
+    /// GPT-5.6 and later rows reject it: their cache lifetime is
+    /// `prompt_cache_options.ttl`.
     pub supports_in_memory_prompt_cache_retention: bool,
+}
+
+impl OpenAiResponsesParamCapabilities {
+    /// The row's default prompt-cache mode, if it names one it accepts.
+    pub fn default_prompt_cache_mode(&self) -> Option<OpenAiPromptCacheMode> {
+        self.default_prompt_cache_mode
+            .filter(|mode| self.prompt_cache_modes.contains(mode))
+    }
+
+    /// Why `model` (this row) rejects the deprecated `prompt_cache_retention`
+    /// value, or `None` when it accepts it.
+    pub fn prompt_cache_retention_rejection(
+        &self,
+        model: &str,
+        retention: crate::lifecycle::run_primitive::OpenAiPromptCacheRetention,
+    ) -> Option<String> {
+        use crate::lifecycle::run_primitive::OpenAiPromptCacheRetention;
+        match retention {
+            OpenAiPromptCacheRetention::InMemory
+                if !self.supports_in_memory_prompt_cache_retention =>
+            {
+                let ttls = self
+                    .prompt_cache_ttls
+                    .iter()
+                    .map(|ttl| format!("'{}'", ttl.as_wire_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Some(if ttls.is_empty() {
+                    format!(
+                        "OpenAI model '{model}' does not accept prompt_cache_retention 'in_memory'"
+                    )
+                } else {
+                    format!(
+                        "OpenAI model '{model}' does not accept prompt_cache_retention \
+                         'in_memory'; set its prompt cache lifetime with \
+                         prompt_cache_options.ttl ({ttls})"
+                    )
+                })
+            }
+            OpenAiPromptCacheRetention::InMemory | OpenAiPromptCacheRetention::TwentyFourHours => {
+                None
+            }
+        }
+    }
 }
 
 /// Full per-model capability record.

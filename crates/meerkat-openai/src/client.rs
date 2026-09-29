@@ -111,6 +111,20 @@ enum ResponsesCacheBreakpoints {
     /// Every input that can become the anchor is lowered as content parts
     /// even when unmarked, so marking it later adds only the marker and
     /// leaves the item's content bytes as the earlier requests sent them.
+    ///
+    /// Assumption: OpenAI keys cache entries on the prompt content and treats
+    /// `prompt_cache_breakpoint` as placement metadata, not prefix content.
+    /// The prompt-caching guide (developers.openai.com/api/docs/guides/
+    /// prompt-caching) describes implicit breakpoints moving to "the end of
+    /// the latest eligible message" on every request and explicit ones being
+    /// added "without turning off the implicit breakpoint", which only
+    /// works if markers are not hashed. If OpenAI did hash them, the anchor
+    /// item would change bytes as the anchor moves, and each run boundary
+    /// would re-bill from the previous anchor onward.
+    ///
+    /// This mode never authors cache-breakpoint evidence
+    /// ([`LlmClient::authored_cache_breakpoints`] only lowers explicit mode),
+    /// so it does not enter the per-request evidence path.
     ImplicitWithTurnAnchor { anchor_message: Option<usize> },
 }
 
@@ -896,18 +910,13 @@ impl OpenAiClient {
                 }
             }
             if tag.prompt_cache_enabled != Some(false) {
-                if let Some(retention) = tag.prompt_cache_retention
-                    && crate::request_support::supports_prompt_cache_retention(
+                if let Some(message) = tag.prompt_cache_retention.and_then(|retention| {
+                    crate::request_support::prompt_cache_retention_rejection(
                         &request.model,
                         retention,
-                    ) == Some(false)
-                {
-                    return Err(LlmError::InvalidRequest {
-                        message: format!(
-                            "OpenAI model '{}' supports only '24h' prompt_cache_retention",
-                            request.model
-                        ),
-                    });
+                    )
+                }) {
+                    return Err(LlmError::InvalidRequest { message });
                 }
                 if let Some(options) = tag.prompt_cache_options {
                     if let Some(mode) = options.mode

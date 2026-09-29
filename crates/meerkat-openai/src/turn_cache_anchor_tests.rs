@@ -13,8 +13,8 @@
 //! - pin that every request of the forking turn and the child's first request
 //!   carry an explicit breakpoint on the last input before the previous run's
 //!   output, and that the lowered input through that item, breakpoints
-//!   included, is byte-identical between them, in both explicit mode (the
-//!   GPT-6 default) and implicit mode;
+//!   included, is byte-identical between them, in both explicit mode and
+//!   implicit mode (the GPT-6 default);
 //! - replay the requests against a model of OpenAI's documented cache
 //!   (entries only at breakpoints, at most four writes per request, lookups
 //!   walk back through up to 20 eligible boundaries) for a cold-start and a
@@ -391,4 +391,39 @@ fn warm_start_forker_turn_refreshes_the_entry_the_child_reads() {
             "{mode:?}"
         );
     }
+}
+
+#[test]
+fn implicit_anchor_mode_authors_no_cache_evidence() {
+    let fork = fork_requests();
+    let client = OpenAiClient::new("test-key".to_string());
+    let request_for = |mode| {
+        let mut request = LlmRequest::new(MODEL, fork.forker_round.clone())
+            .with_tools(tools())
+            .with_openai_tag_merge(|tag| {
+                tag.prompt_cache_enabled = Some(true);
+                tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                    mode: Some(mode),
+                    ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+                });
+            });
+        request.messages = client.project_replay_messages(&request.messages).unwrap();
+        request
+    };
+    let implicit = request_for(OpenAiPromptCacheMode::Implicit);
+    assert!(
+        client
+            .authored_cache_breakpoints(&implicit, &implicit.messages)
+            .unwrap()
+            .is_empty(),
+        "the implicit turn anchor stays off the per-request evidence path"
+    );
+    let explicit = request_for(OpenAiPromptCacheMode::Explicit);
+    assert!(
+        !client
+            .authored_cache_breakpoints(&explicit, &explicit.messages)
+            .unwrap()
+            .is_empty(),
+        "control: explicit mode does author evidence"
+    );
 }

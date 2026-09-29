@@ -82,6 +82,7 @@ const GPT56_RESPONSES_PARAMS: OpenAiResponsesParamCapabilities = OpenAiResponses
         OpenAiPromptCacheMode::Implicit,
         OpenAiPromptCacheMode::Explicit,
     ],
+    default_prompt_cache_mode: Some(OpenAiPromptCacheMode::Explicit),
     prompt_cache_ttls: &[OpenAiPromptCacheTtl::ThirtyMinutes],
     supports_in_memory_prompt_cache_retention: false,
 };
@@ -109,6 +110,12 @@ const GPT6_RESPONSES_PARAMS: OpenAiResponsesParamCapabilities = OpenAiResponsesP
         OpenAiPromptCacheMode::Implicit,
         OpenAiPromptCacheMode::Explicit,
     ],
+    // Implicit by default: explicit mode marks every input, which would
+    // re-bill each live session's transcript once when adopted and relies on
+    // unspecified behaviour when more than four marked prefixes are
+    // uncached. Implicit mode plus the single turn anchor keeps fork_off
+    // children cacheable (#1235). Explicit stays available as an opt-in.
+    default_prompt_cache_mode: Some(OpenAiPromptCacheMode::Implicit),
     prompt_cache_ttls: &[OpenAiPromptCacheTtl::ThirtyMinutes],
     supports_in_memory_prompt_cache_retention: false,
 };

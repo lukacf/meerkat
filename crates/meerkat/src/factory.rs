@@ -1285,7 +1285,7 @@ fn provider_request_defaults_for(
         AnthropicProviderTag, GeminiProviderTag, OpaqueProviderBody, OpenAiPromptCacheOptions,
         OpenAiProviderTag, ProviderTag,
     };
-    use meerkat_core::model_profile::capabilities::{OpenAiPromptCacheMode, OpenAiPromptCacheTtl};
+    use meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl;
 
     let web_search_enabled = !matches!(web_search_override, ToolCategoryOverride::Disable)
         && model_profile.is_some_and(|profile| profile.supports_web_search);
@@ -1308,19 +1308,11 @@ fn provider_request_defaults_for(
                 None
             };
             let prompt_cache_options = cache_capabilities.and_then(|capabilities| {
-                let mode = if capabilities
-                    .prompt_cache_modes
-                    .contains(&OpenAiPromptCacheMode::Explicit)
-                {
-                    Some(OpenAiPromptCacheMode::Explicit)
-                } else if capabilities
-                    .prompt_cache_modes
-                    .contains(&OpenAiPromptCacheMode::Implicit)
-                {
-                    Some(OpenAiPromptCacheMode::Implicit)
-                } else {
-                    None
-                }?;
+                // The catalog row names its default mode (GPT-5.6 explicit,
+                // GPT-6 implicit). Implicit mode on a row that also accepts
+                // explicit breakpoints still authors the turn-boundary
+                // anchor in the OpenAI lowering (#1235).
+                let mode = capabilities.default_prompt_cache_mode()?;
                 Some(OpenAiPromptCacheOptions {
                     mode: Some(mode),
                     ttl: capabilities
@@ -1359,6 +1351,37 @@ fn provider_request_defaults_for(
             }))
         }
         _ => None,
+    }
+}
+
+/// Refuse a `prompt_cache_retention` the resolved OpenAI catalog row does not
+/// accept when the agent is built, instead of failing its first request.
+fn validate_openai_prompt_cache_retention(
+    provider: Provider,
+    model: &str,
+    provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+) -> Result<(), BuildAgentError> {
+    use meerkat_core::lifecycle::run_primitive::ProviderTag;
+    if provider != Provider::OpenAI {
+        return Ok(());
+    }
+    let Some(ProviderTag::OpenAi(tag)) =
+        provider_params.and_then(|params| params.provider_tag.as_ref())
+    else {
+        return Ok(());
+    };
+    let Some(retention) = tag
+        .prompt_cache_retention
+        .filter(|_| tag.prompt_cache_enabled != Some(false))
+    else {
+        return Ok(());
+    };
+    match meerkat_models::capabilities_for(Provider::OpenAI, model)
+        .and_then(|capabilities| capabilities.openai_responses_params)
+        .and_then(|params| params.prompt_cache_retention_rejection(model, retention))
+    {
+        Some(rejection) => Err(BuildAgentError::Config(rejection)),
+        None => Ok(()),
     }
 }
 
@@ -7211,6 +7234,11 @@ impl AgentFactory {
         ) {
             builder = builder.provider_tool_defaults(defaults);
         }
+        validate_openai_prompt_cache_retention(
+            provider,
+            &model,
+            build_config.provider_params.as_ref(),
+        )?;
         if let Some(params) = build_config.provider_params.clone() {
             builder = builder.provider_params(params);
         }
@@ -9949,6 +9977,92 @@ mod tests {
             disabled.prompt_cache_enabled,
             Some(false),
             "explicit disable intent must win over default-on across resume and feature growth"
+        );
+    }
+
+    #[test]
+    fn gpt_6_cache_defaults_stay_implicit() {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiPromptCacheOptions, ProviderTag};
+        use meerkat_core::model_profile::capabilities::{
+            OpenAiPromptCacheMode, OpenAiPromptCacheTtl,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let session_id = meerkat_core::SessionId::parse("018f2f0d-7b1d-7a34-8c09-0a1b2c3d4e5f")
+            .expect("fixed session id");
+        for model in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+            let identity = SessionLlmIdentity {
+                model: model.to_string(),
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            };
+            let policy = factory
+                .request_policy_for_session_llm_identity(
+                    &Config::default(),
+                    &identity,
+                    ToolCategoryOverride::Disable,
+                    &session_id,
+                )
+                .expect("request policy");
+            let Some(ProviderTag::OpenAi(defaults)) = policy.provider_tool_defaults else {
+                panic!("{model} must receive OpenAI request defaults");
+            };
+            assert_eq!(
+                defaults.prompt_cache_options,
+                Some(OpenAiPromptCacheOptions {
+                    mode: Some(OpenAiPromptCacheMode::Implicit),
+                    ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+                }),
+                "{model}: implicit mode stays the default; the lowering adds the turn anchor"
+            );
+            assert_eq!(defaults.prompt_cache_enabled, Some(true));
+        }
+    }
+
+    #[test]
+    fn in_memory_prompt_cache_retention_is_refused_at_build_for_gpt_6() {
+        use meerkat_core::lifecycle::run_primitive::{
+            OpenAiPromptCacheRetention, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+        let params = |retention| ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                prompt_cache_retention: Some(retention),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let Err(BuildAgentError::Config(message)) = validate_openai_prompt_cache_retention(
+            Provider::OpenAI,
+            "gpt-6-astra",
+            Some(&params(OpenAiPromptCacheRetention::InMemory)),
+        ) else {
+            panic!("in_memory retention must be refused at build");
+        };
+        assert!(message.contains("'in_memory'"), "{message}");
+        assert!(
+            message.contains("prompt_cache_options.ttl ('30m')"),
+            "{message}"
+        );
+        assert!(!message.contains("24h"), "{message}");
+        assert!(
+            validate_openai_prompt_cache_retention(
+                Provider::OpenAI,
+                "gpt-6-astra",
+                Some(&params(OpenAiPromptCacheRetention::TwentyFourHours)),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_openai_prompt_cache_retention(
+                Provider::OpenAI,
+                "gpt-5.5",
+                Some(&params(OpenAiPromptCacheRetention::InMemory)),
+            )
+            .is_ok(),
+            "rows without GPT-5.6-and-later cache capabilities keep accepting it"
         );
     }
 

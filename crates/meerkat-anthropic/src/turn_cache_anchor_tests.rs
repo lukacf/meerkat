@@ -517,3 +517,63 @@ fn a_first_run_request_authors_no_anchor() {
     assert!(breakpoint_messages(&body).is_empty());
     assert_eq!(body["cache_control"], json!({"type": "ephemeral"}));
 }
+
+#[test]
+fn system_and_conversation_skips_a_trailing_thinking_block_within_four_slots() {
+    let fork = fork_requests();
+    let anchor = anchor_index(&fork);
+    let forker_run = match &fork.forker_round[fork.forker_round.len() - 2] {
+        Message::BlockAssistant(message) => message.identity.run_id.clone().unwrap(),
+        other => panic!("expected the fork_off call, got {other:?}"),
+    };
+    let mut messages = fork.forker_round.clone();
+    // A recent tool round whose assistant message ends in a thinking block.
+    messages.push(stamped(
+        &forker_run,
+        vec![
+            AssistantBlock::ToolUse {
+                id: "call-late".to_string(),
+                name: "calendar_lookup".to_string(),
+                args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                meta: None,
+            },
+            AssistantBlock::Reasoning {
+                text: "trailing thought".to_string(),
+                meta: Some(Box::new(ProviderMeta::Anthropic {
+                    signature: "sig".to_string(),
+                })),
+            },
+        ],
+        StopReason::ToolUse,
+    ));
+    messages.push(Message::ToolResults {
+        results: vec![ToolResult::new("call-late".to_string(), "ok".into(), false)],
+        created_at: meerkat_core::types::message_timestamp_now(),
+    });
+
+    let body = lower(
+        &messages,
+        Some(AnthropicCacheControlPolicy::SystemAndConversation),
+    );
+    let lowered = body["messages"].as_array().unwrap();
+    let thinking_message = &lowered[lowered.len() - 2]["content"];
+    assert_eq!(thinking_message[1]["type"], "thinking");
+    assert!(
+        thinking_message[1].get("cache_control").is_none(),
+        "no breakpoint on the thinking block"
+    );
+    assert_eq!(
+        thinking_message[0]["cache_control"],
+        json!({"type": "ephemeral"}),
+        "the breakpoint moves to the message's last non-thinking block"
+    );
+    assert_eq!(
+        breakpoint_messages(&body),
+        vec![anchor, lowered.len() - 2, lowered.len() - 1]
+    );
+    assert_eq!(
+        body.to_string().matches("\"cache_control\"").count(),
+        4,
+        "system prefix + anchor + two recent boundaries"
+    );
+}

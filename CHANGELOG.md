@@ -37,6 +37,25 @@ them.
 
 ### Breaking
 
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`) gains a run-fenced Stop (#1261). The
+  input `StopCurrentRunForRun { run_id }` is added (`MeerkatMachineInput::*`,
+  `MeerkatMachineInputVariant::*`, `MeerkatMachineRuntimeInternalInput::*`,
+  kernel `Input::*` and kernel `InputKind::*` discriminants move). The
+  transitions `StopCurrentRunForRunRunning`, `StopCurrentRunForRunRetired`,
+  `ResolveLiveBoundaryDurableAppendJoinRunStoppedRunning`,
+  `ResolveStagedRollbackRunStoppedIdle`,
+  `ResolveStagedRollbackRunStoppedAttached`,
+  `ResolveStagedRollbackRunStoppedRunning`,
+  `ResolveStagedRollbackRunStoppedRetired` and
+  `ResolveStagedRollbackRunStoppedStopped` are added (`TransitionId::*`
+  discriminants move). `MeerkatMachineState` and the kernel `State` gain the
+  field `run_stop_requested: Option<RunId>`, so struct-literal users must add
+  it.
+- Behaviour-only (not measured by the gate): the `RuntimeEvent`
+  `InputLifecycleEvent::Abandoned` emitted by a staged-rollback abandonment
+  now carries the reason the generated arm chose. Before, it was always
+  `MaxAttemptsExhausted`; a stopped run's contributors now report `Cancelled`.
 - `meerkat_mob::MemberReloadDisposition` gains the variant `Reattached`
   (appended last, so existing discriminants do not move); exhaustive matches
   must handle it. `MobHandle::reload_member_registration` returns it when a
@@ -115,6 +134,21 @@ them.
 
 ### Added
 
+- `MeerkatMachine::stop_run(session_id, expected_run_id, reason)` stops one
+  exact run and terminalizes every contributor already bound to it (#1261).
+  The stop is linearized under the session mutation gate as the generated
+  `StopCurrentRunForRun`. From then on the run admits no durable Steer join.
+  Its unretained joins are abandoned as `Cancelled` instead of requeued, and a
+  failed attempt never replays its staged batch. The call returns
+  `RunStopReceipt::Stopped { run_id, contributors }` after every contributor
+  reaches its canonical terminal. Each `RunStopContributor` carries the
+  delivered `CompletionOutcome` and the committed `InputTerminalOutcome`. A
+  late stop returns `RunStopReceipt::NotCurrent { run_id, current_run_id }`
+  and touches no queued input or newer run. A stop refused because a runtime
+  stop or teardown took the still-bound run returns
+  `RunStopReceipt::NotStoppable { run_id, state }`. Once the stop is
+  committed, a failed or unconfirmed interrupt dispatch does not fail the
+  call; it returns at the stopped run's terminal.
 - `meerkat_runtime::RuntimeSessionAttachmentState` (`Unregistered`,
   `Attached`, `ReloadRequired { registration, attachment }`,
   `Detached { registration, unregister }`), `RuntimeDetachedUnregister`
@@ -172,6 +206,13 @@ them.
 
 ### Fixed
 
+- A host that stopped a selected run with `cancel_input_if_present` or
+  `hard_cancel_run_if_current` saw a durable Steer that had already joined the
+  run come back as `AppliedDiscarded`, because a persistent session discards
+  the cancelled image. The Steer then started a successor run with an extra
+  provider request. `MeerkatMachine::stop_run` is the supported run-fenced
+  Stop: it cancels that Steer with the run (#1261). The exact-input and
+  exact-run interrupts keep their requeue semantics.
 - Cold resume verifies each committed session head once instead of five
   times (#1258). HeadCanonical resume preparation now brackets the
   store-owned durable-tail recovery with resume observations and adopts the

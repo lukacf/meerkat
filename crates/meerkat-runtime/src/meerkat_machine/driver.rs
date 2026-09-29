@@ -966,6 +966,14 @@ pub(crate) struct PreparedRunlessInteractionTerminalOutboxes {
     candidate_owner_input_id: Option<InputId>,
 }
 
+impl PreparedRunlessInteractionTerminalOutboxes {
+    /// Owner of the directed interaction terminal batch this preparation
+    /// staged, when any recipient carries a directed interaction.
+    pub(crate) fn candidate_owner_input_id(&self) -> Option<&InputId> {
+        self.candidate_owner_input_id.as_ref()
+    }
+}
+
 pub(crate) struct PreparedDestroy {
     pub(crate) report: DestroyReport,
     pub(crate) lifecycle: PreparedDestroyLifecycle,
@@ -5237,6 +5245,27 @@ impl DriverEntry {
         }
     }
 
+    /// Cancel one unretained durable join of a run stopped by
+    /// `StopCurrentRunForRun` before the run's terminal realization. The
+    /// caller prepares and commits the runless terminal carrier around this
+    /// step, exactly as for an exact queued-input cancellation.
+    pub(crate) async fn machine_realize_stopped_live_boundary_join_cancelled(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(driver) => {
+                driver.machine_cancel_stopped_live_boundary_join(run_id, input_id)
+            }
+            DriverEntry::Persistent(driver) => {
+                driver
+                    .machine_cancel_stopped_live_boundary_join(run_id, input_id)
+                    .await
+            }
+        }
+    }
+
     pub(crate) async fn machine_realize_live_boundary_context_injected(
         &mut self,
         run_id: &RunId,
@@ -5904,6 +5933,11 @@ pub(crate) struct LiveBoundaryJoinResolution {
     /// Exact AppliedDiscarded subset of requeued, in original join order.
     /// This is a projection of the existing owner observation, not new state.
     pub(crate) discarded: Vec<InputId>,
+    /// Unretained joins of a run stopped by `StopCurrentRunForRun`, in
+    /// admission order. They are still Published: the caller terminalizes
+    /// each one as `Cancelled` with its own completion batch before the run's
+    /// terminal realization, and none of them re-enters a lane.
+    pub(crate) stopped: Vec<InputId>,
 }
 
 #[derive(Clone, Copy)]

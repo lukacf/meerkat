@@ -2620,6 +2620,56 @@ impl PersistentRuntimeDriver {
         Ok(resolution)
     }
 
+    /// Terminalize one unretained join of a stopped run as `Cancelled` and
+    /// commit its row (with the completion batch the caller staged) before
+    /// the run's terminal realization.
+    pub(crate) async fn machine_cancel_stopped_live_boundary_join(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.require_durability_ready()?;
+        let checkpoint = self.persistence_rollback_checkpoint();
+        if let Err(err) = self
+            .inner
+            .machine_cancel_stopped_live_boundary_join(run_id, input_id)
+        {
+            return Err(self.post_transition_failure(
+                checkpoint,
+                "stopped_live_boundary_join_cancellation",
+                err.to_string(),
+            ));
+        }
+        let changed = std::slice::from_ref(input_id);
+        let (checkpoint, input_states, commit) = self.lifecycle_persistence_payload_with_rollback(
+            checkpoint,
+            changed,
+            "stopped-run live-boundary join cancellation",
+        )?;
+        if let Err(err) = self
+            .store
+            .commit_machine_lifecycle(&self.runtime_id, commit, &input_states)
+            .await
+        {
+            return Err(self.post_transition_failure(
+                checkpoint,
+                "stopped_live_boundary_join_commit",
+                format!("stopped-run live-boundary join cancellation persist failed: {err}"),
+            ));
+        }
+        if let Err(error) = self
+            .inner
+            .archive_archivable_terminal_inputs_after_durable_commit(changed)
+        {
+            return Err(self.post_transition_failure(
+                None,
+                "stopped_live_boundary_join_archive",
+                error.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Consume one Retained durable join with a live-boundary checkpoint
     /// receipt committed together with its input row.
     pub(crate) async fn machine_consume_retained_live_boundary_join(

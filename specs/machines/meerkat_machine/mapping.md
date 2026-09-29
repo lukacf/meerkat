@@ -1001,6 +1001,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `InterruptCurrentRunForRunRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `StopCurrentRunForRunRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StopCurrentRunForRunRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultAcceptedInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3221,6 +3227,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveStagedRollbackMaxAttemptsExhaustedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveStagedRollbackRunStoppedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveStagedRollbackRunStoppedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveStagedRollbackRunStoppedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveStagedRollbackRunStoppedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveStagedRollbackRunStoppedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUnstageableQueuedInputDeferredIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3303,6 +3324,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveLiveBoundaryDurableAppendJoinAppliedRetainedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveBoundaryDurableAppendJoinRunStoppedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ConsumeOnAcceptIdle`

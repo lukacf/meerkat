@@ -13538,6 +13538,7 @@ pub struct State {
     pub input_live_boundary_delivery: std::collections::BTreeMap<String, LiveBoundaryDelivery>,
     pub input_live_boundary_join_run: std::collections::BTreeMap<String, RunId>,
     pub input_live_boundary_join_phase: std::collections::BTreeMap<String, LiveBoundaryJoinPhase>,
+    pub run_stop_requested: Option<RunId>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
     pub op_completion_seq: std::collections::BTreeMap<String, u64>,
@@ -14037,6 +14038,10 @@ pub mod inputs {
     pub struct InterruptCurrentRun {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct InterruptCurrentRunForRun {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StopCurrentRunForRun {
         pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -16391,6 +16396,7 @@ pub enum Input {
     NotifyDrainExited(inputs::NotifyDrainExited),
     InterruptCurrentRun(inputs::InterruptCurrentRun),
     InterruptCurrentRunForRun(inputs::InterruptCurrentRunForRun),
+    StopCurrentRunForRun(inputs::StopCurrentRunForRun),
     ResolveUserInterruptPublicResult(inputs::ResolveUserInterruptPublicResult),
     CancelAfterBoundary(inputs::CancelAfterBoundary),
     CancelAfterBoundaryForRun(inputs::CancelAfterBoundaryForRun),
@@ -16800,6 +16806,7 @@ impl Input {
             Self::NotifyDrainExited(_) => InputKind::NotifyDrainExited,
             Self::InterruptCurrentRun(_) => InputKind::InterruptCurrentRun,
             Self::InterruptCurrentRunForRun(_) => InputKind::InterruptCurrentRunForRun,
+            Self::StopCurrentRunForRun(_) => InputKind::StopCurrentRunForRun,
             Self::ResolveUserInterruptPublicResult(_) => {
                 InputKind::ResolveUserInterruptPublicResult
             }
@@ -17348,6 +17355,7 @@ pub enum InputKind {
     NotifyDrainExited,
     InterruptCurrentRun,
     InterruptCurrentRunForRun,
+    StopCurrentRunForRun,
     ResolveUserInterruptPublicResult,
     CancelAfterBoundary,
     CancelAfterBoundaryForRun,
@@ -20561,6 +20569,8 @@ pub enum TransitionId {
     InterruptCurrentRun,
     InterruptCurrentRunForRunRunning,
     InterruptCurrentRunForRunRetired,
+    StopCurrentRunForRunRunning,
+    StopCurrentRunForRunRetired,
     ResolveUserInterruptPublicResultAcceptedInitializing,
     ResolveUserInterruptPublicResultAcceptedIdle,
     ResolveUserInterruptPublicResultAcceptedAttached,
@@ -21274,6 +21284,11 @@ pub enum TransitionId {
     ResolveStagedRollbackMaxAttemptsExhaustedRunning,
     ResolveStagedRollbackMaxAttemptsExhaustedRetired,
     ResolveStagedRollbackMaxAttemptsExhaustedStopped,
+    ResolveStagedRollbackRunStoppedIdle,
+    ResolveStagedRollbackRunStoppedAttached,
+    ResolveStagedRollbackRunStoppedRunning,
+    ResolveStagedRollbackRunStoppedRetired,
+    ResolveStagedRollbackRunStoppedStopped,
     ResolveUnstageableQueuedInputDeferredIdle,
     ResolveUnstageableQueuedInputDeferredAttached,
     ResolveUnstageableQueuedInputDeferredRunning,
@@ -21302,6 +21317,7 @@ pub enum TransitionId {
     ResolveLiveBoundaryDurableAppendJoinNotAppliedRunning,
     ResolveLiveBoundaryDurableAppendJoinAppliedDiscardedRunning,
     ResolveLiveBoundaryDurableAppendJoinAppliedRetainedRunning,
+    ResolveLiveBoundaryDurableAppendJoinRunStoppedRunning,
     ConsumeOnAcceptIdle,
     ConsumeOnAcceptAttached,
     ConsumeOnAcceptRunning,
@@ -22928,6 +22944,7 @@ pub fn initial_state() -> State {
         input_live_boundary_delivery: Default::default(),
         input_live_boundary_join_run: Default::default(),
         input_live_boundary_join_phase: Default::default(),
+        run_stop_requested: None,
         recovered_admitted_lanes: Default::default(),
         op_statuses: Default::default(),
         op_completion_seq: Default::default(),

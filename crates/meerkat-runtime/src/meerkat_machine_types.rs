@@ -1226,6 +1226,7 @@ meerkat_machine_runtime_internal_inputs!(
     ],
     UserInterruptDispatch => [
         InterruptCurrentRunForRun,
+        StopCurrentRunForRun,
         InterruptCurrentRun,
         ResolveUserInterruptPublicResult,
     ],

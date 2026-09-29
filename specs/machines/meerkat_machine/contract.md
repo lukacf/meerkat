@@ -161,6 +161,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `input_live_boundary_delivery`: `Map<String, LiveBoundaryDelivery>`
 - `input_live_boundary_join_run`: `Map<String, RunId>`
 - `input_live_boundary_join_phase`: `Map<String, LiveBoundaryJoinPhase>`
+- `run_stop_requested`: `Option<RunId>`
 - `recovered_admitted_lanes`: `Map<String, InputLane>`
 - `op_statuses`: `Map<String, OperationStatus>`
 - `op_completion_seq`: `Map<String, u64>`
@@ -522,6 +523,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolvePeerIngressDequeue`(kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, queued_work_remaining: Bool)
 - `InterruptCurrentRun`
 - `InterruptCurrentRunForRun`(run_id: RunId)
+- `StopCurrentRunForRun`(run_id: RunId)
 - `ResolveUserInterruptPublicResult`(observation: UserInterruptObservationKind, target_present: Bool, staged_promotion_busy: Bool)
 - `CancelAfterBoundaryForRun`(run_id: RunId, reason: String)
 - `AbortCancelAfterBoundaryDispatch`(dispatch_generation: u64)
@@ -4643,6 +4645,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `InterruptCurrentRunForRunRetired`
 - From: `Retired`
 - On: `InterruptCurrentRunForRun`(run_id)
+- Guards:
+  - `run_matches_current`
+- Emits: `WakeInterrupt`, `RequestCancellationAtBoundary`
+- To: `Retired`
+
+### `StopCurrentRunForRunRunning`
+- From: `Running`
+- On: `StopCurrentRunForRun`(run_id)
+- Guards:
+  - `run_matches_current`
+- Emits: `WakeInterrupt`, `RequestCancellationAtBoundary`
+- To: `Running`
+
+### `StopCurrentRunForRunRetired`
+- From: `Retired`
+- On: `StopCurrentRunForRun`(run_id)
 - Guards:
   - `run_matches_current`
 - Emits: `WakeInterrupt`, `RequestCancellationAtBoundary`
@@ -11498,6 +11516,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `stage_attempts_remaining`
 - Emits: `InputLifecycleNotice`
 - To: `Idle`
@@ -11511,6 +11530,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `stage_attempts_remaining`
 - Emits: `InputLifecycleNotice`
 - To: `Attached`
@@ -11524,6 +11544,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `stage_attempts_remaining`
 - Emits: `InputLifecycleNotice`
 - To: `Running`
@@ -11537,6 +11558,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `stage_attempts_remaining`
 - Emits: `InputLifecycleNotice`
 - To: `Retired`
@@ -11550,6 +11572,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `stage_attempts_remaining`
 - Emits: `InputLifecycleNotice`
 - To: `Stopped`
@@ -11563,6 +11586,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `stage_attempts_exhausted`
 - Emits: `RecordTerminalOutcome`
 - To: `Idle`
@@ -11576,6 +11600,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `stage_attempts_exhausted`
 - Emits: `RecordTerminalOutcome`
 - To: `Attached`
@@ -11589,6 +11614,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `stage_attempts_exhausted`
 - Emits: `RecordTerminalOutcome`
 - To: `Running`
@@ -11602,6 +11628,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `stage_attempts_exhausted`
 - Emits: `RecordTerminalOutcome`
 - To: `Retired`
@@ -11615,7 +11642,73 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_staged`
   - `attempt_count_tracked`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `stage_attempts_exhausted`
+- Emits: `RecordTerminalOutcome`
+- To: `Stopped`
+
+### `ResolveStagedRollbackRunStoppedIdle`
+- From: `Idle`
+- On: `ResolveStagedRollback`(input_id, lane)
+- Guards:
+  - `input_tracked`
+  - `input_not_live_boundary_joined`
+  - `input_staged`
+  - `attempt_count_tracked`
+  - `recovery_lane_matches`
+  - `run_stopped`
+- Emits: `RecordTerminalOutcome`
+- To: `Idle`
+
+### `ResolveStagedRollbackRunStoppedAttached`
+- From: `Attached`
+- On: `ResolveStagedRollback`(input_id, lane)
+- Guards:
+  - `input_tracked`
+  - `input_not_live_boundary_joined`
+  - `input_staged`
+  - `attempt_count_tracked`
+  - `recovery_lane_matches`
+  - `run_stopped`
+- Emits: `RecordTerminalOutcome`
+- To: `Attached`
+
+### `ResolveStagedRollbackRunStoppedRunning`
+- From: `Running`
+- On: `ResolveStagedRollback`(input_id, lane)
+- Guards:
+  - `input_tracked`
+  - `input_not_live_boundary_joined`
+  - `input_staged`
+  - `attempt_count_tracked`
+  - `recovery_lane_matches`
+  - `run_stopped`
+- Emits: `RecordTerminalOutcome`
+- To: `Running`
+
+### `ResolveStagedRollbackRunStoppedRetired`
+- From: `Retired`
+- On: `ResolveStagedRollback`(input_id, lane)
+- Guards:
+  - `input_tracked`
+  - `input_not_live_boundary_joined`
+  - `input_staged`
+  - `attempt_count_tracked`
+  - `recovery_lane_matches`
+  - `run_stopped`
+- Emits: `RecordTerminalOutcome`
+- To: `Retired`
+
+### `ResolveStagedRollbackRunStoppedStopped`
+- From: `Stopped`
+- On: `ResolveStagedRollback`(input_id, lane)
+- Guards:
+  - `input_tracked`
+  - `input_not_live_boundary_joined`
+  - `input_staged`
+  - `attempt_count_tracked`
+  - `recovery_lane_matches`
+  - `run_stopped`
 - Emits: `RecordTerminalOutcome`
 - To: `Stopped`
 
@@ -11882,6 +11975,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_run_matches`
   - `turn_at_model_boundary`
   - `no_cancel_after_boundary`
+  - `run_not_stopped`
   - `run_owned_by_runtime_loop`
   - `input_is_queued_steer`
   - `input_recovery_lane_bound`
@@ -11900,6 +11994,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `join_published`
   - `input_staged_for_run`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `not_applied`
 - Emits: `InputLifecycleNotice`
 - To: `Running`
@@ -11913,6 +12008,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `join_published`
   - `input_staged_for_run`
   - `recovery_lane_matches`
+  - `run_not_stopped`
   - `applied_then_discarded`
 - Emits: `InputLifecycleNotice`
 - To: `Running`
@@ -11928,6 +12024,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recovery_lane_matches`
   - `applied_and_retained`
 - Emits: `InputLifecycleNotice`
+- To: `Running`
+
+### `ResolveLiveBoundaryDurableAppendJoinRunStoppedRunning`
+- From: `Running`
+- On: `ResolveLiveBoundaryDurableAppendJoin`(run_id, input_id, lane, observation)
+- Guards:
+  - `current_run_matches`
+  - `joined_to_run`
+  - `join_published`
+  - `input_staged_for_run`
+  - `recovery_lane_matches`
+  - `run_stopped`
+  - `not_retained`
+  - `attempt_count_tracked`
+- Emits: `RecordTerminalOutcome`
 - To: `Running`
 
 ### `ConsumeOnAcceptIdle`

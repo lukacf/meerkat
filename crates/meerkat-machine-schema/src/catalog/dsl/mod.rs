@@ -2923,6 +2923,7 @@ runtime_internal_inputs!(
         StartImmediateAppend,
         StartOp,
         SteerAccepted,
+        StopCurrentRunForRun,
         StopDrain,
         SupersedeInput,
         SurfaceApplyBoundary,

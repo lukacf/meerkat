@@ -2937,7 +2937,23 @@ impl EphemeralRuntimeDriver {
             return Ok(resolution);
         }
         let checkpoint = self.rollback_snapshot();
+        let run_stopped = self.run_stop_requested_for(run_id);
         for input_id in joined {
+            if run_stopped {
+                match self.live_boundary_join_observation(run_id, &input_id) {
+                    Ok(mm_dsl::LiveBoundaryJoinObservation::AppliedRetained) => {}
+                    Ok(_) => {
+                        // Terminalized by the caller with its own completion
+                        // batch through the generated `RunStopped` arm.
+                        resolution.stopped.push(input_id);
+                        continue;
+                    }
+                    Err(error) => {
+                        self.restore_rollback_snapshot(checkpoint);
+                        return Err(error);
+                    }
+                }
+            }
             match self.resolve_one_live_boundary_join(run_id, &input_id) {
                 Ok(mm_dsl::LiveBoundaryJoinObservation::AppliedRetained) => {
                     resolution.retained.push(input_id);
@@ -2958,8 +2974,16 @@ impl EphemeralRuntimeDriver {
         Ok(resolution)
     }
 
-    fn resolve_one_live_boundary_join(
-        &mut self,
+    /// Whether generated authority holds a run-fenced Stop for `run_id`.
+    pub(crate) fn run_stop_requested_for(&self, run_id: &RunId) -> bool {
+        let dsl_run_id = mm_dsl::RunId::from_domain(run_id);
+        self.with_dsl_state(|state| state.run_stop_requested.as_ref() == Some(&dsl_run_id))
+    }
+
+    /// Typed observation of one joined durable append, read from its final
+    /// core delivery witness.
+    fn live_boundary_join_observation(
+        &self,
         run_id: &RunId,
         input_id: &InputId,
     ) -> Result<mm_dsl::LiveBoundaryJoinObservation, RuntimeDriverError> {
@@ -2972,22 +2996,84 @@ impl EphemeralRuntimeDriver {
                     "durable live-boundary input {input_id} joined run {run_id} without a core delivery witness"
                 ))
             })?;
-        let observation = match outcome {
+        match outcome {
             meerkat_core::CoreBoundaryDeliveryOutcome::Applied => {
-                mm_dsl::LiveBoundaryJoinObservation::AppliedRetained
+                Ok(mm_dsl::LiveBoundaryJoinObservation::AppliedRetained)
             }
             meerkat_core::CoreBoundaryDeliveryOutcome::Discarded => {
-                mm_dsl::LiveBoundaryJoinObservation::AppliedDiscarded
+                Ok(mm_dsl::LiveBoundaryJoinObservation::AppliedDiscarded)
             }
             meerkat_core::CoreBoundaryDeliveryOutcome::Withdrawn => {
-                mm_dsl::LiveBoundaryJoinObservation::NotApplied
+                Ok(mm_dsl::LiveBoundaryJoinObservation::NotApplied)
             }
             meerkat_core::CoreBoundaryDeliveryOutcome::Pending => {
-                return Err(RuntimeDriverError::Internal(format!(
+                Err(RuntimeDriverError::Internal(format!(
                     "durable live-boundary input {input_id} still has a pending core delivery witness after run {run_id} ended"
-                )));
+                )))
             }
-        };
+        }
+    }
+
+    /// Terminalize one unretained join of a stopped run as `Cancelled`
+    /// through the generated `ResolveLiveBoundaryDurableAppendJoinRunStopped`
+    /// arm. The caller stages the input's completion batch first. Atomic on
+    /// failure.
+    pub(crate) fn machine_cancel_stopped_live_boundary_join(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+    ) -> Result<(), RuntimeDriverError> {
+        let checkpoint = self.rollback_snapshot();
+        let result = self.cancel_stopped_live_boundary_join_inner(run_id, input_id);
+        if result.is_err() {
+            self.restore_rollback_snapshot(checkpoint);
+        }
+        result
+    }
+
+    fn cancel_stopped_live_boundary_join_inner(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+    ) -> Result<(), RuntimeDriverError> {
+        let observation = self.live_boundary_join_observation(run_id, input_id)?;
+        let lane = self.input_recovery_lane(input_id).ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "generated recovery lane missing for stopped durable live-boundary input {input_id}"
+            ))
+        })?;
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::ResolveLiveBoundaryDurableAppendJoin {
+                run_id: mm_dsl::RunId::from_domain(run_id),
+                input_id: Self::dsl_key(input_id),
+                lane: mm_dsl::InputLane::from(lane),
+                observation,
+            },
+            "ResolveLiveBoundaryDurableAppendJoin(RunStopped)",
+        )?;
+        self.live_boundary_join_witnesses.remove(input_id);
+        self.sync_terminal_projection_from_machine(
+            input_id,
+            InputLifecycleState::Staged,
+            InputLifecycleState::Abandoned,
+            "ResolveLiveBoundaryDurableAppendJoin(RunStopped)",
+        )?;
+        self.events
+            .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                InputLifecycleEvent::Abandoned {
+                    input_id: input_id.clone(),
+                    reason: InputAbandonReason::Cancelled,
+                },
+            )));
+        Ok(())
+    }
+
+    fn resolve_one_live_boundary_join(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+    ) -> Result<mm_dsl::LiveBoundaryJoinObservation, RuntimeDriverError> {
+        let observation = self.live_boundary_join_observation(run_id, input_id)?;
         let lane = self.input_recovery_lane(input_id).ok_or_else(|| {
             RuntimeDriverError::Internal(format!(
                 "generated recovery lane missing for durable live-boundary input {input_id}"
@@ -3105,23 +3191,32 @@ impl EphemeralRuntimeDriver {
                     }
                 }
                 InputLifecycleState::Abandoned => {
-                    let attempts = self.input_attempt_count(input_id);
-                    tracing::warn!(
-                        input_id = %input_id,
-                        attempts,
-                        "input abandoned after generated max stage attempts decision"
-                    );
                     self.sync_terminal_projection_from_machine(
                         input_id,
                         InputLifecycleState::Staged,
                         InputLifecycleState::Abandoned,
                         "ResolveStagedRollback->Abandon",
                     )?;
+                    // The generated arm chose the reason: the retry cap, or a
+                    // run-fenced Stop of the run this input contributed to.
+                    let reason = match self.input_terminal_outcome(input_id) {
+                        Some(InputTerminalOutcome::Abandoned { reason }) => reason,
+                        other => {
+                            return Err(RuntimeDriverError::Internal(format!(
+                                "generated staged rollback abandoned input {input_id} with terminal outcome {other:?}"
+                            )));
+                        }
+                    };
+                    tracing::warn!(
+                        input_id = %input_id,
+                        ?reason,
+                        "input abandoned by generated staged rollback resolution"
+                    );
                     self.events
                         .push(self.make_envelope(RuntimeEvent::InputLifecycle(
                             InputLifecycleEvent::Abandoned {
                                 input_id: input_id.clone(),
-                                reason: InputAbandonReason::MaxAttemptsExhausted { attempts },
+                                reason,
                             },
                         )));
                 }

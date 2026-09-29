@@ -7,6 +7,24 @@ use crate::meerkat_machine::MeerkatMachine;
 use crate::runtime_state::RuntimeState;
 use crate::traits::RuntimeDriverError;
 
+/// What a run-fenced stop dispatch observed and registered under the session
+/// mutation gate.
+#[derive(Default)]
+pub(super) struct RunStopCapture {
+    /// The machine's current run at the compare.
+    pub(super) current_run_id: Option<meerkat_core::RunId>,
+    /// Whether `StopCurrentRunForRun` committed for the expected run.
+    pub(super) staged: bool,
+    /// The runtime phase observed when generated authority refused the stop
+    /// after the compare had matched.
+    pub(super) refused_state: Option<RuntimeState>,
+    /// One completion waiter per input staged for the stopped run.
+    pub(super) contributors: Vec<(
+        meerkat_core::lifecycle::InputId,
+        crate::completion::CompletionHandle,
+    )>,
+}
+
 #[cfg(test)]
 const USER_INTERRUPT_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 #[cfg(not(test))]
@@ -192,6 +210,144 @@ impl MeerkatMachine {
     ) -> Result<bool, RuntimeDriverError> {
         self.dispatch_user_interrupt(session_id, Some(expected_run_id), None, reason.into())
             .await
+    }
+
+    /// Stop `expected_run_id` atomically, terminalizing every contributor
+    /// already bound to it.
+    ///
+    /// Under the session mutation gate this compares the machine's current
+    /// run with `expected_run_id` and commits the generated
+    /// `StopCurrentRunForRun`, then dispatches the exact-run hard interrupt.
+    /// From that point the run admits no durable Steer join; at its terminal,
+    /// a joined Steer whose append is not in the surviving image is abandoned
+    /// as `Cancelled` instead of re-entering its lane, and a failed attempt
+    /// never replays its staged batch. So no contributor of the stopped run
+    /// starts a successor. A retained join is consumed with the run as usual.
+    ///
+    /// The call returns after every contributor staged at the stop reached
+    /// its canonical terminal ([`crate::RunStopReceipt::Stopped`]). Once the
+    /// stop is committed, an interrupt dispatch that fails, times out, or
+    /// finds the executor not yet inside the run does not fail the call: the
+    /// run still ends as a stopped run, and the contributors' terminals are
+    /// the outcome. If the executor had not entered the run, the run executes
+    /// until its own terminal before the call returns. A stop refused because
+    /// a runtime stop or teardown took the run is
+    /// [`crate::RunStopReceipt::NotStoppable`]. A late
+    /// stop, whose run is no longer current, touches nothing and returns
+    /// [`crate::RunStopReceipt::NotCurrent`]: queued input and newer runs are
+    /// never interrupted. Input admitted but not joined to the run is not a
+    /// contributor and stays queued.
+    ///
+    /// A run with no runtime-loop contributors (a direct service turn) is
+    /// interrupted and reported as `Stopped` with no contributors.
+    pub async fn stop_run(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &meerkat_core::RunId,
+        reason: impl Into<String>,
+    ) -> Result<crate::run_stop::RunStopReceipt, RuntimeDriverError> {
+        let mut capture = RunStopCapture::default();
+        let dispatched = self
+            .dispatch_user_interrupt_with_stop(
+                session_id,
+                Some(expected_run_id),
+                None,
+                reason.into(),
+                Some(&mut capture),
+            )
+            .await;
+        if !capture.staged {
+            dispatched?;
+            if let Some(state) = capture.refused_state
+                && capture.current_run_id.as_ref() == Some(expected_run_id)
+            {
+                return Ok(crate::run_stop::RunStopReceipt::NotStoppable {
+                    run_id: expected_run_id.clone(),
+                    state,
+                });
+            }
+            return Ok(crate::run_stop::RunStopReceipt::NotCurrent {
+                run_id: expected_run_id.clone(),
+                current_run_id: capture.current_run_id,
+            });
+        }
+        // The stop is committed, so the run's contributors terminalize under
+        // stop semantics whatever the interrupt dispatch reports. Their
+        // terminals are the outcome; the dispatch result is diagnostic only.
+        // `Ok(false)` means the run was no longer current at the executor
+        // callback, or the executor had not entered it yet; an unknown or
+        // failed dispatch leaves the run to reach its terminal on its own.
+        // Either way the run ends as a stopped run: its unretained joins are
+        // cancelled and a failed attempt is not replayed.
+        match dispatched {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
+                %session_id,
+                run_id = %expected_run_id,
+                "committed run stop found no executor interrupt target; awaiting the run terminal"
+            ),
+            Err(error) => tracing::warn!(
+                %session_id,
+                run_id = %expected_run_id,
+                %error,
+                "committed run stop could not confirm its interrupt; awaiting the run terminal"
+            ),
+        }
+        let mut contributors = Vec::with_capacity(capture.contributors.len());
+        for (input_id, waiter) in capture.contributors {
+            let (outcome, observed_terminal) = waiter
+                .try_wait_with_terminal_outcome()
+                .await
+                .map_err(|error| {
+                    RuntimeDriverError::Internal(format!(
+                        "stopped run {expected_run_id} contributor {input_id} completion failed: {error}"
+                    ))
+                })?
+                .into_parts();
+            let terminal = match observed_terminal {
+                Some(terminal) => Some(terminal),
+                None => self.committed_input_terminal(session_id, &input_id).await,
+            };
+            contributors.push(crate::run_stop::RunStopContributor {
+                input_id,
+                outcome,
+                terminal,
+            });
+        }
+        Ok(crate::run_stop::RunStopReceipt::Stopped {
+            run_id: expected_run_id.clone(),
+            contributors,
+        })
+    }
+
+    /// The committed terminal of one contributor: the live ledger first, then
+    /// the durable row an archived input left in the store.
+    async fn committed_input_terminal(
+        &self,
+        session_id: &SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+    ) -> Option<crate::input_state::InputTerminalOutcome> {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).map(|entry| entry.driver.clone())
+        };
+        if let Some(driver) = driver
+            && let Some(stored) = driver.lock().await.as_driver().stored_input_state(input_id)
+        {
+            return stored.seed.terminal_outcome;
+        }
+        let store = self.store.as_ref()?;
+        match store
+            .load_input_state(&Self::logical_runtime_id(session_id), input_id)
+            .await
+        {
+            Ok(stored) => stored.and_then(|stored| stored.seed.terminal_outcome),
+            Err(error) => {
+                tracing::warn!(%session_id, %input_id, %error,
+                    "stopped-run contributor terminal could not be read from the store");
+                None
+            }
+        }
     }
 
     /// Run-fenced hard cancel additionally pinned to one exact host-member

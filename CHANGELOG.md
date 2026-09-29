@@ -62,6 +62,21 @@ them.
   `meerkat_core::model_profile::capabilities::ThinkingSupport` gains
   `ThinkingSupport::AnthropicAdaptiveOrBetweenTools` (enum variant added).
   Exhaustive matches must handle them.
+- The `ThinkingSupport::AnthropicAdaptiveOrBetweenTools` insertion shifts
+  later `ThinkingSupport::*` discriminants (e.g. `GeminiThinkingLevel`).
+- Generated `MobMachineState` gains the field
+  `pending_external_route_installs` (constructible struct), and
+  `MobMachineEffectVariant` gains `ExternalRouteInstallRequested` mid-enum, so
+  later `MobMachineEffectVariant::*` discriminants and ordering move
+  (`MemberOperatorAdmitted`, `MemberOperatorRejected`,
+  `FlowStepDispatchClassified`, `AuthorizeExternalAgentEventSubscription`,
+  `GrantRecorded`, `GrantRevoked`, `ExplicitResumeMemberOutcomeClassified`).
+  Kernel `TransitionId` gains `RecordExternalRouteInstallInstall`,
+  `ResolveExternalRouteInstallRunning`, `ResolveExternalRouteInstallStopped`,
+  `ResolveExternalRouteInstallCompleted`, `ResolveExternalRouteInstallDestroyed`,
+  `RollbackExternalRouteInstallRunning`, `RollbackExternalRouteInstallStopped`,
+  `RollbackExternalRouteInstallCompleted` and
+  `RollbackExternalRouteInstallDestroyed`.
 - Behaviour-only (not measured by the gate): an Anthropic request whose
   thinking type or `thinking_budget_tokens` (including the generic per-turn
   override) the cataloged model does not accept, or that sets `top_k` on a

@@ -319,7 +319,19 @@ them.
   (the GPT-6 default, which stays implicit). The implicit anchor authors no
   cache-breakpoint evidence, so it stays off the per-request evidence path. The `ForkCacheInheritance` documentation no longer
   claims the child hits whenever the source's entry is alive.
-
+- The `fork_relink` restart test
+  `a_failed_turn_deduplicated_against_restart_interrupted_keeps_its_child_seated`
+  was flaky under load (#1259). It re-links a child in the same process that
+  forked it, and the dropped run handle left the child's live fork supervisor
+  running, so when the turn failed that supervisor retired the child, racing
+  the assertion that the re-link keeps it seated. The product behaviour is
+  unchanged and correct: the automatic re-link only takes children forked
+  before this process started, which never have a live supervisor. Test
+  builds of `meerkat-mob` now expose
+  `ForkChildRun::end_supervisor_as_process_exit_for_test`, which aborts the
+  supervisor task and awaits its end (reporting a typed
+  `ForkSupervisorExitForTest`), and the restart tests end the supervisor that
+  way, as a process exit does, instead of leaving it live.
 - A host that stopped a selected run with `cancel_input_if_present` or
   `hard_cancel_run_if_current` saw a durable Steer that had already joined the
   run come back as `AppliedDiscarded`, because a persistent session discards
@@ -357,8 +369,48 @@ them.
   its row prefix. Every store-authority check still runs; only repeated
   materializations of the same committed head are gone. In a cold-resume
   harness, content-digest bytes dropped from 4.53x to 0.91x of the verified
-  transcript bytes for append-only heads, and from 7.19x to 0.96x for
+  transcript bytes for append-only heads, and from 7.19x to 0.97x for
   compacted heads. `cold_resume_digest_cost` pins both bounds.
+- Follow-ups to #1258 (cold resume verifies each head once). The body-free
+  physical-head check both prepared-body reuse sites run now uses the new
+  provided `IncrementalSessionStore::verify_current_head`, which keeps every
+  head-row check `materialize_head` runs. SQLite and memory stores override
+  it to also prove that the stored CAS token still equals the one recomputed
+  from the stored head (`Corrupted` otherwise); `load_head`, which the check
+  used before, drops the stored token. The store conformance incremental
+  profiles cover the new method. A new end-to-end test consumes a
+  preparation receipt through actor creation after advancing the physical
+  head and requires the seed site itself to refuse it, so deleting that
+  check fails a test (the gated archive re-check would otherwise catch it
+  silently). Actor creation also no longer keeps a second `Session` handle
+  of the resume body alive across actor construction, which could force a
+  whole-transcript copy-on-write at the actor's first append; the receipt's
+  own body clone shares the transcript allocation with the returned body,
+  now pinned by a test. `cold_resume_digest_cost` holds a serial guard over
+  the process-global digest counters, so its two harnesses no longer mix
+  measurements under plain `cargo test`, and it waits for members on the mob
+  actor's machine-state publications instead of a sleep loop.
+- The CI gate's push-to-terminal budget failed pull-request runs in which
+  every lane passed, and a re-run could never pass, because it measured
+  1200 s from the run's fixed `created_at`. Each lane is now timed from the
+  start of the run attempt it ran in, so a re-run lane gets a fresh clock
+  while a carried-over lane keeps its own attempt's clock (re-running only
+  the gate cannot launder an overrun). The budget is 1500 s, sized from the
+  last 64 pull-request runs (lane terminal p50 847 s, p90 1194 s, max
+  1244 s; the tail is the example-web lane under its own 20-minute
+  timeout). The gate reports the critical-path lane, the slowest lane and
+  the latest lane terminals on every run.
+- `make verify-machine-poster-coverage` failed locally since the `crates/`
+  layout move (it opened `meerkat-machine-schema/...`), and CI never ran it:
+  only `cargo.yml`, which nothing calls, did. The paths are fixed, the
+  drifted posters are regenerated, and `ci.yml` runs the gate in the
+  generation-ratchets lane whenever machine authority or poster inputs
+  change. The path-classifier pinning tests had also never run and had
+  failures of the same class: `machine-authority-changed` and the edge
+  classifier missed `crates/xtask/*-baseline.toml`, and
+  `scripts/cargo-agent-gate` missed `crates/meerkat-web-runtime/`, so it
+  never ran `wasm-check`. Those patterns are fixed and
+  `make path-classifier-selftest` runs in CI and `make ci`.
 - An aligned HeadCanonical durable-tail recovery source (no unapplied
   provisional intent) is now verified as the physical head as well as the
   runtime boundary, in one row replay. It used to be verified only with the

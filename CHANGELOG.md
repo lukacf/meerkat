@@ -199,6 +199,13 @@ them.
 
 ### Added
 
+- `IncrementalSessionStore::verify_current_head` (provided method): a
+  body-free proof that a head is still the store's current physical head,
+  with `materialize_head`'s head-row checks (`NotFound`,
+  `TranscriptRevisionConflict`, and `Corrupted` for a stored CAS token that
+  no longer matches the stored head in backends that persist one). The
+  default compares recomputed tokens over `load_head`; `SqliteSessionStore`
+  and `MemoryStore` override it. Cold-resume body reuse uses it.
 - `MobHandle::member_peer_endpoint(&identity)` returns a member's canonical
   comms endpoint as a `MobMemberPeerEndpoint`: the exact generation
   endpoint MobMachine holds for its current incarnation (name, peer id,
@@ -326,12 +333,14 @@ them.
   running, so when the turn failed that supervisor retired the child, racing
   the assertion that the re-link keeps it seated. The product behaviour is
   unchanged and correct: the automatic re-link only takes children forked
-  before this process started, which never have a live supervisor. Test
-  builds of `meerkat-mob` now expose
+  before this `MobMcpState` was created, which never have a live supervisor
+  in it. Test builds (`test-support`) of `meerkat-mob` now expose
   `ForkChildRun::end_supervisor_as_process_exit_for_test`, which aborts the
   supervisor task and awaits its end (reporting a typed
-  `ForkSupervisorExitForTest`), and the restart tests end the supervisor that
-  way, as a process exit does, instead of leaving it live.
+  `ForkSupervisorExitForTest`: ended before an outcome, already settled, or
+  panicked). Every `fork_relink` restart test that dropped a run with a live
+  supervisor now ends it that way, as a process exit does, while the turn is
+  still held by the test gate, so the race cannot occur.
 - A host that stopped a selected run with `cancel_input_if_present` or
   `hard_cancel_run_if_current` saw a durable Steer that had already joined the
   run come back as `AppliedDiscarded`, because a persistent session discards
@@ -398,14 +407,20 @@ them.
   the gate cannot launder an overrun). The budget is 1500 s, sized from the
   last 64 pull-request runs (lane terminal p50 847 s, p90 1194 s, max
   1244 s; the tail is the example-web lane under its own 20-minute
-  timeout). The gate reports the critical-path lane, the slowest lane and
-  the latest lane terminals on every run.
+  timeout), about 20% above the observed maximum and below the 40-minute
+  lane timeouts, which only stop hung lanes. The gate reports the
+  critical-path lane, the slowest lane and the latest lane terminals on
+  every run that was not cancelled, failed runs included. On a push to
+  `main`, where the budget is not enforced, a failure to measure it is a
+  warning, so a transient API error cannot turn `main` red.
 - `make verify-machine-poster-coverage` failed locally since the `crates/`
   layout move (it opened `meerkat-machine-schema/...`), and CI never ran it:
   only `cargo.yml`, which nothing calls, did. The paths are fixed, the
   drifted posters are regenerated, and `ci.yml` runs the gate in the
   generation-ratchets lane whenever machine authority or poster inputs
-  change. The path-classifier pinning tests had also never run and had
+  change. Poster inputs have their own classifier,
+  `scripts/machine-posters-changed`, so a poster-only change does not start
+  the machine-authority lanes (pre-push machine hook, remote TLC). The path-classifier pinning tests had also never run and had
   failures of the same class: `machine-authority-changed` and the edge
   classifier missed `crates/xtask/*-baseline.toml`, and
   `scripts/cargo-agent-gate` missed `crates/meerkat-web-runtime/`, so it

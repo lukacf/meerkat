@@ -28946,14 +28946,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 !self.live_revoked_execution_channels.contains(channel_id)
             }
             // Replayed runtime work output rides the quiet thinking lane and
-            // is history the model has not seen, so it is not held behind an
-            // active provider turn: it lands while the user's first utterance
-            // is still in flight, before the model answers it. Voiced rows and
-            // reassertions of live speech wait for the turn boundary.
+            // is history the model has not seen, so it is not held behind the
+            // user phase of a provider turn: it lands while the user's first
+            // utterance is still in flight, before the model answers it. Once
+            // an assistant turn has started for the turn's interaction it
+            // waits like every other row, so it can never interleave with an
+            // in-flight response. Voiced rows and reassertions of live speech
+            // wait for the turn boundary.
             guard "safe_provider_turn_boundary" {
                 !self.live_provider_turn_by_channel.contains_key(channel_id)
-                || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReplayRuntimeWork)
+                || (self.live_context_queued_disposition_by_append.get_copied(append_id)
+                        == Some(LiveContextRowDisposition::ReplayRuntimeWork)
+                    && for_all(assistant_turn_ref in self.live_assistant_interaction_by_turn.keys(),
+                        self.live_assistant_interaction_by_turn.get_cloned(assistant_turn_ref)
+                            != self.live_active_interaction_by_channel.get_cloned(channel_id)))
             }
             // Quiet history appended into silence is still a cue to speak, so
             // replayed runtime work output waits for the conversation to start.
@@ -29041,7 +29047,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertCausalTail))
+                    == Some(LiveContextRowDisposition::ReassertCausalTail)
+                    || (self.live_context_queued_disposition_by_append.get_copied(append_id)
+                            == Some(LiveContextRowDisposition::ReplayRuntimeWork)
+                        && !for_all(assistant_turn_ref in self.live_assistant_interaction_by_turn.keys(),
+                            self.live_assistant_interaction_by_turn.get_cloned(assistant_turn_ref)
+                                != self.live_active_interaction_by_channel.get_cloned(channel_id))))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "provider_turn_owns_boundary" {

@@ -2082,6 +2082,48 @@ fn quiet_history_waits_for_the_conversation_without_a_bootstrap() {
     assert!(authorized(&effects, "merged-result-reply"));
 }
 
+/// Replayed runtime work output is admitted during the user phase of a
+/// provider turn only: once an assistant turn is attributed to the turn's
+/// interaction it waits for the turn boundary like every other row, so it can
+/// never interleave with an in-flight response.
+#[test]
+fn replayed_runtime_work_after_the_assistant_turn_started_stays_deferred() {
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    start_user_turn(&mut authority, "user-turn");
+    enqueue_sourced_mirror_row(
+        &mut authority,
+        "merged-result-reply",
+        1,
+        mm::LiveContextRowSource::RuntimeWork,
+    );
+    let mut state = authority.state().clone();
+    let interaction = state.live_active_interaction_by_channel[CHANNEL].clone();
+    state
+        .live_assistant_interaction_by_turn
+        .insert("assistant-turn".into(), interaction);
+    state
+        .live_assistant_turn_channel_by_ref
+        .insert("assistant-turn".into(), CHANNEL.into());
+    state.live_assistant_origin_by_turn.insert(
+        "assistant-turn".into(),
+        mm::LiveAssistantTurnOrigin::ForegroundCorrelated,
+    );
+    state
+        .live_assistant_playback_segment_by_turn
+        .insert("assistant-turn".into(), 0);
+    let mut responding = mm::MeerkatMachineAuthority::recover_from_state(state)
+        .expect("an assistant turn attributed to the active interaction is a valid state");
+    let effects = authorize_row(&mut responding, "merged-result-reply", 0).expect("typed deferral");
+    assert!(
+        deferred(&effects, "merged-result-reply"),
+        "no quiet replay during an in-flight response"
+    );
+    let effects = authorize_row(&mut authority, "merged-result-reply", 0)
+        .expect("the same row is admitted in the user phase");
+    assert!(authorized(&effects, "merged-result-reply"));
+}
+
 /// A voiced row and a quiet reassertion of live speech still wait for the
 /// provider turn boundary; only replayed runtime work output is admitted
 /// mid-turn.

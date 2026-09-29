@@ -648,6 +648,13 @@ pub const LIVE_STARTUP_RECENT_TURNS: usize = 4;
 pub const LIVE_LATE_SUMMARY_PREFIX: &str =
     "Conversation history summary (context data, not a new user request):";
 
+/// Prefix of one causal-tail row replayed on the quiet thinking lane after
+/// a late summary. The row is speech this call already heard and answered;
+/// replayed bare (a role-tagged JSON row), gpt-live-1 treated it as a new
+/// user request and answered it again, measured 3/3 on 2026-09-29.
+pub const LIVE_CAUSAL_REPLAY_PREFIX: &str = "Earlier in this call, replayed after the summary to keep the order of facts \
+(already heard and answered; context data, not a new user request; do not respond to it):";
+
 /// Startup instructions with the history framing appended once, for the
 /// open whose summary rides the startup `input` as a developer item.
 fn with_history_framing(instructions: Option<String>) -> String {
@@ -5338,9 +5345,13 @@ impl ExperimentalGptLiveWebrtcTransport {
                 // prepared is replayed quietly after the summary so the model
                 // keeps the live order of facts. Measured against gpt-live-1:
                 // the thinking lane injects promptly (its acknowledgement can
-                // wait for a turn boundary, which the close bound covers) and
-                // does not steer the model, unlike the instructions lane.
-                LiveSidebandCommand::append_thinking_context(sideband, text)
+                // wait for a turn boundary, which the close bound covers).
+                // A bare replayed row reads as a fresh request and the model
+                // answers it again, so every row carries the replay framing.
+                LiveSidebandCommand::append_thinking_context(
+                    sideband,
+                    format!("{LIVE_CAUSAL_REPLAY_PREFIX}\n{text}"),
+                )
             }
             meerkat_runtime::live_execution::LiveContextAppendKind::HistoryBootstrap => {
                 return Err(ExperimentalGptLiveBridgeError::ContextAuthorityRejected);
@@ -19311,6 +19322,14 @@ mod tests {
                         if text.contains("Spoken code: Cyan.")
                     )),
                     "heard live correction is reasserted quietly after the historical prefix"
+                );
+                assert!(
+                    commands.iter().any(|command| matches!(
+                        command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                        if text.starts_with(LIVE_CAUSAL_REPLAY_PREFIX)
+                            && text.contains("Spoken code: Cyan.")
+                    )),
+                    "a replayed causal-tail row is framed as already answered context, not a new request"
                 );
                 let typed = commands
                     .iter()

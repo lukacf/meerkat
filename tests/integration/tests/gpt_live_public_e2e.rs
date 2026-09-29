@@ -638,6 +638,10 @@ impl PublicLiveHarness {
         }
         let (shared, exact) = self.shared()?;
         let started = Instant::now();
+        // The 5 s ceiling is this harness's latency expectation, tighter
+        // than the product's own confirmation bound (the owner retires an
+        // unconfirmed transport locally at LIVE_CLOSE_CONFIRMATION_BOUND).
+        // Crossing it names the step instead of surfacing a bare `Elapsed`.
         let result = timeout(
             Duration::from_secs(5),
             shared.member_host.close_experimental_live_active_channel(
@@ -646,7 +650,14 @@ impl PublicLiveHarness {
                 &exact.activation_receipt,
             ),
         )
-        .await??;
+        .await
+        .map_err(|_| {
+            format!(
+                "exact live close exceeded the 5000 ms harness ceiling (product bound {} ms): the provider did not confirm closure of channel {}",
+                meerkat::experimental_gpt_live::LIVE_CLOSE_CONFIRMATION_BOUND.as_millis(),
+                exact.id.as_str()
+            )
+        })??;
         assert_eq!(result, LiveCloseStatus::Closed);
         println!(
             "GPT_LIVE_PUBLIC_EXACT_CLOSE elapsed_ms={} ceiling_ms=5000",
@@ -6770,9 +6781,13 @@ async fn run_s105_fork_and_merge_parallel(
                 "no second file holds twice number.txt before the correction: number={number:?} others={others:?}"
             ));
         }
-        // Each delegation's WorkGraph item title equals the arrival-anchored
-        // user final (the executor input equals the transcript).
-        let finals = live.peer.energy().await?.input_finals;
+        // Each delegation's WorkGraph item title equals its delegation
+        // window's user transcript: every user delta since the previous
+        // `session.delegation.created`, regardless of assistant output in
+        // between (the S100 title rule). The provider may close a window
+        // over two finals when the assistant answered the first one, so the
+        // delegation-closed final alone is not the executor input.
+        let delegation_inputs = live.peer.energy().await?.delegation_inputs;
         let service = live
             .mobs
             .workgraph_service_for_mob(&meerkat_mob::MobId::from(live.mob_id.as_str()))?
@@ -6784,22 +6799,21 @@ async fn run_s105_fork_and_merge_parallel(
             })
             .await?;
         let titles: Vec<String> = items.iter().map(|item| normalize_words(&item.title)).collect();
-        let delegated_finals: Vec<String> = finals
+        let delegated_windows: Vec<String> = delegation_inputs
             .iter()
-            .filter(|f| f.closed_by.as_deref() == Some("delegation"))
-            .map(|f| normalize_words(&f.text))
+            .map(|input| normalize_words(&input.text))
             .collect();
-        println!("GPT_LIVE_S105_INPUTS delegated_finals={delegated_finals:?} workgraph_titles={titles:?}");
-        for final_text in &delegated_finals {
-            if !titles.iter().any(|title| title == final_text) {
+        println!("GPT_LIVE_S105_INPUTS delegated_windows={delegated_windows:?} workgraph_titles={titles:?}");
+        for window in &delegated_windows {
+            if !titles.iter().any(|title| title == window) {
                 deterministic_failures.push(format!(
-                    "no WorkGraph item title equals the user's final transcript {final_text:?}; titles: {titles:?}"
+                    "no WorkGraph item title equals the delegation window transcript {window:?}; titles: {titles:?}"
                 ));
             }
         }
-        if delegated_finals.len() < 2 {
+        if delegated_windows.len() < 2 {
             deterministic_failures.push(format!(
-                "expected two delegation-closed user finals, got {delegated_finals:?}"
+                "expected two client delegation windows, got {delegated_windows:?}"
             ));
         }
         // Both forks retired after their delegations closed.

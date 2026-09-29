@@ -575,9 +575,28 @@ impl SessionEventLine {
     }
 }
 
+/// Tail of a session's durable event stream: the newest envelope sequence
+/// the session published durably, possibly before a restart. A new sequence
+/// space for such a session starts above it, so sequences stay monotonic
+/// against the durable log and a restarted host keeps counting up.
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[async_trait]
+pub(crate) trait SessionEventTailSource: Send + Sync {
+    async fn durable_stream_tail(&self, id: &SessionId) -> Option<u64>;
+}
+
+struct RetainedSessionEvent {
+    envelope: Arc<EventEnvelope<AgentEvent>>,
+    bytes: usize,
+    position: u64,
+}
+
 /// Bounded replay window of one actor incarnation.
 struct SessionEventReplayWindow {
-    retained: std::collections::VecDeque<(Arc<EventEnvelope<AgentEvent>>, usize)>,
+    /// Retained envelopes with their encoded size and the sequence position
+    /// they stand for: an envelope's own sequence, or, for the typed gap
+    /// marker of a replaced incarnation's late event, that event's sequence.
+    retained: std::collections::VecDeque<RetainedSessionEvent>,
     /// Encoded bytes of `retained`.
     bytes: usize,
     /// Sequence of the newest envelope no longer retained: the newest evicted
@@ -667,7 +686,7 @@ impl SessionEventJournal {
             (self.raw_session_event_tx.receiver_count() > 0).then(|| envelope.as_ref().clone());
         let seq = envelope.seq;
         self.line.advance_to(seq);
-        self.retain_and_send(envelope, bytes);
+        self.retain_and_send(envelope, bytes, seq);
         if let Some(raw_envelope) = raw_envelope {
             let _ = self.raw_session_event_tx.send(raw_envelope);
         }
@@ -681,18 +700,27 @@ impl SessionEventJournal {
         }
     }
 
-    fn retain_and_send(&self, envelope: Arc<EventEnvelope<AgentEvent>>, bytes: usize) {
+    fn retain_and_send(
+        &self,
+        envelope: Arc<EventEnvelope<AgentEvent>>,
+        bytes: usize,
+        position: u64,
+    ) {
         let mut replay = self.lock_replay();
-        replay.retained.push_back((Arc::clone(&envelope), bytes));
+        replay.retained.push_back(RetainedSessionEvent {
+            envelope: Arc::clone(&envelope),
+            bytes,
+            position,
+        });
         replay.bytes = replay.bytes.saturating_add(bytes);
         while replay.retained.len() > self.limits.max_envelopes
             || replay.bytes > self.limits.max_bytes
         {
-            let Some((evicted, evicted_bytes)) = replay.retained.pop_front() else {
+            let Some(evicted) = replay.retained.pop_front() else {
                 break;
             };
-            replay.bytes = replay.bytes.saturating_sub(evicted_bytes);
-            replay.floor_seq = replay.floor_seq.max(evicted.seq);
+            replay.bytes = replay.bytes.saturating_sub(evicted.bytes);
+            replay.floor_seq = replay.floor_seq.max(evicted.position);
             replay.evicted = replay.evicted.saturating_add(1);
         }
         let _ = self.session_event_tx.send(envelope);
@@ -705,7 +733,7 @@ impl SessionEventJournal {
         marker.event_id = self.line.epoch.marker_event_id(seq, 1);
         let marker = Arc::new(marker);
         let bytes = meerkat_core::comms::encoded_envelope_len(marker.as_ref());
-        self.retain_and_send(marker, bytes);
+        self.retain_and_send(marker, bytes, seq);
     }
 
     fn subscribe_raw(&self) -> tokio::sync::broadcast::Receiver<EventEnvelope<AgentEvent>> {
@@ -750,7 +778,7 @@ impl SessionEventJournal {
                     replay
                         .retained
                         .iter()
-                        .map(|(envelope, _)| Arc::clone(envelope))
+                        .map(|retained| Arc::clone(&retained.envelope))
                         .collect::<Vec<_>>(),
                 ),
                 Some(Some(after)) => {
@@ -766,18 +794,23 @@ impl SessionEventJournal {
                     } else {
                         0
                     };
+                    // Resume right after the last retained entry whose
+                    // position is at or below the cursor, so a typed marker
+                    // that followed it is replayed, not stepped over, while
+                    // a marker standing for a sequence the cursor already
+                    // covers is not.
                     let first = replay
                         .retained
                         .iter()
-                        .position(|(envelope, _)| envelope.seq > after)
-                        .unwrap_or(replay.retained.len());
+                        .rposition(|retained| retained.position != 0 && retained.position <= after)
+                        .map_or(0, |last_seen| last_seen + 1);
                     (
                         dropped,
                         replay
                             .retained
                             .iter()
                             .skip(first)
-                            .map(|(envelope, _)| Arc::clone(envelope))
+                            .map(|retained| Arc::clone(&retained.envelope))
                             .collect::<Vec<_>>(),
                     )
                 }
@@ -1236,7 +1269,77 @@ mod session_event_stream_tests {
             vec![own_after],
             "the predecessor's sequence is inside the shared tail, not ahead of it"
         );
+
+        // Resuming right after the successor's own event replays the marker
+        // that followed it: window [own 2, marker(pred 3), own 4], After(2).
+        let mut from_own = successor
+            .subscribe(after(&successor, own))
+            .map_err(|error| error.to_string())?;
+        let marker = from_own.next().await.ok_or("the marker after the cursor")?;
+        assert_eq!(
+            lagged_by(&marker),
+            Some(1),
+            "the marker is not stepped over"
+        );
+        assert_eq!(next_seqs(&mut from_own, 1).await?, vec![own_after]);
         Ok(())
+    }
+
+    /// Exact terminal batches plan against the shared allocation and claim
+    /// the planned range only if nothing was allocated meanwhile; under
+    /// contention with other allocations every sequence is still unique and
+    /// every batch contiguous.
+    #[test]
+    fn terminal_batches_under_allocation_contention_stay_unique_and_contiguous() {
+        const THREADS: usize = 4;
+        const ROUNDS: usize = 200;
+        let line = Arc::new(SessionEventLine::new());
+        let workers: Vec<_> = (0..THREADS)
+            .map(|worker| {
+                let line = Arc::clone(&line);
+                std::thread::spawn(move || {
+                    let mut journal = RuntimeInteractionTerminalJournal::default();
+                    let mut seqs = Vec::new();
+                    for round in 0..ROUNDS {
+                        if (round + worker) % 2 == 0 {
+                            seqs.push(vec![line.allocate()]);
+                        } else {
+                            let batch = (0..3)
+                                .map(|_| AgentEvent::InteractionComplete {
+                                    interaction_id: meerkat_core::InteractionId::new(),
+                                    result: "done".to_owned(),
+                                    structured_output: None,
+                                })
+                                .collect();
+                            let (_, envelopes) = journal
+                                .append_exact_batch(&line, batch)
+                                .map_err(|error| error.to_string())?;
+                            seqs.push(envelopes.iter().map(|envelope| envelope.seq).collect());
+                        }
+                    }
+                    Ok::<_, String>(seqs)
+                })
+            })
+            .collect();
+        let mut all = Vec::new();
+        for worker in workers {
+            let batches = worker
+                .join()
+                .unwrap_or_else(|_| Err("worker panicked".to_string()))
+                .unwrap_or_else(|error| panic!("{error}"));
+            for batch in batches {
+                assert!(
+                    batch.windows(2).all(|pair| pair[1] == pair[0] + 1),
+                    "a terminal batch is contiguous: {batch:?}"
+                );
+                all.extend(batch);
+            }
+        }
+        let total = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), total, "no sequence is allocated twice");
+        assert_eq!(line.allocated(), u64::try_from(total).unwrap_or(u64::MAX));
     }
 
     /// Replay and live delivery never overlap or leave a gap, whenever a
@@ -3233,6 +3336,10 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     session_event_lines: std::sync::Mutex<HashMap<SessionId, Arc<SessionEventLine>>>,
     /// Bounds of each actor incarnation's replay window.
     session_event_replay_limits: std::sync::RwLock<meerkat_core::comms::SessionEventReplayLimits>,
+    /// Durable stream tail a new sequence space starts above (installed by
+    /// the persistent service when it projects events durably).
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    session_event_tail_source: std::sync::RwLock<Option<Arc<dyn SessionEventTailSource>>>,
     builder: B,
     /// Single typed owner of session materialization status, staged-capacity
     /// custody, and the global active-capacity admission seam.
@@ -3480,15 +3587,53 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     }
 
     /// The session's event sequence space, shared with every actor
-    /// incarnation of the session in this service.
-    fn session_event_line(&self, id: &SessionId) -> Arc<SessionEventLine> {
-        Arc::clone(
+    /// incarnation of the session in this service. A new space starts above
+    /// the session's durable stream tail when one is known.
+    async fn session_event_line(&self, id: &SessionId) -> Arc<SessionEventLine> {
+        if let Some(line) = self
+            .session_event_lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
+            return Arc::clone(line);
+        }
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        let durable_tail = {
+            let source = self
+                .session_event_tail_source
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            match source {
+                Some(source) => source.durable_stream_tail(id).await,
+                None => None,
+            }
+        };
+        let line = Arc::clone(
             self.session_event_lines
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .entry(id.clone())
                 .or_insert_with(|| Arc::new(SessionEventLine::new())),
-        )
+        );
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        if let Some(tail) = durable_tail {
+            line.advance_to(tail);
+        }
+        line
+    }
+
+    /// Start new sequence spaces above the session's durable stream tail.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) fn install_session_event_tail_source(
+        &self,
+        source: Arc<dyn SessionEventTailSource>,
+    ) {
+        *self
+            .session_event_tail_source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
     }
 
     /// Bound the replay window each subsequently created actor incarnation
@@ -3521,6 +3666,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             session_event_replay_limits: std::sync::RwLock::new(
                 meerkat_core::comms::SessionEventReplayLimits::default(),
             ),
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            session_event_tail_source: std::sync::RwLock::new(None),
             builder,
             staged_registry: Arc::new(StagedSessionRegistry::bounded(max_sessions)),
             session_registered: tokio::sync::Notify::new(),
@@ -6334,7 +6481,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let (llm_identity_tx, llm_identity_rx) = watch::channel(llm_identity);
         let event_journal = SessionEventJournal::install(
             session_id.clone(),
-            self.session_event_line(&session_id),
+            self.session_event_line(&session_id).await,
             self.session_event_replay_limits(),
         );
         #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -7345,7 +7492,13 @@ async fn publish_interaction_terminal_batch(
 
     // Reserve the batch's sequences in the shared space; the store assigns
     // canonical sequences above the floor (possibly above the reservation,
-    // when its durable tail is ahead), which are then recorded.
+    // when its durable tail is ahead), which are then recorded. Sequences a
+    // failed append or a store assignment above the reservation leaves
+    // unused are numbering gaps with no events behind them: nothing was
+    // published under them, so no gap marker is published (a marker would
+    // claim dropped events that never existed). Seeding new spaces from the
+    // durable stream tail keeps the store's assignment inside the
+    // reservation in the ordinary case.
     let stream_seq_floor = next_seq.reserve(u64::try_from(terminals.len()).unwrap_or(u64::MAX));
     let appends = event_store
         .append_interaction_terminals_exact_batch(session_id, stream_seq_floor, &terminals)
@@ -9486,6 +9639,44 @@ mod runtime_turn_metadata_tests {
                 Arc::clone(handle) as Arc<dyn meerkat_core::handles::SessionContextHandle>
             })
         }
+    }
+
+    /// A session that already published durably (before a restart) starts its
+    /// new sequence space above the durable stream tail, so its sequences stay
+    /// monotonic against the durable log.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_new_sequence_space_starts_above_the_durable_stream_tail() {
+        struct Tail(u64);
+        #[async_trait]
+        impl SessionEventTailSource for Tail {
+            async fn durable_stream_tail(&self, _id: &SessionId) -> Option<u64> {
+                Some(self.0)
+            }
+        }
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references: Arc::new(Mutex::new(Vec::new())),
+                observed_context_texts: Arc::new(Mutex::new(Vec::new())),
+                run_context_counts: Arc::new(Mutex::new(Vec::new())),
+                fail_flow_overlay_set: false,
+                session_context_handle: None,
+            },
+            2,
+        );
+        service.install_session_event_tail_source(Arc::new(Tail(41)));
+        let session = SessionId::new();
+        let line = service.session_event_line(&session).await;
+        assert_eq!(
+            line.allocate(),
+            42,
+            "the space continues above the durable tail"
+        );
+        let same = service.session_event_line(&session).await;
+        assert!(
+            Arc::ptr_eq(&line, &same),
+            "one space per session in the service"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

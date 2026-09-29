@@ -89,7 +89,14 @@ enum FanOutOrigin {
 /// that stops after its idle grace parks the window, and the next pump of the
 /// same residency adopts it, so a reconnecting subscriber's cursor stays
 /// valid. A new residency starts a new window in a new sequence space
-/// ([`meerkat_core::comms::SessionEventEpoch`]).
+/// ([`meerkat_core::comms::SessionEventEpoch`]). The residency is the full
+/// [`BridgeMemberIncarnation`]: a host rebinding (a replacement host, or a
+/// host that re-binds after a restart) promotes `binding_generation`
+/// (`stop_exact_pump_and_join` requires it to grow), so its events land in a
+/// new space. A host that restarts without rebinding keeps the residency;
+/// its persistent member sessions continue their envelope sequences above
+/// their durable event log's tail, so the window's sequences stay monotonic.
+/// The window uses the default limits (1024 envelopes, 4 MiB).
 ///
 /// It is updated under the manager state lock together with the fan-out to
 /// taps, and replaying taps are opened under the same lock, so a replayed tap
@@ -198,13 +205,16 @@ impl TapReplayWindow {
                 } else {
                     0
                 };
+                // Resume right after the last retained row at or below the
+                // cursor, so a typed marker that followed it is replayed,
+                // not stepped over.
                 let first = self
                     .retained
                     .iter()
-                    .position(|(origin, event, _)| {
-                        matches!(origin, FanOutOrigin::Row { .. }) && event.envelope.seq > after
+                    .rposition(|(origin, event, _)| {
+                        matches!(origin, FanOutOrigin::Row { .. }) && event.envelope.seq <= after
                     })
-                    .unwrap_or(self.retained.len());
+                    .map_or(0, |last_seen| last_seen + 1);
                 (dropped, first)
             }
             _ => return Err(SessionEventCursorRejection::ReplayUnsupported),
@@ -232,13 +242,13 @@ pub(crate) struct MemberEventTap {
     /// Retained events after the cursor, in order, before any live event.
     pub(crate) replay: Vec<Arc<AttributedEvent>>,
     /// Live events after the replayed ones.
-    pub(crate) live: mpsc::Receiver<AttributedEvent>,
+    pub(crate) live: mpsc::Receiver<Arc<AttributedEvent>>,
 }
 
 impl MemberEventTap {
     fn live_only(
         epoch: Option<meerkat_core::comms::SessionEventEpoch>,
-        live: mpsc::Receiver<AttributedEvent>,
+        live: mpsc::Receiver<Arc<AttributedEvent>>,
     ) -> Self {
         Self {
             epoch,
@@ -773,7 +783,7 @@ impl RemoteCompletionContext {
 pub(crate) struct PreparedRemoteCompletionPump {
     manager: Arc<MemberEventPumpManager>,
     material: MemberPumpMaterial,
-    tap: mpsc::Receiver<AttributedEvent>,
+    tap: mpsc::Receiver<Arc<AttributedEvent>>,
 }
 
 #[cfg(test)]
@@ -1085,7 +1095,7 @@ struct PumpEntry {
     runtime_id: AgentRuntimeId,
     peer: meerkat_core::comms::TrustedPeerDescriptor,
     /// Live event taps; closed receivers are pruned on send.
-    taps: Vec<mpsc::Sender<AttributedEvent>>,
+    taps: Vec<mpsc::Sender<Arc<AttributedEvent>>>,
     /// Bounded replay of what this residency fanned out; inherited by a
     /// same-residency replacement together with the taps.
     replay: TapReplayWindow,
@@ -1454,7 +1464,7 @@ impl MemberEventPumpManager {
     fn prepare_pump_replacement<'a>(
         &'a self,
         material: &'a MemberPumpMaterial,
-        tap: &mut Option<mpsc::Sender<AttributedEvent>>,
+        tap: &mut Option<mpsc::Sender<Arc<AttributedEvent>>>,
     ) -> Option<PumpReplacement<'a>> {
         let mut state = self
             .state
@@ -1486,9 +1496,9 @@ impl MemberEventPumpManager {
     fn adopt_pump_installed_while_barrier_released(
         &self,
         material: &MemberPumpMaterial,
-        tap: Option<mpsc::Sender<AttributedEvent>>,
+        tap: Option<mpsc::Sender<Arc<AttributedEvent>>>,
         obligation_keepalive: bool,
-    ) -> Result<(), Option<mpsc::Sender<AttributedEvent>>> {
+    ) -> Result<(), Option<mpsc::Sender<Arc<AttributedEvent>>>> {
         let mut state = self
             .state
             .lock()
@@ -1838,7 +1848,7 @@ impl MemberEventPumpManager {
     pub(crate) fn subscribe_tap(
         &self,
         identity: &AgentIdentity,
-    ) -> Option<mpsc::Receiver<AttributedEvent>> {
+    ) -> Option<mpsc::Receiver<Arc<AttributedEvent>>> {
         let mut state = self
             .state
             .lock()
@@ -1962,7 +1972,7 @@ impl MemberEventPumpManager {
     pub(crate) async fn ensure_pump_with_tap(
         self: &Arc<Self>,
         material: MemberPumpMaterial,
-    ) -> mpsc::Receiver<AttributedEvent> {
+    ) -> mpsc::Receiver<Arc<AttributedEvent>> {
         let (tx, rx) = mpsc::channel(TAP_CAPACITY);
         let mut transition = self.pump_transition.lock().await;
         self.reap_finished_pump_tasks();
@@ -2104,15 +2114,17 @@ impl MemberEventPumpManager {
     }
 
     /// Stop one member's pump (retire/release/destroy realization) and
-    /// delete its durable cursor.
+    /// delete its durable cursor and its replay window: the member is gone,
+    /// so nothing may adopt the window again.
     pub(crate) async fn stop_pump(&self, identity: &AgentIdentity) {
         let _transition = self.pump_transition.lock().await;
         let entry = {
-            self.state
+            let mut state = self
+                .state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pumps
-                .remove(identity)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.parked_windows.remove(identity);
+            state.pumps.remove(identity)
         };
         if let Some(entry) = entry {
             entry.cancel.cancel();
@@ -2301,7 +2313,7 @@ impl MemberEventPumpManager {
         }
         entry
             .taps
-            .retain(|tap| match tap.try_send(event.as_ref().clone()) {
+            .retain(|tap| match tap.try_send(Arc::clone(&event)) {
                 Ok(()) => true,
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     tracing::warn!(
@@ -3432,6 +3444,19 @@ mod tap_replay_window_tests {
                 current: window.epoch
             }
         );
+    }
+
+    /// Resuming right after a row replays a typed marker that followed it:
+    /// window [row 2, marker, row 4], After(2).
+    #[test]
+    fn a_marker_right_after_the_cursor_is_replayed_not_stepped_over() {
+        let mut window = TapReplayWindow::default();
+        record(&mut window, FanOutOrigin::Row { durable_seq: 2 }, &row(2));
+        record(&mut window, FanOutOrigin::Marker, &marker());
+        record(&mut window, FanOutOrigin::Row { durable_seq: 4 }, &row(4));
+        let replay = window.replay_from(after(&window, 2)).unwrap();
+        assert_eq!(replay.dropped, 0);
+        assert_eq!(seqs(&replay), vec![0, 4], "the marker is replayed");
     }
 
     #[test]
@@ -4889,6 +4914,145 @@ mod tests {
             Ok(Err(_)) => {}
             other => panic!("stop_pump must close the registered waiter promptly, got {other:?}"),
         }
+    }
+
+    /// A pump that stops after its idle grace parks its replay window; the
+    /// next pump of the same residency adopts it, so a reconnecting cursor
+    /// replays what the first pump delivered. A pump stop for the member's
+    /// retirement drops the window, and the next pump starts a new space.
+    #[tokio::test]
+    async fn a_restarted_pump_adopts_the_parked_window_and_a_stop_drops_it() {
+        let authority = crate::store::SupervisorAuthorityRecord::generate(
+            meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_current_protocol_version(
+            ),
+        );
+        let mob_id = crate::MobId::from("pump-parked-window-test");
+        let bridge = Arc::new(
+            super::super::MobSupervisorBridge::new(&mob_id, authority, None)
+                .await
+                .expect("supervisor bridge builds"),
+        );
+        let store: Arc<dyn MobRuntimeMetadataStore> =
+            Arc::new(crate::store::InMemoryMobRuntimeMetadataStore::new());
+        let manager = Arc::new(MemberEventPumpManager::new(
+            mob_id,
+            bridge,
+            store,
+            accepting_host_runtime_observer(),
+        ));
+        let identity = AgentIdentity::from("w-parked");
+        let runtime_id = AgentRuntimeId::initial(identity.clone());
+        let expected_member = test_member(&identity, &runtime_id, FenceToken::new(1));
+        let material = MemberPumpMaterial {
+            agent_identity: identity.clone(),
+            host_id: TEST_HOST_ID.to_string(),
+            expected_member: expected_member.clone(),
+            runtime_id: runtime_id.clone(),
+            fence_token: FenceToken::new(1),
+            role: ProfileName::from("worker"),
+            peer: meerkat_core::comms::TrustedPeerDescriptor {
+                peer_id: meerkat_core::comms::PeerId::new(),
+                name: meerkat_core::comms::PeerName::new("w-parked").expect("valid peer name"),
+                address: meerkat_core::comms::PeerAddress::new(
+                    meerkat_core::comms::PeerTransport::Inproc,
+                    "w-parked",
+                ),
+                pubkey: [0u8; 32],
+            },
+        };
+        let row = |seq: u64| AttributedEvent {
+            source: runtime_id.clone(),
+            source_fence_token: FenceToken::new(1),
+            role: ProfileName::from("worker"),
+            envelope: EventEnvelope::new(
+                identity.to_string(),
+                seq,
+                None,
+                AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                },
+            ),
+        };
+        let incarnation = |manager: &MemberEventPumpManager| {
+            manager
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pumps
+                .get(&identity)
+                .map(|entry| entry.incarnation)
+                .expect("a pump is installed")
+        };
+
+        let first = manager
+            .ensure_pump_with_tap_from(
+                material.clone(),
+                meerkat_core::comms::SessionEventCursor::Live,
+            )
+            .await
+            .expect("live tap");
+        let epoch = first.epoch.expect("the pump's window names its space");
+        let first_incarnation = incarnation(&manager);
+        manager.fan_out(
+            &identity,
+            &expected_member,
+            first_incarnation,
+            FanOutOrigin::Row { durable_seq: 1 },
+            row(1),
+        );
+        drop(first);
+        // The pump exits after its idle grace: its entry is removed and the
+        // window parked.
+        manager.remove_entry(&identity, first_incarnation);
+        let parked = manager
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .parked_windows
+            .contains_key(&identity);
+        assert!(parked, "the stopped pump parked its window");
+
+        let reconnect = manager
+            .ensure_pump_with_tap_from(
+                material.clone(),
+                meerkat_core::comms::SessionEventCursor::After { epoch, seq: 0 },
+            )
+            .await
+            .expect("the reconnecting cursor stays valid");
+        assert_eq!(reconnect.epoch, Some(epoch), "the same sequence space");
+        assert_eq!(
+            reconnect
+                .replay
+                .iter()
+                .map(|event| event.envelope.seq)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "the first pump's delivery is replayed"
+        );
+        drop(reconnect);
+
+        manager.stop_pump(&identity).await;
+        let state = manager
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(state.pumps.is_empty());
+        assert!(
+            state.parked_windows.is_empty(),
+            "a retired member's window is dropped, never adopted again"
+        );
+        drop(state);
+        let after_stop = manager
+            .ensure_pump_with_tap_from(material, meerkat_core::comms::SessionEventCursor::Live)
+            .await
+            .expect("live tap");
+        assert_ne!(
+            after_stop.epoch,
+            Some(epoch),
+            "a fresh window starts a new space"
+        );
+        manager.stop_pump(&identity).await;
     }
 
     #[tokio::test]

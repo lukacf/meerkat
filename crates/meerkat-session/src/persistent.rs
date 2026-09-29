@@ -8360,6 +8360,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         event_store: Arc<dyn EventStore>,
         projector: Arc<SessionProjector>,
     ) -> Self {
+        // Sequences of a session revived after a restart continue above what
+        // it already published durably.
+        self.inner
+            .install_session_event_tail_source(Arc::new(EventStoreStreamTail(Arc::clone(
+                &event_store,
+            ))));
         self.event_store = Some(event_store);
         self.projector = Some(projector);
         self
@@ -13128,6 +13134,36 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         _authority: MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
         self.inner.cancel_after_boundary(id).await
+    }
+}
+
+/// The newest envelope sequence a session's durable event log recorded (the
+/// maximum `stream_seq` among its last rows).
+struct EventStoreStreamTail(Arc<dyn EventStore>);
+
+/// Rows read from the durable log's end to find its stream tail. Rows are
+/// appended in publication order, which can differ slightly from sequence
+/// order only while a replaced actor incarnation still publishes.
+const EVENT_STREAM_TAIL_ROWS: u64 = 16;
+
+#[async_trait]
+impl crate::ephemeral::SessionEventTailSource for EventStoreStreamTail {
+    async fn durable_stream_tail(&self, id: &SessionId) -> Option<u64> {
+        let last = self.0.last_seq(id).await.ok()?;
+        if last == 0 {
+            return None;
+        }
+        let from = last.saturating_sub(EVENT_STREAM_TAIL_ROWS - 1).max(1);
+        let rows = self
+            .0
+            .read_from_bounded(
+                id,
+                from,
+                usize::try_from(EVENT_STREAM_TAIL_ROWS).unwrap_or(16),
+            )
+            .await
+            .ok()?;
+        rows.iter().map(|row| row.stream_seq).max()
     }
 }
 

@@ -2060,6 +2060,16 @@ impl std::fmt::Display for SessionEventEpoch {
     }
 }
 
+/// Parses the [`std::fmt::Display`] form, so an epoch can round-trip through
+/// a textual cursor (for example an SSE event id).
+impl std::str::FromStr for SessionEventEpoch {
+    type Err = uuid::Error;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        uuid::Uuid::parse_str(text).map(Self)
+    }
+}
+
 /// Where a session event subscription starts.
 ///
 /// A replayed subscription is gap-free against live delivery: the retained
@@ -2163,8 +2173,9 @@ impl Default for SessionEventReplayLimits {
 }
 
 /// Encoded (JSON) size of an envelope, measured without allocating the
-/// encoding. An envelope that cannot be encoded counts as `usize::MAX`, so a
-/// byte-bounded window never retains it.
+/// encoding. An envelope that cannot be encoded (which a well-formed event
+/// never is) counts as its in-memory size, so it neither escapes the byte
+/// bound nor flushes a window of retained events.
 pub fn encoded_envelope_len<T: serde::Serialize>(
     envelope: &crate::event::EventEnvelope<T>,
 ) -> usize {
@@ -2181,7 +2192,7 @@ pub fn encoded_envelope_len<T: serde::Serialize>(
     let mut counter = Counter(0);
     match serde_json::to_writer(&mut counter, envelope) {
         Ok(()) => counter.0,
-        Err(_) => usize::MAX,
+        Err(_) => std::mem::size_of_val(envelope),
     }
 }
 

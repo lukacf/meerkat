@@ -311,9 +311,13 @@ them.
   materialized or restored member already began its first run still sees
   that run's `RunStarted`/`TurnStarted`. `actor` names the local member's
   exact actor incarnation. Placed members replay from their event pump's
-  window, bounded the same way, shared rather than copied, and kept across
-  pump restarts of the same residency, so a reconnecting subscriber's
-  cursor stays valid. A new residency starts a new sequence space.
+  window, bounded by the default limits (1024 envelopes, 4 MiB), shared
+  rather than copied, and kept across pump restarts of the same residency
+  (dropped when the member's pump stops for good), so a reconnecting
+  subscriber's cursor stays valid. A new residency (a host rebinding bumps
+  its binding generation) starts a new sequence space. A persistent session
+  with an event store starts a new sequence space above its durable event
+  log's tail, so its sequences keep counting up across a restart.
   `MobSessionService::subscribe_agent_session_events_from` is the
   forwarding seam, so session-service decorators must forward it.
 - Anthropic `thinking: {"type": "between_tools"}`

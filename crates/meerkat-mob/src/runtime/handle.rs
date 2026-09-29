@@ -8490,7 +8490,7 @@ impl MobHandle {
     pub(super) async fn external_member_event_tap(
         &self,
         agent_identity: &AgentIdentity,
-    ) -> Result<tokio::sync::mpsc::Receiver<crate::event::AttributedEvent>, MobError> {
+    ) -> Result<tokio::sync::mpsc::Receiver<Arc<crate::event::AttributedEvent>>, MobError> {
         self.external_member_event_tap_from(agent_identity, SessionEventCursor::Live)
             .await
             .map(|tap| tap.live)
@@ -8546,7 +8546,7 @@ impl MobHandle {
         let live = futures::stream::unfold(live, |mut live| async move {
             live.recv()
                 .await
-                .map(|attributed| (attributed.envelope, live))
+                .map(|attributed| (Arc::unwrap_or_clone(attributed).envelope, live))
         });
         Ok(AgentEventSubscription::without_actor(
             epoch,

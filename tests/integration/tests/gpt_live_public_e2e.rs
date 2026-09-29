@@ -2926,26 +2926,31 @@ fn delegations_per_window(
 /// line pauses longer than the peer's 600 ms end hysteresis between lines,
 /// so one readout yields several bursts. A response is the peer's
 /// `response` index, which advances only when a new user utterance starts;
-/// a burst carrying the same index as the burst before it continues that
-/// response, and repetition inside one response is the peer's own
-/// `duplicate_readout` fault on the output transcript text, which every
-/// scenario already fails on. The prompt window opens at the previous
-/// burst's `last_active_ms`, the last audible window: the burst's
-/// `assistant_audio_end` entry is pushed only after the hysteresis, so an
-/// input final that closed inside it still follows the audio.
+/// a burst continues the previous burst's response when its index equals
+/// that burst's index at its start or at its end (a late user delta can
+/// advance the index while the assistant is still speaking). Repetition
+/// inside one response is the peer's own `duplicate_readout` fault on the
+/// output transcript text, which every scenario already fails on. The
+/// prompt window opens at the previous burst's `last_active_ms`, the last
+/// audible window: the burst's `assistant_audio_end` entry is pushed only
+/// after the hysteresis, so an input final that closed inside it still
+/// follows the audio.
 fn unprompted_assistant_response_starts(timeline: &[TimelineEntry], from_ms: u64) -> Vec<u64> {
     let mut unprompted = Vec::new();
-    let mut previous_response = None;
+    let mut previous_start_response = None;
+    let mut previous_end_response = None;
     let mut last_audible_ms = 0u64;
     for (index, entry) in timeline.iter().enumerate() {
         match entry.kind {
             TimelineKind::AssistantAudioEnd => {
                 last_audible_ms = entry.detail_u64("last_active_ms").unwrap_or(entry.t_ms);
+                previous_end_response = entry.detail_u64("response");
             }
             TimelineKind::AssistantAudioStart => {
                 let response = entry.detail_u64("response");
-                let continues = response.is_some() && response == previous_response;
-                previous_response = response;
+                let continues = response.is_some()
+                    && (response == previous_start_response || response == previous_end_response);
+                previous_start_response = response;
                 if continues || entry.t_ms < from_ms {
                     continue;
                 }
@@ -7765,6 +7770,34 @@ mod config_tests {
             (77678, "assistant_audio_start", json!({"response": 6})),
         ]);
         assert!(super::unprompted_assistant_response_starts(&entries, 69380).is_empty());
+    }
+
+    /// A local S103 run: the answer to the correction starts as response 1,
+    /// the late "Friday" delta advances the peer's index to 2 while the
+    /// assistant speaks, and the readout goes on line by line as response 2.
+    #[test]
+    fn s103_readout_continues_when_a_late_user_delta_advances_the_response() {
+        use serde_json::json;
+        let entries = timeline(&[
+            (53787, "fixture_start", json!({"id": 2})),
+            (60922, "input_final", json!({"index": 1})),
+            (61287, "assistant_audio_start", json!({"response": 1})),
+            (61299, "response_end", json!({"index": 1})),
+            (61301, "input_final", json!({"index": 2})),
+            (
+                66287,
+                "assistant_audio_end",
+                json!({"last_active_ms": 65687, "response": 2}),
+            ),
+            (66587, "assistant_audio_start", json!({"response": 2})),
+            (
+                67487,
+                "assistant_audio_end",
+                json!({"last_active_ms": 66887, "response": 2}),
+            ),
+            (67787, "assistant_audio_start", json!({"response": 2})),
+        ]);
+        assert!(super::unprompted_assistant_response_starts(&entries, 53787).is_empty());
     }
 
     #[test]

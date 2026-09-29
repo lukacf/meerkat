@@ -42,7 +42,7 @@ mark_path() {
       mark_all
       return
       ;;
-    xtask/rmat-baseline.toml|xtask/ownership-baseline.toml|crates/xtask/src/rmat_policy.rs|crates/xtask/src/seam_inventory.rs|crates/xtask/src/ownership_ledger.rs|crates/xtask/src/rmat_audit.rs|docs/internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md|docs/architecture/meerkat-dogma.md|docs/architecture/meerkat-dogma-commentary.md|docs/internal/dogma-audits/*)
+    crates/xtask/rmat-baseline.toml|crates/xtask/ownership-baseline.toml|crates/xtask/src/rmat_policy.rs|crates/xtask/src/seam_inventory.rs|crates/xtask/src/ownership_ledger.rs|crates/xtask/src/rmat_audit.rs|docs/internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md|docs/architecture/meerkat-dogma.md|docs/architecture/meerkat-dogma-commentary.md|docs/internal/dogma-audits/*)
       mark_all
       return
       ;;

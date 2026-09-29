@@ -59,6 +59,7 @@ const MACHINE_SPECS = [
     ),
     catalogPath: path.join(
       repoRoot,
+      "crates",
       "meerkat-machine-schema",
       "src",
       "catalog",
@@ -383,6 +384,7 @@ const MACHINE_SPECS = [
     ),
     catalogPath: path.join(
       repoRoot,
+      "crates",
       "meerkat-machine-schema",
       "src",
       "catalog",
@@ -647,6 +649,7 @@ const MACHINE_SPECS = [
 function canonicalMachineFns() {
   const catalogModPath = path.join(
     repoRoot,
+    "crates",
     "meerkat-machine-schema",
     "src",
     "catalog",

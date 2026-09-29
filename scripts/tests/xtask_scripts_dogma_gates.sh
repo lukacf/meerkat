@@ -36,7 +36,7 @@ fi
 # ── #227: Bazel CARGO_PKG_VERSION is gated and regenerated ───────────────────
 echo "#227 Bazel CARGO_PKG_VERSION is gated + regenerated:"
 if grep -Fq 'CARGO_PKG_VERSION' scripts/verify-version-parity.sh \
-  && grep -Fq 'crates/meerkat-machine-codegen/BUILD.bazel' scripts/verify-version-parity.sh; then
+  && grep -Fq -- '-name BUILD.bazel' scripts/verify-version-parity.sh; then
   ok "verify-version-parity.sh asserts BUILD.bazel CARGO_PKG_VERSION"
 else
   bad "verify-version-parity.sh does not assert BUILD.bazel CARGO_PKG_VERSION"
@@ -80,6 +80,13 @@ if scripts/machine-authority-changed -- docs/reference/machine-authority.mdx >/d
 else
   bad "machine-authority-changed did not flag machine-authority docs"
 fi
+for poster_input in scripts/machine-posters/generate-machine-posters.mjs docs/internal/machine-posters/mob_machine.html crates/xtask/src/machine_alphabet.rs; do
+  if scripts/machine-authority-changed -- "$poster_input" >/dev/null; then
+    ok "machine-authority-changed routes poster input $poster_input to the poster gate"
+  else
+    bad "machine-authority-changed ignored poster input $poster_input"
+  fi
+done
 for gate_owner in .github/workflows/ci.yml .github/workflows/cargo.yml Makefile scripts/machine-authority-changed scripts/tests/xtask_scripts_dogma_gates.sh crates/xtask/tests/ci_gate_requires_rmat.rs; do
   if scripts/machine-authority-changed -- "$gate_owner" >/dev/null; then
     ok "machine-authority-changed protects its gate owner $gate_owner"

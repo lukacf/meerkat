@@ -995,6 +995,26 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::RollbackRouteInstall,
         reason: MobMachineRuntimeInternalReason::RouteInstallObligationAuthority,
     },
+    // Placed-member external edges: the same Record / synchronous pre-unwire
+    // Authorize / Resolve / Rollback obligation quartet, driven only by the
+    // actor while realizing `ExternalRouteInstallRequested` over the host
+    // bridge (wire/unwire of a placed member, the route drains, recovery).
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordExternalRouteInstall,
+        reason: MobMachineRuntimeInternalReason::RouteInstallObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AuthorizeExternalRouteRemovalBeforeUnwire,
+        reason: MobMachineRuntimeInternalReason::RouteInstallObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveExternalRouteInstall,
+        reason: MobMachineRuntimeInternalReason::RouteInstallObligationAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RollbackExternalRouteInstall,
+        reason: MobMachineRuntimeInternalReason::RouteInstallObligationAuthority,
+    },
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::RecordRemoteTurnObligation,
         reason: MobMachineRuntimeInternalReason::RemoteTurnObligationAuthority,

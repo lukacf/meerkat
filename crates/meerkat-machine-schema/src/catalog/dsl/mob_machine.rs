@@ -23338,22 +23338,21 @@ impl Default for RouteInstallObligation {
 /// `pending_external_route_installs`; `Remove` values are ephemeral
 /// synchronous pre-unwire authority.
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct ExternalRouteObligation {
     pub edge: ExternalPeerEdge,
     pub host: HostId,
     pub kind: RouteObligationKind,
-}
-
-impl Default for ExternalRouteObligation {
-    fn default() -> Self {
-        Self {
-            edge: ExternalPeerEdge::default(),
-            host: HostId::default(),
-            kind: RouteObligationKind::default(),
-        }
-    }
 }
 
 /// Outstanding remote turn-directive outcome obligation (§18 O2).

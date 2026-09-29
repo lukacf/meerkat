@@ -210,7 +210,7 @@ async fn mob_custody_host_child() {
     }
     let client = Arc::new(ScriptedShellClient::new(tool_command(&root)));
     let service = build_service(&root, Arc::clone(&client)).await;
-    let storage = MobStorage::persistent(&root.join("mob.db")).expect("persistent mob storage");
+    let storage = MobStorage::persistent(root.join("mob.db")).expect("persistent mob storage");
     let mob_id = std::fs::read_to_string(root.join("mob-id")).expect("mob id");
     let handle = MobBuilder::new(mob_definition(mob_id.trim()), storage)
         .with_session_service(service)
@@ -285,7 +285,7 @@ async fn mob_member_interrupted_by_host_death_is_settled_not_replayed_on_resume(
     // Next host: resume the mob and give the revived worker a real turn.
     let client = Arc::new(ScriptedShellClient::new(tool_command(root)));
     let service = build_service(root, Arc::clone(&client)).await;
-    let storage = MobStorage::persistent(&root.join("mob.db")).expect("reopen mob storage");
+    let storage = MobStorage::persistent(root.join("mob.db")).expect("reopen mob storage");
     let handle = MobBuilder::for_resume(storage)
         .with_session_service(Arc::clone(&service) as Arc<dyn meerkat_mob::MobSessionService>)
         .with_default_llm_client(Arc::clone(&client) as Arc<dyn LlmClient>)

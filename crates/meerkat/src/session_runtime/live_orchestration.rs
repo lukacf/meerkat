@@ -445,6 +445,12 @@ pub enum LiveSeedProjectionError {
 pub struct RealtimeSessionOpenProjection {
     pub open_config: RealtimeSessionOpenConfig,
     pub seed_status: LiveSeedProjectionStatus,
+    /// Written and read only by the live orchestrator (`mod orchestrator`).
+    #[cfg(all(
+        feature = "session-store",
+        feature = "live",
+        not(target_arch = "wasm32")
+    ))]
     owner_session_id: SessionId,
     #[cfg(feature = "openai-live")]
     summary: Option<super::live_summary::LiveContextSummary>,

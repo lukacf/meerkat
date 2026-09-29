@@ -4809,10 +4809,14 @@ impl ForkChildRun {
             guard.disarm();
         }
         self.supervisor.abort();
+        // A join error is either the abort (cancelled) or the task failing to
+        // run to completion, which is a panic. Only `is_cancelled` exists on
+        // both tokio and wasm32's tokio_with_wasm, so the panic is the
+        // non-cancelled case.
         match (&mut self.supervisor).await {
             Ok(()) => ForkSupervisorExitForTest::AlreadySettled,
-            Err(error) if error.is_panic() => ForkSupervisorExitForTest::Panicked,
-            Err(_) => ForkSupervisorExitForTest::EndedBeforeOutcome,
+            Err(error) if error.is_cancelled() => ForkSupervisorExitForTest::EndedBeforeOutcome,
+            Err(_) => ForkSupervisorExitForTest::Panicked,
         }
     }
 

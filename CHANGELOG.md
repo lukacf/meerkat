@@ -458,6 +458,15 @@ them.
 
 ### Fixed
 
+- `make wasm-check` failed on the release branch: the `test-support` fork
+  supervisor hook called `JoinError::is_panic`, which wasm32's
+  `tokio_with_wasm` does not have (it now classifies a non-cancelled join
+  error as the typed `Panicked` outcome on both targets), and clippy flagged
+  a hand-written `Default` for `ExternalRouteObligation` in the MobMachine
+  DSL and state types (now derived). The facade's
+  `RealtimeSessionOpenProjection::owner_session_id` is gated on the live
+  orchestrator that alone writes and reads it, and the MobMachine poster is
+  regenerated for the external route obligation inputs.
 - `meerkat-runtime` built with default features, or with only one of `live`
   and `sqlite-store`, emitted 54 dead-code warnings (and so failed
   `clippy -D warnings` and the feature-matrix lanes): live-context mirror

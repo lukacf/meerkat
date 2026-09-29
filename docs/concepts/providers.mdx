@@ -310,6 +310,16 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
       "Solve this problem"
     ```
 
+    Thinking is typed per model: `{"type": "adaptive"}`,
+    `{"type": "enabled", "budget_tokens": N}`, or, on Claude Sonnet 5.5,
+    `{"type": "between_tools"}`, which turns off up-front thinking and is
+    accepted only at `high` effort or below. A thinking type or budget
+    (`thinking_budget_tokens`) the model does not accept, `top_k` on a model
+    without top-k support, and `between_tools` above `high` effort are refused
+    when the agent is built and again before each request, never sent to
+    Anthropic. A generic `temperature` is omitted for models that reject
+    sampling parameters.
+
     Anthropic also supports `top_k` and the prompt-cache policies `automatic`
     (the default on the Anthropic API, Vertex, and Foundry), `system_prefix`,
     `system_and_conversation`, and `disabled`, plus `cache_ttl` (`5m`, the

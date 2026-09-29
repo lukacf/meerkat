@@ -469,8 +469,10 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     Fable 5.1 and Opus 5.5):
     //     https://platform.claude.com/docs/en/build-with-claude/compaction
     //
-    // Meerkat never emits `{type: "disabled"}`, so adaptive-only thinking is
-    // the honest catalog shape. ASSUMED from the claude-opus-5-5 row:
+    // Thinking is `AnthropicAdaptiveOrBetweenTools`: adaptive (the default)
+    // or `between_tools`; `disabled` and `enabled` budgets are refused
+    // locally before the provider call. ASSUMED from the claude-opus-5-5
+    // row:
     //   - image_tool_results (vision and tool use are documented; image tool
     //     results are not called out separately)
     //   - supports_structured_output (the forced-tool-use migration points at
@@ -501,7 +503,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_temperature: false,
         supports_top_p: false,
         supports_top_k: false,
-        thinking: ThinkingSupport::AnthropicAdaptiveOnly,
+        thinking: ThinkingSupport::AnthropicAdaptiveOrBetweenTools,
         supports_reasoning: false,
         effort_levels: CLAUDE_5_OPUS_48_47_EFFORT,
         openai_responses_params: None,

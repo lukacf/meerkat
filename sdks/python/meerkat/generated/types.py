@@ -6586,7 +6586,10 @@ class WireAnthropicThinkingConfigEnabled(TypedDict, total=False):
     budget_tokens: Required[int]
     type: Required[Literal['enabled']]
 
-WireAnthropicThinkingConfig = WireAnthropicThinkingConfigAdaptive | WireAnthropicThinkingConfigEnabled
+class WireAnthropicThinkingConfigBetweenTools(TypedDict, total=False):
+    type: Required[Literal['between_tools']]
+
+WireAnthropicThinkingConfig = WireAnthropicThinkingConfigAdaptive | WireAnthropicThinkingConfigEnabled | WireAnthropicThinkingConfigBetweenTools
 
 # Mob RPC helper wire type for WireGeminiThinkingLevel.
 WireGeminiThinkingLevel = Literal['minimal', 'low', 'medium', 'high']

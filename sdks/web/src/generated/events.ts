@@ -104,6 +104,8 @@ export type AnthropicThinkingConfig = {
 } | {
   budget_tokens: number;
   type: "enabled";
+} | {
+  type: "between_tools";
 };
 
 export interface AssistantImageEvent {

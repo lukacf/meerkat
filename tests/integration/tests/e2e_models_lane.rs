@@ -350,6 +350,16 @@ async fn thinking_modes_per_capability() {
                 "adaptive",
                 anthropic_thinking(AnthropicThinkingConfig::Adaptive),
             )],
+            ThinkingSupport::AnthropicAdaptiveOrBetweenTools => vec![
+                (
+                    "adaptive",
+                    anthropic_thinking(AnthropicThinkingConfig::Adaptive),
+                ),
+                (
+                    "between_tools",
+                    anthropic_thinking(AnthropicThinkingConfig::BetweenTools),
+                ),
+            ],
             ThinkingSupport::AnthropicAdaptiveAndEnabled => vec![
                 (
                     "adaptive",

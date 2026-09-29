@@ -279,7 +279,10 @@ fn claude_sonnet_5_5_capability_row_matches_the_official_model_page() {
         Some(300_000),
         "Sonnet 5.5 is listed for the output-300k batch beta"
     );
-    assert_eq!(caps.thinking, ThinkingSupport::AnthropicAdaptiveOnly);
+    assert_eq!(
+        caps.thinking,
+        ThinkingSupport::AnthropicAdaptiveOrBetweenTools
+    );
     assert!(
         !caps.supports_temperature && !caps.supports_top_p && !caps.supports_top_k,
         "non-default sampling parameters return 400 on Sonnet 5.5"

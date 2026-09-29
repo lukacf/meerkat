@@ -64,6 +64,35 @@ use tokio::time::timeout;
 
 pub use meerkat_core::config::HookInProcessHandlerId as InProcessHookHandlerId;
 
+/// Observer told the leader pid of every command-hook process group right
+/// after spawn (the group id equals the leader pid).
+#[cfg(unix)]
+static COMMAND_HOOK_PROCESS_GROUP_OBSERVER: OnceLock<fn(i32)> = OnceLock::new();
+
+/// Install the process-wide observer of command-hook process groups.
+///
+/// Command hooks run in their own process group, and members a hook starts
+/// in the background can outlive the hook. A host that settles process
+/// groups left by an earlier incarnation of itself (durable shell process
+/// custody) installs an observer that registers each hook group as live, so
+/// such recovery never mistakes a running hook group for an earlier
+/// incarnation's tool. The first installation wins; returns whether this
+/// call installed `observer`.
+#[cfg(unix)]
+pub fn set_command_hook_process_group_observer(observer: fn(i32)) -> bool {
+    COMMAND_HOOK_PROCESS_GROUP_OBSERVER.set(observer).is_ok()
+}
+
+#[cfg(unix)]
+fn observe_command_hook_process_group(child: &tokio::process::Child) {
+    if let (Some(observer), Some(pid)) = (
+        COMMAND_HOOK_PROCESS_GROUP_OBSERVER.get(),
+        child.id().and_then(|pid| i32::try_from(pid).ok()),
+    ) {
+        observer(pid);
+    }
+}
+
 #[cfg(unix)]
 async fn terminate_child_process_group(child: &mut tokio::process::Child) {
     use nix::sys::signal::{Signal, killpg};
@@ -742,6 +771,8 @@ impl DefaultHookEngine {
                 hook_id: entry.id.clone(),
                 reason: format!("failed to spawn command hook: {err}"),
             })?;
+        #[cfg(unix)]
+        observe_command_hook_process_group(&child);
 
         let mut stdin = match child.stdin.take() {
             Some(stdin) => stdin,
@@ -1975,6 +2006,65 @@ mod tests {
             .expect_err("post-commit hook points must reject guardrail capability");
 
         assert!(matches!(err, HookEngineError::InvalidConfiguration(_)));
+    }
+
+    #[cfg(unix)]
+    static OBSERVED_HOOK_GROUP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+    #[cfg(unix)]
+    fn record_hook_group(pid: i32) {
+        OBSERVED_HOOK_GROUP.store(pid, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_hook_process_groups_are_reported_to_the_observer() {
+        assert!(set_command_hook_process_group_observer(record_hook_group));
+        let mut config = HooksConfig::default();
+        config.entries = vec![HookEntryConfig {
+            id: HookId::new("observed-command-hook"),
+            point: HookPoint::PreToolExecution,
+            runtime: HookAdapterConfig::from_kind_and_value(
+                HookRuntimeKind::Command,
+                Some(serde_json::json!({
+                    "command": "sh",
+                    "args": ["-c", "cat >/dev/null; printf '{}'"],
+                    "env": {}
+                })),
+            )
+            .unwrap_or_default(),
+            ..Default::default()
+        }];
+
+        let report = DefaultHookEngine::new(config)
+            .execute(
+                HookInvocation {
+                    point: HookPoint::PreToolExecution,
+                    session_id: SessionId::new(),
+                    turn_number: Some(1),
+                    prompt_input: None,
+                    error_report: None,
+                    error_class: None,
+                    llm_request: None,
+                    llm_response: None,
+                    tool_call: None,
+                    tool_result: None,
+                    observation: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(report.outcomes[0].failure_reason.is_none());
+        assert!(
+            OBSERVED_HOOK_GROUP.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the spawned hook group leader must be reported"
+        );
+        assert!(
+            !set_command_hook_process_group_observer(record_hook_group),
+            "the first installed observer wins"
+        );
     }
 
     #[tokio::test]

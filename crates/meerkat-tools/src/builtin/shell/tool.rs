@@ -207,11 +207,32 @@ impl ShellTool {
     }
 
     /// Execute a command synchronously and return the result
+    #[cfg_attr(not(test), allow(dead_code))]
     async fn execute_command(
         &self,
         command: &str,
         working_dir: Option<&Path>,
         timeout_secs: u64,
+    ) -> Result<ShellOutput, ShellError> {
+        self.execute_command_for_call(command, working_dir, timeout_secs, None)
+            .await
+    }
+
+    /// Execute a command synchronously for one provider tool call.
+    ///
+    /// When durable process custody is bound, the process is spawned behind a
+    /// spawn gate that is released only after its identity is durably
+    /// recorded, and the record is settled only after containment is proven.
+    async fn execute_command_for_call(
+        &self,
+        command: &str,
+        working_dir: Option<&Path>,
+        timeout_secs: u64,
+        #[cfg_attr(
+            not(any(target_os = "linux", target_os = "macos")),
+            allow(unused_variables)
+        )]
+        tool_call_id: Option<&str>,
     ) -> Result<ShellOutput, ShellError> {
         // Enforce concurrency limit via job manager
         let _guard = self.job_manager.acquire_sync_slot().await?;
@@ -220,9 +241,38 @@ impl ShellTool {
 
         let start = Instant::now();
 
+        // Durable custody: reserve before spawn, and gate the spawned process
+        // until its identity is recorded.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut custody = match self.job_manager.process_custody() {
+            Some(custody) => {
+                let reservation = custody
+                    .reserve(tool_call_id)
+                    .await
+                    .map_err(|error| ShellError::Io(std::io::Error::other(error)))?;
+                let gate = super::custody::SpawnGate::new(reservation.entry_id())
+                    .map_err(ShellError::Io)?;
+                Some((reservation, gate))
+            }
+            None => None,
+        };
+
         // Build the command
-        let mut cmd = Command::new(&shell_path);
-        cmd.arg("-c").arg(command);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut cmd = match custody.as_ref() {
+            Some((_, gate)) => gate.command(&shell_path, command).map_err(ShellError::Io)?,
+            None => {
+                let mut cmd = Command::new(&shell_path);
+                cmd.arg("-c").arg(command);
+                cmd
+            }
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let mut cmd = {
+            let mut cmd = Command::new(&shell_path);
+            cmd.arg("-c").arg(command);
+            cmd
+        };
 
         // Set working directory and capture it as placement metadata. The path
         // is mechanical context only; it is not operation identity.
@@ -271,6 +321,59 @@ impl ShellTool {
         #[cfg(not(all(test, unix)))]
         let mut process_group = OwnedProcessGroup::new(&child);
 
+        // Record the leader's identity durably, then release the gate. A
+        // failure here leaves the gate closed: the prologue can never run the
+        // command, and containment below reaps it.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut custody = match custody.take() {
+            Some((mut reservation, mut gate)) => {
+                gate.spawned();
+                let recorded = match child.id().and_then(|pid| i32::try_from(pid).ok()) {
+                    Some(pid) => reservation.record_spawned(pid).await,
+                    None => Err(super::custody::ProcessCustodyError::Io {
+                        context: "capture tool leader pid",
+                        source: std::io::Error::from(std::io::ErrorKind::NotFound),
+                    }),
+                };
+                let released = match recorded {
+                    Ok(()) => gate.release().map_err(ShellError::Io),
+                    Err(error) => {
+                        drop(gate);
+                        Err(ShellError::Io(std::io::Error::other(error)))
+                    }
+                };
+                if let Err(error) = released {
+                    return match process_group.terminate(&mut child).await {
+                        Ok(()) => {
+                            reservation.settle().await;
+                            Err(error)
+                        }
+                        Err(containment_error) => {
+                            reservation.retain();
+                            self.retain_foreground_containment_retry(child, process_group)
+                                .await;
+                            Err(ShellError::Io(std::io::Error::new(
+                                containment_error.kind(),
+                                format!(
+                                    "{error}; gated shell containment remains unproven: {containment_error}"
+                                ),
+                            )))
+                        }
+                    };
+                }
+                Some(reservation)
+            }
+            None => {
+                // Not custody-bound: still register the live group so a
+                // custody recovery in this process never mistakes it for an
+                // earlier incarnation's tool.
+                if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+                    super::custody::track_owned_process_group(pid);
+                }
+                None
+            }
+        };
+
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
@@ -314,6 +417,16 @@ impl ShellTool {
         };
 
         let containment_error = containment_result.err();
+        // Settle durable custody only on proven containment. Otherwise the
+        // record stays for a later incarnation to recover.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(reservation) = custody.take() {
+            if containment_error.is_none() {
+                reservation.settle().await;
+            } else {
+                reservation.retain();
+            }
+        }
         if containment_error.is_some() {
             // Returning an error must not drop the only ownership proof for a
             // still-live process group. Move the armed guard and child handle
@@ -355,7 +468,7 @@ impl ShellTool {
         })
     }
 
-    async fn call_with_tool_call_id(
+    pub(super) async fn call_with_tool_call_id(
         &self,
         args: Value,
         tool_call_id: Option<&str>,
@@ -422,7 +535,12 @@ impl ShellTool {
         }
 
         let output = self
-            .execute_command(&input.command, working_dir.as_deref(), timeout_secs)
+            .execute_command_for_call(
+                &input.command,
+                working_dir.as_deref(),
+                timeout_secs,
+                tool_call_id,
+            )
             .await
             .map_err(|error| {
                 warn!(%error, "Command execution failed");

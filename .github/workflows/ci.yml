@@ -29,7 +29,8 @@ name: CI
 #                     with the web runtime suites
 #   gate            - "CI gate": fail-closed aggregate, 1500-second
 #                     push-to-terminal budget on pull requests (per-attempt
-#                     lane clocks, slowest lane reported on every run),
+#                     lane clocks; the slowest lane is reported on every run
+#                     that was not cancelled, failed runs included),
 #                     schema-4 exact-tree attestation on main
 #
 # Push to main only (no wall-clock budget):
@@ -120,8 +121,11 @@ env:
   # after classification (about 60 s) and then runs up to 1182 s, 984 s of
   # it the wasm release build, under its own 20-minute timeout. A 1200 s
   # budget was therefore tighter than that lane's own timeout allows and
-  # failed runs in which every lane passed. 1500 s is classification plus
-  # the longest lane timeout plus about 4 minutes of headroom.
+  # failed runs in which every lane passed. 1500 s is about 20% above the
+  # observed maximum. It stays deliberately below the longest pull-request
+  # lane timeouts (40 minutes for ratchets, clippy, unit, closure-check and
+  # sdk-host): those only stop a hung lane, while a run whose lanes take
+  # more than 25 minutes end to end has drifted and must be looked at.
   CI_MAX_SECONDS: "1500"
   # Target set for the closure-check lane: "lib" checks lib and bin targets
   # of the closure; "all" adds every test target (--all-targets), which
@@ -139,6 +143,7 @@ jobs:
       reason: ${{ steps.plan.outputs.reason }}
       generated_contract: ${{ steps.plan.outputs.generated_contract }}
       machine_authority: ${{ steps.plan.outputs.machine_authority }}
+      machine_posters: ${{ steps.plan.outputs.machine_posters }}
       wasm: ${{ steps.plan.outputs.wasm }}
       sdk_host: ${{ steps.plan.outputs.sdk_host }}
       bazel_graph: ${{ steps.plan.outputs.bazel_graph }}
@@ -306,9 +311,11 @@ jobs:
         env:
           GENERATED_CONTRACT: ${{ needs.changes.outputs.generated_contract }}
           MACHINE_AUTHORITY: ${{ needs.changes.outputs.machine_authority }}
+          MACHINE_POSTERS: ${{ needs.changes.outputs.machine_posters }}
         run: |
           echo "generated contract paths changed: ${GENERATED_CONTRACT}"
           echo "machine authority paths changed: ${MACHINE_AUTHORITY}"
+          echo "machine poster inputs changed: ${MACHINE_POSTERS}"
 
       - name: Verify schema freshness
         if: ${{ needs.changes.outputs.generated_contract == 'true' }}
@@ -399,10 +406,13 @@ jobs:
       # The posters render the canonical machine catalog, TLA specs and
       # contracts. The gate used to run only in cargo.yml, which nothing calls,
       # so the script's paths and the rendered HTML drifted unnoticed. It
-      # runs here on the same classifier as the other machine ratchets, and
-      # `make verify-machine-poster-coverage` is the same command locally.
+      # runs when machine authority changes (what the posters render) or when
+      # a poster input changes (scripts/machine-posters-changed, kept apart
+      # from the machine-authority classifier so a poster-only change never
+      # starts the machine lanes). `make verify-machine-poster-coverage` is
+      # the same command locally.
       - name: Verify machine poster coverage and freshness
-        if: ${{ needs.changes.outputs.machine_authority == 'true' }}
+        if: ${{ needs.changes.outputs.machine_authority == 'true' || needs.changes.outputs.machine_posters == 'true' }}
         run: make verify-machine-poster-coverage
 
   clippy:
@@ -1182,13 +1192,16 @@ jobs:
           echo "All selected lanes succeeded."
 
       - name: Enforce push-to-terminal budget
-        # Reported on every run; enforced on pull requests only (the
-        # push-to-main run carries the deferred lanes and has no wall-clock
-        # budget). Each lane is timed from the start of the run attempt it
+        # Runs on every run that was not cancelled, including runs whose lane
+        # check above failed, so a failed run also names its slowest lanes.
+        # Enforced on pull requests only (the push-to-main run carries the
+        # deferred lanes and has no wall-clock budget; there it only reports,
+        # and a failure to measure is a warning). Each lane is timed from the start of the run attempt it
         # actually ran in, so re-running a failed lane gets a fresh clock,
         # while a lane carried over from an earlier attempt keeps that
         # attempt's clock: re-running only this gate cannot launder a real
         # overrun.
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1226,46 +1239,64 @@ jobs:
           enforce = os.environ["ENFORCE_BUDGET"] == "true"
           gate_name = os.environ["GATE_JOB_NAME"]
 
-          # Start of every attempt so far; a carried-over job belongs to the
-          # latest attempt that had started when the job started.
-          attempt_starts = []
-          for n in range(1, attempt + 1):
-              page = api(f"/repos/{repo}/actions/runs/{run_id}/attempts/{n}")[0]
-              attempt_starts.append((n, ts(page["run_started_at"])))
-          jobs = [
-              job
-              for page in api(
-                  f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
-              )
-              for job in page["jobs"]
-          ]
+          def collect_lanes():
+              # Start of every attempt so far; a carried-over job belongs to the
+              # latest attempt that had started when the job started.
+              attempt_starts = []
+              for n in range(1, attempt + 1):
+                  page = api(f"/repos/{repo}/actions/runs/{run_id}/attempts/{n}")[0]
+                  attempt_starts.append((n, ts(page["run_started_at"])))
+              jobs = [
+                  job
+                  for page in api(
+                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+                  )
+                  for job in page["jobs"]
+              ]
 
-          lanes = []
-          for job in jobs:
-              if job["name"] == gate_name or job["conclusion"] in (None, "skipped"):
-                  continue
-              if not job["started_at"] or not job["completed_at"]:
-                  continue
-              started, completed = ts(job["started_at"]), ts(job["completed_at"])
-              if completed < started:
-                  continue
-              ran_in, clock = attempt_starts[0]
-              for n, begun in attempt_starts:
-                  if begun <= started:
-                      ran_in, clock = n, begun
-              lanes.append(
-                  {
-                      "name": job["name"],
-                      "attempt": ran_in,
-                      "queued": int((started - clock).total_seconds()),
-                      "duration": int((completed - started).total_seconds()),
-                      "terminal": int((completed - clock).total_seconds()),
-                      "conclusion": job["conclusion"],
-                  }
-              )
+              lanes = []
+              for job in jobs:
+                  if job["name"] == gate_name or job["conclusion"] in (None, "skipped"):
+                      continue
+                  if not job["started_at"] or not job["completed_at"]:
+                      continue
+                  started, completed = ts(job["started_at"]), ts(job["completed_at"])
+                  if completed < started:
+                      continue
+                  ran_in, clock = attempt_starts[0]
+                  for n, begun in attempt_starts:
+                      if begun <= started:
+                          ran_in, clock = n, begun
+                  lanes.append(
+                      {
+                          "name": job["name"],
+                          "attempt": ran_in,
+                          "queued": int((started - clock).total_seconds()),
+                          "duration": int((completed - started).total_seconds()),
+                          "terminal": int((completed - clock).total_seconds()),
+                          "conclusion": job["conclusion"],
+                      }
+                  )
+              return lanes
+
+
+          # Measurement needs the Actions API. A failure to measure fails a
+          # pull request, whose budget is enforced, but only warns on a push
+          # to main, where the budget is a report: a transient API error must
+          # not turn main's CI gate red and block release readiness.
+          try:
+              lanes = collect_lanes()
+          except (subprocess.CalledProcessError, KeyError, IndexError, TypeError, ValueError) as error:
+              detail = (getattr(error, "stderr", None) or str(error)).strip()
+              if enforce:
+                  print(f"::error::could not measure the push-to-terminal budget: {detail}")
+                  sys.exit(1)
+              print(f"::warning::push-to-terminal report unavailable (budget not enforced): {detail}")
+              sys.exit(0)
           if not lanes:
-              print("::error::no completed lanes found for the push-to-terminal budget.")
-              sys.exit(1)
+              level = "error" if enforce else "warning"
+              print(f"::{level}::no completed lanes found for the push-to-terminal budget.")
+              sys.exit(1 if enforce else 0)
 
           critical = max(lanes, key=lambda lane: lane["terminal"])
           slowest = max(lanes, key=lambda lane: lane["duration"])

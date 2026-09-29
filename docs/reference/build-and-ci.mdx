@@ -216,7 +216,7 @@ the release tag carry the rest):
 | --- | --- | --- | --- | --- |
 | `changes`: classify the diff with `scripts/ci-cargo-lanes.mjs` | yes | yes | - | - |
 | `fmt-governance`: fmt, docs, semver self-test, version parity, lock consistency, release config, lane and path classifier self-tests | yes | yes | - | - |
-| `ratchets`: schema/SDK/RPC/REST freshness when contract paths changed; machine and protocol drift plus machine poster coverage and freshness when machine authority changed | yes | yes | - | - |
+| `ratchets`: schema/SDK/RPC/REST freshness when contract paths changed; machine and protocol drift when machine authority changed; machine poster coverage and freshness when machine authority or a poster input (`scripts/machine-posters-changed`) changed | yes | yes | - | - |
 | `clippy` per shard of every changed package: `--no-deps --all-targets --all-features -D warnings` | yes | yes | whole workspace (`make lint`) | Bazel clippy lanes |
 | `unit` per shard: `nextest --lib --bins --profile ci-pr` for changed packages outside the meerkat-mob compile chain | yes | - | `make test-unit` | Bazel unit lanes |
 | `main-unit` per shard: `nextest --lib --bins` over the whole workspace, including the meerkat-mob chain (mob, mob-mcp, mob-pack, rpc, rest, mcp-server, rkat, web-runtime, integration-tests, machine-codegen, machine-dsl-tests, xtask) | deferred | yes | `make test-unit` | Bazel unit lanes |
@@ -234,13 +234,18 @@ a fresh clock (the run's `created_at` never changes, so a budget measured from
 it made every re-run fail), while lanes carried over from an earlier attempt
 keep that attempt's clock, so re-running only the gate cannot turn an overrun
 green. The gate prints the critical-path lane, the slowest lane and the ten
-latest lane terminals on every run, including `main` pushes where the budget
-is not enforced. The 1500 s figure is sized from measurement: over the last 64
-pull-request runs before the change the lane terminal was p50 847 s, p90
-1194 s and max 1244 s, and the tail is the `example-web` lane (about 60 s of
-classification, then up to 1182 s, 984 s of it the wasm release build, under
-its own 20-minute timeout). A 1200 s budget was tighter than that lane's own
-timeout and failed runs in which every lane passed.
+latest lane terminals on every run that was not cancelled, including runs
+whose lanes failed and `main` pushes, where the budget is not enforced and a
+failure to measure it is only a warning. The 1500 s figure is sized from
+measurement: over the last 64 pull-request runs before the change the lane
+terminal was p50 847 s, p90 1194 s and max 1244 s, and the tail is the
+`example-web` lane (about 60 s of classification, then up to 1182 s, 984 s of
+it the wasm release build, under its own 20-minute timeout). A 1200 s budget
+was tighter than that lane's own timeout and failed runs in which every lane
+passed. 1500 s is about 20% above the observed maximum and deliberately below
+the longest pull-request lane timeouts (40 minutes): a lane timeout only stops
+a hung lane, while a run that takes more than 25 minutes end to end has
+drifted.
 
 Why the meerkat-mob chain is deferred: measured on 4-vCPU hosted runners,
 every unit lane that ever exceeded the budget compiled `meerkat-mob`'s 442k

@@ -352,8 +352,10 @@ GitHub-hosted runners and sized to a 25-minute push-to-terminal budget:
   parity, lock consistency, `make ci-lanes-selftest`,
   `make path-classifier-selftest`.
 - `ratchets`: generated-contract freshness when contract paths changed;
-  `machine-check-drift`/`protocol-check-drift`/`verify-machine-poster-coverage`
-  when machine authority changed.
+  `machine-check-drift`/`protocol-check-drift` when machine authority changed;
+  `verify-machine-poster-coverage` when machine authority or a poster input
+  (`scripts/machine-posters-changed`, a separate classifier so poster-only
+  changes never start the machine lanes) changed.
 - `clippy`: one lane per shard of every directly changed package
   (`clippy --no-deps --all-targets --all-features -D warnings`).
 - `unit`: `nextest --lib --bins --profile ci-pr` (identical to `fast`) for
@@ -371,7 +373,8 @@ GitHub-hosted runners and sized to a 25-minute push-to-terminal budget:
   1500-second push-to-terminal budget on pull requests (each lane timed
   from the start of the run attempt it ran in, so a re-run lane gets a fresh
   clock but a gate-only re-run cannot launder an overrun; the slowest lane
-  and critical path are reported on every run), schema-4 attestation (backend
+  and critical path are reported on every non-cancelled run, failed runs
+  included; a failure to measure only warns on `main`), schema-4 attestation (backend
   `github-hosted-cargo`) on successful `main` pushes. It runs under
   `!cancelled()` so superseded runs surface as cancelled.
 

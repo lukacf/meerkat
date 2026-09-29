@@ -80,13 +80,23 @@ if scripts/machine-authority-changed -- docs/reference/machine-authority.mdx >/d
 else
   bad "machine-authority-changed did not flag machine-authority docs"
 fi
-for poster_input in scripts/machine-posters/generate-machine-posters.mjs docs/internal/machine-posters/mob_machine.html crates/xtask/src/machine_alphabet.rs; do
-  if scripts/machine-authority-changed -- "$poster_input" >/dev/null; then
-    ok "machine-authority-changed routes poster input $poster_input to the poster gate"
+for poster_input in scripts/machine-posters/generate-machine-posters.mjs docs/internal/machine-posters/mob_machine.html crates/xtask/src/machine_alphabet.rs scripts/machine-posters-changed; do
+  if scripts/machine-posters-changed -- "$poster_input" >/dev/null; then
+    ok "machine-posters-changed routes poster input $poster_input to the poster gate"
   else
-    bad "machine-authority-changed ignored poster input $poster_input"
+    bad "machine-posters-changed ignored poster input $poster_input"
+  fi
+  if scripts/machine-authority-changed -- "$poster_input" >/dev/null; then
+    bad "machine-authority-changed routes poster-only input $poster_input to the machine lanes"
+  else
+    ok "poster-only input $poster_input stays out of the machine lanes"
   fi
 done
+if scripts/machine-posters-changed -- crates/meerkat-core/src/lib.rs >/dev/null; then
+  bad "machine-posters-changed flagged an unrelated path"
+else
+  ok "machine-posters-changed ignores unrelated paths"
+fi
 for gate_owner in .github/workflows/ci.yml .github/workflows/cargo.yml Makefile scripts/machine-authority-changed scripts/tests/xtask_scripts_dogma_gates.sh crates/xtask/tests/ci_gate_requires_rmat.rs; do
   if scripts/machine-authority-changed -- "$gate_owner" >/dev/null; then
     ok "machine-authority-changed protects its gate owner $gate_owner"

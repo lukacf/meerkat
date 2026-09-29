@@ -14588,14 +14588,48 @@ mod tests {
         }
     }
 
-    /// Read the runtime run id from the first `run_started` event of a turn.
+    /// Typed `session/event` notification params, as RPC clients read them.
+    #[derive(serde::Deserialize)]
+    struct SessionEventNotification {
+        session_id: String,
+        event: EventEnvelope<AgentEvent>,
+    }
+
+    /// Install a capturing notification sink on `runtime`. Runtime-routed
+    /// turns publish their events only through the runtime's notification
+    /// sink (`session/event`), which the executor reads at apply time, so the
+    /// sink must be installed before the turn is admitted.
+    fn capture_session_events(
+        runtime: &SessionRuntime,
+    ) -> mpsc::Receiver<crate::protocol::RpcNotification> {
+        let (tx, rx) = mpsc::channel(1024);
+        runtime.set_notification_sink(crate::router::NotificationSink::new(tx));
+        rx
+    }
+
+    /// Read the runtime run id from the first `run_started` `session/event`
+    /// notification of `session_id`, the value an RPC client passes to
+    /// `turn/stop_run`.
     async fn run_started_run_id(
-        event_rx: &mut mpsc::Receiver<EventEnvelope<AgentEvent>>,
+        notifications: &mut mpsc::Receiver<crate::protocol::RpcNotification>,
+        session_id: &SessionId,
     ) -> meerkat_core::lifecycle::RunId {
         tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, async {
             loop {
-                let envelope = event_rx.recv().await.expect("event stream open");
-                if let AgentEvent::RunStarted { identity, .. } = envelope.payload
+                let notification = notifications
+                    .recv()
+                    .await
+                    .expect("notification sink stays open");
+                if notification.method != "session/event" {
+                    continue;
+                }
+                let params: SessionEventNotification =
+                    serde_json::from_str(notification.params.get())
+                        .expect("session/event params decode as a typed event envelope");
+                if params.session_id != session_id.to_string() {
+                    continue;
+                }
+                if let AgentEvent::RunStarted { identity, .. } = params.event.payload
                     && let Some(run_id) = identity.run_id
                 {
                     return run_id;
@@ -14619,9 +14653,12 @@ mod tests {
             .create_or_resume_session_without_turn(build, None, None, Default::default())
             .await
             .unwrap();
+        // Subscribe before the turn starts: runtime-routed turn events reach
+        // clients only as `session/event` notifications.
+        let mut notifications = capture_session_events(&runtime);
         let turn_runtime = Arc::clone(&runtime);
         let turn_id = id.clone();
-        let (event_tx, mut event_rx) = mpsc::channel(100);
+        let (event_tx, _event_rx) = mpsc::channel(100);
         let turn = tokio::spawn(async move {
             turn_runtime
                 .start_turn_via_runtime(
@@ -14637,7 +14674,7 @@ mod tests {
                 .await
         });
         wait_for_llm_calls(&calls, 1, "provider in flight").await;
-        let run_id = run_started_run_id(&mut event_rx).await;
+        let run_id = run_started_run_id(&mut notifications, &id).await;
 
         let stale = meerkat_core::lifecycle::RunId::new();
         match runtime

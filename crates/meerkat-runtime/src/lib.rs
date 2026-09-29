@@ -1080,10 +1080,10 @@ pub use service_ext::{SessionServiceRuntimeExt, persistent_runtime_pre_dequeue_h
 pub use store::SqliteRuntimeStore;
 pub use store::{
     CommittedRecoveryBoundary, CommittedWholeBlobMetadata, CommittedWholeBlobProvisionalTail,
-    CommittedWholeBlobSnapshot, FencedPreparedRuntimeSessionCommitOutcome,
-    HeadCanonicalProvisionalTailAuthority, HeadCanonicalRuntimeAuthorityActivation,
-    HeadCanonicalStoreAuthority, InMemoryRuntimeStore, InputStateRow,
-    PreparedDurableTailRecoverySource, PreparedHeadCanonicalProvisionalPromotion,
+    CommittedWholeBlobSnapshot, CommittingWholeBlobSession,
+    FencedPreparedRuntimeSessionCommitOutcome, HeadCanonicalProvisionalTailAuthority,
+    HeadCanonicalRuntimeAuthorityActivation, HeadCanonicalStoreAuthority, InMemoryRuntimeStore,
+    InputStateRow, PreparedDurableTailRecoverySource, PreparedHeadCanonicalProvisionalPromotion,
     PreparedHeadCanonicalProvisionalTail, PreparedRecoveryEvidence,
     PreparedRecoveryReceiptDigestEnrichment, PreparedRecoveryReceiptSource,
     PreparedRuntimeSessionCommit, PreparedRuntimeSessionCommitKind,
@@ -1094,6 +1094,7 @@ pub use store::{
     RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
     RuntimeStoreWriteFenceOutcome, SerializedSessionSnapshot, VerifiedCommittedWholeBlobPayload,
     WholeBlobProvisionalTailAuthority, WholeBlobStoreAuthority,
+    reuse_or_load_committed_whole_blob_snapshot,
 };
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlane,

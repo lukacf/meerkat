@@ -281,6 +281,25 @@ them.
   compaction, and `inference_geo`. It is the recommended Sonnet
   model; the Anthropic default stays `claude-opus-5-5`.
 
+- `PreparedRuntimeSessionCommit::committing_whole_blob_session()` returns a
+  `CommittingWholeBlobSession`. This is the typed WholeBlob session the
+  boundary commits, kept across the commit so that a host projecting
+  committed state does not have to read and decode it back (#1273).
+  - `CommittingWholeBlobSession::bind_committed(&result)` returns the
+    committed `CommittedWholeBlobSnapshot` only when three things hold. The
+    result carries WholeBlob authority for that session. The store has
+    already materialized this carrier's document. The document's row digest
+    equals the digest the authority binds. It never encodes, decodes or
+    hashes.
+  - `reuse_or_load_committed_whole_blob_snapshot` reuses that snapshot only
+    while a fresh body-free `load_whole_blob_store_authority` equals its
+    authority exactly. Otherwise it falls back to the authoritative
+    `load_committed_whole_blob_snapshot`.
+  - `BoundSessionCommit::materialized_whole_blob_artifact()` peeks at an
+    already-materialized artifact without encoding.
+
+  All of these are additive.
+
 - `IncrementalSessionStore::verify_current_head` (provided method): a
   body-free proof that a head is still the store's current physical head,
   with `materialize_head`'s head-row checks (`NotFound`,

@@ -1049,6 +1049,29 @@ impl BoundSessionCommit {
         }
     }
 
+    /// The WholeBlob artifact this carrier has already materialized, without
+    /// materializing it.
+    ///
+    /// Clones of one carrier share a single-assignment artifact cell, so after
+    /// a store consumed one clone through [`Self::whole_blob_artifact`] every
+    /// other clone observes the exact bytes and row digest the store
+    /// committed. Returns `None` when nothing was materialized (or the
+    /// materialization failed), and for the head-canonical and provisional
+    /// promotion variants. Never encodes.
+    #[must_use]
+    pub fn materialized_whole_blob_artifact(&self) -> Option<&crate::SerializedSessionArtifact> {
+        let whole_blob = match &self.kind {
+            BoundSessionCommitKind::WholeBlobTyped { whole_blob, .. }
+            | BoundSessionCommitKind::WholeBlobUntyped { whole_blob } => whole_blob,
+            BoundSessionCommitKind::HeadCanonical { .. }
+            | BoundSessionCommitKind::ProvisionalPromotion { .. } => return None,
+        };
+        match whole_blob.get() {
+            Some(Ok(artifact)) => Some(artifact.as_ref()),
+            Some(Err(_)) | None => None,
+        }
+    }
+
     /// Consume this carrier into a shared whole-blob representation.
     ///
     /// This is the owned counterpart to [`Self::whole_blob_bytes`]. It avoids

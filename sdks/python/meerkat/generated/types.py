@@ -7148,6 +7148,20 @@ class ContentBlockSkillContext(TypedDict, total=False):
 
 ContentBlock = ContentBlockText | ContentBlockImageInline | ContentBlockImageBlob | ContentBlockVideoInline | ContentBlockVideoUri | ContentBlockStructured | ContentBlockSkillContext
 
+# What settling interrupted-run evidence did to the run the process belonged
+# to, as told to the model.
+class InterruptedToolRunDispositionInputsSettled(TypedDict, total=False):
+    inputs: Required[int]
+    kind: Required[Literal['inputs_settled']]
+
+class InterruptedToolRunDispositionRunCompleted(TypedDict, total=False):
+    kind: Required[Literal['run_completed']]
+
+class InterruptedToolRunDispositionUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+InterruptedToolRunDisposition = InterruptedToolRunDispositionInputsSettled | InterruptedToolRunDispositionRunCompleted | InterruptedToolRunDispositionUnknown
+
 # Sender-declared content-taint classification for peer content.
 #
 # This is the typed vocabulary for the optional taint declaration a sender
@@ -7180,22 +7194,28 @@ PeerId = str
 # How recovery established that an earlier incarnation's tool process has
 # ceased.
 class ToolProcessCessationNeverStarted(TypedDict, total=False):
-    cessation: Required[Literal['never_started']]
+    kind: Required[Literal['never_started']]
 
 class ToolProcessCessationAlreadyExited(TypedDict, total=False):
-    cessation: Required[Literal['already_exited']]
+    kind: Required[Literal['already_exited']]
 
 class ToolProcessCessationGroupReassigned(TypedDict, total=False):
-    cessation: Required[Literal['group_reassigned']]
+    kind: Required[Literal['group_reassigned']]
 
 class ToolProcessCessationKilledByRecovery(TypedDict, total=False):
-    cessation: Required[Literal['killed_by_recovery']]
+    kind: Required[Literal['killed_by_recovery']]
     members: Required[int]
 
 class ToolProcessCessationPriorEnvironmentEnded(TypedDict, total=False):
-    cessation: Required[Literal['prior_environment_ended']]
+    kind: Required[Literal['prior_environment_ended']]
 
-ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded
+class ToolProcessCessationExitedBeforeCommit(TypedDict, total=False):
+    kind: Required[Literal['exited_before_commit']]
+
+class ToolProcessCessationUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded | ToolProcessCessationExitedBeforeCommit | ToolProcessCessationUnknown
 
 # Which kind of owned process a custody entry guards.
 class ToolProcessSpawnerShellCall(TypedDict, total=False):
@@ -7213,7 +7233,10 @@ class ToolProcessSpawnerCommandHook(TypedDict, total=False):
     hook_id: Required[str]
     kind: Required[Literal['command_hook']]
 
-ToolProcessSpawner = ToolProcessSpawnerShellCall | ToolProcessSpawnerBackgroundJob | ToolProcessSpawnerMonitor | ToolProcessSpawnerCommandHook
+class ToolProcessSpawnerUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+ToolProcessSpawner = ToolProcessSpawnerShellCall | ToolProcessSpawnerBackgroundJob | ToolProcessSpawnerMonitor | ToolProcessSpawnerCommandHook | ToolProcessSpawnerUnknown
 
 # Typed runtime-authored transcript metadata.
 #
@@ -7276,6 +7299,8 @@ class SystemNoticeBlockRuntimeNotice(TypedDict, total=False):
 
 class SystemNoticeBlockToolProcessInterrupted(TypedDict, total=False):
     cessation: Required[ToolProcessCessation]
+    disposition: Required[InterruptedToolRunDisposition]
+    run_id: Required[RunId]
     spawner: Required[ToolProcessSpawner]
     tool_call_id: NotRequired[Optional[str]]
     type: Required[Literal['tool_process_interrupted']]

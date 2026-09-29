@@ -21,6 +21,7 @@ from .types import (  # noqa: F401
     ContentBlock,
     ContentInput,
     ExternalToolDeltaPhase,
+    InterruptedToolRunDisposition,
     LiveChannelId,
     MeerkatSchema,
     PeerId,

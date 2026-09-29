@@ -6219,30 +6219,53 @@ export type BackgroundJobTerminalStatus = "completed" | "failed" | "aborted" | "
 
 export type CommsNoticeKind = string;
 
+export interface InterruptedToolRunDispositionInputsSettled {
+  inputs: number;
+  kind: "inputs_settled";
+}
+
+export interface InterruptedToolRunDispositionRunCompleted {
+  kind: "run_completed";
+}
+
+export interface InterruptedToolRunDispositionUnknown {
+  kind: "unknown";
+}
+
+export type InterruptedToolRunDisposition = InterruptedToolRunDispositionInputsSettled | InterruptedToolRunDispositionRunCompleted | InterruptedToolRunDispositionUnknown;
+
 export type SystemNoticeDirection = "incoming" | "outgoing" | "internal";
 
 export interface ToolProcessCessationNeverStarted {
-  cessation: "never_started";
+  kind: "never_started";
 }
 
 export interface ToolProcessCessationAlreadyExited {
-  cessation: "already_exited";
+  kind: "already_exited";
 }
 
 export interface ToolProcessCessationGroupReassigned {
-  cessation: "group_reassigned";
+  kind: "group_reassigned";
 }
 
 export interface ToolProcessCessationKilledByRecovery {
-  cessation: "killed_by_recovery";
+  kind: "killed_by_recovery";
   members: number;
 }
 
 export interface ToolProcessCessationPriorEnvironmentEnded {
-  cessation: "prior_environment_ended";
+  kind: "prior_environment_ended";
 }
 
-export type ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded;
+export interface ToolProcessCessationExitedBeforeCommit {
+  kind: "exited_before_commit";
+}
+
+export interface ToolProcessCessationUnknown {
+  kind: "unknown";
+}
+
+export type ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded | ToolProcessCessationExitedBeforeCommit | ToolProcessCessationUnknown;
 
 export interface ToolProcessSpawnerShellCall {
   kind: "shell_call";
@@ -6263,7 +6286,11 @@ export interface ToolProcessSpawnerCommandHook {
   kind: "command_hook";
 }
 
-export type ToolProcessSpawner = ToolProcessSpawnerShellCall | ToolProcessSpawnerBackgroundJob | ToolProcessSpawnerMonitor | ToolProcessSpawnerCommandHook;
+export interface ToolProcessSpawnerUnknown {
+  kind: "unknown";
+}
+
+export type ToolProcessSpawner = ToolProcessSpawnerShellCall | ToolProcessSpawnerBackgroundJob | ToolProcessSpawnerMonitor | ToolProcessSpawnerCommandHook | ToolProcessSpawnerUnknown;
 
 export interface SystemNoticeBlockComms {
   content?: ContentBlock[];
@@ -6329,6 +6356,8 @@ export interface SystemNoticeBlockRuntimeNotice {
 
 export interface SystemNoticeBlockToolProcessInterrupted {
   cessation: ToolProcessCessation;
+  disposition: InterruptedToolRunDisposition;
+  run_id: RunId;
   spawner: ToolProcessSpawner;
   tool_call_id?: string | null;
   type: "tool_process_interrupted";

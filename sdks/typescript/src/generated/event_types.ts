@@ -20,6 +20,7 @@ import type {
   DeferredCatalogDelta,
   ExternalToolDeltaPhase,
   GeminiImageMetadata,
+  InterruptedToolRunDisposition,
   LiveChannelId,
   LiveContextObservationId,
   MeerkatSchema,

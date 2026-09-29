@@ -345,6 +345,15 @@ export type InteractionId = string;
 
 export type InteractionStreamAbandonReason = "send_failed" | "admission_rejected" | "response_rejected" | "terminal_delivery_failed";
 
+export type InterruptedToolRunDisposition = {
+  inputs: number;
+  kind: "inputs_settled";
+} | {
+  kind: "run_completed";
+} | {
+  kind: "unknown";
+};
+
 export type LiveChannelId = string;
 
 export interface LiveContextObservationId {
@@ -754,6 +763,8 @@ export type SystemNoticeBlock = {
   type: "runtime_notice";
 } | {
   cessation: ToolProcessCessation;
+  disposition: InterruptedToolRunDisposition;
+  run_id: RunId;
   spawner: ToolProcessSpawner;
   tool_call_id?: string | null;
   type: "tool_process_interrupted";
@@ -825,16 +836,20 @@ export type ToolConfigChangedPayload = {
 export type ToolName = string;
 
 export type ToolProcessCessation = {
-  cessation: "never_started";
+  kind: "never_started";
 } | {
-  cessation: "already_exited";
+  kind: "already_exited";
 } | {
-  cessation: "group_reassigned";
+  kind: "group_reassigned";
 } | {
-  cessation: "killed_by_recovery";
+  kind: "killed_by_recovery";
   members: number;
 } | {
-  cessation: "prior_environment_ended";
+  kind: "prior_environment_ended";
+} | {
+  kind: "exited_before_commit";
+} | {
+  kind: "unknown";
 };
 
 export type ToolProcessSpawner = {
@@ -848,6 +863,8 @@ export type ToolProcessSpawner = {
 } | {
   hook_id: string;
   kind: "command_hook";
+} | {
+  kind: "unknown";
 };
 
 export interface TranscriptEditRewriteRange {

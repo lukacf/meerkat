@@ -3322,6 +3322,56 @@
           }
         ]
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -5469,10 +5519,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -5491,8 +5548,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -5826,46 +5885,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -5876,21 +5935,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -5960,6 +6045,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -25627,6 +25725,56 @@
           }
         ]
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -27808,10 +27956,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -27830,8 +27985,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -28165,46 +28322,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -28215,21 +28372,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -28299,6 +28482,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -29338,6 +29534,56 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -29902,10 +30148,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -29924,8 +30177,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -30210,46 +30465,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -30260,21 +30515,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -30344,6 +30625,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -39425,6 +39719,56 @@
           }
         ]
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -41935,10 +42279,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -41957,8 +42308,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -42319,46 +42672,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -42369,21 +42722,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -42453,6 +42832,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -56260,6 +56652,56 @@
           }
         ]
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -59901,10 +60343,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -59923,8 +60372,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -60348,46 +60799,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -60398,21 +60849,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -60482,6 +60959,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -75281,6 +75771,56 @@
           }
         ]
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -77791,10 +78331,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -77813,8 +78360,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -78175,46 +78724,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -78225,21 +78774,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -78309,6 +78884,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -85431,6 +86019,56 @@
           }
         ]
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -87603,10 +88241,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -87625,8 +88270,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -87960,46 +88607,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -88010,21 +88657,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -88094,6 +88767,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -108566,6 +109252,56 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -109130,10 +109866,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -109152,8 +109895,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -109438,46 +110183,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -109488,21 +110233,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -109572,6 +110343,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -134070,6 +134854,56 @@
         ],
         "type": "object"
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "OpenAiAssistantPhase": {
         "description": "Responses assistant-message phase, distinct from reasoning metadata.",
         "enum": [
@@ -134223,6 +135057,10 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
         "type": "string"
       },
       "SenderContentTaint": {
@@ -134536,10 +135374,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -134558,8 +135403,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -134844,46 +135691,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -134894,21 +135741,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -134978,6 +135851,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -142025,6 +142911,56 @@
           }
         ]
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -144172,10 +145108,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -144194,8 +145137,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -144529,46 +145474,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -144579,21 +145524,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -144663,6 +145634,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -146314,6 +147298,56 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -146878,10 +147912,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -146900,8 +147941,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -147186,46 +148229,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -147236,21 +148279,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -147320,6 +148389,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -154019,6 +155101,56 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -154583,10 +155715,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -154605,8 +155744,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -154891,46 +156032,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -154941,21 +156082,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -155025,6 +156192,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -161527,6 +162707,56 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -162091,10 +163321,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -162113,8 +163350,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -162399,46 +163638,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -162449,21 +163688,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -162533,6 +163798,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -164102,6 +165380,56 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -164666,10 +165994,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -164688,8 +166023,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -164974,46 +166311,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -165024,21 +166361,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -165108,6 +166471,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -167137,6 +168513,56 @@
         "description": "Unique identifier for an interaction.",
         "type": "string"
       },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -167701,10 +169127,17 @@
             "type": "object"
           },
           {
-            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
             "properties": {
               "cessation": {
                 "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
               },
               "spawner": {
                 "$ref": "#/$defs/ToolProcessSpawner"
@@ -167723,8 +169156,10 @@
             },
             "required": [
               "type",
+              "run_id",
               "spawner",
-              "cessation"
+              "cessation",
+              "disposition"
             ],
             "type": "object"
           },
@@ -168009,46 +169444,46 @@
           {
             "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "never_started",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "already_exited",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "group_reassigned",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
             ],
             "type": "object"
           },
           {
             "description": "Recovery SIGKILLed the group and observed every member exit.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "killed_by_recovery",
                 "type": "string"
               },
@@ -168059,21 +169494,47 @@
               }
             },
             "required": [
-              "cessation",
+              "kind",
               "members"
             ],
             "type": "object"
           },
           {
-            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
             "properties": {
-              "cessation": {
+              "kind": {
                 "const": "prior_environment_ended",
                 "type": "string"
               }
             },
             "required": [
-              "cessation"
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -168143,6 +169604,19 @@
             "required": [
               "kind",
               "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }

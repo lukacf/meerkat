@@ -209,6 +209,34 @@ async function main() {
   ], { env: { ...process.env, TMPDIR: profile }, stdio: ["ignore", "ignore", "pipe"] });
   let chromeStderr = "";
   chrome.stderr.on("data", chunk => { chromeStderr = (chromeStderr + chunk).slice(-4000); });
+  // Chrome announces its DevTools endpoint on stderr once the listener is
+  // bound ("DevTools listening on ws://127.0.0.1:<port>/devtools/browser/<id>");
+  // its exit is the only other outcome. Both are events, so a slow start on a
+  // loaded runner just takes longer instead of failing a fixed poll. Attached
+  // synchronously after spawn, so no stderr chunk is missed; the announcement
+  // is matched against everything received so far, since the line can span
+  // chunks.
+  const devtools = new Promise((resolve, reject) => {
+    let received = "";
+    const onData = chunk => {
+      received += chunk;
+      const announced = /DevTools listening on (ws:\/\/\S+)/.exec(received);
+      if (!announced) return;
+      settle();
+      const endpoint = new URL(announced[1]);
+      resolve({ port: endpoint.port, socket: endpoint.pathname });
+    };
+    const onExit = (code, signal) => {
+      settle();
+      reject(Error(`Chromium at ${chromeBin} exited before exposing DevTools (code ${code}, signal ${signal}): ${chromeStderr.trim()}`));
+    };
+    const settle = () => { chrome.stderr.off("data", onData); chrome.off("exit", onExit); };
+    chrome.stderr.on("data", onData);
+    chrome.once("exit", onExit);
+  });
+  // Handled here so an early exit is not an unhandled rejection before the
+  // try block awaits it; the await below still sees the rejection.
+  devtools.catch(() => {});
   // Registered before anything can fail so the teardown never waits for an
   // exit that already happened (a signal-killed Chrome has exitCode null).
   const chromeExited = new Promise(resolve => chrome.once("exit", resolve));
@@ -217,10 +245,7 @@ async function main() {
   const pages = [];
   let blocked = 0;
   try {
-    const portFile = path.join(profile, "DevToolsActivePort");
-    for (let i = 0; i < 200 && !fs.existsSync(portFile) && chromeAlive(); i++) await sleep(50);
-    assert(fs.existsSync(portFile), `Chromium at ${chromeBin} did not expose DevTools${chromeAlive() ? "" : ` (exited: code ${chrome.exitCode}, signal ${chrome.signalCode})`}: ${chromeStderr.trim()}`);
-    const [port, socket] = fs.readFileSync(portFile, "utf8").split("\n");
+    const { port, socket } = await devtools;
     browser = await CDP.connect(`ws://127.0.0.1:${port}${socket}`);
     async function page(route = "/fixture", provider = null, viewport = { width: 1280, height: 900 }) {
       const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json();

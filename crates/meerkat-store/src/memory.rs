@@ -1505,6 +1505,116 @@ mod tests {
         Ok(())
     }
 
+    /// Adopt one record-only rewrite of `session` replacing `[0, end)` with
+    /// the single `summary` message, returning the adopted head.
+    async fn commit_and_adopt_summary_rewrite(
+        inc: &Arc<dyn IncrementalSessionStore>,
+        session: &mut Session,
+        head: &SessionHead,
+        end: usize,
+        summary: &str,
+    ) -> Result<(TranscriptRewriteCommit, SessionHead), Box<dyn std::error::Error>> {
+        let commit = session.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end },
+            vec![Message::User(UserMessage::text(summary.to_string()))],
+            TranscriptRewriteReason::new("compaction"),
+            Some("test".to_string()),
+            None,
+        )?;
+        let history = session
+            .validated_transcript_history_state()?
+            .expect("rewrite must install a sealed compact graph");
+        let record = TranscriptRewriteRecord::new(
+            commit.clone(),
+            history.materialize_rewrite_parent(&commit)?,
+            history.materialize_rewrite_child(&commit)?,
+        )?;
+        let token = session_head_cas_token(head)?;
+        let next = inc
+            .commit_rewrite(
+                session.id(),
+                &record,
+                SessionHeadCas::IfToken(token.clone()),
+            )
+            .await?;
+        let adopted = SessionHead::from_session(session, next.strand.clone(), next.rewrite_count)?;
+        inc.save_head(&adopted, SessionHeadCas::IfToken(token))
+            .await?;
+        Ok((commit, adopted))
+    }
+
+    /// Transcript content revisions recur: two deterministic compactions of
+    /// one session can produce the same rewritten transcript (MobKit #488,
+    /// where a repeated summary wedged the second auto-compaction). Each
+    /// adopted rewrite must therefore land on its own occurrence strand, not
+    /// on the strand named by the recurring revision digest.
+    #[tokio::test]
+    async fn recurring_rewrite_revision_lands_on_a_fresh_occurrence_strand()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(MemoryStore::new());
+        let inc: Arc<dyn IncrementalSessionStore> = Arc::clone(&store)
+            .as_incremental()
+            .expect("memory store must expose the incremental capability");
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("one".to_string())));
+        session.push(Message::User(UserMessage::text("two".to_string())));
+        let root = TranscriptStrandId::root();
+        inc.append_messages(session.id(), &root, 0, session.messages())
+            .await?;
+        let head = SessionHead::from_session(&session, root, 0)?;
+        inc.save_head(&head, SessionHeadCas::Create).await?;
+
+        let mut head = head;
+        let mut commits = Vec::new();
+        for turn in 0..5 {
+            // One post-compaction turn appended on the adopted strand.
+            let appended = Message::User(UserMessage::text(format!("turn {turn}")));
+            inc.append_messages(
+                session.id(),
+                &head.strand,
+                head.message_count,
+                std::slice::from_ref(&appended),
+            )
+            .await?;
+            session.push(appended);
+            let appended_head =
+                SessionHead::from_session(&session, head.strand.clone(), head.rewrite_count)?;
+            inc.save_head(
+                &appended_head,
+                SessionHeadCas::IfToken(session_head_cas_token(&head)?),
+            )
+            .await?;
+            let end = session.messages().len();
+            let (commit, adopted) = commit_and_adopt_summary_rewrite(
+                &inc,
+                &mut session,
+                &appended_head,
+                end,
+                "[compacted] identical summary",
+            )
+            .await?;
+            if let Some(previous) = commits.last() {
+                let previous: &TranscriptRewriteCommit = previous;
+                assert_eq!(
+                    previous.revision, commit.revision,
+                    "the fixture must make the rewritten revision recur"
+                );
+            }
+            assert_ne!(
+                adopted.strand, head.strand,
+                "a recurring revision must not re-adopt the strand it rewrites"
+            );
+            commits.push(commit);
+            head = adopted;
+        }
+
+        assert_eq!(inc.load_rewrites(session.id()).await?.len(), 5);
+        let loaded = store.load(session.id()).await?.expect("head load");
+        assert_eq!(loaded.messages(), session.messages());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn incremental_capability_and_guard_parity() -> Result<(), Box<dyn std::error::Error>> {
         let store = Arc::new(MemoryStore::new());

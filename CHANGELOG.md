@@ -68,6 +68,13 @@ them.
   handle it. Its `failure_class()` is `RuntimeRejected`, and its structured
   data is `kind: "mob_member_runtime_detached"` with
   `required_action: "reload_member_registration"`.
+- Behaviour-only (not measured by the gate):
+  `validate_commit_rewrite_transition` returns a head whose `strand` is
+  `TranscriptStrandId::from_rewrite_occurrence(commit)` instead of
+  `from_rewrite(commit)`. A custom `IncrementalSessionStore::commit_rewrite`
+  must write the rewrite's base rows under the strand of the head it returns
+  rather than re-deriving a revision-named one (see Fixed,
+  lukacf/meerkat-mobkit#488).
 - Behaviour-only (not measured by the gate): member dispatch to a session
   without a committed runtime attachment now fails with
   `MobError::MemberRuntimeDetached` instead of `MobError::Internal`. The
@@ -213,6 +220,20 @@ them.
   provider request. `MeerkatMachine::stop_run` is the supported run-fenced
   Stop: it cancels that Steer with the run (#1261). The exact-input and
   exact-run interrupts keep their requeue semantics.
+- Record-only transcript rewrites (`IncrementalSessionStore::commit_rewrite`
+  through `validate_commit_rewrite_transition`, used by `MemoryStore` and by
+  host stores such as MobKit's continuity store) now adopt the
+  occurrence-named strand `TranscriptStrandId::from_rewrite_occurrence`
+  instead of the revision-named `from_rewrite`. Content revisions recur: two
+  deterministic compactions of one session can rewrite to the same
+  transcript. The second rewrite then re-targeted the strand it was
+  rewriting. `MemoryStore` refused it as `Corrupted`, and MobKit's continuity
+  store refused its base rows against the strand's immutable post-head rows
+  ("not a continuation of persisted revision strand:<rev> seq:1"), which
+  wedged identity-first members at their second auto-compaction
+  (lukacf/meerkat-mobkit#488). Stored strand names are read back from rows,
+  never recomputed, so strands already written under revision names stay
+  readable, and a rewrite refused this way succeeds on its next replay.
 - Cold resume verifies each committed session head once instead of five
   times (#1258). HeadCanonical resume preparation now brackets the
   store-owned durable-tail recovery with resume observations and adopts the

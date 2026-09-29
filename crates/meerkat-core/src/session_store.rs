@@ -1429,8 +1429,11 @@ pub trait SessionStore: Send + Sync {
 ///
 /// Minting rules:
 /// - [`TranscriptStrandId::root`] — a session's first strand;
-/// - [`TranscriptStrandId::from_rewrite`] — the strand created by adopting a
-///   transcript rewrite commit (named by the commit's revision digest);
+/// - [`TranscriptStrandId::from_rewrite_occurrence`] - the strand created by
+///   adopting a transcript rewrite commit (named by its rewrite generation and
+///   revision digest, so a recurring revision still gets a fresh strand);
+/// - [`TranscriptStrandId::from_rewrite`] - the revision-named strand released
+///   record-only rewrites adopted (read-compat only; never minted anew);
 /// - [`TranscriptStrandId::rebase`] — `rebase:{digest}` strands minted for
 ///   compat/equivalence representation rebases and for migrated rebookkept
 ///   rewrite parents.
@@ -1444,7 +1447,12 @@ impl TranscriptStrandId {
         Self("root".to_string())
     }
 
-    /// The strand created by adopting a transcript rewrite commit.
+    /// The revision-named strand released record-only rewrites adopted.
+    ///
+    /// Retained so stores can recognize and read durable rows written under
+    /// that naming. New rewrites must not mint it: a content revision can
+    /// recur within one session, so the digest alone is not a durable strand
+    /// identity. Mint [`Self::from_rewrite_occurrence`] instead.
     pub fn from_rewrite(commit: &TranscriptRewriteCommit) -> Self {
         Self(commit.revision.clone())
     }
@@ -5152,11 +5160,18 @@ pub trait IncrementalSessionStore: SessionStore {
     /// (O(parent), rewrite-time only), then writes the commit at
     /// `rewrite_idx = stored head.rewrite_count` (replacing any unadopted row
     /// at that idx => idempotent retry) plus the new strand's base rows
-    /// (`revision_body.messages` under `from_rewrite(commit)`).
+    /// (`revision_body.messages` under `from_rewrite_occurrence(commit)`).
     ///
     /// Does NOT advance the head: adoption = a subsequent [`save_head`] with
-    /// `rewrite_count = idx + 1` and `strand = from_rewrite(commit)`. Returns
-    /// the implied next head for the caller to adopt.
+    /// `rewrite_count = idx + 1` and `strand = from_rewrite_occurrence(commit)`.
+    /// Returns the implied next head for the caller to adopt; implementations
+    /// must take the strand from it rather than re-deriving one.
+    ///
+    /// The strand is named by the rewrite OCCURRENCE, never by the revision
+    /// digest alone: content revisions recur (two deterministic compactions of
+    /// one session can rewrite to the same transcript), and a revision-named
+    /// strand would make the recurring rewrite re-target the strand it is
+    /// rewriting, whose immutable post-head rows then refuse the new base.
     ///
     /// [`save_head`]: IncrementalSessionStore::save_head
     async fn commit_rewrite(
@@ -5763,7 +5778,9 @@ pub fn validate_commit_rewrite_transition(
     Ok(SessionHead {
         id: id.clone(),
         version: stored.version,
-        strand: TranscriptStrandId::from_rewrite(&record.commit),
+        // Occurrence-named: a recurring revision (`A -> B -> ... -> B`) must
+        // not re-target an existing strand. See `commit_rewrite`.
+        strand: TranscriptStrandId::from_rewrite_occurrence(&record.commit),
         head_revision: record.commit.revision.clone(),
         message_count: record.commit.messages_after as u64,
         message_row_prefix: Some(message_row_prefix),

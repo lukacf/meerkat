@@ -179,6 +179,11 @@ pub(super) fn probe(pid: i32) -> io::Result<ProcessProbe> {
     })
 }
 
+/// An empty `/proc` listing is cross-checked against `kill(-pgid, 0)`:
+/// zombies stay listed, so a signalable group with no listed member means
+/// the listing did not see it.
+pub(super) const EMPTY_LISTING_IS_AUTHORITATIVE: bool = false;
+
 /// Members of group `pgid`. Unreadable processes are omitted (their group
 /// cannot be known); readable members owned by another user are reported as
 /// [`ProcessProbe::Foreign`]. Callers cross-check an empty result against

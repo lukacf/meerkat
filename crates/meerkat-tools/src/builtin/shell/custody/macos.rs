@@ -59,11 +59,16 @@ fn bsd_info(pid: i32) -> io::Result<BsdInfo> {
     };
     if written <= 0 {
         let error = io::Error::last_os_error();
-        if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
-            return Ok(BsdInfo::Foreign);
+        match error.raw_os_error() {
+            Some(libc::EPERM | libc::EACCES) => return Ok(BsdInfo::Foreign),
+            // ESRCH: the kernel no longer describes the pid as a live
+            // process. It is gone, or it is a zombie - PROC_PIDTBSDINFO does
+            // not describe zombies on macOS even though kill(pid, 0) still
+            // succeeds on them. Either way it can never run again.
+            Some(libc::ESRCH) => return Ok(BsdInfo::Absent),
+            _ => {}
         }
-        // PROC_PIDTBSDINFO also describes zombies, so a failure normally
-        // means the process is gone; confirm that independently.
+        // Any other failure: believe absence only when kill(2) confirms it.
         return match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
             Err(nix::errno::Errno::ESRCH) => Ok(BsdInfo::Absent),
             Err(nix::errno::Errno::EPERM) => Ok(BsdInfo::Foreign),
@@ -112,8 +117,15 @@ pub(super) fn probe(pid: i32) -> io::Result<ProcessProbe> {
     })
 }
 
-/// Members of group `pgid` as listed by the kernel, excluding processes that
-/// vanished while being read.
+/// An empty group listing is authoritative on macOS: listing failures are
+/// detected through errno, and the kernel may not list zombies, which still
+/// answer `kill(-pgid, 0)` although they can never run again.
+pub(super) const EMPTY_LISTING_IS_AUTHORITATIVE: bool = true;
+
+/// Members of group `pgid` as listed by the kernel. A listed pid that probes
+/// as absent (a zombie, or a process that exited while being read) is
+/// reported as [`ProcessProbe::Absent`], so callers can tell a group whose
+/// only remaining members can never run from an empty listing.
 pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessProbe)>> {
     let mut capacity = 256usize;
     let pids = loop {
@@ -148,7 +160,7 @@ pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessProbe)>> {
     let mut members = Vec::with_capacity(pids.len());
     for pid in pids.into_iter().filter(|pid| *pid > 0) {
         match probe(pid)? {
-            ProcessProbe::Absent => {}
+            ProcessProbe::Absent => members.push((pid, ProcessProbe::Absent)),
             ProcessProbe::Foreign => members.push((pid, ProcessProbe::Foreign)),
             // proc_listpgrppids is a point-in-time listing; re-check.
             ProcessProbe::Observed(snapshot) if snapshot.pgid == pgid => {

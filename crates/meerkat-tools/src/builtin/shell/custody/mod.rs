@@ -349,38 +349,42 @@ fn release_when_group_exits(pgid: i32, leader_start: Option<ProcessStartStamp>) 
     let spawned = std::thread::Builder::new()
         .name("meerkat-custody-group-watch".to_owned())
         .spawn(move || {
-            loop {
-                let Ok(members) = observed_members(pgid) else {
-                    return;
-                };
-                let descendants: Vec<ProcessIdentity> = members
-                    .into_iter()
-                    .filter(|member| {
-                        leader_start
-                            .is_none_or(|leader| leader.not_after(&member.start) == Some(true))
-                    })
-                    .collect();
-                let mut live = Vec::with_capacity(descendants.len());
-                for member in descendants {
-                    match member.is_running() {
-                        Ok(true) => live.push(member),
-                        Ok(false) => {}
-                        Err(_) => return,
-                    }
-                }
-                if live.is_empty() {
-                    release_live_group(pgid, leader_start);
-                    return;
-                }
-                let waited = sys::ExitWatch::new(&live)
-                    .and_then(|watch| watch.wait_all(Instant::now() + RELEASE_WATCH_ROTATION));
-                if waited.is_err() {
-                    return;
-                }
+            if let Err(error) = watch_until_group_exits(pgid, leader_start) {
+                // Only a group that cannot be observed keeps its entry; its
+                // leader stamp lets later recoveries recognise it as stale.
+                tracing::warn!(
+                    %error,
+                    pgid,
+                    "custody group release watcher cannot observe the group; entry kept"
+                );
             }
         });
     if let Err(error) = spawned {
         tracing::warn!(%error, pgid, "could not start a custody group release watcher");
+    }
+}
+
+/// Wait on kernel exit notification (pidfd on Linux, kqueue `EVFILT_PROC` on
+/// macOS) for every member of the group started no earlier than its leader,
+/// re-listing after each round, then release the entry.
+fn watch_until_group_exits(
+    pgid: i32,
+    leader_start: Option<ProcessStartStamp>,
+) -> std::io::Result<()> {
+    loop {
+        let mut live = Vec::new();
+        for member in observed_members(pgid)? {
+            let descends = leader_start
+                .is_none_or(|leader| leader.not_after(&member.start) == Some(true));
+            if descends && member.is_running()? {
+                live.push(member);
+            }
+        }
+        if live.is_empty() {
+            release_live_group(pgid, leader_start);
+            return Ok(());
+        }
+        sys::ExitWatch::new(&live)?.wait_all(Instant::now() + RELEASE_WATCH_ROTATION)?;
     }
 }
 
@@ -924,20 +928,16 @@ fn settle_phase(
     }
 }
 
-/// Current members of group `pgid` (zombies included). Foreign members may
-/// be listed but are never ours. An empty listing is only believed when
+/// Current members of group `pgid` (zombies included where the platform
+/// lists them). Foreign members may be listed but are never ours. Where an
+/// empty listing is not authoritative (Linux), it is only believed when
 /// `kill(-pgid, 0)` agrees: ESRCH (no such group) or EPERM (the group holds
 /// only processes we cannot signal, so none of ours).
 fn group_members_checked(pgid: i32) -> std::io::Result<Vec<(i32, ProcessProbe)>> {
-    let members: Vec<_> = sys::group_members(pgid)?
-        .into_iter()
-        .filter(|(_, probe)| match probe {
-            ProcessProbe::Observed(member) => member.pgid == pgid,
-            ProcessProbe::Absent => false,
-            ProcessProbe::Foreign => true,
-        })
-        .collect();
-    if members.is_empty() {
+    let listed = sys::group_members(pgid)?;
+    // Only an empty kernel listing needs the cross-check: listed members that
+    // probe as absent (zombies, exits while reading) prove the listing works.
+    if listed.is_empty() && !sys::EMPTY_LISTING_IS_AUTHORITATIVE {
         match nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pgid), None) {
             Err(nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM) => {}
             Ok(()) => {
@@ -948,7 +948,14 @@ fn group_members_checked(pgid: i32) -> std::io::Result<Vec<(i32, ProcessProbe)>>
             Err(error) => return Err(std::io::Error::from(error)),
         }
     }
-    Ok(members)
+    Ok(listed
+        .into_iter()
+        .filter(|(_, probe)| match probe {
+            ProcessProbe::Observed(member) => member.pgid == pgid,
+            ProcessProbe::Absent => false,
+            ProcessProbe::Foreign => true,
+        })
+        .collect())
 }
 
 /// Whether the recorded group id still names the recorded tool's group.

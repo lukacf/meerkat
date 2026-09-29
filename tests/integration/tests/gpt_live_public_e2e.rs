@@ -1719,6 +1719,15 @@ fn answer_transcript_text(events: &[Value], start: usize) -> String {
         .join("")
 }
 
+/// A WorkGraph title and a delegation window carry the same transcript when
+/// they match with whitespace removed. The product joins a window's finals
+/// with a space; the peer concatenates raw deltas, so a word the provider
+/// split across two finals ("thetext" + "irst") differs only in spacing.
+fn same_transcript_words(title: &str, window: &str) -> bool {
+    let compact = |text: &str| text.split_whitespace().collect::<String>();
+    compact(title) == compact(window)
+}
+
 /// S99's reply to the exchange that began at `start`: every assistant
 /// transcript delta whose provider `start_ms` is no earlier than the
 /// question's first input delta.
@@ -1744,9 +1753,9 @@ fn s99_answer_text(events: &[Value], start: usize) -> String {
 }
 
 /// Assistant transcript of the exchange at `start` that began before the
-/// question's first input delta: a response still streaming at the onset.
+/// question's first input delta: a response already streaming at the onset.
 /// Its later deltas could carry `start_ms` values inside the answer window,
-/// so S99 refuses the exchange instead of letting it satisfy the match.
+/// so S99 then anchors the answer on the user's last words instead.
 fn s99_in_flight_at_onset(events: &[Value], start: usize) -> Option<String> {
     let question_start = events[start..]
         .iter()
@@ -2241,15 +2250,18 @@ async fn s99_native_exchange(
         // replays, so speech that starts at a pause inside the question
         // (the provider may answer before the fixture's last words) answers
         // this question.
+        // Speech that began before the question's first words (the provider
+        // started talking as the fixture began) must not satisfy the match:
+        // with it in flight the answer is anchored on the user's last words,
+        // so only speech after the question counts, and the overlap is
+        // recorded as evidence.
+        let in_flight = s99_in_flight_at_onset(&events, start);
         let text = user_start
-            .map(|_| s99_answer_text(&events, start))
+            .map(|_| match &in_flight {
+                None => s99_answer_text(&events, start),
+                Some(_) => answer_transcript_text(&events, start),
+            })
             .unwrap_or_default();
-        if let Some(in_flight) = s99_in_flight_at_onset(&events, start) {
-            return Err(format!(
-                "S99 exchange {fixture}: an assistant response was still streaming at the question onset ({in_flight:?}); the answer cannot be attributed to this question"
-            )
-            .into());
-        }
         let audio = live.peer.audio_evidence().await?;
         if matches_text(&text.to_lowercase()) && audio.has_decoded_speech_since(baseline) {
             s99_assert_unmeasured(live)?;
@@ -2259,7 +2271,14 @@ async fn s99_native_exchange(
                 audio,
             })?;
             println!("GPT_LIVE_PUBLIC_CONCURRENT_AUDIO fixture={fixture} evidence={audio:?}");
-            return Ok(s99_answer_text(&live.peer.events().await?, start));
+            if let Some(in_flight) = &in_flight {
+                println!("GPT_LIVE_S99_IN_FLIGHT_AT_ONSET fixture={fixture} speech={in_flight:?}");
+            }
+            let events = live.peer.events().await?;
+            return Ok(match in_flight {
+                None => s99_answer_text(&events, start),
+                Some(_) => answer_transcript_text(&events, start),
+            });
         }
         if Instant::now() >= deadline {
             s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
@@ -4146,7 +4165,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             let titles: Vec<String> = items.iter().map(|item| normalize_words(&item.title)).collect();
             println!("GPT_LIVE_S100_WORKGRAPH_TITLES {titles:?}");
             for (index, window) in spoken_inputs.iter().enumerate() {
-                if !titles.iter().any(|title| title == window) {
+                if !titles.iter().any(|title| same_transcript_words(title, window)) {
                     deterministic_failures.push(format!(
                         "no WorkGraph item title equals request {} window {window:?}; titles: {titles:?}",
                         index + 1
@@ -6859,7 +6878,7 @@ async fn run_s105_fork_and_merge_parallel(
             .collect();
         println!("GPT_LIVE_S105_INPUTS delegated_windows={delegated_windows:?} workgraph_titles={titles:?}");
         for window in &delegated_windows {
-            if !titles.iter().any(|title| title == window) {
+            if !titles.iter().any(|title| same_transcript_words(title, window)) {
                 deterministic_failures.push(format!(
                     "no WorkGraph item title equals the delegation window transcript {window:?}; titles: {titles:?}"
                 ));

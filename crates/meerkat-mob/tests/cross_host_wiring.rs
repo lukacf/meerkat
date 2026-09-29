@@ -1421,6 +1421,22 @@ async fn placed_member_publishes_its_transport_key_and_retires_at_its_real_addre
     .expect("published key decodes");
     assert_eq!(decoded.to_peer_id(), b2_peer);
 
+    // The public durable-endpoint read carries the member's real remote
+    // address and key: what a cross-process host dials for a placed member.
+    let endpoint = controlling
+        .handle
+        .member_peer_endpoint(&identity("b2"))
+        .await
+        .expect("query b2 endpoint")
+        .expect("a placed member has a durable endpoint");
+    assert_eq!(endpoint.peer_id, b2_peer);
+    assert_eq!(endpoint.pubkey, *decoded.as_bytes());
+    assert_ne!(
+        endpoint.address.transport(),
+        meerkat_core::comms::PeerTransport::Inproc,
+        "a placed member's durable endpoint is its real remote address"
+    );
+
     let a1_session = controlling.member_session_id(&identity("a1")).await;
     let a1_runtime = controlling.member_comms_runtime(&a1_session).await;
     let b2_in_a1 = a1_runtime
@@ -1448,6 +1464,15 @@ async fn placed_member_publishes_its_transport_key_and_retires_at_its_real_addre
             .expect("query b2")
             .is_none(),
         "the retired placed member leaves the roster"
+    );
+    assert!(
+        controlling
+            .handle
+            .member_peer_endpoint(&identity("b2"))
+            .await
+            .expect("query retired b2 endpoint")
+            .is_none(),
+        "a retired placed member publishes no endpoint"
     );
     wait_until(
         "a1's trust row for the retired placed member to go",

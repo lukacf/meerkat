@@ -8799,6 +8799,47 @@ impl MobHandle {
         Self::project_get_member_result(result)
     }
 
+    /// The member's canonical comms endpoint: the exact generation endpoint
+    /// MobMachine holds for its current incarnation (display name, peer id,
+    /// transport address and Ed25519 transport key).
+    ///
+    /// For a placed (host-owned) member this is the host-acknowledged
+    /// endpoint with its real remote address, which a cross-process host can
+    /// dial; the controlling process holds no local comms runtime for it. For
+    /// a local member the address is the one its runtime advertised when the
+    /// endpoint was registered (`inproc://` for an in-process member).
+    ///
+    /// Returns `Ok(None)` when the member is absent, has no registered
+    /// endpoint, or is Broken (a Broken member publishes no endpoint, exactly
+    /// like its roster projection). A query fault is `Err`, never `None`.
+    pub async fn member_peer_endpoint(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<meerkat_core::comms::TrustedPeerDescriptor>, MobError> {
+        let state = self.query_machine_state().await?;
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        if state.member_restore_failures.contains_key(&dsl_identity) {
+            return Ok(None);
+        }
+        state
+            .member_peer_endpoints
+            .get(&dsl_identity)
+            .map(|endpoint| {
+                meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+                    endpoint.name.0.clone(),
+                    endpoint.peer_id.0.clone(),
+                    endpoint.signing_key.0,
+                    endpoint.address.0.clone(),
+                )
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "member '{identity}' has an invalid MobMachine peer endpoint: {error}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
     /// Read the total stored observation for one identity intent row.
     pub async fn identity_intent(
         &self,

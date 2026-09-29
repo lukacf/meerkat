@@ -17978,6 +17978,22 @@ async fn assert_running_boot_broke_only(
         .expect("healthy member listed");
     assert_eq!(healthy_entry.status, MobMemberStatus::Active);
     assert_eq!(healthy_entry.peer_id, Some(healthy_peer_id));
+    assert!(
+        handle
+            .member_peer_endpoint(broken)
+            .await
+            .expect("query broken endpoint")
+            .is_none(),
+        "a Broken member publishes no durable endpoint"
+    );
+    assert_eq!(
+        handle
+            .member_peer_endpoint(healthy)
+            .await
+            .expect("query healthy endpoint")
+            .map(|endpoint| endpoint.peer_id),
+        Some(healthy_peer_id)
+    );
 }
 
 /// A Running mob restarts after one member's comms identity store was lost.

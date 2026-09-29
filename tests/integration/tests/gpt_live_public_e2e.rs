@@ -2918,6 +2918,55 @@ fn delegations_per_window(
         .collect()
 }
 
+/// Assistant audio starts at or after `from_ms` that open a new assistant
+/// response with no input final or commentary append since the assistant
+/// was last audible (a duplicate readout).
+///
+/// The peer's energy bursts are not responses: a readout spoken line by
+/// line pauses longer than the peer's 600 ms end hysteresis between lines,
+/// so one readout yields several bursts. A response is the peer's
+/// `response` index, which advances only when a new user utterance starts;
+/// a burst carrying the same index as the burst before it continues that
+/// response, and repetition inside one response is the peer's own
+/// `duplicate_readout` fault on the output transcript text, which every
+/// scenario already fails on. The prompt window opens at the previous
+/// burst's `last_active_ms`, the last audible window: the burst's
+/// `assistant_audio_end` entry is pushed only after the hysteresis, so an
+/// input final that closed inside it still follows the audio.
+fn unprompted_assistant_response_starts(timeline: &[TimelineEntry], from_ms: u64) -> Vec<u64> {
+    let mut unprompted = Vec::new();
+    let mut previous_response = None;
+    let mut last_audible_ms = 0u64;
+    for (index, entry) in timeline.iter().enumerate() {
+        match entry.kind {
+            TimelineKind::AssistantAudioEnd => {
+                last_audible_ms = entry.detail_u64("last_active_ms").unwrap_or(entry.t_ms);
+            }
+            TimelineKind::AssistantAudioStart => {
+                let response = entry.detail_u64("response");
+                let continues = response.is_some() && response == previous_response;
+                previous_response = response;
+                if continues || entry.t_ms < from_ms {
+                    continue;
+                }
+                let window_start = last_audible_ms.min(entry.t_ms);
+                let prompted = timeline[..index].iter().any(|e| {
+                    e.t_ms >= window_start
+                        && matches!(
+                            e.kind,
+                            TimelineKind::InputFinal | TimelineKind::CommentaryAppended
+                        )
+                });
+                if !prompted {
+                    unprompted.push(entry.t_ms);
+                }
+            }
+            _ => {}
+        }
+    }
+    unprompted
+}
+
 // ===========================================================================
 // Scenario 100: morning standup (timed multi-turn voice session)
 // ===========================================================================
@@ -4540,8 +4589,10 @@ async fn wait_for_settled(
 /// over the user; the only legitimate lever against that is instruction
 /// text asking the model to let the user finish, never a runtime heuristic.
 /// The remaining deterministic checks:
-/// after the barge-in every assistant audio start follows a new input final
-/// or a commentary append (no duplicate readout, also a browser fault);
+/// after the barge-in every new assistant response starts after a new input
+/// final or a commentary append, and no response repeats itself (no
+/// duplicate readout; see `unprompted_assistant_response_starts`, the
+/// repetition is a browser fault);
 /// overlap beyond the bound only inside the two interruption windows; close
 /// converges. Tolerant: assistant energy off within 800 ms of the barge-in
 /// onset; the last executor input carries "friday"; open -> connected < 5 s.
@@ -4748,27 +4799,9 @@ async fn run_s103_interrupt_and_recover(
             &mut tolerant_failures,
         )?;
 
-        // Readout integrity after the barge-in: every assistant audio start
-        // follows a new input final or a commentary append since the
-        // previous assistant audio end.
-        let mut unprompted_starts = Vec::new();
-        let mut last_end_ms = 0u64;
-        for (index, entry) in timeline.iter().enumerate() {
-            match entry.kind {
-                TimelineKind::AssistantAudioEnd => last_end_ms = entry.t_ms,
-                TimelineKind::AssistantAudioStart if entry.t_ms >= barge_in_start_ms => {
-                    let prompted = timeline[..index].iter().any(|e| {
-                        e.t_ms >= last_end_ms.min(entry.t_ms)
-                            && e.t_ms <= entry.t_ms
-                            && matches!(e.kind, TimelineKind::InputFinal | TimelineKind::CommentaryAppended)
-                    });
-                    if !prompted {
-                        unprompted_starts.push(entry.t_ms);
-                    }
-                }
-                _ => {}
-            }
-        }
+        // Readout integrity after the barge-in: every assistant response
+        // starts after a new input final or a commentary append.
+        let unprompted_starts = unprompted_assistant_response_starts(&timeline, barge_in_start_ms);
 
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S103").await?;
@@ -7638,5 +7671,121 @@ mod config_tests {
             "openai_api"
         );
         assert_eq!(section.default_binding.as_deref(), Some(BINDING));
+    }
+
+    fn timeline(entries: &[(u64, &str, serde_json::Value)]) -> Vec<super::TimelineEntry> {
+        entries
+            .iter()
+            .map(|(t_ms, kind, detail)| {
+                serde_json::from_value(
+                    serde_json::json!({"t_ms": t_ms, "kind": kind, "detail": detail}),
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    /// Turbo S run 36599321227, S103 attempt 2 after the barge-in at 53790:
+    /// the correction's final lands 8 ms before the previous burst's end
+    /// entry but 691 ms after its last audible window, and the brief is
+    /// then read line by line as ten bursts of one response.
+    #[test]
+    fn s103_line_by_line_readout_after_a_correction_is_one_prompted_response() {
+        use serde_json::json;
+        let mut entries = vec![
+            (51736, "assistant_audio_start", json!({"response": 3})),
+            (53790, "fixture_start", json!({"id": 2})),
+            (
+                55640,
+                "assistant_audio_end",
+                json!({"last_active_ms": 55038, "response": 4}),
+            ),
+            (58119, "input_final", json!({"index": 4})),
+            (59038, "assistant_audio_start", json!({"response": 4})),
+            (60814, "commentary_appended", json!({})),
+            (61430, "input_final", json!({"index": 5})),
+            (
+                61438,
+                "assistant_audio_end",
+                json!({"last_active_ms": 60739, "response": 5}),
+            ),
+        ];
+        let bursts = [
+            (62040, 66840, 66238),
+            (67240, 70636, 69939),
+            (70739, 73136, 72440),
+            (73438, 78739, 78136),
+            (78936, 81939, 81240),
+            (82336, 84840, 84238),
+            (85336, 87640, 87038),
+            (88238, 91139, 90536),
+            (91336, 93838, 93139),
+            (94339, 96936, 96238),
+        ];
+        for (start, end, last_active) in bursts {
+            entries.push((start, "assistant_audio_start", json!({"response": 5})));
+            entries.push((
+                end,
+                "assistant_audio_end",
+                json!({"last_active_ms": last_active, "response": 5}),
+            ));
+        }
+        assert!(super::unprompted_assistant_response_starts(&timeline(&entries), 53790).is_empty());
+    }
+
+    /// Turbo S run 36599321227, S103 attempt 1: the readout the barge-in
+    /// interrupts pauses 900 ms between two lines and resumes in the same
+    /// response just after the barge-in onset.
+    #[test]
+    fn s103_readout_resumed_after_a_line_pause_is_not_a_new_response() {
+        use serde_json::json;
+        let entries = timeline(&[
+            (67540, "commentary_appended", json!({})),
+            (67876, "assistant_audio_start", json!({"response": 3})),
+            (
+                69183,
+                "assistant_audio_end",
+                json!({"last_active_ms": 68580, "response": 3}),
+            ),
+            (69380, "fixture_start", json!({"id": 2})),
+            (69482, "assistant_audio_start", json!({"response": 3})),
+            (
+                71583,
+                "assistant_audio_end",
+                json!({"last_active_ms": 70882, "response": 4}),
+            ),
+            (73131, "input_final", json!({"index": 4})),
+            (73780, "assistant_audio_start", json!({"response": 5})),
+            (
+                76378,
+                "assistant_audio_end",
+                json!({"last_active_ms": 75681, "response": 6}),
+            ),
+            (76847, "input_final", json!({"index": 6})),
+            (77678, "assistant_audio_start", json!({"response": 6})),
+        ]);
+        assert!(super::unprompted_assistant_response_starts(&entries, 69380).is_empty());
+    }
+
+    #[test]
+    fn s103_new_response_without_a_final_or_commentary_is_unprompted() {
+        use serde_json::json;
+        let entries = timeline(&[
+            (1000, "input_final", json!({"index": 0})),
+            (1200, "assistant_audio_start", json!({"response": 1})),
+            // This final closed while the assistant was still audible; the
+            // next response has no final or commentary after that.
+            (2900, "input_final", json!({"index": 1})),
+            (
+                3700,
+                "assistant_audio_end",
+                json!({"last_active_ms": 3000, "response": 1}),
+            ),
+            (5000, "assistant_audio_start", json!({"response": 2})),
+        ]);
+        assert_eq!(
+            super::unprompted_assistant_response_starts(&entries, 0),
+            vec![5000]
+        );
     }
 }

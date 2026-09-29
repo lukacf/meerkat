@@ -16399,6 +16399,26 @@
             "type": "object"
           },
           {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/components/schemas/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "message": {
                 "type": "string"

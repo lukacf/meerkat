@@ -1182,6 +1182,17 @@ pub enum MobError {
         requested_role: ProfileName,
         reason: String,
     },
+
+    /// A delivery identity's correlation and a caller-supplied transcript
+    /// interaction id (on the `WorkSpec` or in the turn options) name
+    /// different interactions. The delivery is refused before admission.
+    #[error(
+        "delivery correlation '{correlation_id}' conflicts with supplied interaction id '{interaction_id}'"
+    )]
+    DeliveryInteractionConflict {
+        correlation_id: String,
+        interaction_id: String,
+    },
 }
 
 /// THE single owner of the operator-facing name-occupancy remedy text, shared

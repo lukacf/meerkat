@@ -119,6 +119,9 @@ export type SkillResolutionFailureReason = {
   skill_name: string;
   source_uuid: string;
 } | {
+  reason_type: "no_skill_engine";
+  requested: SkillKey[];
+} | {
   message: string;
   reason_type: "unknown";
 };

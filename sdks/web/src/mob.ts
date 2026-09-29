@@ -1,6 +1,6 @@
 import { EventSubscription } from './events.js';
 import { MeerkatError, serializePromptContentInput } from './session.js';
-import { isKnownEvent } from './types.js';
+import { foldUnknownSkillResolutionReason, isKnownEvent } from './types.js';
 import type { ProviderTokenAccounting } from './generated/events.js';
 import { MOB_SPAWN_MANY_FAILURE_CAUSES } from './generated/mob.js';
 import type {
@@ -608,10 +608,11 @@ function parseEventPayload(raw: unknown, context: string): EventEnvelope['payloa
   // of blindly casting an arbitrary record. An unknown discriminant is a
   // malformed/forward-incompatible wire shape — mirroring session.ts and the
   // TS SDK's parseCoreEvent policy.
-  if (!isKnownEvent(payload as { type: string })) {
+  const event = foldUnknownSkillResolutionReason(payload as { type: string });
+  if (!isKnownEvent(event)) {
     throw new Error(`${context}: unknown event type "${type}"`);
   }
-  return payload as EventEnvelope['payload'];
+  return event as EventEnvelope['payload'];
 }
 
 function parseEventEnvelope(raw: unknown, context: string): EventEnvelope {

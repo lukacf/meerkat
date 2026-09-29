@@ -365,6 +365,13 @@ Pass tagged `skill_refs` in API requests to resolve and inject skills for a spec
 
 Legacy `skill_references` strings are retired and rejected; use structured `skill_refs`.
 
+A nonempty `skill_refs` selection never silently downgrades to an ordinary
+turn. If the agent was built without a skill engine (for example, skills were
+disabled when the session was built, and the config was changed later without
+rebuilding it), the turn fails before any provider call. It fails with
+`skill_resolution_failed` and the typed reason `no_skill_engine`, which lists
+the requested keys.
+
 ### 3. Preloading at session creation
 
 Pass `preload_skills` to inject skills into the system prompt at session creation:

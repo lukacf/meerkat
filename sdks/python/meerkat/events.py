@@ -550,6 +550,7 @@ class SkillResolutionFailureReason:
     to_source_uuid: str = ""
     to_skill_name: str = ""
     alias: str = ""
+    requested: list[SkillKey] = field(default_factory=list)
     raw_reason_type: str | None = None
 
 
@@ -1091,6 +1092,7 @@ def _parse_skill_resolution_failure_reason(
         "remap_without_lineage",
         "unknown_skill_alias",
         "remap_cycle",
+        "no_skill_engine",
         "unknown",
     }
     normalized_reason_type = reason_type if reason_type in known_reason_types else "unknown"
@@ -1103,10 +1105,17 @@ def _parse_skill_resolution_failure_reason(
             return None
     else:
         capability = raw.get("capability", "")
+    requested: list[SkillKey] = []
+    if reason_type == "no_skill_engine":
+        try:
+            requested = _parse_skill_key_list(raw.get("requested"))
+        except ValueError:
+            return None
 
     return SkillResolutionFailureReason(
         reason_type=normalized_reason_type,
         key=key,
+        requested=requested,
         capability=capability if isinstance(capability, str) else "",
         message=str(raw.get("message", "")),
         source_uuid=str(raw.get("source_uuid", raw.get("sourceUuid", ""))),

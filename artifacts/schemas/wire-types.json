@@ -4962,6 +4962,26 @@
             "type": "object"
           },
           {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "message": {
                 "type": "string"
@@ -27020,6 +27040,26 @@
             "type": "object"
           },
           {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "message": {
                 "type": "string"
@@ -40746,6 +40786,26 @@
               "reason_type",
               "source_uuid",
               "skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
             ],
             "type": "object"
           },
@@ -58271,6 +58331,26 @@
             "type": "object"
           },
           {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "message": {
                 "type": "string"
@@ -75712,6 +75792,26 @@
             "type": "object"
           },
           {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "message": {
                 "type": "string"
@@ -85163,6 +85263,26 @@
             "type": "object"
           },
           {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "message": {
                 "type": "string"
@@ -90927,6 +91047,26 @@
               "reason_type",
               "source_uuid",
               "skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
             ],
             "type": "object"
           },
@@ -140689,6 +140829,26 @@
             "type": "object"
           },
           {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "message": {
                 "type": "string"
@@ -156713,6 +156873,26 @@
               "reason_type",
               "source_uuid",
               "skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
             ],
             "type": "object"
           },

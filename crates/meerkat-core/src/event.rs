@@ -703,6 +703,13 @@ pub enum SkillResolutionFailureReason {
         source_uuid: String,
         skill_name: String,
     },
+    /// The turn carried an explicit, nonempty skill selection but the agent
+    /// was built without a skill engine, so the selection cannot resolve.
+    /// The turn fails before any provider call instead of silently running
+    /// as an ordinary turn without the selected skills.
+    NoSkillEngine {
+        requested: Vec<SkillKey>,
+    },
     Unknown {
         message: String,
     },
@@ -780,6 +787,9 @@ impl<'de> Deserialize<'de> for SkillResolutionFailureReason {
             "remap_cycle" => Ok(Self::RemapCycle {
                 source_uuid: deserialize_skill_resolution_field(&value, "source_uuid")?,
                 skill_name: deserialize_skill_resolution_field(&value, "skill_name")?,
+            }),
+            "no_skill_engine" => Ok(Self::NoSkillEngine {
+                requested: deserialize_skill_resolution_field(&value, "requested")?,
             }),
             "unknown" => Ok(Self::Unknown {
                 message: value
@@ -925,6 +935,13 @@ impl std::fmt::Display for SkillResolutionFailureReason {
                 f,
                 "skill remap cycle detected for {source_uuid}/{skill_name}"
             ),
+            Self::NoSkillEngine { requested } => {
+                f.write_str("skills were explicitly selected but the agent has no skill engine:")?;
+                for key in requested {
+                    write!(f, " {key}")?;
+                }
+                Ok(())
+            }
             Self::Unknown { message } if message.is_empty() => {
                 f.write_str("unknown skill resolution failure")
             }
@@ -4394,6 +4411,38 @@ mod tests {
             AgentEvent::SkillResolutionFailed { skill_key, reason } => {
                 assert_eq!(skill_key, Some(key.clone()));
                 assert_eq!(reason, SkillResolutionFailureReason::NotFound { key });
+            }
+            other => unreachable!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_skill_engine_reason_roundtrips_with_every_requested_key() {
+        let first = SkillKey::builtin(SkillName::parse("first-skill").unwrap());
+        let second = SkillKey::builtin(SkillName::parse("second-skill").unwrap());
+        let reason = SkillResolutionFailureReason::NoSkillEngine {
+            requested: vec![first.clone(), second.clone()],
+        };
+        let event = AgentEvent::SkillResolutionFailed {
+            skill_key: Some(first.clone()),
+            reason: reason.clone(),
+        };
+
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["reason"]["reason_type"], "no_skill_engine");
+        assert_eq!(
+            value["reason"]["requested"][1]["skill_name"],
+            second.skill_name.as_str()
+        );
+
+        let roundtrip: AgentEvent = serde_json::from_value(value).unwrap();
+        match roundtrip {
+            AgentEvent::SkillResolutionFailed {
+                skill_key,
+                reason: decoded,
+            } => {
+                assert_eq!(skill_key, Some(first));
+                assert_eq!(decoded, reason);
             }
             other => unreachable!("unexpected event: {other:?}"),
         }

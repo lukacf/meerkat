@@ -2213,6 +2213,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         // without laundering them into a false spawn failure cause.
         MobError::PlacedInteractionIdAlreadyUsed { .. }
         | MobError::InvalidPlacedInteractionId { .. }
+        | MobError::DeliveryInteractionConflict { .. }
         | MobError::PlacedCompletionDeliveryRejected
         | MobError::PlacedCompletionHostNoEffect
         | MobError::PlacedCompletionHostCancelled
@@ -11993,11 +11994,51 @@ impl MobHandle {
         delivery_identity: crate::store::MobDeliveryIdentity,
         deadline: Instant,
     ) -> Result<WorkDeliveryReceipt, MobError> {
+        self.submit_host_human_input_with_options_bounded(
+            runtime_id,
+            fence_token,
+            spec,
+            handling_mode,
+            MemberTurnOptions::default(),
+            delivery_identity,
+            deadline,
+        )
+        .await
+    }
+
+    /// [`Self::submit_host_human_input_bounded`] with host-owned
+    /// [`MemberTurnOptions`] for the exact target turn.
+    ///
+    /// The options ride the same fenced host-human admission as the content:
+    /// selected [`MemberTurnOptions::skill_references`] resolve natively on
+    /// the target member (typed `SkillsResolved` / `SkillResolutionFailed`
+    /// and durable `SkillContext`), never as host-rendered prompt text. The
+    /// options are part of the runtime's exact replay identity, so a retry
+    /// with the SAME delivery identity and the same options deduplicates to
+    /// the original admission, and a retry that changes them is refused as
+    /// an idempotency conflict. The skill selection is order-sensitive: a
+    /// replay must repeat the same keys in the same order. An empty
+    /// selection is normalized to no selection. An interaction id in the
+    /// options that differs from the delivery correlation is refused with
+    /// [`MobError::DeliveryInteractionConflict`].
+    #[cfg(feature = "runtime-adapter")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn submit_host_human_input_with_options_bounded(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+        options: MemberTurnOptions,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        deadline: Instant,
+    ) -> Result<WorkDeliveryReceipt, MobError> {
         let cmd = self.host_human_input_command(
             runtime_id,
             fence_token,
             spec,
             handling_mode,
+            options,
             delivery_identity,
         )?;
         self.submit_work_command_bounded(cmd, deadline).await
@@ -12018,6 +12059,33 @@ impl MobHandle {
         delivery_identity: crate::store::MobDeliveryIdentity,
         deadline: Instant,
     ) -> Result<WorkTurnHandle, MobError> {
+        self.start_host_human_input_with_options_bounded(
+            runtime_id,
+            fence_token,
+            spec,
+            handling_mode,
+            MemberTurnOptions::default(),
+            delivery_identity,
+            deadline,
+        )
+        .await
+    }
+
+    /// Completion-bearing counterpart to
+    /// [`Self::submit_host_human_input_with_options_bounded`]; see
+    /// [`Self::start_host_human_input_bounded`] for the completion contract.
+    #[cfg(feature = "runtime-adapter")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_host_human_input_with_options_bounded(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+        options: MemberTurnOptions,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        deadline: Instant,
+    ) -> Result<WorkTurnHandle, MobError> {
         let session_id = {
             let state = self.machine_state_watch_rx.borrow();
             Self::machine_bridge_session_id_for_identity(&runtime_id.identity, &state)
@@ -12027,6 +12095,7 @@ impl MobHandle {
             fence_token,
             spec,
             handling_mode,
+            options,
             delivery_identity,
         )?;
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
@@ -12093,14 +12162,24 @@ impl MobHandle {
         fence_token: FenceToken,
         spec: WorkSpec,
         handling_mode: HandlingMode,
+        mut options: MemberTurnOptions,
         delivery_identity: crate::store::MobDeliveryIdentity,
     ) -> Result<Box<crate::mob_machine::SubmitWorkCommand>, MobError> {
         delivery_identity.validate()?;
+        // An empty selection is no selection: normalize it so it keeps the
+        // metadata-less replay identity instead of minting a distinct one.
+        if options.skill_references.as_ref().is_some_and(Vec::is_empty) {
+            options.skill_references = None;
+        }
         let work_ref = WorkRef::for_delivery(
             &self.definition.id,
             &runtime_id.identity,
             &delivery_identity.idempotency_key,
         );
+        // Absent options keep the metadata-less command shape, so existing
+        // host-human deliveries keep their exact replay identity.
+        let turn_metadata = (options != MemberTurnOptions::default())
+            .then(|| options.into_runtime_metadata(handling_mode));
         Ok(Box::new(crate::mob_machine::SubmitWorkCommand {
             runtime_id,
             fence_token,
@@ -12108,7 +12187,7 @@ impl MobHandle {
             spec,
             handling_mode,
             external_delivery_identity: Some(delivery_identity),
-            turn_metadata: None,
+            turn_metadata,
             event_tx: None,
             completion_tx: None,
             bounded_result_spec: None,

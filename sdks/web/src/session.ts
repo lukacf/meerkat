@@ -1,5 +1,5 @@
 import { EventSubscription } from './events.js';
-import { isKnownEvent } from './types.js';
+import { foldUnknownSkillResolutionReason, isKnownEvent } from './types.js';
 import type {
   ContentBlock,
   WireTurnInputOptions,
@@ -130,10 +130,11 @@ function normalizeSessionEvent(raw: unknown): SessionEvent {
   // silently-coercible one. The full record is passed (not a synthetic
   // `{ type }`) so the structural skill-resolution guards inside
   // `isKnownEvent` validate against the real payload.
-  if (!isKnownEvent(raw as { type: string })) {
+  const event = foldUnknownSkillResolutionReason(raw as { type: string });
+  if (!isKnownEvent(event)) {
     throw new Error(`Invalid session event: unknown event type "${raw.type}"`);
   }
-  return raw as unknown as SessionEvent;
+  return event as unknown as SessionEvent;
 }
 
 function normalizeSessionEvents(raw: unknown): SessionEvent[] {

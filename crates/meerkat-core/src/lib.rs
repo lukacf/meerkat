@@ -204,6 +204,9 @@ pub use context_budget::{
     context_budget_fact_for_messages, context_budget_fact_for_provider_request,
     context_budget_fact_for_session,
 };
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use digest_observability::whole_blob_decodes_of_session;
 pub use digest_observability::{
     DIGEST_SITE_LABELS, digest_site_bytes, global_session_content_digest_bytes,
     global_session_encode_bytes, global_transcript_graph_validations,

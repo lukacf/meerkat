@@ -96,6 +96,38 @@ static GLOBAL_WHOLE_BLOB_DECODE_BYTES: std::sync::atomic::AtomicU64 =
 static GLOBAL_TRANSCRIPT_GRAPH_VALIDATIONS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// WholeBlob decodes per decoded session, for tests: the process-wide count
+/// moves whenever any test decodes, and a store may decode on a blocking
+/// worker thread, so neither the global nor a thread-local count can
+/// attribute decodes to one test. Each test's sessions are its own.
+#[cfg(any(test, feature = "test-support"))]
+static WHOLE_BLOB_DECODES_BY_SESSION: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<crate::types::SessionId, u64>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn record_whole_blob_session_decode(session_id: &crate::types::SessionId) {
+    *WHOLE_BLOB_DECODES_BY_SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(session_id.clone())
+        .or_default() += 1;
+}
+
+/// Successful WholeBlob decodes of documents of `session_id`, on any thread
+/// (test support only).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn whole_blob_decodes_of_session(session_id: &crate::types::SessionId) -> u64 {
+    WHOLE_BLOB_DECODES_BY_SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(session_id)
+        .copied()
+        .unwrap_or(0)
+}
+
 thread_local! {
     // The same count scoped to the calling thread, so a test can attribute
     // decodes to its own work while parallel tests decode too.

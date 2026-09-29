@@ -20156,14 +20156,14 @@ ORDER BY runtime_id";
                 params![runtime_id_text(&runtime_id)],
             )
             .unwrap();
-            let decodes = meerkat_core::global_whole_blob_decodes();
+            let decodes = meerkat_core::whole_blob_decodes_of_session(session.id());
             let error = recommit(&store, &runtime_id, &committed).await.unwrap_err();
             assert!(
                 error.to_string().contains("finalized compaction intent"),
                 "{error}"
             );
             assert_eq!(
-                meerkat_core::global_whole_blob_decodes(),
+                meerkat_core::whole_blob_decodes_of_session(session.id()),
                 decodes,
                 "the refusal came from the reaffirm path itself"
             );
@@ -20180,7 +20180,10 @@ ORDER BY runtime_id";
                     .contains("without atomic outbox authority"),
                 "{error}"
             );
-            assert_eq!(meerkat_core::global_whole_blob_decodes(), decodes);
+            assert_eq!(
+                meerkat_core::whole_blob_decodes_of_session(session.id()),
+                decodes
+            );
         }
 
         #[tokio::test]
@@ -20212,9 +20215,12 @@ ORDER BY runtime_id";
             )
             .unwrap();
 
-            let decodes = meerkat_core::global_whole_blob_decodes();
+            let decodes = meerkat_core::whole_blob_decodes_of_session(session.id());
             recommit(&store, &runtime_id, &committed).await.unwrap();
-            assert_eq!(meerkat_core::global_whole_blob_decodes(), decodes);
+            assert_eq!(
+                meerkat_core::whole_blob_decodes_of_session(session.id()),
+                decodes
+            );
             assert_eq!(
                 store
                     .load_runtime_session_catalog_entry(&runtime_id)
@@ -20246,10 +20252,10 @@ ORDER BY runtime_id";
                     .is_some(),
                 "the older document's evidence is still recorded"
             );
-            let decodes = meerkat_core::global_whole_blob_decodes();
+            let decodes = meerkat_core::whole_blob_decodes_of_session(session.id());
             let _ = recommit(&store, &runtime_id, &first).await;
             assert!(
-                meerkat_core::global_whole_blob_decodes() > decodes,
+                meerkat_core::whole_blob_decodes_of_session(session.id()) > decodes,
                 "bytes that are not the current authority's body take the full decode path"
             );
 
@@ -20268,10 +20274,10 @@ ORDER BY runtime_id";
                 params![runtime_id_text(&runtime_id), current.as_ref().as_slice()],
             )
             .unwrap();
-            let decodes = meerkat_core::global_whole_blob_decodes();
+            let decodes = meerkat_core::whole_blob_decodes_of_session(session.id());
             let _ = recommit(&store, &runtime_id, &current).await;
             assert!(
-                meerkat_core::global_whole_blob_decodes() > decodes,
+                meerkat_core::whole_blob_decodes_of_session(session.id()) > decodes,
                 "a present legacy row takes the full decode path"
             );
         }
@@ -20305,7 +20311,7 @@ ORDER BY runtime_id";
 
             // The startup compaction refresh shape: the committed bytes,
             // loaded raw and re-committed verbatim.
-            let decodes = meerkat_core::global_whole_blob_decodes();
+            let decodes = meerkat_core::whole_blob_decodes_of_session(session.id());
             store
                 .commit_session_snapshot(
                     &runtime_id,
@@ -20316,7 +20322,7 @@ ORDER BY runtime_id";
                 .await
                 .unwrap();
             assert_eq!(
-                meerkat_core::global_whole_blob_decodes(),
+                meerkat_core::whole_blob_decodes_of_session(session.id()),
                 decodes,
                 "a byte-identical re-commit of evidenced bytes is reaffirmed without a decode"
             );
@@ -20328,7 +20334,7 @@ ORDER BY runtime_id";
             // Different bytes always take the full decode.
             session.push(Message::User(UserMessage::text("second turn".to_string())));
             let grown = serde_json::to_vec(&session).unwrap();
-            let decodes = meerkat_core::global_whole_blob_decodes();
+            let decodes = meerkat_core::whole_blob_decodes_of_session(session.id());
             store
                 .commit_session_snapshot(
                     &runtime_id,
@@ -20338,7 +20344,7 @@ ORDER BY runtime_id";
                 )
                 .await
                 .unwrap();
-            assert!(meerkat_core::global_whole_blob_decodes() > decodes);
+            assert!(meerkat_core::whole_blob_decodes_of_session(session.id()) > decodes);
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
                 Some(Arc::new(grown))

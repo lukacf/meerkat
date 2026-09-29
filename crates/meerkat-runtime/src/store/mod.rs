@@ -11093,7 +11093,7 @@ mod committing_whole_blob_session_tests {
         let result = RuntimeStore::commit_prepared_session_boundary(&store, &runtime_id, request)
             .await
             .unwrap();
-        let decodes_before = meerkat_core::global_whole_blob_decodes();
+        let decodes_before = meerkat_core::whole_blob_decodes_of_session(session.id());
         let bound = committing
             .bind_committed(&result)
             .expect("the store committed exactly this carrier's bytes");
@@ -11114,7 +11114,7 @@ mod committing_whole_blob_session_tests {
             "an unchanged head reuses the committing session"
         );
         assert_eq!(
-            meerkat_core::global_whole_blob_decodes(),
+            meerkat_core::whole_blob_decodes_of_session(session.id()),
             decodes_before,
             "binding and reusing the committing session decode nothing"
         );

@@ -11720,11 +11720,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     ActorSessionSeedAuthority::DurableCommitted,
                 ) => {
                     // A consumed preparation already carries the exact body
-                    // its bracket verified; the observation check below
-                    // proves that authority unchanged before the actor is
-                    // seeded, so the committed head is not materialized and
-                    // verified a second time.
-                    let exact_session = match (
+                    // its bracket verified. When a fresh observation equals
+                    // the prepared one and the physical head has not moved,
+                    // that body is still the committed head, so it is not
+                    // materialized and verified a second time. A changed
+                    // observation falls back to the authoritative read.
+                    let prepared_body = match (
                         prepared_committed_body.take(),
                         prepared_observation.as_ref(),
                     ) {
@@ -11747,14 +11748,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                     id: resume_session_id.clone(),
                                 });
                             }
-                            self.verify_prepared_physical_head_current(
-                                resume_session_id,
-                                observation,
-                            )
-                            .await?;
-                            *committed_body
+                            if &current == observation {
+                                self.verify_prepared_physical_head_current(
+                                    resume_session_id,
+                                    observation,
+                                )
+                                .await?;
+                                Some(*committed_body)
+                            } else {
+                                None
+                            }
                         }
-                        _ => self
+                        _ => None,
+                    };
+                    let exact_session = match prepared_body {
+                        Some(session) => session,
+                        None => self
                             .load_committed_runtime_session_for_body(
                                 resume_session_id,
                                 "live actor materialization",

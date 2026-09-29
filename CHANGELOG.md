@@ -178,12 +178,12 @@ them.
   aligned outcome's already verified body. It runs the rewrite-audit replay
   over that body instead of a separate authoritative read. The
   non-cloneable preparation receipt carries the verified body, so actor
-  creation seeds from it once a fresh observation proves the session
-  authority unchanged. The archive re-check under the recovery gate reads
+  creation seeds from it once a fresh observation equals the prepared one;
+  a changed observation falls back to the authoritative read. The archive re-check under the recovery gate reads
   the body-free RuntimeStore verdict when the prepared observation is still
   current. Both reuse sites first compare the compact physical head with the
-  prepared boundary and fail with the same `TranscriptRevisionConflict` a
-  re-materialization would report. Compact-graph ingress also stops hashing
+  prepared boundary and fail closed with `TranscriptRevisionConflict` when
+  the head has moved past it. Compact-graph ingress also stops hashing
   the retained pre-rewrite anchor twice for its content digest and twice for
   its row prefix. Every store-authority check still runs; only repeated
   materializations of the same committed head are gone. In a cold-resume

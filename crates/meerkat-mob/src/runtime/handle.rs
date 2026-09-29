@@ -4836,7 +4836,7 @@ pub type FlowTargetProvisioner =
 /// changes the machine state and on every actor roster mutation (including
 /// changes that leave observable membership unchanged); a machine input that
 /// leaves the state unchanged does not fire. Consumers must treat a wake as
-/// "re-project now", never as a semantic event. The wrapper exposes no state access by design — projections go
+/// "re-project now", never as a semantic event. The wrapper exposes no state access by design; projections go
 /// through the `list_members*` surfaces, which borrow the watch value
 /// without cloning it.
 #[derive(Debug, Clone)]

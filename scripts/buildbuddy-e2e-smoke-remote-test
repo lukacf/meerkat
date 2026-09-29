@@ -386,12 +386,6 @@ fi
 if ! command -v cargo >/dev/null 2>&1; then
   echo "warning: cargo not found in remote e2e-smoke PATH; browser WASM materialization will fail" >&2
 fi
-e2e_artifacts_bin="$(absolute_runfile "${MEERKAT_E2E_ARTIFACTS_BIN:-tests/integration/e2e_artifacts_bin}")"
-if [[ ! -x "${e2e_artifacts_bin}" ]]; then
-  echo "error: missing executable e2e_artifacts_bin at ${e2e_artifacts_bin}" >&2
-  exit 1
-fi
-
 if [[ -n "${MEERKAT_E2E_WASM_PACK_BIN:-}" ]]; then
   wasm_pack_bin="$(absolute_runfile "${MEERKAT_E2E_WASM_PACK_BIN}")"
   export RKAT_WASM_PACK_BIN="${RKAT_WASM_PACK_BIN:-${wasm_pack_bin}}"
@@ -424,6 +418,51 @@ export MEERKAT_E2E_EXECUTION_MODE=prebuilt
 export MEERKAT_WEB_WASM_OUT_DIR="${manifest_dir}/web-wasm"
 export MEERKAT_WEB_WASM_LOCK_DIR="${manifest_dir}/web-wasm.lock"
 unset MEERKAT_E2E_ASSUME_WEB_WASM_PREBUILT
+
+# Builder mode (the //:e2e_web_wasm_bundle genrule): build the browser WASM
+# runtime once, with the same toolchain setup and dev profile the in-test
+# materialization uses, and archive it as a declared Bazel output. Every
+# browser scenario and retry in an invocation then consumes that one output,
+# and the remote cache serves it for as long as its inputs are unchanged.
+if [[ -n "${MEERKAT_E2E_WEB_WASM_BUNDLE_OUT:-}" ]]; then
+  bundle_dir="${manifest_dir}/web-wasm-bundle"
+  rm -rf "${bundle_dir}"
+  mkdir -p "${bundle_dir}"
+  (
+    cd "${workspace_root}/sdks/web"
+    MEERKAT_WEB_WASM_OUT_DIR="${bundle_dir}" \
+      MEERKAT_WEB_WASM_LOCK_DIR="${manifest_dir}/web-wasm-bundle.lock" \
+      MEERKAT_WEB_WASM_PROFILE=dev \
+      node ./scripts/build-wasm.mjs
+  )
+  for required in meerkat_web_runtime.js meerkat_web_runtime_bg.wasm; do
+    if [[ ! -f "${bundle_dir}/${required}" ]]; then
+      echo "error: web WASM bundle build did not produce ${required}" >&2
+      exit 1
+    fi
+  done
+  tar -C "${bundle_dir}" -cf "${MEERKAT_E2E_WEB_WASM_BUNDLE_OUT}" .
+  exit 0
+fi
+
+# Consumer mode: a browser scenario whose target declares the bundle as data
+# runs against it instead of building the runtime inside the test body.
+if [[ -n "${MEERKAT_E2E_WEB_WASM_BUNDLE:-}" ]]; then
+  web_wasm_bundle="$(absolute_runfile "${MEERKAT_E2E_WEB_WASM_BUNDLE}")"
+  if [[ ! -f "${web_wasm_bundle}" ]]; then
+    echo "error: missing declared web WASM bundle at ${web_wasm_bundle}" >&2
+    exit 1
+  fi
+  mkdir -p "${MEERKAT_WEB_WASM_OUT_DIR}"
+  tar -xf "${web_wasm_bundle}" -C "${MEERKAT_WEB_WASM_OUT_DIR}"
+  export MEERKAT_E2E_ASSUME_WEB_WASM_PREBUILT=1
+fi
+
+e2e_artifacts_bin="$(absolute_runfile "${MEERKAT_E2E_ARTIFACTS_BIN:-tests/integration/e2e_artifacts_bin}")"
+if [[ ! -x "${e2e_artifacts_bin}" ]]; then
+  echo "error: missing executable e2e_artifacts_bin at ${e2e_artifacts_bin}" >&2
+  exit 1
+fi
 
 "${e2e_artifacts_bin}" materialize --manifest "${manifest}" "${selection_args[@]}"
 "${e2e_artifacts_bin}" run-smoke --manifest "${manifest}" "${selection_args[@]}"

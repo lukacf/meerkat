@@ -732,6 +732,17 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Changed
 
+- Release Turbo S no longer rebuilds the browser WASM runtime inside every
+  test attempt. The GPT Live peer scenarios (97-107) materialize only what
+  their specs declare (the browser workspace packages and Playwright), since
+  their peer drives a bare page; the browser raw-session and mobpack
+  scenarios (45-48) consume `//:e2e_web_wasm_bundle`, one Bazel action that
+  builds the runtime with the same toolchain and dev profile and is served by
+  the remote cache while its inputs are unchanged. Each materialize step logs
+  its duration. Measured on BuildBuddy: a GPT Live attempt went from about
+  820s to about 16s, and scenario 47 from about 810s to about 16s plus one
+  shared 6-minute bundle build per source change.
+
 - `MobHandle::machine_state_changes` (and the actor's machine-state watch)
   fires when an applied machine input changes the machine state or the
   actor's roster projection changed, instead of on every applied machine

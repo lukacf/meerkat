@@ -491,6 +491,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireProjectionProvenance": schema_for!(crate::wire::WireProjectionProvenance),
         "WireReachability": schema_for!(crate::wire::WireReachability),
         "WireRouteInstallObligation": schema_for!(crate::wire::WireRouteInstallObligation),
+        "WireExternalRouteInstallObligation": schema_for!(crate::wire::WireExternalRouteInstallObligation),
         "WireScopeDeniedDetail": schema_for!(crate::wire::WireScopeDeniedDetail),
         "WireHostUnavailableDetail": schema_for!(crate::wire::WireHostUnavailableDetail),
         "WireStaleCursorDetail": schema_for!(crate::wire::WireStaleCursorDetail),

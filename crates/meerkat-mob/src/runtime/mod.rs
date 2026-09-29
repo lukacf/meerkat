@@ -544,6 +544,46 @@ pub(crate) fn recovery_member_edge_trust_is_desired(
 /// an `Install` obligation. Called from controlling recovery (bare authority,
 /// before the actor exists) and from the actor's rebind/drive re-derivation
 /// (optionally host-scoped) — one rule, two call sites, zero drift.
+/// Install obligations for external-peer edges whose local member is placed
+/// on a bound host (optionally one host). Same posture as
+/// [`derive_install_obligations`]: every input is durable and over-recording
+/// is safe. A retiring member's edge is excluded: retirement owns its
+/// teardown, and reinstalling it could resurrect trust just before cleanup.
+pub(crate) fn derive_external_install_obligations(
+    state: &crate::machines::mob_machine::MobMachineState,
+    host_filter: Option<&crate::machines::mob_machine::HostId>,
+) -> BTreeSet<crate::machines::mob_machine::ExternalRouteObligation> {
+    use crate::machines::mob_machine as mob_dsl;
+
+    let mut derived = BTreeSet::new();
+    for edge in &state.external_peer_edges {
+        let Some(host) = state.member_placement.get(&edge.local) else {
+            continue;
+        };
+        if host_filter.is_some_and(|filter| filter != host) {
+            continue;
+        }
+        if state.host_bind_phase.get(host) != Some(&mob_dsl::HostBindPhase::Bound) {
+            continue;
+        }
+        if state.member_restore_failures.contains_key(&edge.local)
+            || state
+                .identity_to_runtime
+                .get(&edge.local)
+                .and_then(|runtime| state.member_state_markers.get(runtime))
+                == Some(&mob_dsl::MobMemberState::Retiring)
+        {
+            continue;
+        }
+        derived.insert(mob_dsl::ExternalRouteObligation {
+            edge: edge.clone(),
+            host: host.clone(),
+            kind: mob_dsl::RouteObligationKind::Install,
+        });
+    }
+    derived
+}
+
 pub(crate) fn derive_install_obligations(
     state: &crate::machines::mob_machine::MobMachineState,
     host_filter: Option<&crate::machines::mob_machine::HostId>,

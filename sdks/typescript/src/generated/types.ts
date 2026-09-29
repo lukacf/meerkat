@@ -2091,6 +2091,7 @@ export interface WireHostCapabilityFlags {
 export interface MobRouteInstallsResult {
   complete: boolean;
   outstanding: WireRouteInstallObligation[];
+  outstanding_external?: Record<string, unknown>[];
 }
 
 export interface WireRouteInstallObligation {

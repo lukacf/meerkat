@@ -2782,6 +2782,7 @@ class MobRouteInstallsResult:
     """Response payload for the route-install status projection."""
     complete: bool
     outstanding: list[WireRouteInstallObligation]
+    outstanding_external: Optional[list[dict[str, Any]]] = None
 
 
 @dataclass

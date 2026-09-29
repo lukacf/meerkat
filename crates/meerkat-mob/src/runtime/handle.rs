@@ -11137,9 +11137,30 @@ impl MobHandle {
                 host: meerkat_contracts::wire::WireHostRef(obligation.host.as_str().to_string()),
             });
         }
+        let mut outstanding_external =
+            Vec::with_capacity(state.pending_external_route_installs.len());
+        for obligation in &state.pending_external_route_installs {
+            if obligation.kind != crate::machines::mob_machine::RouteObligationKind::Install {
+                return Err(MobError::Internal(format!(
+                    "MobMachine invariant violation: pending external route ledger contains non-Install obligation for host '{}'",
+                    obligation.host.as_str()
+                )));
+            }
+            outstanding_external.push(
+                meerkat_contracts::wire::WireExternalRouteInstallObligation {
+                    local: obligation.edge.local.0.clone(),
+                    peer_id: obligation.edge.endpoint.peer_id.0.clone(),
+                    peer_name: obligation.edge.endpoint.name.0.clone(),
+                    host: meerkat_contracts::wire::WireHostRef(
+                        obligation.host.as_str().to_string(),
+                    ),
+                },
+            );
+        }
         Ok(meerkat_contracts::wire::MobRouteInstallsResult {
-            complete: outstanding.is_empty(),
+            complete: outstanding.is_empty() && outstanding_external.is_empty(),
             outstanding,
+            outstanding_external,
         })
     }
 

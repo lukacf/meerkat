@@ -16,6 +16,7 @@ pub(super) mod explicit_resume;
 pub(super) mod live_durable_source_loads;
 pub(super) mod member_effect_lane;
 pub(super) mod member_status_lane;
+mod placed_external_routes;
 pub(super) mod reload_revival;
 mod resume_post_commit;
 mod resume_rollback;
@@ -10337,6 +10338,7 @@ impl MobActor {
     /// them. Set semantics dedupe; machine guards own admission (guard
     /// rejects are debug-logged skips — ADJ-P4-1 re-derive posture).
     fn record_derived_route_install_obligations(&mut self, host_filter: Option<&mob_dsl::HostId>) {
+        self.record_derived_external_route_install_obligations(host_filter);
         let derived: BTreeSet<mob_dsl::RouteInstallObligation> =
             super::derive_install_obligations(self.dsl_authority.state(), host_filter);
         for obligation in derived {
@@ -10392,7 +10394,10 @@ impl MobActor {
                 );
             }
         }
-        Ok(())
+        // Placed-member external edges drain on every trigger that drains
+        // member routes (the one canonical drain every trigger converges on).
+        self.realize_pending_external_route_installs(host_filter)
+            .await
     }
 
     /// The explicit retry verb (ADJ-P4-9b): drain the PENDING obligation
@@ -10439,6 +10444,7 @@ impl MobActor {
         for edge in edges {
             self.fold_route_install_obligations_after_wire(&edge).await;
         }
+        self.drive_external_routes_for_identity(identity).await;
     }
 
     // -----------------------------------------------------------------------
@@ -41454,6 +41460,11 @@ impl MobActor {
         local: AgentIdentity,
         spec: TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
+        if super::member_runtime_is_host_owned(self.dsl_authority.state(), &local) {
+            // A placed member's trust row lives on its host: same machine
+            // edge and durable projection, realized through the host lane.
+            return self.wire_placed_member_external_peer(local, spec).await;
+        }
         let preparation = self.prepare_external_peer_wire(local, spec).await?;
         self.realize_wiring_preparation_inline(preparation).await
     }
@@ -41474,8 +41485,8 @@ impl MobActor {
         )?;
         let local_identity = AgentIdentity::from(local.as_str());
         if super::member_runtime_is_host_owned(self.dsl_authority.state(), &local_identity) {
-            return Err(MobError::WiringError(format!(
-                "wire between placed member '{local}' and an external peer is unsupported"
+            return Err(MobError::Internal(format!(
+                "placed member '{local}' is wired to an external peer through its host lane, not the local wiring plan"
             )));
         }
         let external_identity = AgentIdentity::from(spec.name.as_str());
@@ -41585,9 +41596,11 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let local_identity = AgentIdentity::from(local.as_str());
         if super::member_runtime_is_host_owned(self.dsl_authority.state(), &local_identity) {
-            return Err(MobError::WiringError(format!(
-                "unwire between placed member '{local}' and an external peer is unsupported"
-            )));
+            // The machine-owned edge is the only authority for a placed
+            // member's external row; a stale descriptor names no host row.
+            return self
+                .unwire_placed_member_external_peer(local_identity, peer_name)
+                .await;
         }
         // The machine-owned external edge supplies the prior descriptor.
         // The roster mirror may lag and is display-only.
@@ -42928,16 +42941,18 @@ impl MobActor {
         if external_edges.is_empty() {
             return Ok(());
         }
-        if super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity) {
-            // Placed↔legacy-external wiring has no remote cleanup protocol.
-            // Fail closed rather than treating the host-resident session id
-            // as local or deleting topology while remote trust survives.
-            return Err(MobError::WiringError(format!(
-                "retire external-peer cleanup is unsupported for placed member '{}'",
-                entry.agent_identity
-            )));
-        }
-        let comms = self.provisioner_comms(&entry.member_ref).await;
+        // A retiring placed member's external rows live on its host and die
+        // with the exact ReleaseMember (its member-member rows likewise):
+        // there is no local comms runtime to clean, so the observed-absent
+        // machine cleanup applies.
+        let comms = if super::member_runtime_is_host_owned(
+            self.dsl_authority.state(),
+            &entry.agent_identity,
+        ) {
+            None
+        } else {
+            self.provisioner_comms(&entry.member_ref).await
+        };
         for edge in external_edges {
             let peer_name = meerkat_core::comms::PeerName::new(edge.endpoint.name.0.clone())
                 .map_err(|error| {
@@ -42971,6 +42986,7 @@ impl MobActor {
                     }
                 }
                 None => {
+                    self.rollback_superseded_external_installs(&edge)?;
                     self.apply_cleanup_retiring_external_peer_observed_absent(entry, &key, &edge)?;
                     tracing::debug!(
                         mob_id = %self.definition.id,

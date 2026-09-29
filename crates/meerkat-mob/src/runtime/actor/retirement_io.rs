@@ -949,11 +949,11 @@ impl MobActor {
             self.dsl_authority.state(),
             &continuation.entry.agent_identity,
         ) {
-            let error = MobError::WiringError(format!(
-                "retire external-peer cleanup is unsupported for placed member '{}'",
-                continuation.entry.agent_identity,
-            ));
-            self.finish_retirement(continuation, Err(error)).await;
+            // A retiring placed member's external trust rows live on its host
+            // and die with the exact ReleaseMember, exactly like its
+            // member-member rows: there is no local comms runtime to observe.
+            continuation.external_comms = None;
+            self.retirement_next_external_edge(continuation).await;
             return;
         }
         let provisioner = self.provisioner.clone();
@@ -1023,6 +1023,12 @@ impl MobActor {
                 RetirementObservation::ExternalTrustRemoved { edge, result }
             });
         } else {
+            // A pending host install for this edge can never re-validate once
+            // the edge leaves the graph.
+            if let Err(error) = self.rollback_superseded_external_installs(&edge) {
+                self.finish_retirement(continuation, Err(error)).await;
+                return;
+            }
             match self.apply_cleanup_retiring_external_peer_observed_absent(
                 &continuation.entry,
                 &key,

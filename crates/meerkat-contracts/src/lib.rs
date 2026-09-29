@@ -443,6 +443,7 @@ pub use wire::{
     WireDeviceCompleteResult,
     WireDeviceStart,
     WireEvent,
+    WireExternalRouteInstallObligation,
     WireGenerateImageExecutionPlan,
     WireGenerateImageRequest,
     WireGrantRecord,

@@ -210,6 +210,7 @@ pub use digest_observability::{
     global_whole_blob_decode_bytes, global_whole_blob_decodes, record_session_encode_bytes,
     rewrite_record_body_decodes, rewrite_record_body_decodes_on_this_thread,
     session_content_digest_bytes, session_content_digest_computations,
+    whole_blob_decodes_on_this_thread,
 };
 pub use error::{AgentError, ToolError};
 pub use event::{

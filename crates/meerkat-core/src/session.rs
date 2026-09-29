@@ -1899,7 +1899,10 @@ impl Session {
     /// process-global memo lookup.
     pub fn from_persisted_bytes(serialized: &[u8]) -> Result<Self, serde_json::Error> {
         crate::digest_observability::record_whole_blob_decode(serialized.len() as u64);
-        serde_json::from_slice(serialized)
+        let session: Self = serde_json::from_slice(serialized)?;
+        #[cfg(any(test, feature = "test-support"))]
+        crate::digest_observability::record_whole_blob_session_decode(session.id());
+        Ok(session)
     }
 
     /// Decode an observed WholeBlob row and derive its exact physical identity.

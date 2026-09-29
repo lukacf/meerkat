@@ -2119,7 +2119,7 @@ where
         let saved_terminal_error_metadata = self.terminal_error_metadata.take();
         let saved_run_completed_hooks_applied = self.run_completed_hooks_applied;
         let saved_run_completed_event_emitted = self.run_completed_event_emitted;
-        let saved_run_lifecycle_publication = self.run_lifecycle_publication.take();
+        let saved_run_lifecycle_publication = std::mem::take(&mut self.run_lifecycle_publication);
         let saved_run_result_assistant_message = self.run_result_assistant_message.take();
         let saved_extraction_state = std::mem::take(&mut self.extraction_state);
         let saved_pending_callback_async_ops = self.pending_callback_async_ops.take();

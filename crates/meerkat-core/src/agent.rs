@@ -2609,11 +2609,6 @@ impl RunLifecyclePublication {
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
     }
-
-    /// Move the facts out (a nested run saves and restores its parent's).
-    pub(crate) fn take(&mut self) -> Self {
-        std::mem::take(self)
-    }
 }
 
 /// The main Agent struct

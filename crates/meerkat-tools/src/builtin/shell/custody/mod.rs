@@ -374,8 +374,8 @@ fn watch_until_group_exits(
     loop {
         let mut live = Vec::new();
         for member in observed_members(pgid)? {
-            let descends = leader_start
-                .is_none_or(|leader| leader.not_after(&member.start) == Some(true));
+            let descends =
+                leader_start.is_none_or(|leader| leader.not_after(&member.start) == Some(true));
             if descends && member.is_running()? {
                 live.push(member);
             }

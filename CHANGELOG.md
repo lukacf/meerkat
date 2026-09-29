@@ -37,21 +37,41 @@ them.
 
 ### Breaking
 
+- `meerkat_core::model_profile::capabilities::OpenAiResponsesParamCapabilities`
+  gains the public field `default_prompt_cache_mode:
+  Option<OpenAiPromptCacheMode>` (constructible struct adds field): the
+  catalog row, not the facade, now names the prompt-cache mode Meerkat
+  requests by default (GPT-5.6 `explicit`, GPT-6 `implicit`). New helpers
+  `default_prompt_cache_mode()` and `prompt_cache_retention_rejection()`
+  (#1235).
 - Behaviour-only (not measured by the gate): the GPT-6 catalog rows
   (`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`) now carry the GPT-5.6-and-later
-  prompt-cache capabilities. On the OpenAI API their requests default to
-  `prompt_cache_options = { mode = "explicit", ttl = "30m" }` with the
-  per-model `prompt_cache_key`, and an explicit
-  `prompt_cache_retention = "in_memory"` is now rejected locally for them, as
-  it already was for GPT-5.6 (#1235).
+  prompt-cache capabilities (implicit and explicit modes, `30m` TTL). On the
+  OpenAI API their requests now default to
+  `prompt_cache_options = { mode = "implicit", ttl = "30m" }` with the
+  per-model `prompt_cache_key`; explicit mode is an opt-in, and an explicit
+  `mode = "implicit"`, previously refused locally for GPT-6, is accepted.
+  `prompt_cache_retention = "in_memory"` is refused for GPT-5.6 and GPT-6,
+  now when the agent is built rather than on its first request, with a
+  message naming `prompt_cache_options.ttl` (the old text claimed only
+  `24h` was supported) (#1235).
 - Behaviour-only (not measured by the gate): Anthropic `automatic` requests
   now also carry one block-level `cache_control` breakpoint on the previous
   run's last output block, and `system_and_conversation` marks the system
   prefix, that block, and the two most recent conversation boundaries
-  instead of the three most recent. OpenAI `implicit` mode on a model that
-  accepts explicit breakpoints now adds one `prompt_cache_breakpoint` on the
-  last input before the previous run's output and lowers user, notice, and
-  tool-output inputs as content parts (#1235).
+  instead of the three most recent, never on a thinking block. OpenAI
+  `implicit` mode on a model that accepts explicit breakpoints (every GPT-6
+  default request, and GPT-5.6 implicit opt-ins) now adds one
+  `prompt_cache_breakpoint` on the last input before the previous run's
+  output and lowers user, notice, and tool-output inputs as content parts.
+  Sessions whose lowered request bytes change this way can see one full
+  prompt-cache miss on their first request after the upgrade: GPT-6
+  sessions (content parts, the anchor marker, and the new cache key and
+  options) and GPT-5.6 implicit-mode opt-ins (content parts). OpenAI does
+  not document a bare-string `content` as byte-equivalent to one
+  `input_text` part, so the miss is possible but not certain. Anthropic
+  sessions only gain a marker, which is not prefix content, and keep their
+  cache (#1235).
 
 - Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
   meerkat-runtime `meerkat_machine::dsl`) gains a run-fenced Stop (#1261). The
@@ -295,8 +315,9 @@ them.
   that entry even on a cold cache, later requests refresh it, and the child,
   whose request computes the same anchor, reads the whole shared prefix. This
   covers Anthropic `automatic` and `system_and_conversation`, OpenAI explicit
-  mode (now the GPT-6 default), and OpenAI implicit mode on models that accept
-  explicit breakpoints. The `ForkCacheInheritance` documentation no longer
+  mode, and OpenAI implicit mode on models that accept explicit breakpoints
+  (the GPT-6 default, which stays implicit). The implicit anchor authors no
+  cache-breakpoint evidence, so it stays off the per-request evidence path. The `ForkCacheInheritance` documentation no longer
   claims the child hits whenever the source's entry is alive.
 
 - A host that stopped a selected run with `cancel_input_if_present` or

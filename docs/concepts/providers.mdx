@@ -343,14 +343,17 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     The catalog validates each model's reasoning-effort subset. GPT-5.6 and
     the GPT-6 family also support `prompt_cache_enabled`, `prompt_cache_key`,
     and `prompt_cache_options` (`implicit` or `explicit`, with optional
-    `30m` TTL); Meerkat defaults them to `explicit` with the `30m` TTL on the
-    OpenAI API. Use `max`, not `ultra`, as the public provider effort.
+    `30m` TTL). On the OpenAI API Meerkat defaults GPT-5.6 to `explicit` and
+    GPT-6 to `implicit`, both with the `30m` TTL. Use `max`, not `ultra`, as
+    the public provider effort.
 
     Explicit mode marks every input item, so the last input before the
     previous run's output always carries a breakpoint. In `implicit` mode on
     those models Meerkat adds one explicit breakpoint there and lowers inputs
     as content parts, so a run that starts on a cold cache still writes an
     entry a `fork_off` child cut at the previous turn end can read.
+    `prompt_cache_retention = "in_memory"` is refused for these models when
+    the agent is built; set the lifetime with `prompt_cache_options.ttl`.
 
     Meerkat's default `prompt_cache_key` is one key per model
     (`meerkat:profile:openai:<model>`), shared across sessions so identical

@@ -905,7 +905,7 @@ impl AnthropicClient {
                     .and_then(|messages| messages.get_mut(anchor))
             {
                 let _ =
-                    Self::author_anthropic_anchor_breakpoint(&mut message["content"], cache_ttl);
+                    Self::author_anthropic_content_breakpoint(&mut message["content"], cache_ttl);
             }
         }
 
@@ -926,7 +926,7 @@ impl AnthropicClient {
             }
             if let Some(message) = anchor.and_then(|anchor| messages.get_mut(anchor)) {
                 let _ =
-                    Self::author_anthropic_anchor_breakpoint(&mut message["content"], cache_ttl);
+                    Self::author_anthropic_content_breakpoint(&mut message["content"], cache_ttl);
             }
         }
 
@@ -1101,12 +1101,20 @@ impl AnthropicClient {
         }
     }
 
+    /// Mark the last block of a message's content that can carry a
+    /// breakpoint, turning bare-string content into one text block. Thinking
+    /// blocks cannot carry one, so they are skipped.
     fn author_anthropic_content_breakpoint(
         content: &mut Value,
         cache_ttl: AnthropicCacheTtl,
     ) -> bool {
         if let Some(blocks) = content.as_array_mut() {
-            let Some(block) = blocks.last_mut() else {
+            let Some(block) = blocks.iter_mut().rev().find(|block| {
+                !matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("thinking" | "redacted_thinking")
+                )
+            }) else {
                 return false;
             };
             block["cache_control"] = Self::anthropic_cache_control_value(cache_ttl);
@@ -1141,26 +1149,6 @@ impl AnthropicClient {
             .iter()
             .position(|message| std::ptr::eq(*message, anchor))?
             .checked_sub(leading_system)
-    }
-
-    /// Mark the last block of an assistant message that can carry a
-    /// breakpoint. Thinking blocks cannot, so they are skipped.
-    fn author_anthropic_anchor_breakpoint(
-        content: &mut Value,
-        cache_ttl: AnthropicCacheTtl,
-    ) -> bool {
-        let Some(block) = content.as_array_mut().and_then(|blocks| {
-            blocks.iter_mut().rev().find(|block| {
-                !matches!(
-                    block.get("type").and_then(Value::as_str),
-                    Some("thinking" | "redacted_thinking")
-                )
-            })
-        }) else {
-            return false;
-        };
-        block["cache_control"] = Self::anthropic_cache_control_value(cache_ttl);
-        true
     }
 
     fn contains_cache_control(value: &Value) -> bool {

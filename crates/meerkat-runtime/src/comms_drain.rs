@@ -2800,20 +2800,6 @@ async fn supervisor_route_publish_obligation(
     Ok(obligation)
 }
 
-/// Try to handle a supervisor bridge command from an incoming comms request.
-///
-/// Returns `true` if the candidate was a bridge command (handled or rejected),
-/// `false` if it was not a bridge command and should be processed normally.
-///
-/// Wave 3 D Row 21: the authorized-supervisor binding and bridge admission
-/// classes live in DSL state. Bridge dispatch routes binding-sensitive
-/// decisions through generated admission inputs before emitting wire replies
-/// or staging supervisor binding transitions.
-/// DEC-P6E-7 hard-cancel serving arm — deliberately EXTRACTED: this fn is
-/// the single effect-authority-allowlisted reach from the member drain into
-/// hard interrupt authority (`hard_cancel_run_if_current` → generated
-/// `InterruptCurrentRun`). The dispatcher arm stays a thin call so the gate
-/// ban keeps covering every other drain path.
 struct SupervisorRotationDriveContext<'a> {
     operation_id: &'a str,
     previous: &'a BoundSupervisorState,
@@ -3639,15 +3625,175 @@ async fn try_handle_supervisor_bridge_delivery(
     true
 }
 
-/// Try to handle a supervisor bridge command from an incoming comms request.
-///
-/// Returns `true` if the candidate was a bridge command (handled or rejected),
-/// `false` if it was not a bridge command and should be processed normally.
-///
-/// Wave 3 D Row 21: the authorized-supervisor binding and bridge admission
-/// classes live in DSL state. Bridge dispatch routes binding-sensitive
-/// decisions through generated admission inputs before emitting wire replies
-/// or staging supervisor binding transitions.
+/// Outcome of one `StopMemberRun` operation: the typed reply or the typed
+/// bridge rejection.
+type StopMemberRunOutcome = Result<
+    meerkat_contracts::wire::supervisor_bridge::BridgeMemberRunStopResponse,
+    (BridgeRejectionCause, String),
+>;
+
+/// Bound on remembered `StopMemberRun` operations. Completed entries past the
+/// bound are evicted oldest-first; in-flight ones are never evicted.
+const STOP_MEMBER_RUN_OPERATION_CACHE: usize = 256;
+
+/// Per-process idempotency ledger for `StopMemberRun`, keyed by the member
+/// session and the controller's stable `operation_id`. A resend (reply loss
+/// or a controller transport timeout while the stop still awaits its
+/// contributors' terminals) joins the one in-flight stop or reads its cached
+/// receipt, so every copy of one operation gets the same receipt and the stop
+/// runs exactly once. This is transport idempotency only; run truth stays in
+/// the session's MeerkatMachine.
+#[derive(Default)]
+struct StopMemberRunOperations {
+    order: std::collections::VecDeque<(SessionId, meerkat_core::ops::OperationId)>,
+    entries: std::collections::HashMap<
+        (SessionId, meerkat_core::ops::OperationId),
+        crate::tokio::sync::watch::Receiver<Option<StopMemberRunOutcome>>,
+    >,
+}
+
+static STOP_MEMBER_RUN_OPERATIONS: std::sync::LazyLock<std::sync::Mutex<StopMemberRunOperations>> =
+    std::sync::LazyLock::new(Default::default);
+
+impl StopMemberRunOperations {
+    /// Join an existing operation, or register a new one and return its
+    /// completion sender (the caller then owns running the stop).
+    fn join_or_begin(
+        &mut self,
+        key: (SessionId, meerkat_core::ops::OperationId),
+    ) -> (
+        crate::tokio::sync::watch::Receiver<Option<StopMemberRunOutcome>>,
+        Option<crate::tokio::sync::watch::Sender<Option<StopMemberRunOutcome>>>,
+    ) {
+        if let Some(receiver) = self.entries.get(&key)
+            && !Self::abandoned(receiver)
+        {
+            return (receiver.clone(), None);
+        }
+        // An abandoned entry (its owner task ended before publishing an
+        // outcome) is replaced so this delivery runs the stop itself.
+        self.order.retain(|candidate| candidate != &key);
+        let (sender, receiver) = crate::tokio::sync::watch::channel(None);
+        self.entries.insert(key.clone(), receiver.clone());
+        self.order.push_back(key);
+        while self.order.len() > STOP_MEMBER_RUN_OPERATION_CACHE {
+            let Some(position) = self.order.iter().position(|candidate| {
+                self.entries
+                    .get(candidate)
+                    .is_some_and(|entry| entry.borrow().is_some() || Self::abandoned(entry))
+            }) else {
+                break;
+            };
+            if let Some(evicted) = self.order.remove(position) {
+                self.entries.remove(&evicted);
+            }
+        }
+        (receiver, Some(sender))
+    }
+
+    /// The owner dropped its sender without publishing an outcome.
+    fn abandoned(
+        receiver: &crate::tokio::sync::watch::Receiver<Option<StopMemberRunOutcome>>,
+    ) -> bool {
+        receiver.borrow().is_none() && receiver.has_changed().is_err()
+    }
+}
+
+/// Run one run-fenced stop for the member session under its residency fence
+/// (the comparison and the stop commit share the session mutation gate) and
+/// project the typed receipt.
+async fn serve_stop_member_run(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    payload: &meerkat_contracts::wire::supervisor_bridge::BridgeStopMemberRunPayload,
+) -> StopMemberRunOutcome {
+    let receipt = match adapter
+        .stop_run_for_member_incarnation(
+            session_id,
+            &payload.expected_run_id,
+            &payload.expected_member,
+            payload.reason.clone(),
+        )
+        .await
+    {
+        Ok(receipt) => receipt,
+        Err(crate::traits::RuntimeDriverError::StaleAuthority { reason }) => {
+            return Err((BridgeRejectionCause::StaleFence, reason));
+        }
+        Err(error) => {
+            return Err((
+                BridgeRejectionCause::Internal,
+                format!(
+                    "stop-member-run operation {} failed for expected run {}: {error}",
+                    payload.operation_id, payload.expected_run_id
+                ),
+            ));
+        }
+    };
+    let receipt = crate::run_stop_wire::wire_run_stop_receipt(&receipt)
+        .map_err(|reason| (BridgeRejectionCause::Internal, reason))?;
+    Ok(
+        meerkat_contracts::wire::supervisor_bridge::BridgeMemberRunStopResponse {
+            expected_member: payload.expected_member.clone(),
+            operation_id: payload.operation_id.clone(),
+            receipt,
+        },
+    )
+}
+
+/// Reply to one `StopMemberRun` delivery with its operation's outcome, running
+/// the stop only when this delivery began the operation.
+async fn serve_stop_member_run_delivery(
+    adapter: Arc<MeerkatMachine>,
+    session_id: SessionId,
+    comms_runtime: Arc<dyn CommsRuntime>,
+    candidate: PeerInputCandidate,
+    payload: meerkat_contracts::wire::supervisor_bridge::BridgeStopMemberRunPayload,
+) {
+    let (mut receiver, owner) = STOP_MEMBER_RUN_OPERATIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .join_or_begin((session_id.clone(), payload.operation_id.clone()));
+    if let Some(owner) = owner {
+        let outcome = serve_stop_member_run(&adapter, &session_id, &payload).await;
+        owner.send_replace(Some(outcome));
+    }
+    let outcome = loop {
+        if let Some(outcome) = receiver.borrow_and_update().clone() {
+            break outcome;
+        }
+        if receiver.changed().await.is_err() {
+            break Err((
+                BridgeRejectionCause::Internal,
+                format!(
+                    "stop-member-run operation {} ended without an outcome",
+                    payload.operation_id
+                ),
+            ));
+        }
+    };
+    match outcome {
+        Ok(response) => {
+            send_bridge_response(
+                &comms_runtime,
+                &candidate,
+                meerkat_core::interaction::ResponseStatus::Completed,
+                BridgeReply::MemberRunStopped(response),
+                None,
+            )
+            .await;
+        }
+        Err((cause, reason)) => {
+            send_bridge_failure(&comms_runtime, &candidate, cause, reason, None).await;
+        }
+    }
+}
+
+/// DEC-P6E-7 hard-cancel serving arm - deliberately EXTRACTED: this fn is
+/// the effect-authority-allowlisted reach from the member drain into hard
+/// interrupt authority (`hard_cancel_run_if_current` -> generated
+/// `InterruptCurrentRun`). The dispatcher arm stays a thin call so the gate
+/// ban keeps covering every other drain path.
 async fn serve_hard_cancel_member(
     adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
@@ -3922,6 +4068,15 @@ async fn serve_cancel_tracked_member_input(
     }
 }
 
+/// Try to handle a supervisor bridge command from an incoming comms request.
+///
+/// Returns `true` if the candidate was a bridge command (handled or rejected),
+/// `false` if it was not a bridge command and should be processed normally.
+///
+/// Wave 3 D Row 21: the authorized-supervisor binding and bridge admission
+/// classes live in DSL state. Bridge dispatch routes binding-sensitive
+/// decisions through generated admission inputs before emitting wire replies
+/// or staging supervisor binding transitions.
 async fn try_handle_supervisor_bridge_command(
     adapter: &Arc<MeerkatMachine>,
     session_id: &SessionId,
@@ -5484,6 +5639,51 @@ async fn try_handle_supervisor_bridge_command(
                 &payload,
             )
             .await;
+            true
+        }
+        BridgeCommand::StopMemberRun(payload) => {
+            // Authorize and pin the residency INLINE; the stop itself awaits
+            // its contributors' terminals, so it runs on a DETACHED responder
+            // task and never head-of-line-blocks this member's drain
+            // (the `PollMemberEvents` precedent).
+            let sup_payload = BridgeSupervisorPayload {
+                supervisor: payload.supervisor.clone(),
+                epoch: payload.epoch,
+                protocol_version: payload.protocol_version,
+            };
+            if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                adapter,
+                session_id,
+                comms_runtime,
+                sender,
+                &sup_payload,
+                "stop member run failed",
+            )
+            .await
+            {
+                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                return true;
+            }
+            if let Err((cause, reason)) = require_registered_member_incarnation(
+                adapter,
+                session_id,
+                &payload.expected_member,
+                "stop member run",
+            ) {
+                send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                return true;
+            }
+            let adapter = Arc::clone(adapter);
+            let session_id = session_id.clone();
+            let comms_runtime = Arc::clone(comms_runtime);
+            let candidate = candidate.clone();
+            crate::tokio::spawn(serve_stop_member_run_delivery(
+                adapter,
+                session_id,
+                comms_runtime,
+                candidate,
+                payload,
+            ));
             true
         }
         BridgeCommand::CancelTrackedMemberInput(payload) => {

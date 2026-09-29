@@ -14319,6 +14319,50 @@
       },
       {
         "additionalProperties": false,
+        "description": "Run-fenced Stop of one exact member run: the member host stops that\nrun and terminalizes every contributor bound to it, replying with the\ntyped receipt. The controlling side gates it on the host's recorded\n`hard_cancel_member` fact (same immediate-interrupt authority class);\na peer that predates the command rejects it at decode.",
+        "properties": {
+          "command": {
+            "const": "stop_member_run",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expected_member": {
+            "$ref": "#/$defs/BridgeMemberIncarnation"
+          },
+          "expected_run_id": {
+            "$ref": "#/$defs/RunId"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "protocol_version": {
+            "$ref": "#/$defs/BridgeProtocolVersion"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "supervisor": {
+            "$ref": "#/$defs/BridgePeerSpec"
+          }
+        },
+        "required": [
+          "command",
+          "supervisor",
+          "epoch",
+          "protocol_version",
+          "expected_member",
+          "operation_id",
+          "expected_run_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
         "description": "Retire one exact peer-only controller-member runtime incarnation (V5).\n\nSupervisor authentication proves who issued the command. `member_fence`\nseparately proves which exact Mob incarnation and runtime/session epoch the\ncontroller is authorized to retire. Neither authority may be inferred from\nthe other or from the addressed session id.",
         "properties": {
           "command": {
@@ -39501,6 +39545,10 @@
         ],
         "type": "string"
       },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
+        "type": "string"
+      },
       "OutputSchema": {
         "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
         "properties": {
@@ -42761,6 +42809,17 @@
         ],
         "type": "string"
       },
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
       "WireLiveAdapterStatus": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].\n\nInternally-tagged on `status` (snake_case). The `degraded` variant\nreferences [`WireLiveDegradationReason`] so the typed reason is visible at\nthe SDK boundary.",
         "oneOf": [
@@ -43340,6 +43399,133 @@
             "type": "object"
           }
         ]
+      },
+      "WireRunStopCompletion": {
+        "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
+        "enum": [
+          "completed",
+          "completed_without_result",
+          "callback_pending",
+          "cancelled",
+          "abandoned",
+          "abandoned_with_error",
+          "completed_with_finalization_failure",
+          "runtime_terminated"
+        ],
+        "type": "string"
+      },
+      "WireRunStopContributor": {
+        "description": "One input that contributed to a stopped run.",
+        "properties": {
+          "completion": {
+            "$ref": "#/$defs/WireRunStopCompletion"
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "terminal": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputTerminalOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Generated public class of the committed input terminal. Absent only\nwhen no ledger or store retains the row."
+          }
+        },
+        "required": [
+          "input_id",
+          "completion"
+        ],
+        "type": "object"
+      },
+      "WireRunStopReceipt": {
+        "description": "Typed receipt of a run-fenced Stop.",
+        "oneOf": [
+          {
+            "description": "The run was current and the stop was linearized. Every contributor\nstaged for it has reached its terminal; none started a successor run.",
+            "properties": {
+              "contributors": {
+                "items": {
+                  "$ref": "#/$defs/WireRunStopContributor"
+                },
+                "type": "array"
+              },
+              "outcome": {
+                "const": "stopped",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "contributors"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is not the current run (already terminal, replaced, or never\ncurrent). Nothing was stopped; queued input and newer runs are\nuntouched.",
+            "properties": {
+              "current_run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "const": "not_current",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is still bound, but a runtime stop or teardown owns it and\nrefused the stop. Nothing was staged.",
+            "properties": {
+              "outcome": {
+                "const": "not_stoppable",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/WireRuntimeState"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireRuntimeState": {
+        "description": "Public runtime state projection used by RPC surfaces.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
       },
       "WireServerToolKind": {
         "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
@@ -43936,6 +44122,32 @@
           "expected_member",
           "input_id",
           "outcome"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Response to [`BridgeCommand::StopMemberRun`]: the member host's typed\nrun-stop receipt, with the residency and operation echoed so a reply can\nnever be applied to a replacement member or a different request.",
+        "properties": {
+          "expected_member": {
+            "$ref": "#/$defs/BridgeMemberIncarnation"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "receipt": {
+            "$ref": "#/$defs/WireRunStopReceipt"
+          },
+          "result": {
+            "const": "member_run_stopped",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result",
+          "expected_member",
+          "operation_id",
+          "receipt"
         ],
         "type": "object"
       },
@@ -49788,6 +50000,50 @@
           },
           {
             "additionalProperties": false,
+            "description": "Run-fenced Stop of one exact member run: the member host stops that\nrun and terminalizes every contributor bound to it, replying with the\ntyped receipt. The controlling side gates it on the host's recorded\n`hard_cancel_member` fact (same immediate-interrupt authority class);\na peer that predates the command rejects it at decode.",
+            "properties": {
+              "command": {
+                "const": "stop_member_run",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              "expected_run_id": {
+                "$ref": "#/$defs/RunId"
+              },
+              "operation_id": {
+                "$ref": "#/$defs/OperationId"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "expected_member",
+              "operation_id",
+              "expected_run_id",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
             "description": "Retire one exact peer-only controller-member runtime incarnation (V5).\n\nSupervisor authentication proves who issued the command. `member_fence`\nseparately proves which exact Mob incarnation and runtime/session epoch the\ncontroller is authorized to retire. Neither authority may be inferred from\nthe other or from the addressed session id.",
             "properties": {
               "command": {
@@ -52608,6 +52864,32 @@
               "expected_member",
               "input_id",
               "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Response to [`BridgeCommand::StopMemberRun`]: the member host's typed\nrun-stop receipt, with the residency and operation echoed so a reply can\nnever be applied to a replacement member or a different request.",
+            "properties": {
+              "expected_member": {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              "operation_id": {
+                "$ref": "#/$defs/OperationId"
+              },
+              "receipt": {
+                "$ref": "#/$defs/WireRunStopReceipt"
+              },
+              "result": {
+                "const": "member_run_stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "expected_member",
+              "operation_id",
+              "receipt"
             ],
             "type": "object"
           },
@@ -60583,6 +60865,17 @@
         ],
         "type": "string"
       },
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
       "WireLiveAdapterStatus": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].\n\nInternally-tagged on `status` (snake_case). The `degraded` variant\nreferences [`WireLiveDegradationReason`] so the typed reason is visible at\nthe SDK boundary.",
         "oneOf": [
@@ -61904,6 +62197,133 @@
             "type": "object"
           }
         ]
+      },
+      "WireRunStopCompletion": {
+        "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
+        "enum": [
+          "completed",
+          "completed_without_result",
+          "callback_pending",
+          "cancelled",
+          "abandoned",
+          "abandoned_with_error",
+          "completed_with_finalization_failure",
+          "runtime_terminated"
+        ],
+        "type": "string"
+      },
+      "WireRunStopContributor": {
+        "description": "One input that contributed to a stopped run.",
+        "properties": {
+          "completion": {
+            "$ref": "#/$defs/WireRunStopCompletion"
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "terminal": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputTerminalOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Generated public class of the committed input terminal. Absent only\nwhen no ledger or store retains the row."
+          }
+        },
+        "required": [
+          "input_id",
+          "completion"
+        ],
+        "type": "object"
+      },
+      "WireRunStopReceipt": {
+        "description": "Typed receipt of a run-fenced Stop.",
+        "oneOf": [
+          {
+            "description": "The run was current and the stop was linearized. Every contributor\nstaged for it has reached its terminal; none started a successor run.",
+            "properties": {
+              "contributors": {
+                "items": {
+                  "$ref": "#/$defs/WireRunStopContributor"
+                },
+                "type": "array"
+              },
+              "outcome": {
+                "const": "stopped",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "contributors"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is not the current run (already terminal, replaced, or never\ncurrent). Nothing was stopped; queued input and newer runs are\nuntouched.",
+            "properties": {
+              "current_run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "const": "not_current",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is still bound, but a runtime stop or teardown owns it and\nrefused the stop. Nothing was staged.",
+            "properties": {
+              "outcome": {
+                "const": "not_stoppable",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/WireRuntimeState"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireRuntimeState": {
+        "description": "Public runtime state projection used by RPC surfaces.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
       },
       "WireServerToolKind": {
         "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
@@ -63327,6 +63747,50 @@
               "protocol_version",
               "expected_member",
               "input_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Run-fenced Stop of one exact member run: the member host stops that\nrun and terminalizes every contributor bound to it, replying with the\ntyped receipt. The controlling side gates it on the host's recorded\n`hard_cancel_member` fact (same immediate-interrupt authority class);\na peer that predates the command rejects it at decode.",
+            "properties": {
+              "command": {
+                "const": "stop_member_run",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              "expected_run_id": {
+                "$ref": "#/$defs/RunId"
+              },
+              "operation_id": {
+                "$ref": "#/$defs/OperationId"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "expected_member",
+              "operation_id",
+              "expected_run_id",
+              "reason"
             ],
             "type": "object"
           },
@@ -71522,6 +71986,32 @@
           },
           {
             "additionalProperties": false,
+            "description": "Response to [`BridgeCommand::StopMemberRun`]: the member host's typed\nrun-stop receipt, with the residency and operation echoed so a reply can\nnever be applied to a replacement member or a different request.",
+            "properties": {
+              "expected_member": {
+                "$ref": "#/$defs/BridgeMemberIncarnation"
+              },
+              "operation_id": {
+                "$ref": "#/$defs/OperationId"
+              },
+              "receipt": {
+                "$ref": "#/$defs/WireRunStopReceipt"
+              },
+              "result": {
+                "const": "member_run_stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "expected_member",
+              "operation_id",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
             "description": "Response to a retire command.",
             "properties": {
               "outcome": {
@@ -74501,6 +74991,10 @@
           "medium",
           "high"
         ],
+        "type": "string"
+      },
+      "OperationId": {
+        "description": "Unique identifier for an operation",
         "type": "string"
       },
       "OutputSchema": {
@@ -77763,6 +78257,17 @@
         ],
         "type": "string"
       },
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
       "WireLiveAdapterStatus": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].\n\nInternally-tagged on `status` (snake_case). The `degraded` variant\nreferences [`WireLiveDegradationReason`] so the typed reason is visible at\nthe SDK boundary.",
         "oneOf": [
@@ -78342,6 +78847,133 @@
             "type": "object"
           }
         ]
+      },
+      "WireRunStopCompletion": {
+        "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
+        "enum": [
+          "completed",
+          "completed_without_result",
+          "callback_pending",
+          "cancelled",
+          "abandoned",
+          "abandoned_with_error",
+          "completed_with_finalization_failure",
+          "runtime_terminated"
+        ],
+        "type": "string"
+      },
+      "WireRunStopContributor": {
+        "description": "One input that contributed to a stopped run.",
+        "properties": {
+          "completion": {
+            "$ref": "#/$defs/WireRunStopCompletion"
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "terminal": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputTerminalOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Generated public class of the committed input terminal. Absent only\nwhen no ledger or store retains the row."
+          }
+        },
+        "required": [
+          "input_id",
+          "completion"
+        ],
+        "type": "object"
+      },
+      "WireRunStopReceipt": {
+        "description": "Typed receipt of a run-fenced Stop.",
+        "oneOf": [
+          {
+            "description": "The run was current and the stop was linearized. Every contributor\nstaged for it has reached its terminal; none started a successor run.",
+            "properties": {
+              "contributors": {
+                "items": {
+                  "$ref": "#/$defs/WireRunStopContributor"
+                },
+                "type": "array"
+              },
+              "outcome": {
+                "const": "stopped",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "contributors"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is not the current run (already terminal, replaced, or never\ncurrent). Nothing was stopped; queued input and newer runs are\nuntouched.",
+            "properties": {
+              "current_run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "const": "not_current",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is still bound, but a runtime stop or teardown owns it and\nrefused the stop. Nothing was staged.",
+            "properties": {
+              "outcome": {
+                "const": "not_stoppable",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/WireRuntimeState"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireRuntimeState": {
+        "description": "Public runtime state projection used by RPC surfaces.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
       },
       "WireServerToolKind": {
         "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
@@ -113701,6 +114333,168 @@
     "title": "MobStatusResult",
     "type": "object"
   },
+  "MobStopMemberRunResult": {
+    "$defs": {
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WireRunStopCompletion": {
+        "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
+        "enum": [
+          "completed",
+          "completed_without_result",
+          "callback_pending",
+          "cancelled",
+          "abandoned",
+          "abandoned_with_error",
+          "completed_with_finalization_failure",
+          "runtime_terminated"
+        ],
+        "type": "string"
+      },
+      "WireRunStopContributor": {
+        "description": "One input that contributed to a stopped run.",
+        "properties": {
+          "completion": {
+            "$ref": "#/$defs/WireRunStopCompletion"
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "terminal": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputTerminalOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Generated public class of the committed input terminal. Absent only\nwhen no ledger or store retains the row."
+          }
+        },
+        "required": [
+          "input_id",
+          "completion"
+        ],
+        "type": "object"
+      },
+      "WireRunStopReceipt": {
+        "description": "Typed receipt of a run-fenced Stop.",
+        "oneOf": [
+          {
+            "description": "The run was current and the stop was linearized. Every contributor\nstaged for it has reached its terminal; none started a successor run.",
+            "properties": {
+              "contributors": {
+                "items": {
+                  "$ref": "#/$defs/WireRunStopContributor"
+                },
+                "type": "array"
+              },
+              "outcome": {
+                "const": "stopped",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "contributors"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is not the current run (already terminal, replaced, or never\ncurrent). Nothing was stopped; queued input and newer runs are\nuntouched.",
+            "properties": {
+              "current_run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "const": "not_current",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is still bound, but a runtime stop or teardown owns it and\nrefused the stop. Nothing was staged.",
+            "properties": {
+              "outcome": {
+                "const": "not_stoppable",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/WireRuntimeState"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireRuntimeState": {
+        "description": "Public runtime state projection used by RPC surfaces.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `mob/stop_member_run` and its REST route.",
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "receipt": {
+        "$ref": "#/$defs/WireRunStopReceipt"
+      }
+    },
+    "required": [
+      "mob_id",
+      "agent_identity",
+      "receipt"
+    ],
+    "title": "MobStopMemberRunResult",
+    "type": "object"
+  },
   "MobStreamCloseResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for `mob/stream_close`.",
@@ -130963,6 +131757,164 @@
     "title": "SkillListResponse",
     "type": "object"
   },
+  "StopRunResult": {
+    "$defs": {
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WireRunStopCompletion": {
+        "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
+        "enum": [
+          "completed",
+          "completed_without_result",
+          "callback_pending",
+          "cancelled",
+          "abandoned",
+          "abandoned_with_error",
+          "completed_with_finalization_failure",
+          "runtime_terminated"
+        ],
+        "type": "string"
+      },
+      "WireRunStopContributor": {
+        "description": "One input that contributed to a stopped run.",
+        "properties": {
+          "completion": {
+            "$ref": "#/$defs/WireRunStopCompletion"
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "terminal": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputTerminalOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Generated public class of the committed input terminal. Absent only\nwhen no ledger or store retains the row."
+          }
+        },
+        "required": [
+          "input_id",
+          "completion"
+        ],
+        "type": "object"
+      },
+      "WireRunStopReceipt": {
+        "description": "Typed receipt of a run-fenced Stop.",
+        "oneOf": [
+          {
+            "description": "The run was current and the stop was linearized. Every contributor\nstaged for it has reached its terminal; none started a successor run.",
+            "properties": {
+              "contributors": {
+                "items": {
+                  "$ref": "#/$defs/WireRunStopContributor"
+                },
+                "type": "array"
+              },
+              "outcome": {
+                "const": "stopped",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "contributors"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is not the current run (already terminal, replaced, or never\ncurrent). Nothing was stopped; queued input and newer runs are\nuntouched.",
+            "properties": {
+              "current_run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "const": "not_current",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is still bound, but a runtime stop or teardown owns it and\nrefused the stop. Nothing was staged.",
+            "properties": {
+              "outcome": {
+                "const": "not_stoppable",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/WireRuntimeState"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireRuntimeState": {
+        "description": "Public runtime state projection used by RPC surfaces.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `turn/stop_run` and its REST route.",
+    "properties": {
+      "receipt": {
+        "$ref": "#/$defs/WireRunStopReceipt"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "receipt"
+    ],
+    "title": "StopRunResult",
+    "type": "object"
+  },
   "StreamReadStatus": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Typed terminal status for a single event-stream read.\n\nInternally tagged on `status` to match the canonical read response shape:\n`{ \"status\": \"event\", \"event\": { .. } }`, `{ \"status\": \"timeout\" }`, or\n`{ \"status\": \"closed\" }`. The transport-level stream identifier is carried\nby the enclosing response, not by this status (one fact, one owner).\n\nNot `PartialEq`: the `Event.event` body rides as `Box<RawValue>` — opaque\ncaller-observed JSON (a serialized core `EventEnvelope<AgentEvent>`) that is\nnever pattern-matched at this layer. Allow-listed per `dogma-blind-spots`\n§7, identical to `SessionExternalEventEnvelope`.",
@@ -147402,6 +148354,19 @@
     "title": "WireInputStateHistoryEntry",
     "type": "object"
   },
+  "WireInputTerminalOutcome": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed wire projection of an input's terminal outcome.",
+    "enum": [
+      "completed",
+      "abandoned",
+      "superseded",
+      "coalesced",
+      "cancelled"
+    ],
+    "title": "WireInputTerminalOutcome",
+    "type": "string"
+  },
   "WireLiveAdapterErrorCode": {
     "$defs": {
       "WireLiveConfigRejectionReason": {
@@ -157303,6 +158268,220 @@
     ],
     "title": "WireRunResult",
     "type": "object"
+  },
+  "WireRunStopCompletion": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
+    "enum": [
+      "completed",
+      "completed_without_result",
+      "callback_pending",
+      "cancelled",
+      "abandoned",
+      "abandoned_with_error",
+      "completed_with_finalization_failure",
+      "runtime_terminated"
+    ],
+    "title": "WireRunStopCompletion",
+    "type": "string"
+  },
+  "WireRunStopContributor": {
+    "$defs": {
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WireRunStopCompletion": {
+        "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
+        "enum": [
+          "completed",
+          "completed_without_result",
+          "callback_pending",
+          "cancelled",
+          "abandoned",
+          "abandoned_with_error",
+          "completed_with_finalization_failure",
+          "runtime_terminated"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One input that contributed to a stopped run.",
+    "properties": {
+      "completion": {
+        "$ref": "#/$defs/WireRunStopCompletion"
+      },
+      "input_id": {
+        "type": "string"
+      },
+      "terminal": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireInputTerminalOutcome"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Generated public class of the committed input terminal. Absent only\nwhen no ledger or store retains the row."
+      }
+    },
+    "required": [
+      "input_id",
+      "completion"
+    ],
+    "title": "WireRunStopContributor",
+    "type": "object"
+  },
+  "WireRunStopReceipt": {
+    "$defs": {
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WireRunStopCompletion": {
+        "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
+        "enum": [
+          "completed",
+          "completed_without_result",
+          "callback_pending",
+          "cancelled",
+          "abandoned",
+          "abandoned_with_error",
+          "completed_with_finalization_failure",
+          "runtime_terminated"
+        ],
+        "type": "string"
+      },
+      "WireRunStopContributor": {
+        "description": "One input that contributed to a stopped run.",
+        "properties": {
+          "completion": {
+            "$ref": "#/$defs/WireRunStopCompletion"
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "terminal": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInputTerminalOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Generated public class of the committed input terminal. Absent only\nwhen no ledger or store retains the row."
+          }
+        },
+        "required": [
+          "input_id",
+          "completion"
+        ],
+        "type": "object"
+      },
+      "WireRuntimeState": {
+        "description": "Public runtime state projection used by RPC surfaces.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed receipt of a run-fenced Stop.",
+    "oneOf": [
+      {
+        "description": "The run was current and the stop was linearized. Every contributor\nstaged for it has reached its terminal; none started a successor run.",
+        "properties": {
+          "contributors": {
+            "items": {
+              "$ref": "#/$defs/WireRunStopContributor"
+            },
+            "type": "array"
+          },
+          "outcome": {
+            "const": "stopped",
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "run_id",
+          "contributors"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The run is not the current run (already terminal, replaced, or never\ncurrent). Nothing was stopped; queued input and newer runs are\nuntouched.",
+        "properties": {
+          "current_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "const": "not_current",
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "run_id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The run is still bound, but a runtime stop or teardown owns it and\nrefused the stop. Nothing was staged.",
+        "properties": {
+          "outcome": {
+            "const": "not_stoppable",
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/WireRuntimeState"
+          }
+        },
+        "required": [
+          "outcome",
+          "run_id",
+          "state"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireRunStopReceipt"
   },
   "WireRuntimeBinding": {
     "$defs": {

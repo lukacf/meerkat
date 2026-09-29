@@ -196,6 +196,8 @@ from .types import (
     MobSpawnParams,
     MobSpawnResult,
     MobStatusResult,
+    MobStopMemberRunParams,
+    MobStopMemberRunResult,
     MobStreamCloseParams,
     MobStreamCloseResult,
     MobStreamOpenParams,
@@ -253,6 +255,8 @@ from .types import (
     SessionStreamOpenResult,
     SessionTranscriptRewriteResult,
     SkillListResponse,
+    StopRunParams,
+    StopRunResult,
     SystemPromptUpdateResult,
     ToolsRegisterParams,
     ToolsRegisterResult,
@@ -574,6 +578,14 @@ class RpcRequest(Protocol):
         params: InterruptParams,
         /,
     ) -> Awaitable[InterruptResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["turn/stop_run"],
+        params: StopRunParams,
+        /,
+    ) -> Awaitable[StopRunResult]: ...
 
     @overload
     def __call__(
@@ -1582,6 +1594,14 @@ class RpcRequest(Protocol):
         params: MobHardCancelParams,
         /,
     ) -> Awaitable[MobHardCancelResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/stop_member_run"],
+        params: MobStopMemberRunParams,
+        /,
+    ) -> Awaitable[MobStopMemberRunResult]: ...
 
     @overload
     def __call__(

@@ -246,13 +246,46 @@ impl MeerkatMachine {
         expected_run_id: &meerkat_core::RunId,
         reason: impl Into<String>,
     ) -> Result<crate::run_stop::RunStopReceipt, RuntimeDriverError> {
+        self.stop_run_inner(session_id, expected_run_id, None, reason.into())
+            .await
+    }
+
+    /// [`Self::stop_run`] additionally pinned to one exact host-member
+    /// residency, for the supervisor bridge's `StopMemberRun` receiver. The
+    /// residency comparison and the stop commit share the session mutation
+    /// gate.
+    pub async fn stop_run_for_member_incarnation(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &meerkat_core::RunId,
+        expected_member: &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        reason: impl Into<String>,
+    ) -> Result<crate::run_stop::RunStopReceipt, RuntimeDriverError> {
+        self.stop_run_inner(
+            session_id,
+            expected_run_id,
+            Some(expected_member),
+            reason.into(),
+        )
+        .await
+    }
+
+    async fn stop_run_inner(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &meerkat_core::RunId,
+        expected_member: Option<
+            &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        >,
+        reason: String,
+    ) -> Result<crate::run_stop::RunStopReceipt, RuntimeDriverError> {
         let mut capture = RunStopCapture::default();
         let dispatched = self
             .dispatch_user_interrupt_with_stop(
                 session_id,
                 Some(expected_run_id),
-                None,
-                reason.into(),
+                expected_member,
+                reason,
                 Some(&mut capture),
             )
             .await;

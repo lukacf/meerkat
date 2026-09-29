@@ -98,6 +98,7 @@ impl MobCommand {
             | Self::CancelFlow { .. }
             | Self::ForceCancel { .. }
             | Self::HardCancelMember { .. }
+            | Self::StopMemberRun { .. }
             // Revoking a capability terminalizes outstanding delegated work
             // authority without retiring any member.
             | Self::RevokeForkedParticipant { .. }
@@ -413,6 +414,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::HardCancelMember { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::StopMemberRun { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::MemberHistory { reply_tx, .. } => {

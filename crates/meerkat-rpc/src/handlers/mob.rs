@@ -3264,6 +3264,41 @@ pub async fn handle_hard_cancel_member(
     }
 }
 
+/// Handle `mob/stop_member_run`: the run-fenced Stop of one member run.
+pub async fn handle_stop_member_run(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobStopMemberRunParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let run_id = match meerkat::surface::parse_wire_run_id(&params.run_id) {
+        Ok(run_id) => run_id,
+        Err(message) => return RpcResponse::error(id, crate::error::INVALID_PARAMS, message),
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    match state
+        .mob_stop_member_run(&mob_id, identity, run_id, params.reason)
+        .await
+    {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            meerkat_contracts::MobStopMemberRunResult {
+                mob_id: params.mob_id,
+                agent_identity: params.agent_identity,
+                receipt,
+            },
+        ),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
 pub async fn handle_member_live_open(
     id: Option<RpcId>,
     params: Option<&RawValue>,

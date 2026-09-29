@@ -285,6 +285,7 @@ sidecars remain complete. The server rejects zero.
 | `mob.bindHost(...)` / `mob.revokeHost(...)` | Bind or revoke a remote member host |
 | `mob.grantScopes(...)` / `mob.revokeScopes(...)` / `mob.grants()` | Manage trusted operator control grants |
 | `mob.memberHistory(...)` / `mob.hardCancel(...)` | Read remote/local history or perform an immediate hard cancel |
+| `mob.stopMemberRun(agentIdentity, runId, reason)` | Stop one exact member run and terminalize its contributors |
 | `mob.memberLiveOpen/status/control/close(...)` | Control a live channel on a local or remote member |
 
 Multi-host placement and host/grant mutation are trusted JSON-RPC operator
@@ -548,6 +549,19 @@ async interrupt(): Promise<void>
 ```
 
 Sends `turn/interrupt` for this session. Has no effect if no turn is running.
+
+### stopRun()
+
+```typescript
+async stopRun(runId: string, reason: string): Promise<StopRunResult>
+```
+
+Sends `turn/stop_run`. It stops exactly `runId` (read it from the `run_started`
+event's `identity.run_id`) and terminalizes every input already bound to that
+run, including durable steers that joined it. `receipt.outcome` is `stopped`
+(with `contributors`), `not_current` (the run is no longer current; nothing
+was touched), or `not_stoppable`. `mob.stopMemberRun(agentIdentity, runId,
+reason)` does the same for one mob member.
 
 ### archive()
 

@@ -52,9 +52,11 @@ pub fn run_effect_authority() -> Result<()> {
 
 /// Idents whose mere structural presence in peer-admission / comms-drain code
 /// proves reach into hard interrupt authority.
-const HARD_INTERRUPT_AUTHORITY_IDENTS: [&str; 8] = [
+const HARD_INTERRUPT_AUTHORITY_IDENTS: [&str; 10] = [
     "hard_cancel_current_run",
     "hard_cancel_run_if_current",
+    "stop_run",
+    "stop_run_for_member_incarnation",
     "interrupt_handle",
     "interrupt_handle_for",
     "interrupt_current_run_with_reason",
@@ -442,8 +444,9 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
             interrupt_receivers: &["runtime", "adapter", "session_service"],
             ban_interrupt_current_run_calls: true,
             // Phase 6 (DEC-P6E-7 / §10.6): the machine-admitted hard-cancel
-            // serving arm is the single sanctioned reach.
-            allowed_fns: &["serve_hard_cancel_member"],
+            // serving arm and the run-fenced stop serving arm are the only
+            // sanctioned reaches.
+            allowed_fns: &["serve_hard_cancel_member", "serve_stop_member_run"],
             findings,
         };
         visitor.visit_file(&parsed);

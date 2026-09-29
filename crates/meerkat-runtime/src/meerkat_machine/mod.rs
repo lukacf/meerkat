@@ -767,14 +767,39 @@ fn resolve_input_public_terminal_projection(
     input_id: &InputId,
     seed: &InputStateSeed,
 ) -> Result<Option<dsl::InputPublicTerminalOutcome>, String> {
+    resolve_input_public_terminal_class(input_id, seed.phase, seed.terminal_outcome.as_ref())
+}
+
+/// Resolve the public terminal result class of one committed input terminal
+/// through generated MeerkatMachine authority. The lifecycle phase is the one
+/// the terminal kind implies; surfaces use this to project a committed
+/// terminal (for example a [`crate::RunStopContributor`]) without a seed.
+pub fn resolve_input_public_terminal_outcome_projection(
+    input_id: &InputId,
+    terminal: &InputTerminalOutcome,
+) -> Result<Option<dsl::InputPublicTerminalOutcome>, String> {
+    let phase = match terminal {
+        InputTerminalOutcome::Consumed => InputLifecycleState::Consumed,
+        InputTerminalOutcome::Superseded { .. } => InputLifecycleState::Superseded,
+        InputTerminalOutcome::Coalesced { .. } => InputLifecycleState::Coalesced,
+        InputTerminalOutcome::Abandoned { .. } => InputLifecycleState::Abandoned,
+    };
+    resolve_input_public_terminal_class(input_id, phase, Some(terminal))
+}
+
+fn resolve_input_public_terminal_class(
+    input_id: &InputId,
+    phase: InputLifecycleState,
+    terminal: Option<&InputTerminalOutcome>,
+) -> Result<Option<dsl::InputPublicTerminalOutcome>, String> {
     let input_key = input_id.to_string();
-    let (terminal_kind, abandon_reason) = input_terminality_parts(seed.terminal_outcome.as_ref());
+    let (terminal_kind, abandon_reason) = input_terminality_parts(terminal);
     let mut authority = projection_authority();
     let transition = dsl::MeerkatMachineMutator::apply(
         &mut authority,
         dsl::MeerkatMachineInput::ResolveInputPublicTerminalOutcome {
             input_id: input_key.clone(),
-            phase: observed_input_phase(seed.phase),
+            phase: observed_input_phase(phase),
             terminal_kind,
             abandon_reason,
         },

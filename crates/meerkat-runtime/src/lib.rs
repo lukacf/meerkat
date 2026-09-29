@@ -100,6 +100,7 @@ pub mod protocol_supervisor_trust_revoke;
 pub mod recovery;
 pub(crate) mod run_progress;
 pub mod run_stop;
+pub mod run_stop_wire;
 pub mod runtime_event;
 pub(crate) mod runtime_loop;
 pub mod runtime_state;

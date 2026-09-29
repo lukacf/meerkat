@@ -7660,6 +7660,32 @@ impl MobHandle {
             .await?
     }
 
+    /// Run-fenced Stop of one exact member run: the member's runtime stops
+    /// `run_id` and terminalizes every contributor bound to it (including
+    /// durable Steer inputs that joined the run), and the reply is the typed
+    /// receipt. A stale run id is `NotCurrent`, never an error, and never
+    /// touches a newer run or queued input. `Cancel`-scoped at chokepoint
+    /// (a). Hosts learn a member's run id from its `run_started` event
+    /// (`identity.run_id`).
+    pub async fn stop_member_run(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+        run_id: meerkat_core::lifecycle::RunId,
+        reason: impl Into<String>,
+    ) -> Result<meerkat_contracts::WireRunStopReceipt, MobError> {
+        let reason = reason.into();
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(|reply_tx| super::state::MobCommand::StopMemberRun {
+                agent_identity: identity,
+                run_id,
+                reason,
+                reply_tx,
+            })
+            .await?
+    }
+
     /// Placement-switched member transcript read (phase 6, DEC-P6E-21):
     /// `ReadHistory`-scoped at chokepoint (a); local and remote pages share
     /// ONE wire projection. RPC/REST/MCP exposure is phase 7 (the DTOs

@@ -2336,6 +2336,9 @@ impl MethodRouter {
                 })
                 .await
             }
+            "turn/stop_run" => {
+                routed_arm(|| handlers::turn::handle_stop_run(id, params, &self.runtime)).await
+            }
             "turn/interrupt" => {
                 #[cfg(feature = "mob")]
                 {
@@ -2637,6 +2640,11 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/hard_cancel_member" => {
                 routed_arm(|| handlers::mob::handle_hard_cancel_member(id, params, &self.mob_state))
+                    .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/stop_member_run" => {
+                routed_arm(|| handlers::mob::handle_stop_member_run(id, params, &self.mob_state))
                     .await
             }
             #[cfg(feature = "mob")]
@@ -12686,6 +12694,61 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         let interrupt_resp = router.dispatch(interrupt_req).await.unwrap();
         let interrupt_result = result_value(&interrupt_resp);
         assert_eq!(interrupt_result["interrupted"], true);
+    }
+
+    /// `turn/stop_run` wire contract: a stale run id on a live idle session
+    /// is the typed `not_current` receipt (never an error, never an
+    /// interrupt), and a malformed run id is invalid params.
+    #[tokio::test]
+    async fn turn_stop_run_reports_not_current_for_a_stale_run_and_rejects_malformed_ids() {
+        let (router, _notif_rx) = test_router().await;
+        let create_req = make_request("session/create", serde_json::json!({"prompt": "Hello"}));
+        let create_resp = router.dispatch(create_req).await.unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let stale = meerkat_core::lifecycle::RunId::new().to_string();
+
+        let resp = router
+            .dispatch(make_request(
+                "turn/stop_run",
+                serde_json::json!({"session_id": session_id, "run_id": stale, "reason": "stale"}),
+            ))
+            .await
+            .unwrap();
+        let result = result_value(&resp);
+        assert_eq!(result["session_id"], serde_json::json!(session_id));
+        assert_eq!(result["receipt"]["outcome"], "not_current");
+        assert_eq!(result["receipt"]["run_id"], serde_json::json!(stale));
+        let decoded: meerkat_contracts::StopRunResult =
+            serde_json::from_value(result.clone()).expect("typed StopRunResult");
+        assert!(matches!(
+            decoded.receipt,
+            meerkat_contracts::WireRunStopReceipt::NotCurrent { .. }
+        ));
+
+        let resp = router
+            .dispatch(make_request(
+                "turn/stop_run",
+                serde_json::json!({"session_id": session_id, "run_id": "not-a-uuid", "reason": "x"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+
+        let resp = router
+            .dispatch(make_request(
+                "turn/stop_run",
+                serde_json::json!({
+                    "session_id": meerkat_core::SessionId::new().to_string(),
+                    "run_id": stale,
+                    "reason": "x"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&resp), error::SESSION_NOT_FOUND);
     }
 
     #[tokio::test]

@@ -2419,6 +2419,78 @@ rust_test(
 )
 
 rust_test(
+    name = "stop_run_public_api_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-runtime",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "stop_run_public_api",
+    crate_root = "tests/stop_run_public_api.rs",
+    crate_features = [
+        "live",
+        "sqlite-store",
+        "test-support",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/comms_drain.rs",
+        "src/handles/peer_comms.rs",
+        "src/meerkat_machine/mod.rs",
+    ] + [
+        "//crates/meerkat-core:tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+    ],
+    srcs = [
+        "tests/stop_run_public_api.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.48",
+        "CARGO_BIN_NAME": "stop_run_public_api",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-runtime",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-derive:meerkat_machine_derive",
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-runtime",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-comms:meerkat_comms",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-live:meerkat_live",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-machine-kernels:meerkat_machine_kernels",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+        "//crates/meerkat-sqlite:meerkat_sqlite",
+        "//crates/meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-runtime",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "trust_reconcile_add_failure_test",
     aliases = aliases(
         package_name = "crates/meerkat-runtime",
@@ -2890,6 +2962,7 @@ test_suite(
         ":runtime_bindings_contract_test",
         ":runtime_ingress_control_test",
         ":runtime_terminal_publication_contract_test",
+        ":stop_run_public_api_test",
         ":trust_reconcile_add_failure_test",
         ":trust_reconcile_concurrency_test",
         ":turn_content_shape_contract_test",

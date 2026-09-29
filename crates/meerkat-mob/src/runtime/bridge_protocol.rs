@@ -28,14 +28,15 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     BridgeLiveControlledResponse, BridgeLiveOpenPayload, BridgeLiveOpenedResponse,
     BridgeLiveStatusPayload, BridgeMaterializePayload, BridgeMaterializedResponse,
     BridgeMemberEventsPage, BridgeMemberHistoryPage, BridgeMemberIncarnation,
-    BridgeMemberOperatorPayload, BridgeMemberReleasedResponse, BridgeMemberRuntimeState,
-    BridgeMobPeerOverlayHandoff, BridgeObservationResponse, BridgeOutboundTaintPayload,
-    BridgeOutboundTaintTarget, BridgeOutcomeTracking, BridgePeerConnectivity, BridgePeerSpec,
-    BridgePeerTrustPayload, BridgePeerWiringPayload, BridgePollEventsPayload,
-    BridgeProtocolVersion, BridgeReadHistoryPayload, BridgeRejectionCause, BridgeRejectionReply,
-    BridgeReleasePayload, BridgeReply, BridgeRetireOutcome, BridgeRetirePayload,
-    BridgeRetireResponse, BridgeRevokeForkedParticipantPayload, BridgeSupervisorDelivery,
-    BridgeSupervisorPayload, BridgeSupervisorRotationObservation, BridgeSupervisorRotationObserve,
+    BridgeMemberOperatorPayload, BridgeMemberReleasedResponse, BridgeMemberRunStopResponse,
+    BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff, BridgeObservationResponse,
+    BridgeOutboundTaintPayload, BridgeOutboundTaintTarget, BridgeOutcomeTracking,
+    BridgePeerConnectivity, BridgePeerSpec, BridgePeerTrustPayload, BridgePeerWiringPayload,
+    BridgePollEventsPayload, BridgeProtocolVersion, BridgeReadHistoryPayload, BridgeRejectionCause,
+    BridgeRejectionReply, BridgeReleasePayload, BridgeReply, BridgeRetireOutcome,
+    BridgeRetirePayload, BridgeRetireResponse, BridgeRevokeForkedParticipantPayload,
+    BridgeStopMemberRunPayload, BridgeSupervisorDelivery, BridgeSupervisorPayload,
+    BridgeSupervisorRotationObservation, BridgeSupervisorRotationObserve,
     BridgeSupervisorRotationOperationReceipt, BridgeSupervisorRotationPendingPhase,
     BridgeSupervisorRotationRejectionCause, BridgeSupervisorRotationRejectionReceipt,
     BridgeSupervisorRotationState, BridgeSupervisorRotationSubmit,
@@ -283,6 +284,11 @@ impl_from_bridge_reply!(
     TrackedInputCancelled,
     "tracked_input_cancelled"
 );
+impl_from_bridge_reply!(
+    BridgeMemberRunStopResponse,
+    MemberRunStopped,
+    "member_run_stopped"
+);
 impl_from_bridge_reply!(BridgeRetireResponse, Retire, "retire");
 impl_from_bridge_reply!(BridgeDestroyResponse, Destroy, "destroy");
 impl_from_bridge_reply!(BridgeHostBindResponse, BindHost, "bind_host");
@@ -391,6 +397,7 @@ enum ExpectedBridgeReply {
     Observation,
     Delivery,
     TrackedInputCancelled,
+    MemberRunStopped,
     Retire,
     Destroy,
     BindHost,
@@ -422,6 +429,7 @@ impl ExpectedBridgeReply {
             Self::Observation => "observation",
             Self::Delivery => "delivery",
             Self::TrackedInputCancelled => "tracked_input_cancelled",
+            Self::MemberRunStopped => "member_run_stopped",
             Self::Retire => "retire",
             Self::Destroy => "destroy",
             Self::BindHost => "bind_host",
@@ -465,6 +473,7 @@ fn expected_reply_kind(command: &BridgeCommand) -> ExpectedBridgeReply {
         | BridgeCommand::DeclareMemberOutboundTaint(_) => ExpectedBridgeReply::Ack,
         BridgeCommand::DeliverMemberInput(_) => ExpectedBridgeReply::Delivery,
         BridgeCommand::CancelTrackedMemberInput(_) => ExpectedBridgeReply::TrackedInputCancelled,
+        BridgeCommand::StopMemberRun(_) => ExpectedBridgeReply::MemberRunStopped,
         BridgeCommand::ObserveMember(_) => ExpectedBridgeReply::Observation,
         BridgeCommand::RetireMember(_) => ExpectedBridgeReply::Retire,
         BridgeCommand::DestroyMember(_) => ExpectedBridgeReply::Destroy,
@@ -506,6 +515,7 @@ fn reply_kind(reply: &BridgeReply) -> ExpectedBridgeReply {
         BridgeReply::Observation(_) => ExpectedBridgeReply::Observation,
         BridgeReply::Delivery(_) => ExpectedBridgeReply::Delivery,
         BridgeReply::TrackedInputCancelled(_) => ExpectedBridgeReply::TrackedInputCancelled,
+        BridgeReply::MemberRunStopped(_) => ExpectedBridgeReply::MemberRunStopped,
         BridgeReply::Retire(_) => ExpectedBridgeReply::Retire,
         BridgeReply::Destroy(_) => ExpectedBridgeReply::Destroy,
         BridgeReply::BindHost(_) => ExpectedBridgeReply::BindHost,
@@ -604,6 +614,42 @@ mod tests {
             decode_bridge_payload(&tracked_cancel_command(), value, "tracked cancellation")
                 .expect("typed tracked cancellation reply");
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn stop_member_run_reply_has_its_own_exact_reply_kind() {
+        let BridgeCommand::CancelTrackedMemberInput(tracked) = tracked_cancel_command() else {
+            unreachable!()
+        };
+        let command = BridgeCommand::StopMemberRun(BridgeStopMemberRunPayload {
+            supervisor: tracked.supervisor,
+            epoch: tracked.epoch,
+            protocol_version: BridgeProtocolVersion::V4,
+            expected_member: tracked.expected_member.clone(),
+            operation_id: meerkat_core::ops::OperationId(uuid::Uuid::from_u128(0x5709)),
+            expected_run_id: meerkat_core::RunId::from_uuid(uuid::Uuid::from_u128(0xA11CE)),
+            reason: "stop".to_string(),
+        });
+        let response = BridgeMemberRunStopResponse {
+            expected_member: tracked.expected_member,
+            operation_id: meerkat_core::ops::OperationId(uuid::Uuid::from_u128(0x5709)),
+            receipt: meerkat_contracts::WireRunStopReceipt::NotCurrent {
+                run_id: uuid::Uuid::from_u128(0xA11CE).to_string(),
+                current_run_id: None,
+            },
+        };
+        let value = serde_json::to_value(BridgeReply::MemberRunStopped(response.clone()))
+            .expect("serialize run-stop reply");
+        let decoded: BridgeMemberRunStopResponse =
+            decode_bridge_payload(&command, value, "run stop").expect("typed run-stop reply");
+        assert_eq!(decoded, response);
+        // An Ack for a run-stop command is a kind mismatch, never a receipt.
+        let ack =
+            serde_json::to_value(BridgeReply::Ack(BridgeAck { ok: true })).expect("serialize ack");
+        assert!(
+            decode_bridge_payload::<BridgeMemberRunStopResponse>(&command, ack, "run stop")
+                .is_err()
+        );
     }
 
     #[test]

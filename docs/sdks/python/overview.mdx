@@ -267,7 +267,8 @@ degraded continuity. Zero is rejected by the server.
 - host/grant control: `mob.hosts()`, `mob.route_installs()`,
   `mob.bind_host(...)`, `mob.revoke_host(...)`, `mob.grant_scopes(...)`,
   `mob.revoke_scopes(...)`, `mob.grants()`
-- remote member control: `mob.hard_cancel(...)`, member history, member live
+- remote member control: `mob.hard_cancel(...)`,
+  `mob.stop_member_run(agent_identity, run_id, reason=...)`, member history, member live
   open/status/control/close, and member/mob event subscriptions
 
 Multi-host placement and host/grant mutations are trusted operator APIs on the

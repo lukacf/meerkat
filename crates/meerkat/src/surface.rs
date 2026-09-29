@@ -26,6 +26,7 @@ mod live_projection;
 mod request_execution;
 #[cfg(feature = "session-store")]
 mod runtime_backed;
+pub use meerkat_runtime::run_stop_wire::{parse_wire_run_id, wire_run_stop_receipt};
 #[cfg(feature = "session-store")]
 mod runtime_schedule_host;
 mod schedule_host;

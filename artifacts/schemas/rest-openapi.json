@@ -2811,6 +2811,50 @@
           },
           {
             "additionalProperties": false,
+            "description": "Run-fenced Stop of one exact member run: the member host stops that\nrun and terminalizes every contributor bound to it, replying with the\ntyped receipt. The controlling side gates it on the host's recorded\n`hard_cancel_member` fact (same immediate-interrupt authority class);\na peer that predates the command rejects it at decode.",
+            "properties": {
+              "command": {
+                "const": "stop_member_run",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_member": {
+                "$ref": "#/components/schemas/BridgeMemberIncarnation"
+              },
+              "expected_run_id": {
+                "$ref": "#/components/schemas/RunId"
+              },
+              "operation_id": {
+                "$ref": "#/components/schemas/OperationId"
+              },
+              "protocol_version": {
+                "$ref": "#/components/schemas/BridgeProtocolVersion"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "supervisor": {
+                "$ref": "#/components/schemas/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "protocol_version",
+              "expected_member",
+              "operation_id",
+              "expected_run_id",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
             "description": "Retire one exact peer-only controller-member runtime incarnation (V5).\n\nSupervisor authentication proves who issued the command. `member_fence`\nseparately proves which exact Mob incarnation and runtime/session epoch the\ncontroller is authorized to retire. Neither authority may be inferred from\nthe other or from the addressed session id.",
             "properties": {
               "command": {
@@ -5638,6 +5682,32 @@
               "expected_member",
               "input_id",
               "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Response to [`BridgeCommand::StopMemberRun`]: the member host's typed\nrun-stop receipt, with the residency and operation echoed so a reply can\nnever be applied to a replacement member or a different request.",
+            "properties": {
+              "expected_member": {
+                "$ref": "#/components/schemas/BridgeMemberIncarnation"
+              },
+              "operation_id": {
+                "$ref": "#/components/schemas/OperationId"
+              },
+              "receipt": {
+                "$ref": "#/components/schemas/WireRunStopReceipt"
+              },
+              "result": {
+                "const": "member_run_stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result",
+              "expected_member",
+              "operation_id",
+              "receipt"
             ],
             "type": "object"
           },
@@ -11613,6 +11683,27 @@
         "title": "MobRouteInstallsResult",
         "type": "object"
       },
+      "MobStopMemberRunResult": {
+        "description": "Result for `mob/stop_member_run` and its REST route.",
+        "properties": {
+          "agent_identity": {
+            "type": "string"
+          },
+          "mob_id": {
+            "type": "string"
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/WireRunStopReceipt"
+          }
+        },
+        "required": [
+          "mob_id",
+          "agent_identity",
+          "receipt"
+        ],
+        "title": "MobStopMemberRunResult",
+        "type": "object"
+      },
       "MobTargetBinding": {
         "oneOf": [
           {
@@ -16637,6 +16728,37 @@
           }
         ]
       },
+      "StopRunRequest": {
+        "additionalProperties": false,
+        "description": "REST request body for `POST /sessions/{id}/runs/{run_id}/stop` and\n`POST /mob/{id}/members/{agent_identity}/runs/{run_id}/stop`.",
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "StopRunRequest",
+        "type": "object"
+      },
+      "StopRunResult": {
+        "description": "Result for `turn/stop_run` and its REST route.",
+        "properties": {
+          "receipt": {
+            "$ref": "#/components/schemas/WireRunStopReceipt"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "receipt"
+        ],
+        "title": "StopRunResult",
+        "type": "object"
+      },
       "StreamTruncationReason": {
         "description": "Typed reason a best-effort event stream dropped frames.\n\nThe variant is the typed owner of the truncation cause; the human-readable\nstring is a [`Display`](std::fmt::Display) derivation, never a\nseparately-carried field. `StreamTruncated` is a UI hint — the terminal\nevent remains authoritative.",
         "oneOf": [
@@ -20438,6 +20560,17 @@
         ],
         "type": "string"
       },
+      "WireInputTerminalOutcome": {
+        "description": "Typed wire projection of an input's terminal outcome.",
+        "enum": [
+          "completed",
+          "abandoned",
+          "superseded",
+          "coalesced",
+          "cancelled"
+        ],
+        "type": "string"
+      },
       "WireLiveAdapterStatus": {
         "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].\n\nInternally-tagged on `status` (snake_case). The `degraded` variant\nreferences [`WireLiveDegradationReason`] so the typed reason is visible at\nthe SDK boundary.",
         "oneOf": [
@@ -22503,6 +22636,120 @@
         ],
         "title": "WireRunResult",
         "type": "object"
+      },
+      "WireRunStopCompletion": {
+        "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
+        "enum": [
+          "completed",
+          "completed_without_result",
+          "callback_pending",
+          "cancelled",
+          "abandoned",
+          "abandoned_with_error",
+          "completed_with_finalization_failure",
+          "runtime_terminated"
+        ],
+        "type": "string"
+      },
+      "WireRunStopContributor": {
+        "description": "One input that contributed to a stopped run.",
+        "properties": {
+          "completion": {
+            "$ref": "#/components/schemas/WireRunStopCompletion"
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "terminal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireInputTerminalOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Generated public class of the committed input terminal. Absent only\nwhen no ledger or store retains the row."
+          }
+        },
+        "required": [
+          "input_id",
+          "completion"
+        ],
+        "type": "object"
+      },
+      "WireRunStopReceipt": {
+        "description": "Typed receipt of a run-fenced Stop.",
+        "oneOf": [
+          {
+            "description": "The run was current and the stop was linearized. Every contributor\nstaged for it has reached its terminal; none started a successor run.",
+            "properties": {
+              "contributors": {
+                "items": {
+                  "$ref": "#/components/schemas/WireRunStopContributor"
+                },
+                "type": "array"
+              },
+              "outcome": {
+                "const": "stopped",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "contributors"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is not the current run (already terminal, replaced, or never\ncurrent). Nothing was stopped; queued input and newer runs are\nuntouched.",
+            "properties": {
+              "current_run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "const": "not_current",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run is still bound, but a runtime stop or teardown owns it and\nrefused the stop. Nothing was staged.",
+            "properties": {
+              "outcome": {
+                "const": "not_stoppable",
+                "type": "string"
+              },
+              "run_id": {
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/components/schemas/WireRuntimeState"
+              }
+            },
+            "required": [
+              "outcome",
+              "run_id",
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireRuntimeState": {
         "description": "Public runtime state projection used by RPC surfaces.",
@@ -25252,6 +25499,70 @@
         "summary": "Respawn a mob member with topology restore"
       }
     },
+    "/mob/{id}/members/{agent_identity}/runs/{run_id}/stop": {
+      "post": {
+        "operationId": "post_mob_id_members_agent_identity_runs_run_id_stop",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "agent_identity",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StopRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobStopMemberRunResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Stop one exact run of a mob member and terminalize its contributors"
+      }
+    },
     "/mob/{id}/members/{agent_identity}/status": {
       "get": {
         "description": "Returns the current execution/status snapshot for the named mob member.",
@@ -26758,6 +27069,62 @@
           }
         },
         "summary": "Admit a correlated terminal peer response through the typed runtime ingress"
+      }
+    },
+    "/sessions/{id}/runs/{run_id}/stop": {
+      "post": {
+        "operationId": "post_sessions_id_runs_run_id_stop",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StopRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopRunResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Stop one exact run and terminalize every contributor bound to it"
       }
     },
     "/sessions/{id}/status": {

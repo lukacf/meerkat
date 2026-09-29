@@ -451,6 +451,45 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       } finally { release(); }
     });
 
+    await scenario("stopRun stops the exact pending run and stale or late stops are not_current", async ({ page, requests, provider }) => {
+      let release;
+      let entered;
+      const started = new Promise(resolve => { entered = resolve; });
+      const gate = new Promise(resolve => { release = resolve; });
+      provider.beforeResponse = async () => {
+        if (requests.length === 1) { entered(); await gate; }
+      };
+      try {
+        await page.evaluate(async () => {
+          window.session = await window.runtime.createSession({ model: window.model });
+          window.pending = window.session.turn("BROWSER_STOP_RUN_PENDING")
+            .then(value => ({ value }), error => ({ error: window.errorEnvelope(error) }));
+        });
+        await started;
+        const result = await page.evaluate(async () => {
+          const events = window.session.pollEvents();
+          const runStarted = events.find(event => event.type === "run_started");
+          const runId = runStarted?.identity?.run_id;
+          const stale = await window.bounded(
+            window.session.stopRun(crypto.randomUUID(), "stale selection"), "stale stop");
+          const stopped = await window.bounded(window.session.stopRun(runId, "user pressed stop"), "stop");
+          const terminal = await window.bounded(window.pending, "stopped turn");
+          const late = await window.bounded(window.session.stopRun(runId, "late"), "late stop");
+          return { runId, stale, stopped, terminal, late };
+        });
+        assert.ok(result.runId, JSON.stringify(result));
+        assert.equal(result.stale.outcome, "not_current");
+        assert.equal(result.stale.current_run_id, result.runId);
+        assert.equal(result.stopped.outcome, "stopped");
+        assert.equal(result.stopped.run_id, result.runId);
+        assert.ok(result.stopped.contributors.length >= 1);
+        assert.ok(result.stopped.contributors.every(row => row.terminal === "cancelled"));
+        assert.ok(result.terminal.error?.code, JSON.stringify(result));
+        assert.equal(result.late.outcome, "not_current");
+        assert.equal(requests.length, 1, "no successor provider request after the stop");
+      } finally { release(); provider.beforeResponse = undefined; }
+    });
+
     await scenario("interrupt terminalizes a pending run and the same session accepts later work", async ({ page, requests, provider }) => {
       let release;
       let entered;

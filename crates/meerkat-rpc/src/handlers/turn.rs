@@ -303,6 +303,44 @@ pub async fn handle_interrupt(
     }
 }
 
+/// Handle `turn/stop_run`: the run-fenced Stop.
+///
+/// Stops the exact `run_id` and returns the typed receipt. A stale run id is
+/// the ordinary `not_current` outcome, never an error; a malformed one is an
+/// invalid-params error.
+pub async fn handle_stop_run(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
+    let params: meerkat_contracts::StopRunParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
+        Ok(sid) => sid,
+        Err(resp) => return resp,
+    };
+    let run_id = match meerkat::surface::parse_wire_run_id(&params.run_id) {
+        Ok(run_id) => run_id,
+        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+    };
+    let receipt = match runtime.stop_run(&session_id, &run_id, params.reason).await {
+        Ok(receipt) => receipt,
+        Err(err) => return RpcResponse::error(id, err.code, err.message),
+    };
+    match meerkat::surface::wire_run_stop_receipt(&receipt) {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            meerkat_contracts::StopRunResult {
+                session_id: session_id.to_string(),
+                receipt,
+            },
+        ),
+        Err(message) => RpcResponse::error(id, error::INTERNAL_ERROR, message),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod start_turn_params_tests {

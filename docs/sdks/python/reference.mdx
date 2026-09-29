@@ -202,6 +202,20 @@ await client.inject_context(session_id, text, source=None, idempotency_key=None)
 await session.inject_context(text, source=None, idempotency_key=None)
 ```
 
+### `stop_run`
+
+```python
+result = await session.stop_run(run_id, reason="user pressed stop")
+result = await mob.stop_member_run(agent_identity, run_id, reason="...")
+```
+
+Stops exactly `run_id` (read it from the `run_started` event's
+`identity.run_id`) and terminalizes every input already bound to that run,
+including durable steers that joined it. Returns `StopRunResult` /
+`MobStopMemberRunResult` whose `receipt["outcome"]` is `stopped` (with
+`contributors`), `not_current` (the run is no longer current; nothing was
+touched), or `not_stoppable`.
+
 ### `send_external_event`
 
 ```python

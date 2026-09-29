@@ -148,6 +148,7 @@ of this full catalog.
 | `session/input_status` | Session | `SessionInputStateParams` | `SessionInputStateResult` | Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key |
 | `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
 | `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
+| `turn/stop_run` | Turn | `StopRunParams` | `StopRunResult` | Stop one exact run and terminalize every contributor bound to it |
 | `live/open` | Live | `LiveOpenParams` | `LiveOpenResult` | Open a live channel; optionally bound its serialized seed messages |
 | `live/webrtc/answer` | Live | `LiveWebrtcAnswerParams` | `LiveWebrtcAnswerResult` | Answer a browser WebRTC offer for an already-open live channel |
 | `live/status` | Live | `LiveChannelParams` | `LiveStatusResult` | Get the status of a live channel |
@@ -219,6 +220,7 @@ of this full catalog.
 | `mob/bind_host` | Mob | `MobBindHostParams` | `MobBindHostResult` | Bind a member-host daemon to a mob from its binding descriptor (mob feature) |
 | `mob/revoke_host` | Mob | `MobRevokeHostParams` | `MobRevokeHostResult` | Revoke a bound (or bind-requested) member host (mob feature) |
 | `mob/hard_cancel_member` | Mob | `MobHardCancelParams` | `MobHardCancelResult` | Hard-cancel a mob member; immediate user-interrupt authority (mob feature) |
+| `mob/stop_member_run` | Mob | `MobStopMemberRunParams` | `MobStopMemberRunResult` | Stop one exact run of a mob member and terminalize its contributors (mob feature) |
 | `mob/member_live_open` | Mob | `MobMemberLiveOpenParams` | `LiveOpenResult` | Open a live realtime channel on a mob member by identity (mob feature) |
 | `mob/member_live_close` | Mob | `MobMemberLiveChannelParams` | `LiveCloseResult` | Close one named live channel on a mob member (mob feature) |
 | `mob/member_live_status` | Mob | `MobMemberLiveStatusParams` | `LiveStatusResult` | Read live channel status for a mob member; omit channel_id to discover (mob feature) |
@@ -1246,6 +1248,82 @@ Cancel an in-flight turn. No-op if the session is idle.
 
 <ParamField body="session_id" type="string" required>
   Session ID to interrupt.
+</ParamField>
+
+### turn/stop_run
+
+Stop one exact run and terminalize every input already bound to it, including
+durable steers that joined the run at a model boundary. Unlike
+`turn/interrupt`, a joined steer never takes a follow-up turn, and a failed
+attempt is never replayed. Input admitted but not yet joined to the run stays
+queued and runs afterwards.
+
+Learn the run id from the `run_started` event (`identity.run_id`) or from an
+input's `last_run_id` (`session/input_state`).
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":8,"method":"turn/stop_run","params":{"session_id":"01936f8a-7b2c-7000-8000-000000000001","run_id":"01936f8b-0000-7000-8000-000000000042","reason":"user pressed stop"}}
+```
+
+```json Response (stopped)
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "receipt": {
+      "outcome": "stopped",
+      "run_id": "01936f8b-0000-7000-8000-000000000042",
+      "contributors": [
+        {"input_id": "01936f8b-0000-7000-8000-0000000000a1", "completion": "cancelled", "terminal": "cancelled"},
+        {"input_id": "01936f8b-0000-7000-8000-0000000000b2", "completion": "runtime_terminated", "terminal": "cancelled"}
+      ]
+    }
+  }
+}
+```
+
+```json Response (late stop)
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "receipt": {
+      "outcome": "not_current",
+      "run_id": "01936f8b-0000-7000-8000-000000000042",
+      "current_run_id": "01936f8b-0000-7000-8000-000000000043"
+    }
+  }
+}
+```
+</CodeGroup>
+
+The call returns once every contributor has reached its terminal. The receipt
+`outcome` is one of:
+
+- `stopped`: the run was current. `contributors` lists every input bound to it,
+  with the delivered `completion` class and the committed `terminal` class. A
+  cancelled joined steer reports `completion: "runtime_terminated"` with
+  `terminal: "cancelled"`; read `terminal` for the lifecycle fact.
+- `not_current`: the run is no longer (or never was) current. Nothing was
+  touched, and newer runs and queued input are not interrupted.
+- `not_stoppable`: the run is still bound, but a runtime stop or teardown owns
+  it (`state`). Nothing was staged.
+
+A malformed `run_id` is an invalid-params error.
+
+<ParamField body="session_id" type="string" required>
+  Session ID.
+</ParamField>
+
+<ParamField body="run_id" type="string" required>
+  Exact run to stop.
+</ParamField>
+
+<ParamField body="reason" type="string" required>
+  Reason recorded with the interrupt.
 </ParamField>
 
 `interrupted` is derived from the typed `result`. The public classifier

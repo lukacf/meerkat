@@ -1064,6 +1064,10 @@ struct HeadCanonicalProvisionalIntent<'a> {
 /// [`PersistentSessionService::with_whole_blob_body_cache_bytes`].
 pub const DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Most verified WholeBlob bodies one service retains regardless of size, on
+/// top of the byte budget (a mob's members plus headroom).
+const WHOLE_BLOB_BODY_CACHE_MAX_ENTRIES: usize = 64;
+
 /// One committed WholeBlob body exactly as the store decoded and verified it:
 /// the decoded session, the store-issued authority its bytes hashed to, and
 /// the serialized length the byte budget accounts.
@@ -2483,8 +2487,9 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// - it is dropped or replaced as soon as this service observes or
     ///   commits a newer authority;
     /// - the total is bounded by [`Self::whole_blob_body_budget_bytes`] in
-    ///   committed document bytes, oldest first, and a body larger than the
-    ///   budget is not retained at all.
+    ///   committed document bytes and by [`WHOLE_BLOB_BODY_CACHE_MAX_ENTRIES`]
+    ///   entries, oldest first, and a body larger than the budget is not
+    ///   retained at all.
     whole_blob_bodies: std::sync::Mutex<indexmap::IndexMap<SessionId, VerifiedWholeBlobBody>>,
     /// Byte budget for [`Self::whole_blob_bodies`]; zero disables retention.
     whole_blob_body_budget_bytes: usize,
@@ -4636,7 +4641,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // consumer that needs the digest surfaces the typed error itself.
         let _ = body.session.transcript_content_digest();
         let mut retained: usize = bodies.values().map(|cached| cached.serialized_bytes).sum();
-        while retained + body.serialized_bytes > budget {
+        while retained + body.serialized_bytes > budget
+            || bodies.len() >= WHOLE_BLOB_BODY_CACHE_MAX_ENTRIES
+        {
             let Some((_, evicted)) = bodies.shift_remove_index(0) else {
                 break;
             };

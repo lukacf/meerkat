@@ -1901,6 +1901,81 @@ async fn head_canonical_recovery_uses_only_store_owned_source_and_migrates_floor
     );
 }
 
+/// An aligned recovery source is returned as the committed session body, so
+/// it must carry the same physical-head checks as a direct materialization of
+/// that head: a stray row beyond the head (with no provisional intent that
+/// could own it) fails closed in the recovery itself, exactly as
+/// `materialize_head` does.
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn head_canonical_aligned_recovery_rejects_a_stray_row_beyond_the_head() {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::session_store::PreparedHeadCanonicalMutation;
+    use meerkat_core::types::{Message, UserMessage};
+    use meerkat_runtime::recovery::{DurableTailRecoveryOutcome, recover_durable_tail};
+
+    let tempdir = TempDir::new().unwrap();
+    let db_path = tempdir
+        .path()
+        .join("head-canonical-aligned-stray-row.sqlite3");
+    let store = SqliteRuntimeStore::new_head_canonical(&db_path).unwrap();
+    let session_store = SqliteSessionStore::open(&db_path).unwrap();
+
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("committed input")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let root = PreparedHeadCanonicalMutation::prepare(&committed, None).unwrap();
+    let document = BoundSessionCommit::sealed(Arc::new(committed.clone()))
+        .unwrap()
+        .with_head_canonical_mutation(root)
+        .unwrap();
+    store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(document),
+        )
+        .await
+        .unwrap();
+    let DurableTailRecoveryOutcome::AlreadyAligned { .. } =
+        recover_durable_tail(&store, &session_id).await.unwrap()
+    else {
+        panic!("an untouched committed head is aligned");
+    };
+
+    let head = session_store
+        .load_head(&session_id)
+        .await
+        .unwrap()
+        .expect("committed physical head");
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    let planted = connection
+        .execute(
+            "INSERT INTO session_strand_messages
+                 (session_id, strand, seq, message_json, created_at_ms)
+             SELECT session_id, strand, ?3, message_json, created_at_ms
+             FROM session_strand_messages
+             WHERE session_id = ?1 AND strand = ?2 AND seq = 0",
+            rusqlite::params![
+                session_id.to_string(),
+                head.strand.as_str(),
+                i64::try_from(head.message_count).unwrap()
+            ],
+        )
+        .unwrap();
+    assert_eq!(planted, 1, "instrument honesty: one stray row planted");
+    drop(connection);
+
+    assert!(
+        session_store.materialize_head(&head).await.is_err(),
+        "direct materialization rejects a stray physical row"
+    );
+    assert!(
+        recover_durable_tail(&store, &session_id).await.is_err(),
+        "an aligned recovery source must reject the same stray physical row"
+    );
+}
+
 #[cfg(feature = "sqlite-store")]
 #[tokio::test]
 async fn head_canonical_incomplete_intent_is_discarded_without_advancing_the_session() {

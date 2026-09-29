@@ -181,13 +181,22 @@ them.
   creation seeds from it once a fresh observation proves the session
   authority unchanged. The archive re-check under the recovery gate reads
   the body-free RuntimeStore verdict when the prepared observation is still
-  current. Compact-graph ingress also stops hashing the retained pre-rewrite
-  anchor twice for its content digest and twice for its row prefix. Every
-  store-authority check still runs; only repeated materializations of the
-  same committed head are gone. In a cold-resume harness, content-digest
-  bytes dropped from 4.53x to 0.91x of the verified transcript bytes for
-  append-only heads, and from 7.19x to 0.96x for compacted heads.
-  `cold_resume_digest_cost` pins both bounds.
+  current. Both reuse sites first compare the compact physical head with the
+  prepared boundary and fail with the same `TranscriptRevisionConflict` a
+  re-materialization would report. Compact-graph ingress also stops hashing
+  the retained pre-rewrite anchor twice for its content digest and twice for
+  its row prefix. Every store-authority check still runs; only repeated
+  materializations of the same committed head are gone. In a cold-resume
+  harness, content-digest bytes dropped from 4.53x to 0.91x of the verified
+  transcript bytes for append-only heads, and from 7.19x to 0.96x for
+  compacted heads. `cold_resume_digest_cost` pins both bounds.
+- An aligned HeadCanonical durable-tail recovery source (no unapplied
+  provisional intent) is now verified as the physical head as well as the
+  runtime boundary, in one row replay. It used to be verified only with the
+  runtime-boundary owner, which skips the physical row-shape checks, so
+  recovery returned `AlreadyAligned` over a stray row beyond the head that a
+  direct `materialize_head` rejects. Recovery now fails closed on that row
+  (`head_canonical_aligned_recovery_rejects_a_stray_row_beyond_the_head`).
 - `MobHandle::subscribe_mob_events` returns only once the router is
   subscribed to every member it starts with (local session streams and
   placed members' pump taps). Those subscriptions used to be made inside the

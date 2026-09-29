@@ -5469,6 +5469,33 @@ pub fn verify_runtime_boundary_head_canonical_in_txn(
     )
 }
 
+/// Verify one HeadCanonical head that is both the retained runtime boundary
+/// and the current physical head.
+///
+/// The result carries every check of both single-owner verifications while
+/// replaying the rows once: the runtime-boundary metadata owner must
+/// reproduce the head's authenticated metadata identity, and the rows are
+/// verified as the physical head, including its exact physical row shape (no
+/// row beyond the head, exact linked-strand extent). A caller may therefore
+/// use the materialization wherever [`IncrementalSessionStore::materialize_head`]
+/// of the same head would have been used.
+///
+/// The caller must already have proved the physical head row equal to
+/// `head` in this transaction.
+#[doc(hidden)]
+pub fn verify_aligned_runtime_boundary_head_canonical_in_txn(
+    tx: &Transaction<'_>,
+    head: &SessionHead,
+) -> Result<meerkat_core::VerifiedSessionHeadMaterialization, SessionStoreError> {
+    let mut boundary = head.clone();
+    attach_head_metadata_projection(
+        tx,
+        &mut boundary,
+        HeadMetadataProjectionOwner::RuntimeBoundary,
+    )?;
+    verify_physical_head_canonical_in_txn(tx, head)
+}
+
 fn verify_physical_head_canonical_in_txn(
     tx: &Transaction<'_>,
     head: &SessionHead,

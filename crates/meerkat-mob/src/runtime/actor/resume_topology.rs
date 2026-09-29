@@ -395,6 +395,41 @@ pub(in crate::runtime) struct BackendPeerBindingProjection {
     direct_member_fence: Option<BridgeDirectMemberFence>,
 }
 
+/// Exact roster delta publishing one member's comms identity.
+///
+/// `MemberSpawned` replay never carries the live endpoint, so after a cold
+/// restart the roster's peer id and transport key are empty until resume
+/// projects them. The delta is bound to the incarnation AND the bridge session
+/// it was observed for: a concurrent respawn, retirement, or same-incarnation
+/// session repoint makes it stale instead of publishing a foreign runtime's
+/// endpoint.
+#[derive(Debug, Clone)]
+pub(in crate::runtime) struct MemberCommsIdentityProjection {
+    expected_runtime_id: crate::ids::AgentRuntimeId,
+    expected_generation: crate::ids::Generation,
+    expected_fence_token: crate::ids::FenceToken,
+    expected_bridge_session_id: Option<SessionId>,
+    observation: MemberCommsIdentityObservation,
+}
+
+/// What the off-actor step observed for one member. Nothing here is a
+/// permission; the actor re-validates each kind against current authority.
+#[derive(Debug, Clone)]
+pub(in crate::runtime) enum MemberCommsIdentityObservation {
+    /// One observation of the member's live local comms runtime. The peer id
+    /// and transport key are both read from this descriptor, never from a
+    /// second read of the runtime.
+    Live(Box<TrustedPeerDescriptor>),
+    /// The member has a live local comms runtime that exposes no usable
+    /// endpoint (no peer id or key, or an invalid descriptor).
+    Unavailable { detail: String },
+    /// The member's restore already failed: clear any stale projection.
+    ClearBroken,
+    /// A host-owned (placed) member: republish the peer id of its durable,
+    /// host-acknowledged generation endpoint, exactly as spawn projected it.
+    HostOwnedDurable,
+}
+
 /// Machine/roster-validated material for a V5 direct-member adoption.
 #[derive(Debug, Clone)]
 pub(in crate::runtime) struct DirectMemberAdoptionAuthorization {
@@ -457,6 +492,13 @@ enum ResumeTopologyAuthorityOperation {
     ClassifyBridgeRejectionRecovery {
         cause: BridgeRejectionCause,
         reply_tx: AuthorityReply<bool>,
+    },
+    /// Publish (or, for a broken member, clear) the roster projection of a
+    /// local member's live comms identity.
+    ProjectMemberCommsIdentity {
+        agent_identity: crate::ids::AgentIdentity,
+        projection: Box<MemberCommsIdentityProjection>,
+        reply_tx: AuthorityReply<()>,
     },
     AuthorizePeerOnlyRebind {
         agent_identity: crate::ids::AgentIdentity,
@@ -585,6 +627,9 @@ impl ResumeTopologyAuthorityRequest {
             ResumeTopologyAuthorityOperation::ClassifyBridgeRejectionRecovery { .. } => {
                 "ClassifyBridgeRejectionRecovery"
             }
+            ResumeTopologyAuthorityOperation::ProjectMemberCommsIdentity { .. } => {
+                "ProjectMemberCommsIdentity"
+            }
             ResumeTopologyAuthorityOperation::AuthorizePeerOnlyRebind { .. } => {
                 "AuthorizePeerOnlyRebind"
             }
@@ -634,6 +679,13 @@ pub(in crate::runtime) trait ResumeTopologyRosterProjection {
         bootstrap_token: Option<BridgeBootstrapToken>,
         direct_member_fence: Option<BridgeDirectMemberFence>,
     ) -> Vec<(crate::ids::AgentIdentity, crate::ids::Generation, [u8; 32])>;
+
+    fn resume_topology_set_member_comms_identity(
+        &mut self,
+        identity: &crate::ids::AgentIdentity,
+        peer_id: Option<PeerId>,
+        transport_public_key: Option<String>,
+    ) -> bool;
 }
 
 impl ResumeTopologyRosterProjection for Roster {
@@ -660,6 +712,15 @@ impl ResumeTopologyRosterProjection for Roster {
             bootstrap_token,
             direct_member_fence,
         )
+    }
+
+    fn resume_topology_set_member_comms_identity(
+        &mut self,
+        identity: &crate::ids::AgentIdentity,
+        peer_id: Option<PeerId>,
+        transport_public_key: Option<String>,
+    ) -> bool {
+        self.set_comms_identity(identity, peer_id, transport_public_key)
     }
 }
 
@@ -688,6 +749,15 @@ impl ResumeTopologyRosterProjection for crate::runtime::roster_authority::Roster
             direct_member_fence,
         )
     }
+
+    fn resume_topology_set_member_comms_identity(
+        &mut self,
+        identity: &crate::ids::AgentIdentity,
+        peer_id: Option<PeerId>,
+        transport_public_key: Option<String>,
+    ) -> bool {
+        self.set_comms_identity(identity, peer_id, transport_public_key)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +776,13 @@ where
     /// Exact incarnations whose remote/durable effects this workflow owns.
     /// Custody is taken in the SAME actor turn that grants the effect.
     pub(in crate::runtime) custody: &'a mut ResumeTopologyEffectCustodyLedger,
+    /// Members this request recorded as Broken in MobMachine. The owner of
+    /// the handle's restore diagnostics publishes them after the request, so
+    /// public reads carry the same typed reason as the machine.
+    pub(in crate::runtime) restore_failures: &'a mut Vec<(
+        crate::ids::AgentIdentity,
+        crate::runtime::handle::RestoreFailureDiagnostic,
+    )>,
 }
 
 /// Current machine-owned trust eligibility for one member.
@@ -849,6 +926,16 @@ where
             let result = admitted.and_then(|()| {
                 project_backend_peer_binding(ctx.roster, &agent_identity, &projection)
             });
+            let _ = reply_tx.send(result);
+            true
+        }
+        ResumeTopologyAuthorityOperation::ProjectMemberCommsIdentity {
+            agent_identity,
+            projection,
+            reply_tx,
+        } => {
+            let result = admitted
+                .and_then(|()| project_member_comms_identity(ctx, &agent_identity, &projection));
             let _ = reply_tx.send(result);
             true
         }
@@ -1231,6 +1318,150 @@ where
             session_id: None,
         },
     }))
+}
+
+/// Publish one member's comms identity into the roster projection.
+///
+/// The delta must address the current roster incarnation and bridge session,
+/// and the member must not be retiring. A live endpoint must agree with the
+/// durable generation endpoint MobMachine restored from the journal. When it
+/// does not, or the live runtime exposes no usable endpoint, only THAT member
+/// is recorded Broken (with a reason naming the mismatch and the respawn
+/// action) and nothing is published for it; every other member and the resume
+/// itself carry on. Host-owned members republish their durable
+/// host-acknowledged peer id.
+fn project_member_comms_identity<R>(
+    ctx: &mut ResumeTopologyAuthorityContext<'_, R>,
+    agent_identity: &crate::ids::AgentIdentity,
+    projection: &MemberCommsIdentityProjection,
+) -> Result<(), ResumeTopologyAuthorityError>
+where
+    R: ResumeTopologyRosterProjection + ?Sized,
+{
+    let stale = |detail: &str| {
+        ResumeTopologyAuthorityError::Stale(format!(
+            "resume comms identity projection for '{agent_identity}' {detail}"
+        ))
+    };
+    let entry = ctx
+        .roster
+        .resume_topology_entry(agent_identity)
+        .ok_or_else(|| stale("lost its roster incarnation"))?;
+    if entry.agent_runtime_id != projection.expected_runtime_id
+        || entry.generation != projection.expected_generation
+        || entry.fence_token != projection.expected_fence_token
+    {
+        return Err(stale("does not match the current incarnation"));
+    }
+    if entry.member_ref.bridge_session_id() != projection.expected_bridge_session_id.as_ref() {
+        return Err(stale(
+            "was observed for a session the member no longer binds",
+        ));
+    }
+    let state = ctx.authority.state();
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+    if recovered_endpoint_runtime_is_retiring(state, &dsl_identity) {
+        return Err(stale("targets a retiring member"));
+    }
+    let host_owned = crate::runtime::member_runtime_is_host_owned(state, agent_identity);
+    let broken = state.member_restore_failures.contains_key(&dsl_identity);
+    let durable_endpoint = state.member_peer_endpoints.get(&dsl_identity).cloned();
+    match &projection.observation {
+        MemberCommsIdentityObservation::ClearBroken => {
+            if !broken {
+                return Err(stale("clears a member that is not broken"));
+            }
+            ctx.roster
+                .resume_topology_set_member_comms_identity(agent_identity, None, None);
+            Ok(())
+        }
+        // A Broken member publishes nothing, local or placed.
+        _ if broken => Err(stale("targets a broken member")),
+        MemberCommsIdentityObservation::HostOwnedDurable => {
+            if !host_owned {
+                return Err(stale("republishes a host endpoint for a local member"));
+            }
+            let Some(endpoint) = durable_endpoint else {
+                return Err(stale("has no durable host-acknowledged endpoint"));
+            };
+            let peer_id = match PeerId::parse(&endpoint.peer_id.0) {
+                Ok(peer_id) => peer_id,
+                Err(error) => {
+                    let detail = format!(
+                        "its durable host-acknowledged endpoint has an invalid peer id: {error}"
+                    );
+                    return record_member_endpoint_broken(ctx, &entry, &dsl_identity, &detail);
+                }
+            };
+            // Spawn projects only the host-acknowledged peer id for a placed
+            // member; its transport key stays exactly as spawn left it.
+            ctx.roster.resume_topology_set_member_comms_identity(
+                agent_identity,
+                Some(peer_id),
+                entry.transport_public_key.clone(),
+            );
+            Ok(())
+        }
+        _ if host_owned => Err(stale("targets a host-owned member")),
+        MemberCommsIdentityObservation::Unavailable { detail } => {
+            record_member_endpoint_broken(ctx, &entry, &dsl_identity, detail)
+        }
+        MemberCommsIdentityObservation::Live(descriptor) => {
+            let candidate = mob_dsl::MemberPeerEndpoint::from(descriptor.as_ref());
+            if let Some(durable) = durable_endpoint.as_ref()
+                && durable != &candidate
+            {
+                let detail =
+                    crate::runtime::builder::member_endpoint_mismatch_detail(&candidate, durable);
+                return record_member_endpoint_broken(ctx, &entry, &dsl_identity, &detail);
+            }
+            let transport_public_key =
+                meerkat_comms::PubKey::new(descriptor.pubkey).to_pubkey_string();
+            ctx.roster.resume_topology_set_member_comms_identity(
+                agent_identity,
+                Some(descriptor.peer_id),
+                Some(transport_public_key),
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Record one member Broken because its restored endpoint is unusable, and
+/// clear its projection. The typed restore failure is machine truth (it also
+/// advances the topology epoch, so no trust permission minted for the member
+/// survives); the diagnostic mirrors it for public reads.
+fn record_member_endpoint_broken<R>(
+    ctx: &mut ResumeTopologyAuthorityContext<'_, R>,
+    entry: &RosterEntry,
+    dsl_identity: &mob_dsl::AgentIdentity,
+    detail: &str,
+) -> Result<(), ResumeTopologyAuthorityError>
+where
+    R: ResumeTopologyRosterProjection + ?Sized,
+{
+    let agent_identity = &entry.agent_identity;
+    let reason = crate::runtime::builder::member_endpoint_broken_reason(agent_identity, detail);
+    crate::runtime::builder::apply_seeded_mob_signal(
+        ctx.authority,
+        mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
+            agent_identity: dsl_identity.clone(),
+            reason: reason.clone(),
+        },
+        "resume_project_member_comms_identity_broken",
+    )
+    .map_err(ResumeTopologyAuthorityError::Failed)?;
+    ctx.roster
+        .resume_topology_set_member_comms_identity(agent_identity, None, None);
+    ctx.restore_failures.push((
+        agent_identity.clone(),
+        crate::runtime::handle::RestoreFailureDiagnostic {
+            bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
+            reason,
+            hold: None,
+        },
+    ));
+    Ok(())
 }
 
 fn project_backend_peer_binding<R>(
@@ -1826,6 +2057,74 @@ where
     }
 }
 
+/// Observe one member's comms identity for the resume projection step.
+///
+/// `None` means there is nothing to project. Only the side-effect free
+/// `trusted_peer_spec_from_runtime` is used on the live runtime: the
+/// provisioner's `trusted_peer_spec` also marks the member peer ready, which
+/// needs the operation binding explicit Resume only restores after topology.
+async fn observe_member_comms_identity(
+    provisioner: &dyn MobProvisioner,
+    mob_id: &MobId,
+    entry: &RosterEntry,
+    member: &ResumeTopologyMemberObservation,
+) -> Result<Option<MemberCommsIdentityObservation>, ResumeTopologyAuthorityError> {
+    if member.retiring {
+        // Retirement replay owns the exact retiring endpoint.
+        return Ok(None);
+    }
+    let observation = if member.broken {
+        // A Broken member (local or placed) publishes nothing; only a
+        // stale projection is cleared.
+        if entry.peer_id.is_none() && entry.transport_public_key.is_none() {
+            return Ok(None);
+        }
+        MemberCommsIdentityObservation::ClearBroken
+    } else if member.host_owned {
+        let Some(endpoint) = member.peer_endpoint.as_ref() else {
+            return Ok(None);
+        };
+        if entry
+            .peer_id
+            .is_some_and(|peer_id| peer_id.to_string() == endpoint.peer_id.0)
+        {
+            return Ok(None);
+        }
+        MemberCommsIdentityObservation::HostOwnedDurable
+    } else {
+        let Some(comms) = provisioner.comms_runtime(&entry.member_ref).await else {
+            return Ok(None);
+        };
+        let name = render_member_comms_name(
+            mob_id.as_str(),
+            entry.role.as_str(),
+            entry.agent_identity.as_str(),
+        )?;
+        // Side-effect free: the provisioner's `trusted_peer_spec` also
+        // marks the member peer ready, which needs the operation
+        // binding explicit Resume only restores after topology.
+        match crate::runtime::provisioner::trusted_peer_spec_from_runtime(&name, comms.as_ref()) {
+            Ok(Some(descriptor)) => {
+                let transport_public_key =
+                    meerkat_comms::PubKey::new(descriptor.pubkey).to_pubkey_string();
+                if entry.peer_id == Some(descriptor.peer_id)
+                    && entry.transport_public_key.as_deref() == Some(transport_public_key.as_str())
+                {
+                    return Ok(None);
+                }
+                MemberCommsIdentityObservation::Live(Box::new(descriptor))
+            }
+            Ok(None) => MemberCommsIdentityObservation::Unavailable {
+                detail: "its live comms runtime exposes no peer id or public key".to_string(),
+            },
+            Err(error) => MemberCommsIdentityObservation::Unavailable {
+                detail: format!("its live comms runtime has no valid endpoint: {error}"),
+            },
+        }
+    };
+    Ok(Some(observation))
+}
+
 struct ResumeTopologyReconciler<'a, R>
 where
     R: ResumeTopologyAuthorityRouter,
@@ -1883,6 +2182,7 @@ where
     async fn run(&mut self) -> Result<(), ResumeTopologyAuthorityError> {
         let pending_peer_ids =
             pending_supervisor_operation_peer_ids(self.io.supervisor_bridge).await;
+        self.project_member_comms_identities().await?;
         let plan = self.observe().await?;
         self.register_legacy_backend_member_peers(&plan).await?;
         self.reconcile_peer_only_members(&plan, &pending_peer_ids)
@@ -1892,6 +2192,59 @@ where
         let plan = self.observe().await?;
         let batch = self.plan_trust_batch(&plan, &pending_peer_ids).await?;
         self.apply_trust_batch(&plan, batch).await
+    }
+
+    /// Publish every member's comms identity into the roster.
+    ///
+    /// `MemberSpawned` replay leaves the peer id and transport key empty; the
+    /// live comms runtime of a restored local member still holds them, and a
+    /// placed member's host-acknowledged endpoint is durable MobMachine state.
+    /// Every resume (cold boot of a Running mob and explicit Resume of a
+    /// Stopped one) runs this one workflow, so peer lookup and the member list
+    /// carry the exact preserved endpoint before resume returns and before any
+    /// new turn or topology operation.
+    ///
+    /// This runs on its own observation, BEFORE the trust plan pins its
+    /// topology epoch: recording a member Broken advances that epoch, and the
+    /// trust plan must see the member as Broken rather than replan around it.
+    /// Each request is still bound to its exact incarnation and session.
+    async fn project_member_comms_identities(
+        &mut self,
+    ) -> Result<(), ResumeTopologyAuthorityError> {
+        let plan = self
+            .ask(|reply_tx| ResumeTopologyAuthorityOperation::ObservePlan { reply_tx })
+            .await?;
+        for entry in &plan.entries {
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+            let member = plan.member(&dsl_identity);
+            let Some(observation) = observe_member_comms_identity(
+                self.io.provisioner,
+                &self.io.definition.id,
+                entry,
+                &member,
+            )
+            .await?
+            else {
+                continue;
+            };
+            let agent_identity = entry.agent_identity.clone();
+            let projection = Box::new(MemberCommsIdentityProjection {
+                expected_runtime_id: entry.agent_runtime_id.clone(),
+                expected_generation: entry.generation,
+                expected_fence_token: entry.fence_token,
+                expected_bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
+                observation,
+            });
+            self.ask(move |reply_tx| {
+                ResumeTopologyAuthorityOperation::ProjectMemberCommsIdentity {
+                    agent_identity,
+                    projection,
+                    reply_tx,
+                }
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     /// Legacy `MemberSpawned` journals predate the replay-only endpoint field.
@@ -2830,15 +3183,29 @@ impl MobActor {
         };
         let roster = Arc::clone(&self.roster);
         let mut roster_guard = roster.write().await;
+        let mut restore_failures = Vec::new();
         let mut context = ResumeTopologyAuthorityContext {
             mob_id: &self.definition.id,
             authority: &mut self.dsl_authority,
             roster: &mut *roster_guard,
             topology_epoch: &self.dsl_topology_epoch,
             custody: &mut self.resume_topology_effect_custody,
+            restore_failures: &mut restore_failures,
         };
         let mutated = handle_resume_topology_authority_request(&mut context, admission, *request);
         drop(roster_guard);
+        if !restore_failures.is_empty() {
+            let mut diagnostics = self.restore_diagnostics.write().await;
+            for (agent_identity, diagnostic) in restore_failures {
+                tracing::error!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    reason = %diagnostic.reason,
+                    "restored member endpoint is unusable; marked member broken"
+                );
+                diagnostics.insert(agent_identity, diagnostic);
+            }
+        }
         if mutated {
             self.publish_machine_state_projection();
         }
@@ -3226,6 +3593,10 @@ mod tests {
         authority: mob_dsl::MobMachineAuthority,
         roster: Roster,
         custody: ResumeTopologyEffectCustodyLedger,
+        restore_failures: Vec<(
+            crate::ids::AgentIdentity,
+            crate::runtime::handle::RestoreFailureDiagnostic,
+        )>,
         topology_epoch: Arc<std::sync::atomic::AtomicU64>,
         mob_id: MobId,
         edge: mob_dsl::WiringEdge,
@@ -3260,6 +3631,7 @@ mod tests {
                 authority,
                 roster: Roster::new(),
                 custody: ResumeTopologyEffectCustodyLedger::default(),
+                restore_failures: Vec::new(),
                 topology_epoch,
                 mob_id: MobId::from("fixture-mob"),
                 edge,
@@ -3276,6 +3648,7 @@ mod tests {
                 roster: &mut self.roster,
                 topology_epoch: &self.topology_epoch,
                 custody: &mut self.custody,
+                restore_failures: &mut self.restore_failures,
             }
         }
 
@@ -3398,6 +3771,753 @@ mod tests {
             .try_recv()
             .expect("handler always answers")
             .expect_err("a broken member must not receive trust repair authority");
+        assert!(matches!(refusal, ResumeTopologyAuthorityError::Stale(_)));
+    }
+
+    // ------------------------------------------------------------------
+    // Member comms identity projection (#1262).
+    // ------------------------------------------------------------------
+
+    fn session_roster_entry(name: &str) -> RosterAddEntry {
+        let agent_identity = identity(name);
+        RosterAddEntry {
+            agent_identity: agent_identity.clone(),
+            generation: Generation::INITIAL,
+            fence_token: FenceToken::new(7),
+            agent_runtime_id: AgentRuntimeId::initial(agent_identity),
+            role: ProfileName::from("worker"),
+            runtime_mode: crate::MobRuntimeMode::TurnDriven,
+            member_ref: MemberRef::Session {
+                session_id: SessionId::new(),
+            },
+            peer_id: None,
+            transport_public_key: None,
+            direct_member_fence: None,
+            labels: BTreeMap::new(),
+            effective_profile_override: None,
+            effective_model_override: None,
+            spawned_by: None,
+            fork_job: None,
+            fork_source: None,
+            fork_overlay: Default::default(),
+        }
+    }
+
+    fn descriptor_for(endpoint: &mob_dsl::MemberPeerEndpoint) -> TrustedPeerDescriptor {
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            endpoint.name.0.clone(),
+            endpoint.peer_id.0.clone(),
+            endpoint.signing_key.0,
+            endpoint.address.0.clone(),
+        )
+        .expect("test endpoint forms a consistent descriptor")
+    }
+
+    fn comms_identity_request(
+        roster: &Roster,
+        name: &str,
+        observation: MemberCommsIdentityObservation,
+        reply_tx: AuthorityReply<()>,
+    ) -> ResumeTopologyAuthorityRequest {
+        let entry = roster
+            .get_by_identity(&identity(name))
+            .expect("fixture roster entry");
+        ResumeTopologyAuthorityRequest {
+            attempt: None,
+            expected_topology_epoch: None,
+            operation: ResumeTopologyAuthorityOperation::ProjectMemberCommsIdentity {
+                agent_identity: entry.agent_identity.clone(),
+                projection: Box::new(MemberCommsIdentityProjection {
+                    expected_runtime_id: entry.agent_runtime_id.clone(),
+                    expected_generation: entry.generation,
+                    expected_fence_token: entry.fence_token,
+                    expected_bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
+                    observation,
+                }),
+                reply_tx,
+            },
+        }
+    }
+
+    impl WiredMachineFixture {
+        fn with_member_roster() -> Self {
+            let mut fixture = Self::new();
+            fixture.roster.add(session_roster_entry("member-a"));
+            fixture.roster.add(session_roster_entry("member-b"));
+            fixture
+        }
+
+        fn project(
+            &mut self,
+            request: ResumeTopologyAuthorityRequest,
+            mut reply_rx: oneshot::Receiver<Result<(), ResumeTopologyAuthorityError>>,
+        ) -> Result<(), ResumeTopologyAuthorityError> {
+            let mut context = self.context();
+            handle_resume_topology_authority_request(&mut context, Ok(()), request);
+            reply_rx.try_recv().expect("handler always answers")
+        }
+
+        fn project_live(
+            &mut self,
+            name: &str,
+            endpoint: &mob_dsl::MemberPeerEndpoint,
+        ) -> Result<(), ResumeTopologyAuthorityError> {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let request = comms_identity_request(
+                &self.roster,
+                name,
+                MemberCommsIdentityObservation::Live(Box::new(descriptor_for(endpoint))),
+                reply_tx,
+            );
+            self.project(request, reply_rx)
+        }
+
+        fn projected_peer(&self, name: &str) -> (Option<PeerId>, Option<String>) {
+            let entry = self
+                .roster
+                .get_by_identity(&identity(name))
+                .expect("fixture roster entry");
+            (entry.peer_id, entry.transport_public_key.clone())
+        }
+    }
+
+    #[test]
+    fn comms_identity_publishes_the_live_endpoint_matching_the_durable_one() {
+        let mut fixture = WiredMachineFixture::with_member_roster();
+        let endpoint = test_peer_endpoint("member-a");
+        fixture
+            .project_live("member-a", &endpoint)
+            .expect("a live endpoint equal to the durable one is published");
+        let (peer_id, key) = fixture.projected_peer("member-a");
+        assert_eq!(
+            peer_id.map(|peer_id| peer_id.to_string()),
+            Some(endpoint.peer_id.0)
+        );
+        assert_eq!(
+            key,
+            Some(meerkat_comms::PubKey::new(endpoint.signing_key.0).to_pubkey_string())
+        );
+        assert!(fixture.restore_failures.is_empty());
+        assert!(fixture.authority.state().member_restore_failures.is_empty());
+    }
+
+    #[test]
+    fn comms_identity_for_a_respawned_incarnation_replans() {
+        let mut fixture = WiredMachineFixture::with_member_roster();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let request = comms_identity_request(
+            &fixture.roster,
+            "member-a",
+            MemberCommsIdentityObservation::Live(Box::new(descriptor_for(&test_peer_endpoint(
+                "member-a",
+            )))),
+            reply_tx,
+        );
+        // A respawn lands while the observation is in flight.
+        let mut respawned = session_roster_entry("member-a");
+        respawned.member_ref = fixture
+            .roster
+            .get_by_identity(&identity("member-a"))
+            .expect("fixture roster entry")
+            .member_ref
+            .clone();
+        respawned.generation = Generation::new(1);
+        respawned.fence_token = FenceToken::new(8);
+        fixture.roster.add(respawned);
+        let refusal = fixture
+            .project(request, reply_rx)
+            .expect_err("a delta for the previous incarnation must not publish");
+        assert!(matches!(refusal, ResumeTopologyAuthorityError::Stale(_)));
+        assert_eq!(fixture.projected_peer("member-a"), (None, None));
+    }
+
+    #[test]
+    fn comms_identity_after_a_same_incarnation_session_repoint_replans() {
+        let mut fixture = WiredMachineFixture::with_member_roster();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let request = comms_identity_request(
+            &fixture.roster,
+            "member-a",
+            MemberCommsIdentityObservation::Live(Box::new(descriptor_for(&test_peer_endpoint(
+                "member-x",
+            )))),
+            reply_tx,
+        );
+        fixture
+            .roster
+            .set_bridge_session_id(&identity("member-a"), SessionId::new());
+        let refusal = fixture
+            .project(request, reply_rx)
+            .expect_err("a delta observed on the superseded session must not publish");
+        assert!(
+            matches!(refusal, ResumeTopologyAuthorityError::Stale(_)),
+            "a repoint must replan, never break the member: {refusal:?}"
+        );
+        assert!(fixture.authority.state().member_restore_failures.is_empty());
+    }
+
+    #[test]
+    fn comms_identity_for_a_retiring_member_replans() {
+        let mut fixture = WiredMachineFixture::with_member_roster();
+        fixture.retire_member_a();
+        let refusal = fixture
+            .project_live("member-a", &test_peer_endpoint("member-a"))
+            .expect_err("a retiring member keeps its retirement endpoint");
+        assert!(matches!(refusal, ResumeTopologyAuthorityError::Stale(_)));
+        assert_eq!(fixture.projected_peer("member-a"), (None, None));
+    }
+
+    #[test]
+    fn comms_identity_clears_only_a_broken_member() {
+        let mut fixture = WiredMachineFixture::with_member_roster();
+        let endpoint = test_peer_endpoint("member-a");
+        fixture
+            .project_live("member-a", &endpoint)
+            .expect("publish before the member breaks");
+        mob_dsl::MobMachineMutator::apply(
+            &mut fixture.authority,
+            mob_dsl::MobMachineInput::ResolveRuntimeBindingRefusal {
+                agent_identity: fixture.a.clone(),
+                agent_runtime_id: fixture.a_runtime.clone(),
+                session_id: fixture.a_session.clone(),
+                refusal_code: "unavailable".to_string(),
+                reason: "runtime refused the binding".to_string(),
+            },
+        )
+        .expect("record the restore failure");
+
+        let refusal = fixture
+            .project_live("member-a", &endpoint)
+            .expect_err("a broken member must not publish a live endpoint");
+        assert!(matches!(refusal, ResumeTopologyAuthorityError::Stale(_)));
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let clear = comms_identity_request(
+            &fixture.roster,
+            "member-a",
+            MemberCommsIdentityObservation::ClearBroken,
+            reply_tx,
+        );
+        fixture
+            .project(clear, reply_rx)
+            .expect("a broken member's stale projection is cleared");
+        assert_eq!(fixture.projected_peer("member-a"), (None, None));
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let clear_healthy = comms_identity_request(
+            &fixture.roster,
+            "member-b",
+            MemberCommsIdentityObservation::ClearBroken,
+            reply_tx,
+        );
+        let refusal = fixture
+            .project(clear_healthy, reply_rx)
+            .expect_err("a healthy member is never cleared");
+        assert!(matches!(refusal, ResumeTopologyAuthorityError::Stale(_)));
+    }
+
+    fn assert_member_a_broken_alone(fixture: &WiredMachineFixture, epoch_before: u64) {
+        let reason = fixture
+            .authority
+            .state()
+            .member_restore_failures
+            .get(&fixture.a)
+            .cloned()
+            .expect("the member is recorded Broken in MobMachine");
+        assert!(
+            reason.contains("respawn the member"),
+            "the reason names the repair action: {reason}"
+        );
+        assert_eq!(fixture.restore_failures.len(), 1);
+        assert_eq!(fixture.restore_failures[0].0, identity("member-a"));
+        assert_eq!(fixture.restore_failures[0].1.reason, reason);
+        assert_eq!(
+            fixture.restore_failures[0].1.bridge_session_id.as_ref(),
+            fixture
+                .roster
+                .get_by_identity(&identity("member-a"))
+                .and_then(|entry| entry.member_ref.bridge_session_id())
+        );
+        assert_eq!(fixture.projected_peer("member-a"), (None, None));
+        assert!(
+            !fixture
+                .authority
+                .state()
+                .member_restore_failures
+                .contains_key(&mob_dsl::AgentIdentity::from("member-b")),
+            "no other member is affected"
+        );
+        assert_ne!(
+            fixture.authority.state().topology_epoch,
+            epoch_before,
+            "breaking the member invalidates trust permissions minted for it"
+        );
+    }
+
+    #[test]
+    fn mismatched_live_endpoint_breaks_only_that_member() {
+        let mut fixture = WiredMachineFixture::with_member_roster();
+        let epoch_before = fixture.authority.state().topology_epoch;
+        // A lost identity store or a changed advertise address between stop
+        // and resume: the live runtime no longer matches the durable endpoint.
+        fixture
+            .project_live("member-a", &test_peer_endpoint("member-x"))
+            .expect("a per-member endpoint mismatch never fails the resume");
+        assert_member_a_broken_alone(&fixture, epoch_before);
+        let reason = &fixture.restore_failures[0].1.reason;
+        assert!(
+            reason.contains("disagrees with its durable generation endpoint"),
+            "the reason names the endpoint mismatch: {reason}"
+        );
+        fixture
+            .project_live("member-b", &test_peer_endpoint("member-b"))
+            .expect("the other member still publishes");
+        assert!(fixture.projected_peer("member-b").0.is_some());
+    }
+
+    #[test]
+    fn unavailable_live_endpoint_breaks_only_that_member() {
+        let mut fixture = WiredMachineFixture::with_member_roster();
+        let epoch_before = fixture.authority.state().topology_epoch;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let request = comms_identity_request(
+            &fixture.roster,
+            "member-a",
+            MemberCommsIdentityObservation::Unavailable {
+                detail: "its live comms runtime exposes no peer id or public key".to_string(),
+            },
+            reply_tx,
+        );
+        fixture
+            .project(request, reply_rx)
+            .expect("an unusable live endpoint never fails the resume");
+        assert_member_a_broken_alone(&fixture, epoch_before);
+    }
+
+    struct PlacedMemberFixture {
+        authority: mob_dsl::MobMachineAuthority,
+        roster: Roster,
+        custody: ResumeTopologyEffectCustodyLedger,
+        restore_failures: Vec<(
+            crate::ids::AgentIdentity,
+            crate::runtime::handle::RestoreFailureDiagnostic,
+        )>,
+        topology_epoch: Arc<std::sync::atomic::AtomicU64>,
+        mob_id: MobId,
+        endpoint: mob_dsl::MemberPeerEndpoint,
+    }
+
+    impl PlacedMemberFixture {
+        fn new() -> Self {
+            let signing_key = [3_u8; 32];
+            Self::with_durable_peer_id(
+                meerkat_core::comms::PeerId::from_ed25519_pubkey(&signing_key).to_string(),
+            )
+        }
+
+        fn with_durable_peer_id(peer_id: String) -> Self {
+            let placed = mob_dsl::AgentIdentity::from("placed");
+            let host = mob_dsl::HostId("placed-host".to_string());
+            let signing_key = [3_u8; 32];
+            let endpoint = mob_dsl::MemberPeerEndpoint {
+                name: mob_dsl::PeerName("fixture-mob/worker/placed".to_string()),
+                peer_id: mob_dsl::PeerId(peer_id),
+                address: mob_dsl::PeerAddress("tcp://placed-member.test:4200".to_string()),
+                signing_key: mob_dsl::PeerSigningKey(signing_key),
+            };
+            let mut authority = mob_dsl::MobMachineAuthority::new();
+            authority
+                .apply_signal(mob_dsl::MobMachineSignal::RecoverOwnerBridgeSession {
+                    bridge_session_id: mob_dsl::SessionId::from("owner-session"),
+                    destroy_on_owner_archive: false,
+                    implicit_delegation_mob: false,
+                })
+                .expect("recover owner");
+            authority
+                .apply_signal(mob_dsl::MobMachineSignal::RecoverHostBinding {
+                    host_id: host.clone(),
+                    pubkey: mob_dsl::PeerSigningKey([8; 32]),
+                    endpoint: mob_dsl::PeerAddress("tcp://placed-host.test:4100".to_string()),
+                    epoch: 1,
+                    binding_generation: 1,
+                    protocol_min: 4,
+                    protocol_max: 4,
+                    engine_version: "placed-test-engine".to_string(),
+                    durable_sessions: true,
+                    autonomous_members: true,
+                    hard_cancel_member: true,
+                    tracked_input_cancel: true,
+                    memory_store: true,
+                    mcp: true,
+                    resolvable_providers: BTreeSet::from(["anthropic".to_string()]),
+                    approval_forwarding: false,
+                    live_endpoint: None,
+                })
+                .expect("recover host binding");
+            authority
+                .apply_signal(mob_dsl::MobMachineSignal::RecoverCommittedPlacedSpawn {
+                    spawn_id: mob_dsl::PlacedSpawnId("placed-spawn".to_string()),
+                    agent_identity: placed,
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from("placed:0"),
+                    generation: mob_dsl::Generation(0),
+                    fence_token: mob_dsl::FenceToken(7),
+                    host_id: host,
+                    host_binding_generation: 1,
+                    member_session_id: mob_dsl::SessionId::from("placed-session"),
+                    member_peer_endpoint: endpoint.clone(),
+                    profile_name: "worker".to_string(),
+                    runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::TurnDriven,
+                    external_addressable: true,
+                    provision_operation_id: "placed-operation".to_string(),
+                    operation_owner_session_id: mob_dsl::SessionId::from("owner-session"),
+                })
+                .expect("recover committed placed member");
+            let mut roster = Roster::new();
+            roster.add(session_roster_entry("placed"));
+            let topology_epoch = Arc::new(std::sync::atomic::AtomicU64::new(
+                authority.state().topology_epoch,
+            ));
+            Self {
+                authority,
+                roster,
+                custody: ResumeTopologyEffectCustodyLedger::default(),
+                restore_failures: Vec::new(),
+                topology_epoch,
+                mob_id: MobId::from("fixture-mob"),
+                endpoint,
+            }
+        }
+
+        fn project(
+            &mut self,
+            observation: MemberCommsIdentityObservation,
+        ) -> Result<(), ResumeTopologyAuthorityError> {
+            let (reply_tx, mut reply_rx) = oneshot::channel();
+            let request = comms_identity_request(&self.roster, "placed", observation, reply_tx);
+            let mut context = ResumeTopologyAuthorityContext {
+                mob_id: &self.mob_id,
+                authority: &mut self.authority,
+                roster: &mut self.roster,
+                topology_epoch: &self.topology_epoch,
+                custody: &mut self.custody,
+                restore_failures: &mut self.restore_failures,
+            };
+            handle_resume_topology_authority_request(&mut context, Ok(()), request);
+            reply_rx.try_recv().expect("handler always answers")
+        }
+    }
+
+    impl PlacedMemberFixture {
+        fn break_member(&mut self) {
+            self.authority
+                .apply_signal(mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
+                    agent_identity: mob_dsl::AgentIdentity::from("placed"),
+                    reason: "placed restore failed".to_string(),
+                })
+                .expect("record the placed member's restore failure");
+        }
+
+        fn projected(&self) -> (Option<PeerId>, Option<String>) {
+            let entry = self.roster.get_by_identity(&identity("placed")).unwrap();
+            (entry.peer_id, entry.transport_public_key.clone())
+        }
+    }
+
+    #[test]
+    fn broken_host_owned_member_is_cleared_never_republished() {
+        let mut fixture = PlacedMemberFixture::new();
+        fixture
+            .project(MemberCommsIdentityObservation::HostOwnedDurable)
+            .expect("publish before the placed member breaks");
+        assert!(fixture.projected().0.is_some());
+        fixture.break_member();
+        let refusal = fixture
+            .project(MemberCommsIdentityObservation::HostOwnedDurable)
+            .expect_err("a Broken placed member publishes nothing");
+        assert!(matches!(refusal, ResumeTopologyAuthorityError::Stale(_)));
+        fixture
+            .project(MemberCommsIdentityObservation::ClearBroken)
+            .expect("a Broken placed member's stale projection is cleared");
+        assert_eq!(fixture.projected(), (None, None));
+    }
+
+    #[test]
+    fn invalid_durable_placed_peer_id_breaks_only_that_member() {
+        let mut fixture = PlacedMemberFixture::with_durable_peer_id("not-a-peer-id".to_string());
+        let epoch_before = fixture.authority.state().topology_epoch;
+        fixture
+            .project(MemberCommsIdentityObservation::HostOwnedDurable)
+            .expect("an invalid durable peer id never fails the resume");
+        let reason = fixture
+            .authority
+            .state()
+            .member_restore_failures
+            .get(&mob_dsl::AgentIdentity::from("placed"))
+            .cloned()
+            .expect("the placed member is recorded Broken");
+        assert!(
+            reason.contains("invalid peer id") && reason.contains("respawn the member"),
+            "{reason}"
+        );
+        assert_eq!(fixture.restore_failures.len(), 1);
+        assert_eq!(fixture.projected(), (None, None));
+        assert_ne!(fixture.authority.state().topology_epoch, epoch_before);
+    }
+
+    /// Provisioner double for the observation step: it serves one live comms
+    /// runtime and fails the test if the side-effecting `trusted_peer_spec`
+    /// (which marks the member peer ready) is ever reached.
+    struct ObservationOnlyProvisioner {
+        comms: Arc<dyn meerkat_core::agent::CommsRuntime>,
+        trusted_peer_spec_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl MobProvisioner for ObservationOnlyProvisioner {
+        async fn provision_member(
+            &self,
+            _req: crate::runtime::provisioner::ProvisionMemberRequest,
+        ) -> Result<crate::runtime::handle::MemberSpawnReceipt, MobError> {
+            unreachable!("the observation step never provisions")
+        }
+        async fn abort_member_provision(
+            &self,
+            _member_ref: &MemberRef,
+            _operation_id: &meerkat_core::ops::OperationId,
+            _reason: &str,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never aborts a provision")
+        }
+        async fn capture_resumed_member_rollback_authority(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Result<crate::runtime::provisioner::ResumedMemberRollbackAuthority, MobError> {
+            unreachable!("the observation step never captures rollback authority")
+        }
+        async fn restore_resumed_member(
+            &self,
+            _member_ref: &MemberRef,
+            _operation_id: &meerkat_core::ops::OperationId,
+            _original_origin: crate::runtime::provisioner::ProvisionSessionOrigin,
+            _rollback_authority: &crate::runtime::provisioner::ResumedMemberRollbackAuthority,
+            _rollback_origin: crate::runtime::provisioner::RollbackOrigin,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never restores")
+        }
+        async fn retire_member(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Result<mob_dsl::MemberSessionDisposal, MobError> {
+            unreachable!("the observation step never retires")
+        }
+        async fn retire_member_until(
+            &self,
+            _member_ref: &MemberRef,
+            _member_identity: &crate::ids::AgentIdentity,
+            _deadline: meerkat_core::time_compat::Instant,
+        ) -> Result<mob_dsl::MemberSessionDisposal, MobError> {
+            unreachable!("the observation step never retires")
+        }
+        async fn interrupt_member(
+            &self,
+            _member_ref: &MemberRef,
+            _expected_member: Option<&crate::runtime::bridge_protocol::BridgeMemberIncarnation>,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never interrupts")
+        }
+        async fn hard_cancel_member(
+            &self,
+            _member_ref: &MemberRef,
+            _reason: &str,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never cancels")
+        }
+        async fn start_turn(
+            &self,
+            _member_ref: &MemberRef,
+            _req: meerkat_core::service::StartTurnRequest,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never starts a turn")
+        }
+        async fn admit_turn(
+            &self,
+            _member_ref: &MemberRef,
+            _req: meerkat_core::service::StartTurnRequest,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never admits a turn")
+        }
+        async fn interaction_event_injector(
+            &self,
+            _bridge_session_id: &SessionId,
+        ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+            None
+        }
+        async fn is_member_active(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Result<Option<bool>, MobError> {
+            Ok(None)
+        }
+        async fn prepare_member_session_for_explicit_resume(
+            &self,
+            _session_id: &SessionId,
+            _deadline: meerkat_core::time_compat::Instant,
+            _admission: Option<crate::runtime::state::LifecycleAdmissionSignal>,
+        ) -> Result<bool, MobError> {
+            unreachable!("the observation step never prepares a session")
+        }
+        async fn comms_runtime(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
+            Some(Arc::clone(&self.comms))
+        }
+        async fn trusted_peer_spec(
+            &self,
+            _member_ref: &MemberRef,
+            _fallback_name: &str,
+            _fallback_peer_id: &str,
+        ) -> Result<TrustedPeerDescriptor, MobError> {
+            self.trusted_peer_spec_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(MobError::Internal(
+                "the resume projection step must not mark the member peer ready".to_string(),
+            ))
+        }
+        async fn publish_trusted_peer_spec_for_operation(
+            &self,
+            _member_ref: &MemberRef,
+            _operation_id: &meerkat_core::ops::OperationId,
+            _trusted_peer: TrustedPeerDescriptor,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never publishes for an operation")
+        }
+        async fn active_operation_id_for_member(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Option<meerkat_core::ops::OperationId> {
+            None
+        }
+        async fn bind_member_owner_context(
+            &self,
+            _member_ref: &MemberRef,
+            _owner_bridge_session_id: SessionId,
+            _ops_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+        ) -> Result<(), MobError> {
+            unreachable!("the observation step never binds an owner context")
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_step_never_calls_the_side_effecting_trusted_peer_spec() {
+        let name = format!("observation-only-{}", uuid::Uuid::new_v4().simple());
+        let runtime =
+            meerkat_comms::CommsRuntime::inproc_only(&name).expect("inproc comms runtime");
+        let comms: Arc<dyn meerkat_core::agent::CommsRuntime> = Arc::new(runtime);
+        let live_peer_id = comms.peer_id().expect("live peer id");
+        let provisioner = ObservationOnlyProvisioner {
+            comms,
+            trusted_peer_spec_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let mob_id = MobId::from("fixture-mob");
+        let mut roster = Roster::new();
+        roster.add(session_roster_entry("member-a"));
+        let entry = roster
+            .get_by_identity(&identity("member-a"))
+            .unwrap()
+            .clone();
+
+        let healthy = observe_member_comms_identity(
+            &provisioner,
+            &mob_id,
+            &entry,
+            &ResumeTopologyMemberObservation::default(),
+        )
+        .await
+        .expect("observation succeeds");
+        match healthy {
+            Some(MemberCommsIdentityObservation::Live(descriptor)) => {
+                assert_eq!(descriptor.peer_id, live_peer_id);
+            }
+            other => panic!("a healthy local member observes its live endpoint, got {other:?}"),
+        }
+
+        // A Broken member is checked before placement: a Broken placed member
+        // with a stale projection is cleared, never republished.
+        let mut stale = entry.clone();
+        stale.peer_id = Some(live_peer_id);
+        let broken_placed = ResumeTopologyMemberObservation {
+            broken: true,
+            host_owned: true,
+            peer_endpoint: Some(test_peer_endpoint("placed")),
+            ..ResumeTopologyMemberObservation::default()
+        };
+        let cleared = observe_member_comms_identity(&provisioner, &mob_id, &stale, &broken_placed)
+            .await
+            .expect("observation succeeds");
+        assert!(
+            matches!(cleared, Some(MemberCommsIdentityObservation::ClearBroken)),
+            "got {cleared:?}"
+        );
+
+        assert_eq!(
+            provisioner
+                .trusted_peer_spec_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the step must use the side-effect free runtime observation only"
+        );
+    }
+
+    #[test]
+    fn host_owned_member_refuses_a_local_live_endpoint() {
+        let mut fixture = PlacedMemberFixture::new();
+        let local = descriptor_for(&test_peer_endpoint("placed"));
+        let refusal = fixture
+            .project(MemberCommsIdentityObservation::Live(Box::new(local)))
+            .expect_err("a host owns a placed member's endpoint");
+        assert!(matches!(refusal, ResumeTopologyAuthorityError::Stale(_)));
+        let refusal = fixture
+            .project(MemberCommsIdentityObservation::Unavailable {
+                detail: "no local runtime".to_string(),
+            })
+            .expect_err("a placed member is never broken by a local observation");
+        assert!(matches!(refusal, ResumeTopologyAuthorityError::Stale(_)));
+        assert!(fixture.authority.state().member_restore_failures.is_empty());
+        let entry = fixture.roster.get_by_identity(&identity("placed")).unwrap();
+        assert_eq!(entry.peer_id, None);
+    }
+
+    #[test]
+    fn host_owned_member_republishes_its_durable_peer_id() {
+        let mut fixture = PlacedMemberFixture::new();
+        fixture
+            .project(MemberCommsIdentityObservation::HostOwnedDurable)
+            .expect("the durable host-acknowledged peer id is republished");
+        let entry = fixture.roster.get_by_identity(&identity("placed")).unwrap();
+        assert_eq!(
+            entry.peer_id.map(|peer_id| peer_id.to_string()),
+            Some(fixture.endpoint.peer_id.0.clone())
+        );
+        assert_eq!(
+            entry.transport_public_key, None,
+            "spawn never projects a placed member's transport key; resume keeps parity"
+        );
+    }
+
+    #[test]
+    fn local_member_refuses_a_host_owned_republish() {
+        let mut fixture = WiredMachineFixture::with_member_roster();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let request = comms_identity_request(
+            &fixture.roster,
+            "member-a",
+            MemberCommsIdentityObservation::HostOwnedDurable,
+            reply_tx,
+        );
+        let refusal = fixture
+            .project(request, reply_rx)
+            .expect_err("a local member's endpoint comes from its live runtime");
         assert!(matches!(refusal, ResumeTopologyAuthorityError::Stale(_)));
     }
 
@@ -3699,6 +4819,7 @@ mod tests {
             roster: &mut roster,
             topology_epoch: &topology_epoch,
             custody: &mut custody,
+            restore_failures: &mut Vec::new(),
         };
         handle_resume_topology_authority_request(&mut context, denied(), request);
         reply_rx
@@ -3725,6 +4846,7 @@ mod tests {
             roster: &mut roster,
             topology_epoch: &topology_epoch,
             custody: &mut custody,
+            restore_failures: &mut Vec::new(),
         };
         handle_resume_topology_authority_request(&mut context, denied(), release);
         reply_rx

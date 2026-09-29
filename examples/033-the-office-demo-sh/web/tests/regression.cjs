@@ -11,17 +11,38 @@ const base = path.resolve(__dirname, "..");
 // Short, unique profile directory: Chromium binds a Unix socket under it and
 // a checkout path can exceed the platform's socket path limit.
 const profile = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "office-regression-"));
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const bodies = {};
 for (const file of ["types", "config", "agents", "events", "topology", "incidents", "scenarios", "llm-bridge", "knowledge", "main"]) {
   let source = fs.readFileSync(path.join(base, "src", file + ".ts"), "utf8");
   source = source.replaceAll("import.meta", "({env:{}})");
   if (file === "knowledge") source += "\nexports.inspectGraph = () => cyInstance;";
+  if (file === "main") {
+    // Test seams, applied to the harness's transpiled copy only. Every
+    // change to starting, lifecycleBusy or the pending approvals is followed
+    // by renderApprovalFloat (updateControls calls it), so it announces a
+    // state change once the synchronous caller finishes; window.until
+    // re-checks on it. resolveApproval is wrapped so a test can await the
+    // decision sends it started instead of sleeping past them.
+    const seam = (from, to) => {
+      assert.equal(source.split(from).length - 1, 1, `main.ts test seam anchor must occur once: ${from}`);
+      source = source.replace(from, to);
+    };
+    seam("function renderApprovalFloat(): void {", "function renderApprovalFloat(): void {\n  queueMicrotask(() => window.changed?.());");
+    seam("async function resolveApproval(", "async function resolveApprovalNow(");
+  }
   if (file === "main") source += `
+    const decisionsInFlight = new Set();
+    function resolveApproval(id, approved) {
+      const decision = resolveApprovalNow(id, approved);
+      decisionsInFlight.add(decision);
+      void decision.finally(() => decisionsInFlight.delete(decision));
+      return decision;
+    }
     window.office = {
       startOffice, teardownOffice, pauseOffice, injectEvent, chatWithAgent, resolveApproval,
       setRuntime: mod => { runtime = mod; },
       state: () => ({running, starting, lifecycleBusy, stopped, epoch, mobId, subs, pending:pendingApprovals, topology}),
+      decisionsSettled: () => Promise.allSettled([...decisionsInFlight]),
     };`;
   bodies["./" + file] = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
@@ -82,8 +103,21 @@ function require(name) {
 require("./main");
 window.mods = Object.fromEntries(["types","events","agents","topology","incidents","knowledge"].map(x=>[x,require("./"+x)]));
 window.check = (ok,message) => {if(!ok)throw Error(message);};
-window.delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
-window.until = async predicate => {for(let i=0;i<200;i++){if(predicate())return;await delay(10);}throw Error("Timed out waiting for state");};
+// State waits re-check on change notifications, never on a timer: every DOM
+// mutation, every office render (the renderApprovalFloat seam) and every
+// fixture hold. A predicate that throws rejects the wait.
+const changeListeners = new Set();
+window.changed = () => { for (const listener of [...changeListeners]) listener(); };
+new MutationObserver(() => window.changed()).observe(document, {subtree:true,childList:true,attributes:true,characterData:true});
+window.until = predicate => new Promise((resolve, reject) => {
+ const check = () => {
+  let done;
+  try { done = predicate(); } catch (error) { changeListeners.delete(check); reject(error); return; }
+  if (done) { changeListeners.delete(check); resolve(); }
+ };
+ changeListeners.add(check);
+ check();
+});
 window.click = id => document.getElementById(id).click();
 window.visible = id => !!document.getElementById(id).getClientRects().length;
 window.configure = () => {const key=document.getElementById("keyAnthropic");key.value="synthetic-not-a-key";key.dispatchEvent(new Event("change"));};
@@ -91,6 +125,7 @@ window.fixture = () => {
  const flags={}, calls=[], edges=new Set(), queues=new Map(), handles=new Set();
  let seq=0;
  const key=(a,b)=>[a,b].sort().join("|");
+ const hold=release=>new Promise(resolve=>{flags[release]=resolve;window.changed();});
  const mod={
    default:async()=>{},
    init_runtime_from_config:()=>{calls.push(["init"]);if(flags.init)throw Error("init rejected");edges.clear();},
@@ -99,7 +134,7 @@ window.fixture = () => {
    mob_create:async()=>"the-office",
    mob_spawn:async(id,specs)=>{
      calls.push(["spawn"]);
-     if(flags.holdSpawn)await new Promise(resolve=>flags.releaseSpawn=resolve);
+     if(flags.holdSpawn)await hold("releaseSpawn");
      return JSON.stringify(JSON.parse(specs).map((spec,i)=>flags.spawn==="all"||(flags.spawn==="mixed"&&i===4)
        ? {status:"failed",result:{cause:"build_failed",message:"synthetic build failure"}}
        : {status:"spawned",result:{agent_identity:spec.agent_identity,member_ref:"member-"+i}}));
@@ -115,12 +150,12 @@ window.fixture = () => {
    close_subscription:handle=>{handles.delete(handle);},
    mob_lifecycle:async(id,action)=>{
      calls.push(["lifecycle",action]);if(flags.lifecycle)throw Error("stop rejected");
-     if(flags.holdStop)await new Promise(resolve=>flags.releaseStop=resolve);
+     if(flags.holdStop)await hold("releaseStop");
      return JSON.stringify({ok:true,mob_id:id,action});
    },
    mob_member_send:async(id,agent,request)=>{
      calls.push(["send",agent,JSON.parse(request)]);
-     if(flags.holdSend)await new Promise(resolve=>flags.releaseSend=resolve);
+     if(flags.holdSend)await hold("releaseSend");
      if(flags.send)throw Error("send rejected");
      return JSON.stringify({mob_id:id,agent_identity:agent,handling_mode:"queue"});
    },
@@ -161,14 +196,25 @@ class CDP {
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
-  async eval(expression) {
+  // The 90 s race is a backstop that reports a typed failure, not a wait:
+  // every wait below resolves on a page event well before it.
+  async eval(expression, contextId) {
     let timer;
     const result = await Promise.race([
-      this.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }),
+      this.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true, ...(contextId === undefined ? {} : { contextId }) }),
       new Promise((_, reject) => { timer = setTimeout(() => reject(Error("Browser evaluation exceeded 90 seconds")), 90000); }),
     ]).finally(() => clearTimeout(timer));
     if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
+  }
+  // Resolves with the first truthy value of `expression`, re-evaluated in the
+  // page on every DOM mutation rather than on a timer.
+  waitFor(expression, contextId) {
+    return this.eval(`new Promise(resolve => {
+      const check = () => { const value = (${expression}); if (!value) return false; observer.disconnect(); resolve(value); return true; };
+      const observer = new MutationObserver(check);
+      if (!check()) observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    })`, contextId);
   }
 }
 
@@ -209,18 +255,47 @@ async function main() {
   ], { env: { ...process.env, TMPDIR: profile }, stdio: ["ignore", "ignore", "pipe"] });
   let chromeStderr = "";
   chrome.stderr.on("data", chunk => { chromeStderr = (chromeStderr + chunk).slice(-4000); });
+  // Chrome announces its DevTools endpoint on stderr once the listener is
+  // bound ("DevTools listening on ws://127.0.0.1:<port>/devtools/browser/<id>");
+  // its exit is the only other outcome. Both are events, so a slow start on a
+  // loaded runner just takes longer instead of failing a fixed poll. Attached
+  // synchronously after spawn, so no stderr chunk is missed; the announcement
+  // is matched against everything received so far, since the line can span
+  // chunks.
+  const devtools = new Promise((resolve, reject) => {
+    let received = "";
+    const onData = chunk => {
+      received += chunk;
+      const announced = /DevTools listening on (ws:\/\/\S+)/.exec(received);
+      if (!announced) return;
+      settle();
+      const endpoint = new URL(announced[1]);
+      resolve({ port: endpoint.port, socket: endpoint.pathname });
+    };
+    const onExit = (code, signal) => {
+      settle();
+      reject(Error(`Chromium at ${chromeBin} exited before exposing DevTools (code ${code}, signal ${signal}): ${chromeStderr.trim()}`));
+    };
+    const settle = () => { chrome.stderr.off("data", onData); chrome.off("exit", onExit); };
+    chrome.stderr.on("data", onData);
+    chrome.once("exit", onExit);
+  });
+  // Handled here so an early exit is not an unhandled rejection before the
+  // try block awaits it; the await below still sees the rejection.
+  devtools.catch(() => {});
   // Registered before anything can fail so the teardown never waits for an
   // exit that already happened (a signal-killed Chrome has exitCode null).
   const chromeExited = new Promise(resolve => chrome.once("exit", resolve));
+  // Every Chromium helper process inherits the stderr pipe, so the child's
+  // "close" (exited and stdio at EOF) means the whole browser process tree is
+  // gone and nothing still writes to the profile.
+  const chromeClosed = new Promise(resolve => chrome.once("close", resolve));
   const chromeAlive = () => chrome.exitCode === null && chrome.signalCode === null;
   let browser;
   const pages = [];
   let blocked = 0;
   try {
-    const portFile = path.join(profile, "DevToolsActivePort");
-    for (let i = 0; i < 200 && !fs.existsSync(portFile) && chromeAlive(); i++) await sleep(50);
-    assert(fs.existsSync(portFile), `Chromium at ${chromeBin} did not expose DevTools${chromeAlive() ? "" : ` (exited: code ${chrome.exitCode}, signal ${chrome.signalCode})`}: ${chromeStderr.trim()}`);
-    const [port, socket] = fs.readFileSync(portFile, "utf8").split("\n");
+    const { port, socket } = await devtools;
     browser = await CDP.connect(`ws://127.0.0.1:${port}${socket}`);
     async function page(route = "/fixture", provider = null, viewport = { width: 1280, height: 900 }) {
       const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json();
@@ -261,12 +336,21 @@ async function main() {
       await p.send("Network.enable");
       await p.send("Fetch.enable", { patterns: [{ urlPattern: "*" }] });
       await p.send("Emulation.setDeviceMetricsOverride", { ...viewport, deviceScaleFactor: 1, mobile: false });
-      await p.send("Page.navigate", { url: origin + route });
-      for (let i = 0; i < 200; i++) {
-        if (await p.eval('!!document.getElementById("startBigBtn")')) return p;
-        await sleep(25);
+      // Chrome creates the navigated document's default execution context
+      // (Runtime.executionContextCreated, origin = the server); the start
+      // button is then awaited inside that document as it parses and runs.
+      const documentContext = new Promise(resolve => p.listeners.push(message => {
+        const context = message.method === "Runtime.executionContextCreated" && message.params.context;
+        if (context && context.origin === origin && context.auxData?.isDefault) resolve(context.id);
+      }));
+      const navigation = await p.send("Page.navigate", { url: origin + route });
+      if (navigation.errorText) throw Error(`Page failed to start: navigation to ${route} failed: ${navigation.errorText}`);
+      try {
+        await p.waitFor('document.getElementById("startBigBtn")', await documentContext);
+      } catch (error) {
+        throw Error(`Page failed to start: ${error.message}; console: ${JSON.stringify(p.console.slice(-10))}`);
       }
-      throw Error("Page failed to start");
+      return p;
     }
     async function test(name, body, { rejectWarnings = false, viewport } = {}) {
       const p = await page("/fixture", null, viewport);
@@ -376,7 +460,7 @@ async function main() {
       f.flags.holdStop=false;click("pauseBtn");await until(()=>!office.state().lifecycleBusy);
       check(office.state().running&&f.handles.size===10,"Resume renews subscriptions");
       f.push("triage",{type:"stream_truncated",reason:{kind:"stream_lagged",dropped:17}});
-      await delay(350);check(document.getElementById("statusLine").textContent.includes("lost 17"),"Lag visibly reported");
+      await until(()=>document.getElementById("statusLine").textContent.includes("lost 17"));
       f.flags.lifecycle=true;click("pauseBtn");await until(()=>!office.state().lifecycleBusy);
       check(document.getElementById("statusBadge").textContent==="ERROR"&&!office.state().running&&!office.state().stopped,"No optimistic failed-stop badge");
     `);
@@ -429,7 +513,7 @@ async function main() {
       await until(()=>office.state().pending[0].state==="failed");
       check(office.state().pending[0].error.includes("Runtime unavailable"),"Missing runtime not discarded");
       office.setRuntime(f.mod);f.flags.holdSend=true;document.querySelector(".approve-mini").click();
-      await until(()=>!!f.flags.releaseSend);await office.teardownOffice();f.flags.releaseSend();await delay(20);
+      await until(()=>!!f.flags.releaseSend);await office.teardownOffice();f.flags.releaseSend();await office.decisionsSettled();
       check(office.state().pending[0].state==="expired","Late old-runtime receipt cannot clear expired request");
     `);
 
@@ -557,7 +641,7 @@ async function main() {
       f.push("finance",{type:"run_completed",result:"",structured_output:{headline:"Delayed reply to earlier work"}});
       f.push("it-dept",tool("revoke_access",{target:"finance",reason:"Synthetic access"}));
       f.push("gate",tool("request_human_approval",approval("Synthetic decision")));f.drain();
-      await office.state().topology.settled();document.querySelector(".approve-mini").click();await delay(20);
+      await office.state().topology.settled();document.querySelector(".approve-mini").click();await office.decisionsSettled();
       const incidents=mods.incidents.getIncidents();
       check(incidents.length===3&&incidents.every(x=>x.messages.length===1),"Only initial input owns scenario/chat source");
       const text=document.getElementById("panelContent").textContent;
@@ -656,18 +740,16 @@ async function main() {
       lastRequestSize.set(role, body.messages.length);
     };
     await p.eval(`document.getElementById("startBigBtn").click()`);
-    for (let i = 0; i < 100; i++) {
-      if (await p.eval(`!!document.getElementById("keyOverlay").getClientRects().length`)) break;
-      await sleep(20);
-    }
-    await p.eval(`document.getElementById("keyDialogAnthropic").value="synthetic-not-a-key";document.getElementById("keyDialogSave").click()`);
-    let badge;
-    let wiringState;
-    for (let i = 0; i < 1200; i++) {
-      badge = await p.eval(`document.getElementById("statusBadge").textContent`);
-      if (["LIVE", "ERROR", "CONFIG"].includes(badge)) break;
-      if (i >= 20 && !wiringState && await p.eval(`document.getElementById("statusLine").textContent==="Wiring comms topology..."`)) {
-        wiringState = await p.eval(`(async()=>{
+    await p.waitFor(`document.getElementById("keyOverlay").getClientRects().length > 0`);
+    // Diagnostic for a bootstrap that does not reach LIVE: the runtime's view
+    // of the members, taken when the page enters the wiring stage (a status
+    // line change), so a failed run can show where wiring stood.
+    await p.eval(`(() => {
+      const line = document.getElementById("statusLine");
+      const observer = new MutationObserver(() => {
+        if (line.textContent !== "Wiring comms topology...") return;
+        observer.disconnect();
+        window.wiringDiagnostic = (async()=>{
           const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
           const members=JSON.parse(await wasm.mob_list_members("the-office"));
           const status=JSON.parse(await wasm.mob_status("the-office"));
@@ -685,10 +767,16 @@ async function main() {
             }catch(error){snapshots.push({agent_identity,error:String(error)});}
           }
           return {members:members.map(m=>({agent_identity:m.agent_identity,status:m.status,kickoff:m.kickoff?.phase,wired_to:m.wired_to})),status,snapshots,subscriptions};
-        })()`);
-      }
-      await sleep(50);
-    }
+        })().catch(error=>({error:String(error)}));
+      });
+      observer.observe(line, { subtree: true, childList: true, characterData: true });
+    })()`);
+    await p.eval(`document.getElementById("keyDialogAnthropic").value="synthetic-not-a-key";document.getElementById("keyDialogSave").click()`);
+    const terminalBadge = states => `(badge => ${JSON.stringify(states)}.includes(badge) && badge)(document.getElementById("statusBadge").textContent)`;
+    let badge = await p.waitFor(terminalBadge(["LIVE", "ERROR", "CONFIG"]));
+    // Settled before the run goes on, so the diagnostic's reads never overlap
+    // the checks below.
+    const wiringState = await p.eval(`window.wiringDiagnostic ?? null`);
     if (badge !== "LIVE") {
       const failed = await p.eval(`(async()=>{
         const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
@@ -733,11 +821,7 @@ async function main() {
     assert.equal(p.fixtureErrors.length, 0, JSON.stringify(p.fixtureErrors));
     workloadPhase = "stop";
     await p.eval(`document.getElementById("pauseBtn").click()`);
-    for (let i = 0; i < 600; i++) {
-      badge = await p.eval(`document.getElementById("statusBadge").textContent`);
-      if (["STOPPED", "ERROR"].includes(badge)) break;
-      await sleep(50);
-    }
+    badge = await p.waitFor(terminalBadge(["STOPPED", "ERROR"]));
     assert.equal(badge, "STOPPED", await p.eval(`document.getElementById("statusLine").textContent`));
     const stopped = await p.eval(`(async()=>{
       const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
@@ -748,11 +832,7 @@ async function main() {
     assert.equal(stopped.status, "Stopped"); assert(stopped.rejected && stopped.disabled);
     workloadPhase = "resume";
     await p.eval(`document.getElementById("pauseBtn").click()`);
-    for (let i = 0; i < 1200; i++) {
-      badge = await p.eval(`document.getElementById("statusBadge").textContent`);
-      if (["LIVE", "ERROR"].includes(badge)) break;
-      await sleep(50);
-    }
+    badge = await p.waitFor(terminalBadge(["LIVE", "ERROR"]));
     assert.equal(badge, "LIVE", await p.eval(`document.getElementById("statusLine").textContent`));
     const resumed = await p.eval(`(async()=>{
       const wasm=await import("/meerkat-pkg/meerkat_web_runtime.js");
@@ -789,15 +869,26 @@ async function main() {
     for (const p of pages) p.ws.close();
     browser?.ws.close();
     if (chromeAlive()) chrome.kill("SIGTERM");
-    await chromeExited;
+    // Backstops only, each reporting what it gave up on: a browser that
+    // ignores SIGTERM is killed, and a helper that outlives the browser
+    // leaves the profile in place (cleanup never fails the run).
+    let backstop;
+    const expire = (ms, outcome) => new Promise(resolve => { backstop = setTimeout(resolve, ms, outcome); });
+    if (await Promise.race([chromeExited.then(() => "exited"), expire(10_000, "hung")]) === "hung") {
+      console.warn(`Chromium ignored SIGTERM for 10 s; sending SIGKILL`);
+      chrome.kill("SIGKILL");
+      await chromeExited;
+    }
+    clearTimeout(backstop);
+    const treeGone = await Promise.race([chromeClosed.then(() => true), expire(15_000, false)]);
+    clearTimeout(backstop);
     await new Promise(resolve => server.close(resolve));
-    // Chromium helper processes can still be flushing the profile right after
-    // the browser process exits; retry, and never fail the run on cleanup.
-    for (const deadline = Date.now() + 15_000; ; await sleep(200)) {
-      try { fs.rmSync(profile, { recursive: true, force: true }); break; }
-      catch (error) {
-        if (Date.now() > deadline) { console.warn(`leaving browser profile ${profile}: ${error.message}`); break; }
-      }
+    if (!treeGone) {
+      chrome.stderr.destroy();
+      console.warn(`leaving browser profile ${profile}: Chromium helper processes still hold its stderr 15 s after the browser exited`);
+    } else {
+      try { fs.rmSync(profile, { recursive: true, force: true }); }
+      catch (error) { console.warn(`leaving browser profile ${profile}: ${error.message}`); }
     }
   }
 }

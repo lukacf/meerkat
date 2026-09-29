@@ -39024,7 +39024,9 @@ mod tests {
         };
         commit(&session).await;
 
-        let decodes = meerkat_core::global_whole_blob_decodes();
+        // Counted on this (current-thread runtime) thread: parallel tests decode
+        // too, so the process-wide count cannot attribute decodes to this one.
+        let decodes = meerkat_core::whole_blob_decodes_on_this_thread();
         let (first, first_authority) = service
             .load_committed_whole_blob_session(&id, "cache test")
             .await
@@ -39039,7 +39041,7 @@ mod tests {
         assert_eq!(again.messages().len(), 1);
         assert_eq!(again_authority, first_authority);
         assert_eq!(
-            meerkat_core::global_whole_blob_decodes() - decodes,
+            meerkat_core::whole_blob_decodes_on_this_thread() - decodes,
             1,
             "an unchanged authority reuses the verified body instead of decoding it again"
         );

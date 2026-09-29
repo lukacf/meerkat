@@ -96,9 +96,28 @@ static GLOBAL_WHOLE_BLOB_DECODE_BYTES: std::sync::atomic::AtomicU64 =
 static GLOBAL_TRANSCRIPT_GRAPH_VALIDATIONS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+thread_local! {
+    // The same count scoped to the calling thread, so a test can attribute
+    // decodes to its own work while parallel tests decode too.
+    static WHOLE_BLOB_DECODES_ON_THREAD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn record_whole_blob_decode(bytes: u64) {
     GLOBAL_WHOLE_BLOB_DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     GLOBAL_WHOLE_BLOB_DECODE_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    WHOLE_BLOB_DECODES_ON_THREAD.with(|count| count.set(count.get() + 1));
+}
+
+/// Full session-document decodes performed by the current thread.
+///
+/// The process-wide [`global_whole_blob_decodes`] moves whenever any thread
+/// decodes; an assertion about the decodes of one piece of work running on
+/// one thread (a current-thread test runtime) has to look at its own thread,
+/// or a parallel test that decodes fails it.
+#[doc(hidden)]
+#[must_use]
+pub fn whole_blob_decodes_on_this_thread() -> u64 {
+    WHOLE_BLOB_DECODES_ON_THREAD.with(std::cell::Cell::get)
 }
 
 /// Full session-document decodes (`Session::from_persisted_bytes`, which

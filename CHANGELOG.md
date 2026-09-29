@@ -763,6 +763,22 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Fixed
 
+- Two Release Turbo S flakes are deterministic. The live-adapter smokes
+  (scenarios 71 and 72) read their spoken inputs from committed, verified
+  fixtures (`tests/integration/fixtures/live_adapter_tts`, minted by
+  `voice_fixtures mint`) instead of calling the OpenAI speech API on every
+  run, where a stalled response body failed scenario 72 at its 60 s client
+  timeout before the live path was exercised. Scenario 98 follows the typed
+  supersession signal: when the provider opens another turn on its own and
+  that newer output is admitted before the harness confirms the first, the
+  first is retired as Unmeasured by design and never commits, so the harness
+  confirms the newer output and measures the settlement bound from that
+  confirmation.
+- `scripts/generate-bazel-rust-builds.mjs` owns the Turbo S web WASM bundle
+  rules (the root BUILD.bazel carried them only as hand edits, so a
+  regeneration would have dropped them), and tests that read the committed
+  browser voice fixtures declare `//:live_smoke_browser_fixtures`, so the
+  integration crate's unit test finds them in remote runfiles.
 - The placed-member external-edge route inputs (`RecordExternalRouteInstall`,
   `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`,
   `RollbackExternalRouteInstall`) are now declared runtime-internal in the

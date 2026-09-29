@@ -7001,12 +7001,20 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(first_output["channel_id"], live.channel_id);
     let remember_audio = wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
     println!("GPT_LIVE_PUBLIC_AUDIO phase=remember evidence={remember_audio:?}");
-    let confirmed_at = Instant::now();
+    let mut confirmed_at = Instant::now();
     live.complete_output(&first_output).await?;
     // The snapshot cut commits without a provider final: the assistant text
     // must be in canonical history promptly, bounded well under the retired
     // 1.5 s quiet heuristic plus its 2.5 s readout grace.
-    let settle_deadline = confirmed_at + Duration::from_secs(3);
+    //
+    // The provider may open another turn on its own (a stray user final such
+    // as "." from trailing input) before this confirmation is applied. The
+    // admission of that newer output retires the unconfirmed one as
+    // Unmeasured, so it never commits and the late confirmation replays that
+    // settlement. A newer admitted output is therefore the typed signal to
+    // confirm it instead; the settlement bound is measured from the latest
+    // confirmation.
+    let mut settle_deadline = confirmed_at + Duration::from_secs(3);
     let history = loop {
         let history = live
             .rpc
@@ -7034,7 +7042,20 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
             )
             .into());
         }
-        sleep(Duration::from_millis(100)).await;
+        // The newer-output side is awaited on the harness's output channel
+        // (an mpsc receive, not a sleep). The 100 ms bound exists only because
+        // a history commit has no push signal to this harness: session/history
+        // is request/response, so it is re-read between waits.
+        if let Some(newer_output) = live.poll_output(Duration::from_millis(100)).await? {
+            assert_eq!(newer_output["channel_id"], live.channel_id);
+            println!(
+                "GPT_LIVE_PUBLIC_STAGE stage=remember_superseded_output_confirmed output_id={}",
+                newer_output["output_id"]
+            );
+            confirmed_at = Instant::now();
+            live.complete_output(&newer_output).await?;
+            settle_deadline = confirmed_at + Duration::from_secs(3);
+        }
     };
     let settled_after = confirmed_at.elapsed();
     let events = live.peer.events().await?;

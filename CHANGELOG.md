@@ -72,7 +72,6 @@ them.
   `input_text` part, so the miss is possible but not certain. Anthropic
   sessions only gain a marker, which is not prefix content, and keep their
   cache (#1235).
-
 - Generated `MobMachine` (meerkat-machine-schema, meerkat-machine-kernels,
   meerkat-mob `machines::mob_machine`) gains the placed-member external-edge
   route ledger: state `pending_external_route_installs`, type
@@ -324,6 +323,22 @@ them.
   - A stale or malformed target never becomes an interrupt. A stale run id is
     `not_current`, a malformed run id is invalid params (RPC) or `400` (REST),
     and an unknown session is not found.
+  - A member stop never reports a false `not_current`. A retiring member's run
+    may still be draining, so its runtime answers the run-fenced stop. A
+    legacy peer-only member has no local runtime and is refused with
+    `UnsupportedForMode`; a member whose session is not registered in the
+    local runtime is refused with `SessionError::NotRunning`. An unknown
+    member is `MobError::MemberNotFound` for both `stop_member_run` and
+    `hard_cancel_member` (hard cancel used to report an invalid transition).
+  - Placed stops are deduplicated by `operation_id` on the host: a resend
+    joins the in-flight stop or returns the recorded receipt. The controller
+    resends the same operation when its 60 s bridge wait lapses, so a stop the
+    host committed is never reported as a transport error.
+  - REST maps stop failures by type: a session stop maps validation to `400`,
+    a missing or destroyed runtime to `404`, a not-ready runtime, stale
+    authority or in-progress teardown to `409`, and anything else to `500`. A
+    member stop maps an unknown member to `404`, a not-running session to
+    `409`, and internal mob faults to `500` instead of `400`.
 - `MeerkatMachine::stop_run(session_id, expected_run_id, reason)` stops one
   exact run and terminalizes every contributor already bound to it (#1261).
   The stop is linearized under the session mutation gate as the generated

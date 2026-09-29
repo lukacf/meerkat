@@ -4135,7 +4135,7 @@ impl LiveContextQueuedRow {
             // Runtime work output is replayed quietly instead of voiced.
             LiveContextRowDisposition::MirrorParentText => {
                 *disposition == LiveContextRowDisposition::MirrorParentText
-                    || (reasserted
+                    || (*disposition == LiveContextRowDisposition::ReplayRuntimeWork
                         && row.source()
                             == crate::meerkat_machine::dsl::LiveContextRowSource::RuntimeWork)
             }
@@ -4177,7 +4177,8 @@ impl LiveContextQueuedRow {
     pub fn provider_context(&self) -> Option<&str> {
         match self.disposition {
             LiveContextRowDisposition::MirrorParentText => self.row.provider_context(),
-            LiveContextRowDisposition::ReassertCausalTail => self.row.causal_context(),
+            LiveContextRowDisposition::ReassertCausalTail
+            | LiveContextRowDisposition::ReplayRuntimeWork => self.row.causal_context(),
             LiveContextRowDisposition::AlreadyPresentInLiveChannel
             | LiveContextRowDisposition::AssistantObservation
             | LiveContextRowDisposition::ExcludedFromLiveContext => None,
@@ -4186,7 +4187,11 @@ impl LiveContextQueuedRow {
 
     #[must_use]
     pub fn is_causal_reassertion(&self) -> bool {
-        self.disposition == LiveContextRowDisposition::ReassertCausalTail
+        matches!(
+            self.disposition,
+            LiveContextRowDisposition::ReassertCausalTail
+                | LiveContextRowDisposition::ReplayRuntimeWork
+        )
     }
 }
 

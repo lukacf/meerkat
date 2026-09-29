@@ -4365,6 +4365,8 @@ pub enum LiveContextRowDisposition {
     ExcludedFromLiveContext,
     #[serde(rename = "ReassertCausalTail")]
     ReassertCausalTail,
+    #[serde(rename = "ReplayRuntimeWork")]
+    ReplayRuntimeWork,
 }
 impl LiveContextRowDisposition {
     pub fn as_str(&self) -> &'static str {
@@ -4374,6 +4376,7 @@ impl LiveContextRowDisposition {
             Self::AssistantObservation => "AssistantObservation",
             Self::ExcludedFromLiveContext => "ExcludedFromLiveContext",
             Self::ReassertCausalTail => "ReassertCausalTail",
+            Self::ReplayRuntimeWork => "ReplayRuntimeWork",
         }
     }
 }
@@ -4386,6 +4389,7 @@ impl std::convert::TryFrom<&str> for LiveContextRowDisposition {
             "AssistantObservation" => Ok(Self::AssistantObservation),
             "ExcludedFromLiveContext" => Ok(Self::ExcludedFromLiveContext),
             "ReassertCausalTail" => Ok(Self::ReassertCausalTail),
+            "ReplayRuntimeWork" => Ok(Self::ReplayRuntimeWork),
             other => Err(format!("invalid LiveContextRowDisposition value `{other}`")),
         }
     }

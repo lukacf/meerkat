@@ -2038,7 +2038,7 @@ fn runtime_work_output_replays_quietly_during_the_first_turn() {
     assert_eq!(conversation_start(&authority), None);
     assert_eq!(
         authority.state().live_context_queued_disposition_by_append["merged-result-reply"],
-        mm::LiveContextRowDisposition::ReassertCausalTail
+        mm::LiveContextRowDisposition::ReplayRuntimeWork
     );
     assert!(
         apply(&mut authority, bootstrap_append_input(3)).is_err(),
@@ -2082,16 +2082,47 @@ fn quiet_history_waits_for_the_conversation_without_a_bootstrap() {
     assert!(authorized(&effects, "merged-result-reply"));
 }
 
-/// A voiced row still waits for the provider turn boundary; only the quiet
-/// lane is admitted mid-turn.
+/// A voiced row and a quiet reassertion of live speech still wait for the
+/// provider turn boundary; only replayed runtime work output is admitted
+/// mid-turn.
 #[test]
-fn voiced_row_is_still_deferred_by_an_active_provider_turn() {
+fn voiced_row_and_live_speech_reassertion_are_still_deferred_by_a_provider_turn() {
     let mut authority = opened_authority();
     bind_experimental(&mut authority, 0);
     start_user_turn(&mut authority, "user-turn");
     enqueue_mirror_row(&mut authority, "typed-mid-turn", 1);
     let effects = authorize_row(&mut authority, "typed-mid-turn", 0).expect("typed deferral");
     assert!(deferred(&effects, "typed-mid-turn"));
+
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 0);
+    activate_bootstrap(&mut authority);
+    generate_bootstrap(&mut authority);
+    let heard = record_source(&mut authority, CHANNEL, "bootstrap-job", "heard-speech");
+    enqueue_observed_row(
+        &mut authority,
+        "heard-speech",
+        1,
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        Some(&heard),
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["heard-speech"],
+        mm::LiveContextRowDisposition::ReassertCausalTail
+    );
+    start_user_turn(&mut authority, "first-user-turn");
+    apply(&mut authority, bootstrap_append_input(0)).expect("the user's speech releases it");
+    resolve_bootstrap(
+        &mut authority,
+        0,
+        mm::LiveContextAppendObservation::Delivered,
+    )
+    .expect("exact summary ACK");
+    let effects = authorize_row(&mut authority, "heard-speech", 0).expect("typed deferral");
+    assert!(
+        deferred(&effects, "heard-speech"),
+        "live speech is replayed only at the turn boundary"
+    );
 }
 
 /// A client delegation admitted on an interaction that no user provider turn

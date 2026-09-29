@@ -417,7 +417,9 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   `inputs::EnqueueLiveContextRow`) gains the field
   `row_source: LiveContextRowSource`, and the enum `LiveContextRowSource`
   (`Conversation`, `RuntimeWork`) is added. Struct-literal and
-  exhaustive-pattern users must add the field. The transitions
+  exhaustive-pattern users must add the field. `LiveContextRowDisposition`
+  gains the variant `ReplayRuntimeWork` (exhaustive matches must handle it).
+  The transitions
   `AuthorizeLiveContextAppendDeferredByConversationIdle`,
   `AuthorizeLiveContextAppendDeferredByConversationAttached` and
   `AuthorizeLiveContextAppendDeferredByConversationRunning` are added (kernel
@@ -775,13 +777,14 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   (`SpokenCanonicalRow`) and released the late summary and the result into
   silence. The merge is now runtime-authored injected execution context (no
   conversational user row), and the member's reply to it is runtime work
-  output (`EnqueueLiveContextRow` carries `row_source`): it is replayed on the
-  quiet thinking lane once the conversation has started, after the late
-  summary, and never starts the conversation itself. Typed and peer rows are
-  voiced as before (lukacf/meerkat-mobkit#474). Quiet reassertions are no
-  longer held behind an active provider turn, so that history reaches the
-  model while the user's first utterance is still in flight, before it
-  answers; voiced rows still wait for the turn boundary.
+  output (`EnqueueLiveContextRow` carries `row_source`): it is queued as
+  `ReplayRuntimeWork` and replayed on the quiet thinking lane once the
+  conversation has started, after the late summary, and never starts the
+  conversation itself. Typed and peer rows are voiced as before
+  (lukacf/meerkat-mobkit#474). The replay is not held behind an active
+  provider turn, so the result reaches the model while the user's first
+  utterance is still in flight, before it answers; voiced rows and
+  reassertions of live speech still wait for the turn boundary.
 - The placed-member external-edge route inputs (`RecordExternalRouteInstall`,
   `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`,
   `RollbackExternalRouteInstall`) are now declared runtime-internal in the

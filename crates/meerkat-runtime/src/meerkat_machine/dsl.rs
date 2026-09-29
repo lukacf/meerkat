@@ -2871,6 +2871,7 @@ pub enum LiveContextRowDisposition {
     AssistantObservation,
     ExcludedFromLiveContext,
     ReassertCausalTail,
+    ReplayRuntimeWork,
 }
 
 pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{

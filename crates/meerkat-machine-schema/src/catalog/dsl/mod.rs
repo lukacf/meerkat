@@ -1178,6 +1178,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "AssistantObservation",
                     "ExcludedFromLiveContext",
                     "ReassertCausalTail",
+                    "ReplayRuntimeWork",
                 ],
             ),
             NamedTypeBinding::string_enum(

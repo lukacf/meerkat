@@ -1611,6 +1611,9 @@ pub enum LiveContextRowDisposition {
     AssistantObservation,
     ExcludedFromLiveContext,
     ReassertCausalTail,
+    /// Runtime work output (see `LiveContextRowSource::RuntimeWork`) replayed
+    /// on the quiet lane once the conversation has started. Runtime-minted.
+    ReplayRuntimeWork,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -28757,6 +28760,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "source_disposition_is_not_runtime_minted" {
                 disposition != LiveContextRowDisposition::ReassertCausalTail
+                && disposition != LiveContextRowDisposition::ReplayRuntimeWork
             }
             guard "ordinary_mirror_has_materializable_payload" {
                 disposition != LiveContextRowDisposition::MirrorParentText
@@ -28809,7 +28813,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                     // boundary) is history the model has not seen. Voiced, it
                     // is read aloud unprompted; it is replayed on the quiet
                     // lane instead, once the conversation has started.
-                    { LiveContextRowDisposition::ReassertCausalTail }
+                    { LiveContextRowDisposition::ReplayRuntimeWork }
                     else { disposition } } });
                 self.live_context_queued_append_by_cursor.insert(canonical_cursor, append_id);
                 // A row this channel will voice (the Ordinary append of a
@@ -28931,7 +28935,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertCausalTail))
+                    == Some(LiveContextRowDisposition::ReassertCausalTail)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayRuntimeWork))
             }
             guard "channel_has_no_pending_append" {
                 !self.live_context_pending_append_by_channel.contains_key(channel_id)
@@ -28939,22 +28945,21 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "channel_accepts_context_delivery" {
                 !self.live_revoked_execution_channels.contains(channel_id)
             }
-            // A quiet reassertion rides the thinking lane, which the provider
-            // injects without taking the turn, so it is not held behind an
-            // active provider turn: history replayed after a late summary
-            // lands while the user's first utterance is still in flight,
-            // before the model answers it. A voiced row waits for the turn
-            // boundary.
+            // Replayed runtime work output rides the quiet thinking lane and
+            // is history the model has not seen, so it is not held behind an
+            // active provider turn: it lands while the user's first utterance
+            // is still in flight, before the model answers it. Voiced rows and
+            // reassertions of live speech wait for the turn boundary.
             guard "safe_provider_turn_boundary" {
                 !self.live_provider_turn_by_channel.contains_key(channel_id)
                 || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertCausalTail)
+                    == Some(LiveContextRowDisposition::ReplayRuntimeWork)
             }
             // Quiet history appended into silence is still a cue to speak, so
-            // a reassertion waits for the conversation to start.
+            // replayed runtime work output waits for the conversation to start.
             guard "quiet_history_waits_for_the_conversation" {
                 self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    != Some(LiveContextRowDisposition::ReassertCausalTail)
+                    != Some(LiveContextRowDisposition::ReplayRuntimeWork)
                 || self.live_conversation_started_channels.contains_key(channel_id)
             }
             guard "channel_has_no_recovery_obligation" {
@@ -29033,8 +29038,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_append_by_cursor.get_cloned(next_cursor) == Some(append_id)
                 && self.live_context_queued_digest_by_append.contains_key(append_id)
                 && self.live_context_queued_commit_token_by_append.contains_key(append_id)
-                && self.live_context_queued_disposition_by_append.get_copied(append_id)
+                && (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertCausalTail))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "provider_turn_owns_boundary" {
@@ -29050,9 +29057,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // A quiet reassertion queued before the conversation started waits
-        // for it (guard `quiet_history_waits_for_the_conversation`); the
-        // conversation start requests a drain.
+        // Replayed runtime work output queued before the conversation
+        // started waits for it (guard `quiet_history_waits_for_the_conversation`);
+        // the conversation start requests a drain.
         transition AuthorizeLiveContextAppendDeferredByConversation {
             per_phase [Idle, Attached, Running]
             on input AuthorizeLiveContextAppend {
@@ -29074,7 +29081,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_digest_by_append.contains_key(append_id)
                 && self.live_context_queued_commit_token_by_append.contains_key(append_id)
                 && self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertCausalTail)
+                    == Some(LiveContextRowDisposition::ReplayRuntimeWork)
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "conversation_not_started" {
@@ -29113,7 +29120,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertCausalTail))
+                    == Some(LiveContextRowDisposition::ReassertCausalTail)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayRuntimeWork))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "close_revoked_delivery" { self.live_revoked_execution_channels.contains(channel_id) }
@@ -29147,7 +29156,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
                     || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertCausalTail))
+                    == Some(LiveContextRowDisposition::ReassertCausalTail)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReplayRuntimeWork))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "recovery_owns_replacement" {

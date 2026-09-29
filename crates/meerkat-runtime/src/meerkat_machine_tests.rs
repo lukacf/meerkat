@@ -14935,6 +14935,174 @@ async fn wedged_exact_interrupt_releases_mutation_gate_deduplicates_and_cannot_r
     ));
 }
 
+/// A delivered exact-run interrupt stays delivered when the interrupted run
+/// reaches its terminal before the dispatch reconciles: the executor fenced
+/// the callback to that run, so the caller gets `true`, and the dispatch slot
+/// is released because no retry can join a run that is no longer bound.
+#[tokio::test]
+async fn exact_interrupt_is_delivered_when_the_run_terminates_before_reconcile() {
+    struct TerminatingInterruptHandle {
+        calls: Arc<AtomicUsize>,
+        release_apply: Arc<Notify>,
+        run_terminal: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorInterruptHandle for TerminatingInterruptHandle {
+        async fn hard_cancel_run_if_current(
+            &self,
+            _expected_run_id: &RunId,
+            _reason: String,
+        ) -> Result<bool, CoreExecutorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            // The interrupt ends the run, and the run's terminal commits
+            // before this callback returns and the dispatch reconciles.
+            self.release_apply.notify_one();
+            self.run_terminal.notified().await;
+            Ok(true)
+        }
+    }
+
+    struct BlockingExecutor {
+        interrupt: Arc<TerminatingInterruptHandle>,
+        apply_started: Arc<Notify>,
+        release_apply: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+            Some(self.interrupt.clone())
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_started.notify_one();
+            self.release_apply.notified().await;
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let apply_started = Arc::new(Notify::new());
+    let release_apply = Arc::new(Notify::new());
+    let run_terminal = Arc::new(Notify::new());
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                interrupt: Arc::new(TerminatingInterruptHandle {
+                    calls: Arc::clone(&calls),
+                    release_apply: Arc::clone(&release_apply),
+                    run_terminal: Arc::clone(&run_terminal),
+                }),
+                apply_started: Arc::clone(&apply_started),
+                release_apply: Arc::clone(&release_apply),
+            }),
+        )
+        .await
+        .expect("attach terminating interrupt fixture");
+
+    let (outcome, completion) = machine
+        .accept_input_with_completion(
+            &session_id,
+            Input::Prompt(crate::input::PromptInput::new("run A", None)),
+        )
+        .await
+        .expect("admit run A");
+    assert!(outcome.is_accepted());
+    let completion = completion.expect("run A completion");
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("run A starts");
+    let run_a = machine
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("run A snapshot")
+        .control
+        .current_run_id
+        .expect("run A id");
+
+    let observer_machine = Arc::clone(&machine);
+    let observer_session = session_id.clone();
+    let observer_terminal = Arc::clone(&run_terminal);
+    let observer = tokio::spawn(async move {
+        let outcome = completion.wait_authorized().await;
+        assert!(
+            observer_machine
+                .meerkat_machine_spine_snapshot(&observer_session)
+                .await
+                .expect("snapshot after run A terminal")
+                .control
+                .current_run_id
+                .is_none(),
+            "run A is unbound before the interrupt callback returns"
+        );
+        observer_terminal.notify_one();
+        outcome
+    });
+
+    assert!(
+        machine
+            .hard_cancel_run_if_current(&session_id, &run_a, "interrupt that ends the run")
+            .await
+            .expect("exact-run interrupt"),
+        "a delivered interrupt is reported delivered even after its run ended"
+    );
+    tokio::time::timeout(Duration::from_secs(1), observer)
+        .await
+        .expect("run A terminal observed")
+        .expect("observer task");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let sessions = machine.sessions.read().await;
+    assert!(
+        sessions
+            .get(&session_id)
+            .and_then(|entry| entry.pending_user_interrupt_dispatch.as_ref())
+            .is_none(),
+        "the dispatch slot of an ended run is released"
+    );
+    drop(sessions);
+
+    // A retry for the ended run is a stale interrupt: nothing is dispatched.
+    assert!(
+        !machine
+            .hard_cancel_run_if_current(&session_id, &run_a, "late retry")
+            .await
+            .expect("stale exact-run interrupt")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn panicked_exact_interrupt_clears_retry_slot_and_cannot_reach_successor() {
     struct PanicOnceInterruptHandle {

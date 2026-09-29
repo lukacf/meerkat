@@ -136,20 +136,26 @@ impl MeerkatMachine {
                 .as_ref()
                 == Some(expected_run_id)
         };
-        let result = if run_is_current {
-            match callback_result {
-                Ok(true) => Ok(true),
-                Ok(false) => Err(RuntimeDriverError::InterruptDispatchOutcomeUnknown {
-                    run_id: expected_run_id.clone(),
-                    reason: "executor reported the exact run non-current while machine authority still binds it"
-                        .to_string(),
-                }),
-                Err(error) => Err(error),
-            }
-        } else {
-            Ok(false)
+        let result = match (run_is_current, callback_result) {
+            // The executor fences the callback to the exact run, and the
+            // attachment, handle and dispatch slot still match. So a delivered
+            // interrupt stays delivered even when the run has already reached
+            // its terminal (typically because of this interrupt) before this
+            // reconcile reacquired the gate.
+            (_, Ok(true)) => Ok(true),
+            (true, Ok(false)) => Err(RuntimeDriverError::InterruptDispatchOutcomeUnknown {
+                run_id: expected_run_id.clone(),
+                reason: "executor reported the exact run non-current while machine authority still binds it"
+                    .to_string(),
+            }),
+            (true, Err(error)) => Err(error),
+            (false, Ok(false) | Err(_)) => Ok(false),
         };
-        if matches!(result, Ok(true)) {
+        // Only a delivered interrupt whose run is still bound keeps its slot
+        // for same-run retries to join. Once the run has left machine
+        // authority no retry can join it (the compare answers `false`), so the
+        // slot is released like a failed dispatch.
+        if run_is_current && matches!(result, Ok(true)) {
             result_tx.send_replace(Some(result.clone()));
         } else {
             let mut sessions = self.sessions.write().await;

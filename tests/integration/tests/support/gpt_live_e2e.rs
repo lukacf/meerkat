@@ -811,10 +811,9 @@ pub fn format_timeline(timeline: &[TimelineEntry]) -> String {
     let mut out = String::new();
     for entry in timeline {
         let detail = entry.detail.to_string();
-        let detail = if detail.len() > 240 {
-            format!("{}...", &detail[..240])
-        } else {
-            detail
+        let detail = match detail.char_indices().nth(240) {
+            Some((cut, _)) => format!("{}...", &detail[..cut]),
+            None => detail,
         };
         out.push_str(&format!(
             "  {:>8} ms  {:<22} {detail}\n",

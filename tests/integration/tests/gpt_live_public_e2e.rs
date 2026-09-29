@@ -2972,6 +2972,36 @@ fn unprompted_assistant_response_starts(timeline: &[TimelineEntry], from_ms: u64
     unprompted
 }
 
+/// Readout lines an assistant response at or after `from_ms` speaks more
+/// than once (a duplicate readout inside one response).
+///
+/// A response is the peer's `response` index, so an unprompted second readout
+/// with no user speech in between lands in the same response as the first;
+/// its lines repeat. Lines split on newlines and sentence ends; a kickoff
+/// brief's lines are short ("Client: Marigold account."), so the floor is
+/// three words, below the peer's own five-word sentence fault.
+fn repeated_readout_lines(timeline: &[TimelineEntry], from_ms: u64) -> Vec<String> {
+    let mut repeated = Vec::new();
+    for entry in timeline
+        .iter()
+        .filter(|e| e.kind == TimelineKind::ResponseEnd && e.t_ms >= from_ms)
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        for line in entry
+            .detail_str("text")
+            .unwrap_or_default()
+            .split(['\n', '.', '!', '?'])
+            .map(normalize_words)
+            .filter(|line| line.split(' ').count() >= 3)
+        {
+            if !seen.insert(line.clone()) && !repeated.contains(&line) {
+                repeated.push(line);
+            }
+        }
+    }
+    repeated
+}
+
 // ===========================================================================
 // Scenario 100: morning standup (timed multi-turn voice session)
 // ===========================================================================
@@ -4878,6 +4908,12 @@ async fn run_s103_interrupt_and_recover(
         if !unprompted_starts.is_empty() {
             deterministic_failures.push(format!(
                 "assistant audio started without a new input final or commentary at ms {unprompted_starts:?} (duplicate readout)"
+            ));
+        }
+        let repeated_lines = repeated_readout_lines(&timeline, barge_in_start_ms);
+        if !repeated_lines.is_empty() {
+            deterministic_failures.push(format!(
+                "an assistant response repeated readout lines after the barge-in (duplicate readout): {repeated_lines:?}"
             ));
         }
         record_tolerant(
@@ -7800,25 +7836,50 @@ mod config_tests {
         assert!(super::unprompted_assistant_response_starts(&entries, 53787).is_empty());
     }
 
+    /// The brief read once, line by line, then read again from its first line
+    /// with no user speech in between: one peer response whose short lines
+    /// repeat. The burst rule cannot see it (same response index); the
+    /// readout-line rule does.
     #[test]
-    fn s103_new_response_without_a_final_or_commentary_is_unprompted() {
+    fn s103_second_unprompted_readout_of_short_brief_lines_is_flagged() {
         use serde_json::json;
+        let brief = "Client: Marigold account.\nKickoff: Tuesday afternoon.\nVenue: Copenhagen office downstairs.\nDeck codename: Pelican.";
         let entries = timeline(&[
-            (1000, "input_final", json!({"index": 0})),
-            (1200, "assistant_audio_start", json!({"response": 1})),
-            // This final closed while the assistant was still audible; the
-            // next response has no final or commentary after that.
-            (2900, "input_final", json!({"index": 1})),
+            (53790, "fixture_start", json!({"id": 2})),
+            (61287, "assistant_audio_start", json!({"response": 2})),
             (
-                3700,
+                66287,
                 "assistant_audio_end",
-                json!({"last_active_ms": 3000, "response": 1}),
+                json!({"last_active_ms": 65687, "response": 2}),
             ),
-            (5000, "assistant_audio_start", json!({"response": 2})),
+            (70100, "assistant_audio_start", json!({"response": 2})),
+            (
+                75000,
+                "response_end",
+                json!({"index": 2, "chars": 200, "text": format!("{brief}\n{brief}")}),
+            ),
         ]);
+        assert!(super::unprompted_assistant_response_starts(&entries, 53790).is_empty());
         assert_eq!(
-            super::unprompted_assistant_response_starts(&entries, 0),
-            vec![5000]
+            super::repeated_readout_lines(&entries, 53790),
+            vec![
+                "client marigold account",
+                "kickoff tuesday afternoon",
+                "venue copenhagen office downstairs",
+                "deck codename pelican"
+            ]
         );
+    }
+
+    /// One readout of the brief, and a confirmation after it, repeat nothing.
+    #[test]
+    fn s103_single_readout_repeats_no_lines() {
+        use serde_json::json;
+        let entries = timeline(&[(
+            75000,
+            "response_end",
+            json!({"index": 2, "chars": 150, "text": "Client: Marigold account.\nKickoff: Friday afternoon.\nVenue: Copenhagen office downstairs.\nGot it. I updated the brief."}),
+        )]);
+        assert!(super::repeated_readout_lines(&entries, 0).is_empty());
     }
 }

@@ -352,7 +352,9 @@ async function prepare(command) {
           state.pushFault({ duplicate_readout: { text: sentence.slice(0, 200), response: state.response.index } });
         }
       }
-      state.pushTimeline('response_end', { index: state.response.index, chars: text.length });
+      // The text travels with the entry so scenarios can check a readout for
+      // repeated lines (short brief lines fall under the 5-word floor above).
+      state.pushTimeline('response_end', { index: state.response.index, chars: text.length, text: text.slice(0, 8000) });
       state.response = { text: '', started_ms: null, index: state.response.index + 1 };
     };
     // Close the open utterance now (`reason`: 'delegation' when

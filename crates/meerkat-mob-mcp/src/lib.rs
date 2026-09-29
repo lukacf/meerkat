@@ -51,6 +51,7 @@ pub use workgraph_flow::{
 #[cfg(target_arch = "wasm32")]
 mod tokio {
     pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::spawn;
     pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }

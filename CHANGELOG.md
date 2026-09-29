@@ -203,6 +203,18 @@ them.
   actor's roster projection changed, instead of on every applied machine
   input. An input that leaves both unchanged no longer wakes watchers
   (#1250). Consumers already treat a wake as "re-project now".
+- The `@rkat/web` wasm runtime boxes every future it spawns before handing it
+  to `tokio_with_wasm`'s spawn wrapper (`meerkat_core::tokio::spawn` and
+  `task::JoinSet`, which every wasm crate's `tokio` alias now routes through).
+  The wrapper was monomorphized per future and moved the future by value, so
+  each instance's shadow-stack frame was about the size of its future: at the
+  release build (opt-level "s") the largest of 464 instances was 125,440
+  bytes. It is now instantiated per output type (70 instances), and the
+  largest is 4,512 bytes. A turn's shadow-stack high-water in the
+  packed-package smoke fell from 230,404 to 115,892 bytes (#1230). The
+  web SDK build now fails when a spawn wrapper frame of the release build
+  exceeds 8 KiB (`sdks/web/scripts/wasm-frames.mjs`, which also lists any
+  module's largest frames by name).
 
 ### Fixed
 

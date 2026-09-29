@@ -78,13 +78,56 @@ impl LlmClient for TextClient {
 }
 
 fn spawn_child(root: &Path) -> std::process::Child {
+    let log = std::fs::File::create(root.join("child.log")).expect("child log");
     std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
         .env(ROOT_ENV, root)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(log.try_clone().expect("child log"))
+        .stderr(log)
         .spawn()
         .expect("spawn child")
+}
+
+/// Run the gateway child until it reports the terminal-commit pause, then
+/// SIGKILL it (by pid) and confirm it exited.
+///
+/// A watcher thread owns the child and waits for its exit. If the child dies
+/// before it reports the pause, the watcher writes `exited` into the fifo,
+/// which unblocks the read instead of leaving the test hung, and the failure
+/// then shows the child's output.
+async fn run_gateway_until_paused_then_kill(root: &Path) {
+    let fifo = root.join("phase.fifo");
+    let child = spawn_child(root);
+    let pid = child.id();
+    let paused_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (exited_tx, exited_rx) = std::sync::mpsc::channel::<()>();
+    {
+        let fifo = fifo.clone();
+        let paused_seen = Arc::clone(&paused_seen);
+        std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+            let _ = exited_tx.send(());
+            if !paused_seen.load(Ordering::SeqCst) {
+                let _ = std::fs::write(fifo, "exited\n");
+            }
+        });
+    }
+    let reported = read_fifo(fifo).await;
+    if reported.as_deref().map(str::trim) != Some("held") {
+        let log = std::fs::read_to_string(root.join("child.log")).unwrap_or_default();
+        panic!("gateway did not reach its terminal-commit pause ({reported:?}); output:\n{log}");
+    }
+    paused_seen.store(true, Ordering::SeqCst);
+    let status = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .expect("kill gateway");
+    assert!(status.success(), "kill -9 {pid}");
+    tokio::task::spawn_blocking(move || exited_rx.recv())
+        .await
+        .unwrap()
+        .expect("gateway exit observed");
 }
 
 fn mkfifo(path: &Path) {
@@ -247,11 +290,7 @@ async fn lazy_resume_after_an_uncommitted_run_terminal_serves_the_next_turn() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path();
     mkfifo(&root.join("phase.fifo"));
-    let mut gateway = spawn_child(root);
-    let held = read_fifo(root.join("phase.fifo")).await;
-    gateway.kill().unwrap();
-    gateway.wait().unwrap();
-    assert_eq!(held.as_deref().map(str::trim), Some("held"));
+    run_gateway_until_paused_then_kill(root).await;
     let session_id = std::fs::read_to_string(root.join("session-id"))
         .expect("session id")
         .trim()
@@ -269,6 +308,12 @@ async fn lazy_resume_after_an_uncommitted_run_terminal_serves_the_next_turn() {
         )
         .await;
     assert_eq!(result["text"], "answered", "{result}");
+    assert_eq!(
+        client.requests.load(Ordering::SeqCst),
+        1,
+        "the resumed session makes exactly one model call: the interrupted run was \
+         committed by durable-tail recovery, not rolled back and re-run"
+    );
 
     let history = rpc
         .call(

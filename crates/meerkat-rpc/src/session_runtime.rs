@@ -2761,6 +2761,18 @@ impl SessionRuntime {
         Ok(true)
     }
 
+    /// Resolve a crash-window provisional tail before this host starts or
+    /// attaches `session_id` (see
+    /// [`PersistentSessionService::prepare_cold_attach`]). Called at every
+    /// start/attach entry point before its archive and existence prechecks,
+    /// never on plain reads.
+    pub(crate) async fn prepare_cold_attach(&self, session_id: &SessionId) -> Result<(), RpcError> {
+        self.service
+            .prepare_cold_attach(session_id)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
     pub async fn reject_archived_persisted_session_without_live(
         &self,
         session_id: &SessionId,
@@ -6977,6 +6989,7 @@ impl SessionRuntime {
         // schedules against this runtime's store — the firing host must be
         // live in the same process (see arm_schedule_host_for_agent_tools).
         self.arm_schedule_host_for_agent_tools().await;
+        self.prepare_cold_attach(session_id).await?;
         if self
             .archived_persisted_session_without_live(session_id)
             .await?
@@ -7100,6 +7113,7 @@ impl SessionRuntime {
         self: &Arc<Self>,
         session_id: &SessionId,
     ) -> Result<(), meerkat_core::service::SessionError> {
+        self.service.prepare_cold_attach(session_id).await?;
         self.reject_archived_persisted_session_without_live(session_id)
             .await
             .map_err(|_| meerkat_core::service::SessionError::NotFound {
@@ -7190,6 +7204,7 @@ impl SessionRuntime {
                 data: None,
             });
         }
+        self.prepare_cold_attach(session_id).await?;
         self.reject_archived_persisted_session_without_live(session_id)
             .await?;
         let effective_identity = self
@@ -7623,6 +7638,7 @@ impl SessionRuntime {
             ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
         };
 
+        self.prepare_cold_attach(session_id).await?;
         self.reject_archived_persisted_session_without_live(session_id)
             .await?;
 
@@ -8608,6 +8624,7 @@ impl SessionRuntime {
                     return Err(session_error_to_rpc(SessionError::Busy { id: id.clone() }));
                 }
                 let session = if resume_id.is_some() {
+                    runtime.prepare_cold_attach(&id).await?;
                     runtime
                         .reject_archived_persisted_session_without_live(&id)
                         .await?;

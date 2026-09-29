@@ -748,14 +748,21 @@ them.
     every host's cold precheck (`load_authoritative_session`) failed closed
     on that mismatch. Durable-tail recovery, the only owner of the tail,
     runs later, in actor resume preparation.
-  - Fix: `PersistentSessionService::load_authoritative_session` now resolves
-    the typed `TranscriptRevisionConflict` through the same store-owned,
-    machine-authorized durable-tail recovery, then reads again. This happens
-    only when the profile is HeadCanonical, a provisional tail is recorded,
-    and no live actor owns the session. The interrupted run is then
-    committed exactly once.
-  - Held or refused recovery still surfaces the original conflict.
-    Observation reads never recover.
+  - Fix: the new `PersistentSessionService::prepare_cold_attach(id)` runs
+    the same store-owned, machine-authorized durable-tail recovery that
+    resume preparation runs. It acts only when the profile is HeadCanonical,
+    a provisional tail is recorded, and no live actor owns the session. Hosts
+    call it only on start and attach paths, before their prechecks: RPC
+    `turn/start`, external events, resume, rotation and
+    `ensure_runtime_executor`; MCP `meerkat_resume`; and the REST
+    persisted-only executor preparation. The interrupted run is then
+    committed exactly once, so a tool-process custody record has nothing
+    left to settle.
+  - Plain reads (`load_authoritative_session`, history, status) never
+    recover. They keep returning the typed conflict, because another process
+    may still be committing that run. Held or refused recovery, or a
+    recovery error, is logged and leaves the caller's read to surface the
+    original conflict.
 
 - `make wasm-check` failed on the release branch: the `test-support` fork
   supervisor hook called `JoinError::is_panic`, which wasm32's

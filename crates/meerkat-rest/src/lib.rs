@@ -822,6 +822,13 @@ async fn prepare_rest_session_runtime_executor_locked(
                 "persisted-only REST runtime preparation lost admission for input {input_id}"
             ))
         })?;
+        // Attaching a persisted-only session: resolve a crash-window
+        // provisional tail before the committed read.
+        state
+            .session_service
+            .prepare_cold_attach(session_id)
+            .await
+            .map_err(runtime_driver_error_from_session_error)?;
         let session = state
             .session_service
             .load_authoritative_session(session_id)

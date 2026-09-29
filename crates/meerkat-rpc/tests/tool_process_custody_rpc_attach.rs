@@ -422,14 +422,10 @@ async fn rpc_on_demand_attach_settles_an_interrupted_run_instead_of_replaying_it
 
 /// Crash window: the run finished (its tool ran once) and its provisional
 /// tail was written, but the host died before the run's boundary committed.
-/// Durable-tail recovery owns that run (it commits it when the host rebuilds
-/// the agent), so the on-demand attach must not also settle it: its evidence
-/// stays unsettled (no request captured, no input abandoned, no notice) and
-/// the finished tool is not re-run.
-///
-/// The turn that follows is not asserted: on this path the RPC host's lazy
-/// resume currently rejects the session with a transcript revision mismatch
-/// whether or not process custody is enabled, which is outside custody.
+/// Durable-tail recovery owns that run. The cold attach resolves it first
+/// (#1285): the run is committed exactly once, so custody has nothing left to
+/// settle (no record remains, no notice is shown), the finished tool is not
+/// re-run, and the next turn is served with a single model call.
 #[tokio::test]
 async fn a_run_with_a_provisional_tail_is_left_to_durable_tail_recovery() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -458,21 +454,29 @@ async fn a_run_with_a_provisional_tail_is_left_to_durable_tail_recovery() {
             serde_json::json!({ "session_id": session_id, "prompt": NEXT_PROMPT }),
         )
         .await;
-    let _response = rpc.response(id).await;
-
-    let records: Vec<serde_json::Value> = std::fs::read_dir(&scope)
-        .expect("custody scope")
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
-        .map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap())
-        .collect();
-    assert_eq!(records.len(), 1, "{records:?}");
-    assert_eq!(records[0]["phase"], "interrupted");
-    assert_eq!(records[0]["cessation"]["kind"], "exited_before_commit");
+    let response = rpc.response(id).await;
+    assert!(
+        response["error"].is_null(),
+        "the turn after the crash window is served: {response}"
+    );
     assert_eq!(
-        records[0]["settlement"]["settlement"], "pending",
-        "the run with a provisional tail must not be settled: {}",
-        records[0]
+        client.requests.load(Ordering::SeqCst),
+        1,
+        "one model call: the interrupted run was committed, not rolled back and re-run"
+    );
+
+    let records: Vec<serde_json::Value> = match std::fs::read_dir(&scope) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
+            .map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap())
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("custody scope: {error}"),
+    };
+    assert!(
+        records.is_empty(),
+        "a run durable-tail recovery committed leaves no custody record to settle: {records:?}"
     );
     assert_eq!(
         client.requests_seeing_notice.load(Ordering::SeqCst),

@@ -17827,6 +17827,105 @@ async fn assert_stopped_restart_resume_publishes_preserved_member_peer_endpoint(
     );
 }
 
+/// A restored member whose live endpoint no longer matches its durable
+/// generation endpoint (here: a lost comms identity store across the restart)
+/// is recorded Broken on its own, with a reason naming the mismatch and the
+/// respawn action. The explicit Resume still succeeds and every other member
+/// publishes its preserved endpoint (#1262).
+#[tokio::test]
+async fn test_stopped_cold_restart_resume_breaks_only_the_member_with_a_changed_endpoint() {
+    let definition = with_unique_mob_id(sample_definition(), "stopped-restart-endpoint-mismatch");
+    let service = Arc::new(MockSessionService::new());
+    let _adapter = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob before stopped restart");
+    let changed = AgentIdentity::from("changed");
+    let healthy = AgentIdentity::from("healthy");
+    for identity in [&changed, &healthy] {
+        let mut spec = SpawnMemberSpec::new("worker", identity.clone());
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        handle.spawn_spec(spec).await.expect("spawn member");
+    }
+    handle
+        .wire(changed.clone(), healthy.clone())
+        .await
+        .expect("wire members before stop");
+    let changed_session = handle
+        .resolve_bridge_session_id(&changed)
+        .await
+        .expect("changed member session");
+    let changed_peer_id = handle
+        .get_member(&changed)
+        .await
+        .unwrap()
+        .and_then(|entry| entry.peer_id())
+        .expect("changed member peer id at spawn");
+    let healthy_peer_id = handle
+        .get_member(&healthy)
+        .await
+        .unwrap()
+        .and_then(|entry| entry.peer_id())
+        .expect("healthy member peer id at spawn");
+    handle.stop().await.expect("persist clean stop");
+    let restarted = Arc::new(service.cold_restart_preserving_durable_state().await);
+    let _ = restarted.enable_runtime_adapter();
+    crash_stop_and_release_routes(handle).await;
+    drop(service);
+    // The member's comms identity did not survive the restart: its session
+    // rematerializes with a different key than its durable endpoint.
+    restarted
+        .set_comms_identity_seed(&changed_session, "lost-identity-store")
+        .await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(restarted.clone())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("reconstruct stopped mob");
+    resumed
+        .resume()
+        .await
+        .expect("one member's endpoint mismatch must not fail the whole resume");
+    assert_eq!(resumed.status().await.unwrap(), MobState::Running);
+
+    let members = resumed.list_members().await;
+    let changed_entry = members
+        .iter()
+        .find(|entry| entry.agent_identity == changed)
+        .expect("changed member listed");
+    assert_eq!(changed_entry.status, MobMemberStatus::Broken);
+    assert_eq!(
+        changed_entry.peer_id, None,
+        "nothing is published for a member whose endpoint changed"
+    );
+    assert_ne!(changed_entry.peer_id, Some(changed_peer_id));
+    let reason = changed_entry
+        .error
+        .clone()
+        .expect("the Broken member carries its typed reason");
+    assert!(
+        reason.contains("disagrees with its durable generation endpoint")
+            && reason.contains("respawn the member"),
+        "reason names the mismatch and the repair: {reason}"
+    );
+    let healthy_entry = members
+        .iter()
+        .find(|entry| entry.agent_identity == healthy)
+        .expect("healthy member listed");
+    assert_eq!(healthy_entry.status, MobMemberStatus::Active);
+    assert_eq!(healthy_entry.peer_id, Some(healthy_peer_id));
+}
+
 #[tokio::test]
 async fn test_stopped_wired_member_retire_converges_topology_and_trust() {
     let (handle, service) = create_test_mob(sample_definition()).await;

@@ -1520,7 +1520,7 @@ impl SeededMobTopologyFreshness
     }
 }
 
-fn apply_seeded_mob_signal(
+pub(super) fn apply_seeded_mob_signal(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     signal: crate::machines::mob_machine::MobMachineSignal,
     context: &'static str,
@@ -1951,6 +1951,7 @@ pub(super) async fn reconcile_resume_topology(
     runtime_metadata: &Arc<dyn crate::store::MobRuntimeMetadataStore>,
     dsl_authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     topology_epoch: &Arc<std::sync::atomic::AtomicU64>,
+    restore_diagnostics: &RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>,
 ) -> Result<(), MobError> {
     use super::actor::resume_topology;
 
@@ -1965,6 +1966,7 @@ pub(super) async fn reconcile_resume_topology(
     // these effects run. An unsettled effect is reported to the caller instead
     // of being handed to an owner that does not exist.
     let mut custody = resume_topology::ResumeTopologyEffectCustodyLedger::default();
+    let mut restore_failures = Vec::new();
     let mut router = resume_topology::DirectResumeTopologyAuthority::new(
         resume_topology::ResumeTopologyAuthorityContext {
             mob_id: &definition.id,
@@ -1972,9 +1974,14 @@ pub(super) async fn reconcile_resume_topology(
             roster,
             topology_epoch,
             custody: &mut custody,
+            restore_failures: &mut restore_failures,
         },
     );
-    match resume_topology::reconcile_resume_topology_workflow(&io, &mut router).await {
+    let outcome = resume_topology::reconcile_resume_topology_workflow(&io, &mut router).await;
+    if !restore_failures.is_empty() {
+        restore_diagnostics.write().await.extend(restore_failures);
+    }
+    match outcome {
         resume_topology::ResumeTopologyOutcome::Settled(result) => result,
         resume_topology::ResumeTopologyOutcome::Unsettled(effect) => {
             Err(MobError::ExternalMemberCleanupUncertain {
@@ -9352,6 +9359,7 @@ impl MobBuilder {
             &runtime_metadata,
             dsl_authority,
             topology_epoch,
+            &tool_handle.restore_diagnostics,
         )
         .await?;
         if notify_orchestrator_on_resume && let Some(orchestrator) = &definition.orchestrator {

@@ -248,10 +248,18 @@ them.
   carries no live endpoint, and only the Running cold-boot path refreshed
   it. The shared resume topology workflow, which both cold boot and
   explicit Resume run, now publishes each local member's live peer ID and
-  key into the roster projection through a typed, incarnation-bound delta
-  that must agree with the member's durable MobMachine endpoint, before
-  Resume returns and before any new turn or topology operation. No turn,
-  respawn or host roster edit is needed.
+  key (read side-effect free, from one runtime observation) into the roster
+  projection through a typed delta bound to the member's incarnation and
+  bridge session, before Resume returns and before any new turn or topology
+  operation. No turn, respawn or host roster edit is needed. When a
+  restored member's live endpoint disagrees with its durable generation
+  endpoint (for example a lost identity store or a changed advertise
+  address) or exposes no usable endpoint, only that member is recorded
+  Broken, with a reason naming the mismatch and the respawn action, and
+  nothing is published for it; the other members and the Resume carry on.
+  A placed (host-owned) member's durable host-acknowledged peer ID, which
+  spawn projects but replay dropped, is republished the same way after both
+  Running and Stopped restarts.
 - `MobHandle::subscribe_mob_events` returns only once the router is
   subscribed to every member it starts with (local session streams and
   placed members' pump taps). Those subscriptions used to be made inside the

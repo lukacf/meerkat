@@ -1085,6 +1085,103 @@ impl ProviderTag {
             }),
         }
     }
+
+    /// Inverse of [`Self::merge_missing_from`]: clear every knob on `self`
+    /// whose value is exactly the one `defaults` would have filled in.
+    ///
+    /// What remains is what the caller asked for beyond the build-derived
+    /// request defaults (cache policy, native tool bodies). A tag of another
+    /// provider family, or an opaque tag, shares no defaults and is left
+    /// untouched.
+    pub fn clear_matching_defaults(&mut self, defaults: &ProviderTag) {
+        fn clear<T: PartialEq>(target: &mut Option<T>, default: &Option<T>) {
+            if default.is_some() && target == default {
+                *target = None;
+            }
+        }
+        match (self, defaults) {
+            (Self::Anthropic(target), Self::Anthropic(default)) => {
+                clear(&mut target.thinking, &default.thinking);
+                clear(
+                    &mut target.thinking_budget_tokens,
+                    &default.thinking_budget_tokens,
+                );
+                clear(&mut target.web_search, &default.web_search);
+                clear(&mut target.top_k, &default.top_k);
+                clear(&mut target.effort, &default.effort);
+                clear(&mut target.structured_output, &default.structured_output);
+                clear(&mut target.inference_geo, &default.inference_geo);
+                clear(&mut target.compaction, &default.compaction);
+                clear(&mut target.context, &default.context);
+                clear(&mut target.cache_control, &default.cache_control);
+                clear(&mut target.cache_ttl, &default.cache_ttl);
+                clear(
+                    &mut target.supports_temperature_override,
+                    &default.supports_temperature_override,
+                );
+            }
+            (Self::OpenAi(target), Self::OpenAi(default)) => {
+                clear(&mut target.reasoning_effort, &default.reasoning_effort);
+                clear(&mut target.reasoning_mode, &default.reasoning_mode);
+                clear(&mut target.reasoning_context, &default.reasoning_context);
+                clear(&mut target.text_verbosity, &default.text_verbosity);
+                clear(&mut target.seed, &default.seed);
+                clear(&mut target.frequency_penalty, &default.frequency_penalty);
+                clear(&mut target.presence_penalty, &default.presence_penalty);
+                clear(&mut target.web_search, &default.web_search);
+                clear(&mut target.structured_output, &default.structured_output);
+                clear(&mut target.reasoning, &default.reasoning);
+                clear(
+                    &mut target.chat_template_kwargs,
+                    &default.chat_template_kwargs,
+                );
+                clear(&mut target.thinking, &default.thinking);
+                clear(&mut target.store, &default.store);
+                clear(
+                    &mut target.prompt_cache_enabled,
+                    &default.prompt_cache_enabled,
+                );
+                clear(&mut target.prompt_cache_key, &default.prompt_cache_key);
+                clear(
+                    &mut target.prompt_cache_retention,
+                    &default.prompt_cache_retention,
+                );
+                if let (Some(options), Some(default)) = (
+                    target.prompt_cache_options.as_mut(),
+                    default.prompt_cache_options.as_ref(),
+                ) {
+                    clear(&mut options.mode, &default.mode);
+                    clear(&mut options.ttl, &default.ttl);
+                    if *options == OpenAiPromptCacheOptions::default() {
+                        target.prompt_cache_options = None;
+                    }
+                }
+                clear(
+                    &mut target.supports_temperature_override,
+                    &default.supports_temperature_override,
+                );
+                clear(
+                    &mut target.supports_reasoning_override,
+                    &default.supports_reasoning_override,
+                );
+            }
+            (Self::Gemini(target), Self::Gemini(default)) => {
+                clear(&mut target.thinking, &default.thinking);
+                clear(&mut target.thinking_budget, &default.thinking_budget);
+                clear(&mut target.thinking_level, &default.thinking_level);
+                clear(&mut target.top_k, &default.top_k);
+                clear(&mut target.top_p, &default.top_p);
+                clear(&mut target.structured_output, &default.structured_output);
+                clear(&mut target.google_search, &default.google_search);
+                clear(&mut target.candidate_count, &default.candidate_count);
+                clear(
+                    &mut target.cached_content_name,
+                    &default.cached_content_name,
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Config-resident typed owner of provider parameter facts.
@@ -2537,6 +2634,64 @@ mod tests {
             Some(AnthropicCacheTtl::FiveMinutes),
             "an explicit per-turn cache_ttl wins over the profile"
         );
+    }
+
+    /// Clearing the build-derived defaults out of a merged tag leaves exactly
+    /// the knobs the caller set: a value equal to the default is cleared, a
+    /// value that differs from it survives, and a nested cache-options slot
+    /// that only held defaults disappears.
+    #[test]
+    fn clear_matching_defaults_is_the_inverse_of_the_default_merge() {
+        let defaults = ProviderTag::OpenAi(OpenAiProviderTag {
+            prompt_cache_enabled: Some(true),
+            prompt_cache_key: Some("meerkat:profile:openai:gpt-6-astra".into()),
+            prompt_cache_options: Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Implicit),
+                ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+            }),
+            ..Default::default()
+        });
+
+        let mut merged = ProviderTag::OpenAi(OpenAiProviderTag::default());
+        merged
+            .merge_missing_from(&defaults)
+            .expect("same provider family merges");
+        merged.clear_matching_defaults(&defaults);
+        assert_eq!(merged, ProviderTag::OpenAi(OpenAiProviderTag::default()));
+
+        let mut explicit = ProviderTag::OpenAi(OpenAiProviderTag {
+            seed: Some(7),
+            prompt_cache_key: Some("caller-bucket".into()),
+            prompt_cache_options: Some(OpenAiPromptCacheOptions {
+                mode: Some(OpenAiPromptCacheMode::Explicit),
+                ttl: None,
+            }),
+            ..Default::default()
+        });
+        explicit
+            .merge_missing_from(&defaults)
+            .expect("same provider family merges");
+        explicit.clear_matching_defaults(&defaults);
+        assert_eq!(
+            explicit,
+            ProviderTag::OpenAi(OpenAiProviderTag {
+                seed: Some(7),
+                prompt_cache_key: Some("caller-bucket".into()),
+                prompt_cache_options: Some(OpenAiPromptCacheOptions {
+                    mode: Some(OpenAiPromptCacheMode::Explicit),
+                    ttl: None,
+                }),
+                ..Default::default()
+            })
+        );
+
+        let mut foreign = ProviderTag::Anthropic(AnthropicProviderTag {
+            effort: Some(AnthropicEffort::High),
+            ..Default::default()
+        });
+        let before = foreign.clone();
+        foreign.clear_matching_defaults(&defaults);
+        assert_eq!(foreign, before, "another family shares no defaults");
     }
 
     /// Anthropic cache knobs live on the typed provider tag. The nested form is

@@ -391,12 +391,12 @@
       "name": "haul_e6",
       "file": "haul-e6.wav",
       "voice": "shimmer",
-      "text": "Have the executor count how many words are in that notes file and tell me the number.",
-      "sha256": "674de4ca81a1bbe5ade0414b6d9b5ca3c7ca27aadb914251803a5b28c02528a5",
-      "duration_ms": 6759,
+      "text": "Have the executor add one closing sentence about foghorns to that notes file, then tell me its new word count.",
+      "sha256": "5f983f0bf4131817438d54b46144fe8b470fa529a7bf50eb97d453e66203dace",
+      "duration_ms": 7831,
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1580,
-      "notes": "S106 exchange 6 (delegated); the second close and reopen follow. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
+      "notes": "S106 exchange 6 (delegated): a file edit only the executor can make, whose new word count nobody has heard yet (the earlier count request was answered natively from the exchange 3 result); the second close and reopen follow. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
     },
     {
       "name": "haul_e7",

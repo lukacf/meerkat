@@ -1,9 +1,17 @@
-//! macOS process identity, group enumeration, and exit notification.
+//! macOS process identity, group enumeration, signalling, and exit
+//! notification.
 //!
 //! Identity is the kernel's absolute process start time from
 //! `proc_pidinfo(PROC_PIDTBSDINFO)`; a recycled pid can never carry the same
 //! start time. Exit notification uses a kqueue `EVFILT_PROC`/`NOTE_EXIT`
 //! registration, which works for processes this process did not spawn.
+//!
+//! Another user's process can never be one this host spawned and may
+//! signal: `PROC_PIDTBSDINFO` either reports its uid (compared with our
+//! effective uid) or refuses with EPERM. Both are a typed
+//! [`ProcessProbe::Foreign`], never an I/O error.
+//! (`PROC_PIDT_SHORTBSDINFO` is readable for every process but carries no
+//! start time, so it cannot establish identity.)
 
 #![allow(unsafe_code)]
 
@@ -13,9 +21,11 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::Instant;
 
 use nix::libc;
+use uuid::Uuid;
 
 use super::{
-    ExitWaitOutcome, HostEnvironment, ProcessIdentity, ProcessSnapshot, ProcessStartStamp,
+    ExitWaitOutcome, HostEnvironment, ProcessIdentity, ProcessProbe, ProcessSnapshot,
+    ProcessStartStamp,
 };
 
 /// Reset errno so a failure is never misread from a stale value.
@@ -24,16 +34,14 @@ fn clear_errno() {
     unsafe { *libc::__error() = 0 };
 }
 
-/// Whether a process with `pid` exists, independent of proc_info.
-fn pid_exists(pid: i32) -> io::Result<bool> {
-    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
-        Ok(()) | Err(nix::errno::Errno::EPERM) => Ok(true),
-        Err(nix::errno::Errno::ESRCH) => Ok(false),
-        Err(error) => Err(io::Error::from(error)),
-    }
+/// Outcome of `PROC_PIDTBSDINFO` for one pid.
+enum BsdInfo {
+    Absent,
+    Foreign,
+    Ours(libc::proc_bsdinfo),
 }
 
-fn bsd_info(pid: i32) -> io::Result<Option<libc::proc_bsdinfo>> {
+fn bsd_info(pid: i32) -> io::Result<BsdInfo> {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
     let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
         .map_err(|_| io::Error::other("proc_bsdinfo size out of range"))?;
@@ -51,16 +59,21 @@ fn bsd_info(pid: i32) -> io::Result<Option<libc::proc_bsdinfo>> {
     };
     if written <= 0 {
         let error = io::Error::last_os_error();
-        // PROC_PIDTBSDINFO also describes zombies, so a failure means the
-        // process is gone; confirm that independently before believing it.
-        if pid_exists(pid)? {
-            return Err(if error.raw_os_error().unwrap_or(0) == 0 {
+        if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
+            return Ok(BsdInfo::Foreign);
+        }
+        // PROC_PIDTBSDINFO also describes zombies, so a failure normally
+        // means the process is gone; confirm that independently.
+        return match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
+            Err(nix::errno::Errno::ESRCH) => Ok(BsdInfo::Absent),
+            Err(nix::errno::Errno::EPERM) => Ok(BsdInfo::Foreign),
+            Ok(()) => Err(if error.raw_os_error().unwrap_or(0) == 0 {
                 io::Error::other("proc_pidinfo failed for an existing process")
             } else {
                 error
-            });
-        }
-        return Ok(None);
+            }),
+            Err(other) => Err(io::Error::from(other)),
+        };
     }
     if written != size {
         return Err(io::Error::new(
@@ -70,7 +83,14 @@ fn bsd_info(pid: i32) -> io::Result<Option<libc::proc_bsdinfo>> {
     }
     // SAFETY: zero-initialised plain-integer record fully written by the
     // kernel (checked above).
-    Ok(Some(unsafe { info.assume_init() }))
+    let info = unsafe { info.assume_init() };
+    // SAFETY: geteuid takes no arguments, cannot fail, and touches no
+    // caller memory.
+    let effective_uid = unsafe { libc::geteuid() };
+    if info.pbi_uid != effective_uid {
+        return Ok(BsdInfo::Foreign);
+    }
+    Ok(BsdInfo::Ours(info))
 }
 
 fn snapshot_from_info(info: &libc::proc_bsdinfo) -> io::Result<ProcessSnapshot> {
@@ -84,25 +104,17 @@ fn snapshot_from_info(info: &libc::proc_bsdinfo) -> io::Result<ProcessSnapshot> 
     })
 }
 
-pub(super) fn snapshot(pid: i32) -> io::Result<Option<ProcessSnapshot>> {
-    bsd_info(pid)?.as_ref().map(snapshot_from_info).transpose()
+pub(super) fn probe(pid: i32) -> io::Result<ProcessProbe> {
+    Ok(match bsd_info(pid)? {
+        BsdInfo::Absent => ProcessProbe::Absent,
+        BsdInfo::Foreign => ProcessProbe::Foreign,
+        BsdInfo::Ours(info) => ProcessProbe::Observed(snapshot_from_info(&info)?),
+    })
 }
 
-/// macOS has no pid namespaces, and start stamps are absolute wall-clock
-/// times, so every local process shares one environment.
-pub(super) fn host_environment() -> io::Result<HostEnvironment> {
-    Ok(HostEnvironment::Darwin)
-}
-
-/// Whether exactly this process is still running (not a zombie).
-pub(super) fn is_running(identity: &ProcessIdentity) -> io::Result<bool> {
-    let Some(info) = bsd_info(identity.pid)? else {
-        return Ok(false);
-    };
-    Ok(snapshot_from_info(&info)?.start == identity.start && info.pbi_status != libc::SZOMB)
-}
-
-pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessSnapshot)>> {
+/// Members of group `pgid` as listed by the kernel, excluding processes that
+/// vanished while being read.
+pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessProbe)>> {
     let mut capacity = 256usize;
     let pids = loop {
         let mut buffer = vec![0 as libc::pid_t; capacity];
@@ -129,15 +141,71 @@ pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessSnapshot)>
     };
     let mut members = Vec::with_capacity(pids.len());
     for pid in pids.into_iter().filter(|pid| *pid > 0) {
-        if let Some(info) = bsd_info(pid)? {
-            let snapshot = snapshot_from_info(&info)?;
+        match probe(pid)? {
+            ProcessProbe::Absent => {}
+            ProcessProbe::Foreign => members.push((pid, ProcessProbe::Foreign)),
             // proc_listpgrppids is a point-in-time listing; re-check.
-            if snapshot.pgid == pgid {
-                members.push((pid, snapshot));
+            ProcessProbe::Observed(snapshot) if snapshot.pgid == pgid => {
+                members.push((pid, ProcessProbe::Observed(snapshot)));
             }
+            ProcessProbe::Observed(_) => {}
         }
     }
     Ok(members)
+}
+
+/// The current boot, from `kern.bootsessionuuid`. `None` when the sysctl is
+/// unavailable; recovery then treats boot identity as unknown and relies on
+/// per-process identity checks.
+fn boot_session() -> Option<Uuid> {
+    let name = c"kern.bootsessionuuid";
+    let mut buffer = [0u8; 64];
+    let mut length: libc::size_t = buffer.len();
+    // SAFETY: `name` is NUL-terminated; `buffer` and `length` describe a live
+    // writable region; no new value is set.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast::<libc::c_void>(),
+            &raw mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let raw = buffer.get(..length.min(buffer.len()))?;
+    let text = std::str::from_utf8(raw).ok()?.trim_end_matches('\0');
+    Uuid::parse_str(text.trim()).ok()
+}
+
+/// macOS has no pid namespaces; start stamps are absolute wall-clock times.
+pub(super) fn host_environment() -> io::Result<HostEnvironment> {
+    Ok(HostEnvironment::Darwin {
+        boot_session: boot_session(),
+    })
+}
+
+/// Whether exactly this process is still running (ours, not a zombie).
+pub(super) fn is_running(identity: &ProcessIdentity) -> io::Result<bool> {
+    let BsdInfo::Ours(info) = bsd_info(identity.pid)? else {
+        return Ok(false);
+    };
+    Ok(snapshot_from_info(&info)?.start == identity.start && info.pbi_status != libc::SZOMB)
+}
+
+/// SIGKILL group `pgid`. macOS has no pidfds; the caller has just verified
+/// the group's ownership. EPERM means no member could be signalled by us, so
+/// none is ours; exit watching and re-listing settle the rest.
+pub(super) fn kill_members(pgid: i32, _members: &[ProcessIdentity]) -> io::Result<()> {
+    match nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(pgid),
+        nix::sys::signal::Signal::SIGKILL,
+    ) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM) => Ok(()),
+        Err(error) => Err(io::Error::from(error)),
+    }
 }
 
 /// Exit notification registrations for a set of processes.
@@ -184,20 +252,20 @@ impl ExitWatch {
             };
             if rc < 0 {
                 let error = io::Error::last_os_error();
-                if error.raw_os_error() == Some(libc::ESRCH) {
-                    // Already exited (zombies are not attachable).
-                    continue;
+                match error.raw_os_error() {
+                    // Already exited (zombies are not attachable), or not a
+                    // process we may observe: either way not a live member.
+                    Some(libc::ESRCH | libc::EPERM | libc::EACCES) => continue,
+                    _ => return Err(error),
                 }
-                return Err(error);
             }
             // The registration pins the process it attached to. If the pid
             // was reused before registration, the recorded member is gone;
             // events for the stranger are ignored.
-            let pinned = bsd_info(pid)?
-                .as_ref()
-                .map(snapshot_from_info)
-                .transpose()?;
-            if pinned.is_some_and(|current| current.start == member.start) {
+            if matches!(
+                probe(pid)?,
+                ProcessProbe::Observed(current) if current.start == member.start
+            ) {
                 pending.insert(pid);
             }
         }

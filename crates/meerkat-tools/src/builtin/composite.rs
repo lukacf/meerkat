@@ -37,6 +37,11 @@ pub enum CompositeDispatcherError {
     Io(#[from] std::io::Error),
     #[error("Tool initialization failed for '{name}': {message}")]
     ToolInitFailed { name: String, message: String },
+    /// Earlier-incarnation shell tool processes of the session could not be
+    /// proven stopped; see the error for the operator action.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("shell process custody: {0}")]
+    ProcessCustody(#[from] crate::builtin::shell::ProcessCustodyError),
 }
 
 /// Convert a `ToolOutput::Json` success into typed tool-result content.

@@ -24,6 +24,7 @@
 mod config;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod custody;
+mod custody_types;
 mod job_cancel_tool;
 mod job_manager;
 mod job_status_tool;
@@ -40,9 +41,10 @@ mod types;
 pub use config::{ShellConfig, ShellError};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use custody::{
-    PROCESS_CUSTODY_DIR, ProcessCustody, ProcessCustodyError, ProcessCustodyRecoveryReport,
-    ProcessCustodyScope, ProcessIdentity, ProcessStartStamp, RecoveredToolProcess,
-    ToolProcessCessation,
+    PROCESS_CUSTODY_DIR, ProcessCustody, ProcessCustodyScope, ProcessIdentity, ProcessStartStamp,
+};
+pub use custody_types::{
+    ProcessCustodyError, ProcessCustodyRecoveryReport, RecoveredToolProcess, ToolProcessCessation,
 };
 pub use job_cancel_tool::ShellJobCancelTool;
 pub use job_manager::{

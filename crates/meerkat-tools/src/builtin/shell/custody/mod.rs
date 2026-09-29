@@ -7,14 +7,15 @@
 //! the host:
 //!
 //! 1. **Reserve** - before spawn, a record naming the scope, this host
-//!    incarnation, and the host's own process identity is written durably.
+//!    incarnation, and the host's own process identity and environment (boot,
+//!    pid namespace) is written.
 //! 2. **Gated spawn** - the tool starts in a fresh process group behind a
 //!    spawn gate: a `/bin/sh` prologue blocks on a pipe whose only writer is
 //!    the host. If the host dies before releasing the gate, the prologue reads
 //!    EOF and exits without running the command. No process can execute the
-//!    command without a durable record naming it.
+//!    command without a record naming it.
 //! 3. **Spawned** - the leader's pid and kernel start stamp (pid-reuse proof)
-//!    are written durably, and only then is the gate released.
+//!    are written, and only then is the gate released.
 //! 4. **Settle** - after the in-process guard proves containment the record
 //!    is removed.
 //! 5. **Recover** - a later incarnation opening the same scope must first
@@ -24,9 +25,22 @@
 //!    [`ProcessCustody`] handles can only be obtained through that recovery,
 //!    so holding one is the proof that the scope's earlier tools have ceased.
 //!
-//! Custody covers ordinary tools that stay in their process group. A process
-//! that deliberately leaves its group (`setsid`, `setpgid`) is daemon
-//! containment and out of scope.
+//! **Durability.** Records must survive the death of the host *process*, and
+//! the page cache already guarantees that: a file written and renamed by a
+//! process that is then SIGKILLed stays visible to every later process. The
+//! only extra step is one plain `fsync(2)` of the record data before the
+//! rename (not `F_FULLFSYNC`, and no directory syncs), so a power loss can
+//! leave the previous record or none, never a torn one. Whatever a power loss
+//! does leave was written in a boot that has ended, and recovery settles it
+//! as [`ToolProcessCessation::PriorEnvironmentEnded`] from its recorded boot
+//! identity: every process of that boot is gone.
+//!
+//! **Classification.** Every observation that shows a pid cannot be one of
+//! ours (absent, another user's, unreadable, a thread id, a stamp mismatch)
+//! is a typed outcome, never an I/O error, so a reused pid can never block
+//! recovery. Custody covers ordinary tools that stay in their process group
+//! and run as the host's user. A process that leaves its group (`setsid`,
+//! `setpgid`) is daemon containment and out of scope.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -41,20 +55,29 @@ mod gate;
 
 pub(super) use gate::SpawnGate;
 
+use std::collections::BTreeSet;
 use std::io::Write as _;
+use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Directory, under a realm scope root, that holds custody records.
+pub use super::custody_types::{
+    ProcessCustodyError, ProcessCustodyRecoveryReport, RecoveredToolProcess, ToolProcessCessation,
+};
+
+/// Directory, under a realm runtime root, that holds custody records.
 pub const PROCESS_CUSTODY_DIR: &str = "tool_process_custody";
 
 const RECORD_EXTENSION: &str = "json";
 const TEMP_EXTENSION: &str = "tmp";
+/// Custody record format. The envelope fields of [`RecordEnvelope`] are
+/// frozen across versions so an older build can still recognise a newer
+/// record's owner and environment.
 const RECORD_VERSION: u32 = 1;
 /// Upper bound on waiting for a killed group's exit notifications. SIGKILL
 /// cannot be ignored, so this only elapses for a process stuck in an
@@ -110,15 +133,20 @@ pub struct ProcessIdentity {
 }
 
 impl ProcessIdentity {
+    /// Identity of a process of ours; `None` when `pid` is absent or not
+    /// ours to observe.
     fn capture(pid: i32) -> std::io::Result<Option<Self>> {
-        Ok(sys::snapshot(pid)?.map(|snapshot| Self {
-            pid,
-            start: snapshot.start,
-        }))
+        Ok(match sys::probe(pid)? {
+            ProcessProbe::Observed(snapshot) => Some(Self {
+                pid,
+                start: snapshot.start,
+            }),
+            ProcessProbe::Absent | ProcessProbe::Foreign => None,
+        })
     }
 
     /// True only when this exact process (pid and start stamp) has not
-    /// exited.
+    /// exited. Absent, foreign, and reused pids are not running.
     fn is_running(&self) -> std::io::Result<bool> {
         sys::is_running(self)
     }
@@ -131,14 +159,91 @@ impl ProcessIdentity {
 enum HostEnvironment {
     Linux {
         boot_id: Uuid,
-        pid_namespace_dev: u64,
-        pid_namespace_ino: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pid_namespace_dev: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pid_namespace_ino: Option<u64>,
     },
-    Darwin,
+    /// `boot_session` is absent in records written before boot identity was
+    /// recorded; such records are handled as an unknown boot.
+    Darwin {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        boot_session: Option<Uuid>,
+    },
 }
 
-/// Point-in-time kernel facts about one process. Zombies are included:
-/// only kernel exit notification decides that a member has ceased.
+/// How a recorded environment relates to the current one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvironmentRelation {
+    Same,
+    /// Provably another boot or pid namespace: everything recorded there has
+    /// ended, and its pids name nothing here.
+    Ended,
+    /// Not provably the same or different (an identity was not recorded).
+    /// Recovery proceeds with per-process checks, which classify reused and
+    /// foreign pids safely.
+    Unknown,
+}
+
+impl HostEnvironment {
+    fn relation_to(&self, current: &Self) -> EnvironmentRelation {
+        match (self, current) {
+            (
+                Self::Linux {
+                    boot_id: recorded_boot,
+                    pid_namespace_dev: recorded_dev,
+                    pid_namespace_ino: recorded_ino,
+                },
+                Self::Linux {
+                    boot_id: current_boot,
+                    pid_namespace_dev: current_dev,
+                    pid_namespace_ino: current_ino,
+                },
+            ) => {
+                if recorded_boot != current_boot {
+                    return EnvironmentRelation::Ended;
+                }
+                match (recorded_dev, recorded_ino, current_dev, current_ino) {
+                    (Some(rd), Some(ri), Some(cd), Some(ci)) if (rd, ri) == (cd, ci) => {
+                        EnvironmentRelation::Same
+                    }
+                    (Some(_), Some(_), Some(_), Some(_)) => EnvironmentRelation::Ended,
+                    _ => EnvironmentRelation::Unknown,
+                }
+            }
+            (
+                Self::Darwin {
+                    boot_session: Some(recorded),
+                },
+                Self::Darwin {
+                    boot_session: Some(current),
+                },
+            ) => {
+                if recorded == current {
+                    EnvironmentRelation::Same
+                } else {
+                    EnvironmentRelation::Ended
+                }
+            }
+            (Self::Darwin { .. }, Self::Darwin { .. }) => EnvironmentRelation::Unknown,
+            // A record from another operating system cannot name a process
+            // of this host.
+            _ => EnvironmentRelation::Ended,
+        }
+    }
+}
+
+/// What a kernel probe of one pid established.
+enum ProcessProbe {
+    Absent,
+    /// The pid names a process that cannot be ours: another user's, or one we
+    /// are not permitted to inspect.
+    Foreign,
+    Observed(ProcessSnapshot),
+}
+
+/// Point-in-time kernel facts about one process of ours. Zombies are
+/// included: only kernel exit notification decides that a member ceased.
 struct ProcessSnapshot {
     pgid: i32,
     start: ProcessStartStamp,
@@ -185,6 +290,35 @@ fn incarnation() -> Result<&'static CustodyIncarnation, ProcessCustodyError> {
         host,
         environment,
     }))
+}
+
+/// Process group ids of this incarnation's custody-bound tools that are not
+/// yet proven stopped, across every scope. A recorded group id that names one
+/// of them cannot be an earlier incarnation's group: group ids are unique
+/// while a group exists. This guards recovery when earlier and current tools
+/// share a session (for example a supervisor-inherited session), where
+/// start-time and session checks alone cannot tell incarnations apart.
+static LIVE_GROUPS: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
+
+fn register_live_group(pgid: i32) {
+    LIVE_GROUPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(pgid);
+}
+
+fn release_live_group(pgid: i32) {
+    LIVE_GROUPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&pgid);
+}
+
+fn is_live_group(pgid: i32) -> bool {
+    LIVE_GROUPS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&pgid)
 }
 
 /// The unit whose earlier tools must cease before new work is admitted.
@@ -245,81 +379,18 @@ struct CustodyRecord {
     phase: CustodyPhase,
 }
 
-/// How recovery established that an earlier incarnation's tool has ceased.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "cessation", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ToolProcessCessation {
-    /// The host died before releasing the spawn gate, so the command never
-    /// started.
-    NeverStarted,
-    /// The group had no live member when recovery inspected it: the tool had
-    /// already finished or been killed. Its result was not delivered.
-    AlreadyExited,
-    /// Recovery SIGKILLed the group and observed every member exit.
-    KilledByRecovery { members: usize },
-    /// The earlier incarnation ran in a boot or pid namespace that has since
-    /// been replaced. A reboot ends every process; the kernel SIGKILLs every
-    /// process of a pid namespace when its init exits. Recovery cannot
-    /// observe that environment, so it signals nothing.
-    PriorEnvironmentEnded,
-}
-
-/// One earlier-incarnation tool settled by recovery.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct RecoveredToolProcess {
-    pub entry_id: Uuid,
-    pub prior_incarnation: Uuid,
-    /// Provider tool-call id of the interrupted call, when known.
-    pub tool_call_id: Option<String>,
-    pub cessation: ToolProcessCessation,
-}
-
-/// Outcome of settling a scope's earlier-incarnation custody records.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct ProcessCustodyRecoveryReport {
-    pub recovered: Vec<RecoveredToolProcess>,
-}
-
-/// Errors establishing or recovering process custody. Every error fails
-/// closed: no custody handle is produced and no new scope work is admitted.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum ProcessCustodyError {
-    #[error("invalid process custody scope '{0}'")]
-    InvalidScope(String),
-    #[error("process custody I/O failed ({context}): {source}")]
-    Io {
-        context: &'static str,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("process custody record {path} is unreadable: {reason}")]
-    CorruptRecord { path: PathBuf, reason: String },
-    #[error(
-        "tool process of custody entry {entry_id} is still owned by live host incarnation {incarnation} (pid {host_pid})"
-    )]
-    PriorIncarnationAlive {
-        entry_id: Uuid,
-        incarnation: Uuid,
-        host_pid: i32,
-    },
-    #[error(
-        "tool process group {pgid} of custody entry {entry_id} did not cease: {live_members} member(s) still running"
-    )]
-    CessationUnproven {
-        entry_id: Uuid,
-        pgid: i32,
-        live_members: usize,
-    },
-}
-
-impl ProcessCustodyError {
-    fn io(context: &'static str, source: std::io::Error) -> Self {
-        Self::Io { context, source }
-    }
+/// Fields every record version carries with this meaning. Read first, so a
+/// record of an unknown version can still be matched to its owner and
+/// environment.
+#[derive(Debug, Deserialize)]
+struct RecordEnvelope {
+    version: u32,
+    entry_id: Uuid,
+    incarnation: Uuid,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    environment: Option<serde_json::Value>,
 }
 
 /// Custody authority for one scope in the current host incarnation.
@@ -337,8 +408,9 @@ impl ProcessCustody {
     /// Settle every earlier-incarnation custody record for `scope` under
     /// `root`, then return the scope's custody handle.
     ///
-    /// Earlier tools are proven stopped (or were never started) before this
-    /// returns `Ok`; any doubt is an error and yields no handle.
+    /// Earlier tools are proven stopped (or never started, or provably gone)
+    /// before this returns `Ok`; any doubt is a typed error and yields no
+    /// handle. See [`ProcessCustodyError`] for the operator action per error.
     pub async fn recover_and_open(
         root: &Path,
         scope: ProcessCustodyScope,
@@ -372,7 +444,7 @@ impl ProcessCustody {
         &self.scope
     }
 
-    /// Durably reserve custody for one tool process before it is spawned.
+    /// Reserve custody for one tool process before it is spawned.
     pub(super) async fn reserve(
         self: &Arc<Self>,
         tool_call_id: Option<&str>,
@@ -387,7 +459,7 @@ impl ProcessCustody {
             tool_call_id: tool_call_id.map(str::to_owned),
             phase: CustodyPhase::Reserved,
         };
-        let path = self.record_path(record.entry_id);
+        let path = record_path(&self.dir, record.entry_id);
         write_record(&self.dir, &path, &record).await?;
         Ok(CustodyReservation {
             path: Some(path),
@@ -395,13 +467,25 @@ impl ProcessCustody {
             record,
         })
     }
-
-    fn record_path(&self, entry_id: Uuid) -> PathBuf {
-        self.dir.join(format!("{entry_id}.{RECORD_EXTENSION}"))
-    }
 }
 
-/// A durable custody record for one tool process owned by this incarnation.
+fn record_path(dir: &Path, entry_id: Uuid) -> PathBuf {
+    dir.join(format!("{entry_id}.{RECORD_EXTENSION}"))
+}
+
+/// Temp files carry their writer's incarnation, so recovery only ever
+/// deletes interrupted writes of earlier incarnations, never a live write.
+fn temp_path(dir: &Path, entry_id: Uuid, incarnation: Uuid) -> PathBuf {
+    dir.join(format!("{entry_id}.{incarnation}.{TEMP_EXTENSION}"))
+}
+
+fn temp_incarnation(path: &Path) -> Option<Uuid> {
+    let stem = path.file_stem()?.to_str()?;
+    let (_, incarnation) = stem.rsplit_once('.')?;
+    Uuid::parse_str(incarnation).ok()
+}
+
+/// A custody record for one tool process owned by this incarnation.
 ///
 /// Dropping a reservation that never reached [`Self::record_spawned`] removes
 /// its record: the spawn gate it guarded was never released, so no command
@@ -420,8 +504,15 @@ impl CustodyReservation {
         self.record.entry_id
     }
 
-    /// Record the spawned leader's identity durably. Call before releasing
-    /// the spawn gate.
+    fn leader_pgid(&self) -> Option<i32> {
+        match &self.record.phase {
+            CustodyPhase::Spawned { leader, .. } => Some(leader.pid),
+            CustodyPhase::Reserved => None,
+        }
+    }
+
+    /// Record the spawned leader's identity. Call before releasing the spawn
+    /// gate.
     pub(super) async fn record_spawned(
         &mut self,
         leader_pid: i32,
@@ -439,9 +530,10 @@ impl CustodyReservation {
                 ProcessCustodyError::io("read tool session id", std::io::Error::from(error))
             })?
             .as_raw();
-        // Mark the reservation spawned before the durable write starts. If
-        // this future is cancelled mid-write, Drop must not remove a record
-        // the still-running blocking write may yet rename into place; the
+        register_live_group(leader.pid);
+        // Mark the reservation spawned before the write starts. If this
+        // future is cancelled mid-write, Drop must not remove a record the
+        // still-running blocking write may yet rename into place; the
         // unreleased gate guarantees the command never runs, and recovery
         // settles whichever record landed.
         self.record.phase = CustodyPhase::Spawned {
@@ -457,6 +549,9 @@ impl CustodyReservation {
     /// Remove the record once the in-process guard has proven containment.
     /// A failed removal is harmless: recovery later finds the group gone.
     pub(super) async fn settle(mut self) {
+        if let Some(pgid) = self.leader_pgid() {
+            release_live_group(pgid);
+        }
         if let Some(path) = self.path.take() {
             let result = tokio::task::spawn_blocking(move || remove_record(&path)).await;
             if !matches!(result, Ok(Ok(()))) {
@@ -466,7 +561,7 @@ impl CustodyReservation {
     }
 
     /// Keep the record for recovery by a later incarnation (containment was
-    /// not proven in-process).
+    /// not proven in-process). The group stays registered as live.
     pub(super) fn retain(mut self) {
         self.path = None;
     }
@@ -493,7 +588,8 @@ async fn write_record(
     })?;
     let dir = dir.to_path_buf();
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || write_record_blocking(&dir, &path, &bytes))
+    let temp = temp_path(&dir, record.entry_id, record.incarnation);
+    tokio::task::spawn_blocking(move || write_record_blocking(&dir, &path, &temp, &bytes))
         .await
         .map_err(|error| {
             ProcessCustodyError::io("join custody record write", std::io::Error::other(error))
@@ -501,30 +597,76 @@ async fn write_record(
         .map_err(|error| ProcessCustodyError::io("write custody record", error))
 }
 
-/// Atomic, durable replace: write a temp file, fsync it, rename over the
-/// record, fsync the directory.
-fn write_record_blocking(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let temp = path.with_extension(TEMP_EXTENSION);
-    {
-        let mut file = std::fs::File::create(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&temp, path)?;
-    std::fs::File::open(dir)?.sync_all()
+/// Atomic replace: write a temp file, plain-`fsync` its data (see the module
+/// docs for why that is sufficient), then rename it over the record.
+fn write_record_blocking(
+    dir: &Path,
+    path: &Path,
+    temp: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let mut file = loop {
+        std::fs::create_dir_all(dir)?;
+        match std::fs::File::create(temp) {
+            Ok(file) => break file,
+            // Recovery removes an empty scope directory; recreate it.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    };
+    file.write_all(bytes)?;
+    nix::unistd::fsync(file.as_raw_fd()).map_err(std::io::Error::from)?;
+    drop(file);
+    std::fs::rename(temp, path)
 }
 
 fn remove_record(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
-    match path.parent() {
-        Some(dir) => std::fs::File::open(dir)?.sync_all(),
-        None => Ok(()),
+}
+
+/// A listed record file, as read by recovery.
+enum ListedRecord {
+    /// Removed between listing and reading: already settled.
+    Gone,
+    Current(CustodyRecord),
+    /// A record of another format version, interpreted only through its
+    /// frozen envelope.
+    OtherVersion(RecordEnvelope),
+}
+
+fn read_listed_record(path: &Path) -> Result<ListedRecord, ProcessCustodyError> {
+    let corrupt = |reason: String| ProcessCustodyError::CorruptRecord {
+        path: path.to_path_buf(),
+        reason,
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ListedRecord::Gone);
+        }
+        Err(error) => return Err(ProcessCustodyError::io("read custody record", error)),
+    };
+    let envelope: RecordEnvelope =
+        serde_json::from_slice(&bytes).map_err(|error| corrupt(error.to_string()))?;
+    let named = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| Uuid::parse_str(stem).ok());
+    if named != Some(envelope.entry_id) {
+        return Err(corrupt(
+            "record name does not match its entry id".to_owned(),
+        ));
     }
+    if envelope.version != RECORD_VERSION {
+        return Ok(ListedRecord::OtherVersion(envelope));
+    }
+    serde_json::from_slice(&bytes)
+        .map(ListedRecord::Current)
+        .map_err(|error| corrupt(error.to_string()))
 }
 
 fn recover_scope_blocking(
@@ -546,16 +688,14 @@ fn recover_scope_blocking(
             .path();
         match path.extension().and_then(|extension| extension.to_str()) {
             Some(RECORD_EXTENSION) => paths.push(path),
-            // An interrupted atomic write; the durable record (if any) is the
-            // renamed file, which is what governs.
+            // An interrupted write of an earlier incarnation; the record (if
+            // any) is the renamed file, which is what governs. A temp of the
+            // current incarnation may be a write in flight: keep it.
             Some(TEMP_EXTENSION) => {
-                if let Err(error) = std::fs::remove_file(&path)
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    return Err(ProcessCustodyError::io(
-                        "remove interrupted custody write",
-                        error,
-                    ));
+                if temp_incarnation(&path).is_some_and(|owner| owner != incarnation.id) {
+                    remove_record(&path).map_err(|error| {
+                        ProcessCustodyError::io("remove interrupted custody write", error)
+                    })?;
                 }
             }
             _ => {}
@@ -565,48 +705,53 @@ fn recover_scope_blocking(
 
     let mut report = ProcessCustodyRecoveryReport::default();
     for path in paths {
-        let record = read_record(&path)?;
-        if record.incarnation == incarnation.id {
-            continue;
-        }
-        let cessation = settle_prior_record(&record, incarnation, deadline)?;
+        let settled = match read_listed_record(&path)? {
+            ListedRecord::Gone => continue,
+            ListedRecord::Current(record) => {
+                if record.incarnation == incarnation.id {
+                    continue;
+                }
+                let cessation = settle_prior_record(&record, incarnation, deadline)?;
+                RecoveredToolProcess {
+                    entry_id: record.entry_id,
+                    prior_incarnation: record.incarnation,
+                    tool_call_id: record.tool_call_id,
+                    cessation,
+                }
+            }
+            ListedRecord::OtherVersion(envelope) => {
+                if envelope.incarnation == incarnation.id {
+                    continue;
+                }
+                let ended = envelope
+                    .environment
+                    .and_then(|value| serde_json::from_value::<HostEnvironment>(value).ok())
+                    .is_some_and(|recorded| {
+                        recorded.relation_to(&incarnation.environment) == EnvironmentRelation::Ended
+                    });
+                if !ended {
+                    return Err(ProcessCustodyError::UnsupportedRecordVersion {
+                        path,
+                        version: envelope.version,
+                    });
+                }
+                RecoveredToolProcess {
+                    entry_id: envelope.entry_id,
+                    prior_incarnation: envelope.incarnation,
+                    tool_call_id: envelope.tool_call_id,
+                    cessation: ToolProcessCessation::PriorEnvironmentEnded,
+                }
+            }
+        };
         remove_record(&path)
             .map_err(|error| ProcessCustodyError::io("remove settled custody record", error))?;
-        report.recovered.push(RecoveredToolProcess {
-            entry_id: record.entry_id,
-            prior_incarnation: record.incarnation,
-            tool_call_id: record.tool_call_id,
-            cessation,
-        });
+        report.recovered.push(settled);
     }
+    // Drop the scope directory once it is empty. A concurrent reservation
+    // recreates it (see `write_record_blocking`); a non-empty directory is
+    // left as is.
+    let _ = std::fs::remove_dir(dir);
     Ok(report)
-}
-
-fn read_record(path: &Path) -> Result<CustodyRecord, ProcessCustodyError> {
-    let corrupt = |reason: String| ProcessCustodyError::CorruptRecord {
-        path: path.to_path_buf(),
-        reason,
-    };
-    let bytes = std::fs::read(path)
-        .map_err(|error| ProcessCustodyError::io("read custody record", error))?;
-    let record: CustodyRecord =
-        serde_json::from_slice(&bytes).map_err(|error| corrupt(error.to_string()))?;
-    if record.version != RECORD_VERSION {
-        return Err(corrupt(format!(
-            "unsupported record version {}",
-            record.version
-        )));
-    }
-    let named = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .and_then(|stem| Uuid::parse_str(stem).ok());
-    if named != Some(record.entry_id) {
-        return Err(corrupt(
-            "record name does not match its entry id".to_owned(),
-        ));
-    }
-    Ok(record)
 }
 
 fn settle_prior_record(
@@ -614,7 +759,7 @@ fn settle_prior_record(
     current: &CustodyIncarnation,
     deadline: Instant,
 ) -> Result<ToolProcessCessation, ProcessCustodyError> {
-    if record.environment != current.environment {
+    if record.environment.relation_to(&current.environment) == EnvironmentRelation::Ended {
         // Pids and sessions from another boot or pid namespace name nothing
         // here; comparing or signalling them could only hit strangers.
         return Ok(ToolProcessCessation::PriorEnvironmentEnded);
@@ -637,10 +782,14 @@ fn settle_prior_record(
             session_leader,
         } => {
             let pgid = leader.pid;
-            let Some(members) = owned_members(leader, *session_leader)
+            if is_live_group(pgid) {
+                return Ok(ToolProcessCessation::GroupReassigned);
+            }
+            let members = match owned_members(leader, *session_leader)
                 .map_err(|error| ProcessCustodyError::io("inspect tool process group", error))?
-            else {
-                return Ok(ToolProcessCessation::AlreadyExited);
+            {
+                GroupOwnership::Reassigned => return Ok(ToolProcessCessation::GroupReassigned),
+                GroupOwnership::Owned(members) => members,
             };
             if members.is_empty() {
                 return Ok(ToolProcessCessation::AlreadyExited);
@@ -654,56 +803,69 @@ fn settle_prior_record(
     }
 }
 
-/// Current members of group `pgid` (zombies included). An empty listing is
-/// only believed when the kernel also reports that no process has the group
-/// id, so a failed listing can never pass for an empty group.
-fn group_members_checked(pgid: i32) -> std::io::Result<Vec<(i32, ProcessSnapshot)>> {
+/// Current members of group `pgid` (zombies included). Foreign members may
+/// be listed but are never ours. An empty listing is only believed when
+/// `kill(-pgid, 0)` agrees: ESRCH (no such group) or EPERM (the group holds
+/// only processes we cannot signal, so none of ours).
+fn group_members_checked(pgid: i32) -> std::io::Result<Vec<(i32, ProcessProbe)>> {
     let members: Vec<_> = sys::group_members(pgid)?
         .into_iter()
-        .filter(|(_, member)| member.pgid == pgid)
+        .filter(|(_, probe)| match probe {
+            ProcessProbe::Observed(member) => member.pgid == pgid,
+            ProcessProbe::Absent => false,
+            ProcessProbe::Foreign => true,
+        })
         .collect();
     if members.is_empty() {
         match nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pgid), None) {
-            Err(nix::errno::Errno::ESRCH) => {}
-            Ok(()) | Err(_) => {
+            Err(nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM) => {}
+            Ok(()) => {
                 return Err(std::io::Error::other(
                     "process group exists but its member listing is empty",
                 ));
             }
+            Err(error) => return Err(std::io::Error::from(error)),
         }
     }
     Ok(members)
 }
 
-/// Members of the recorded group, or `None` when the group id no longer
-/// names the recorded tool's group.
-///
+/// Whether the recorded group id still names the recorded tool's group.
+enum GroupOwnership {
+    /// The id now names a different group; the recorded one is gone.
+    Reassigned,
+    /// The recorded group; its members of ours (possibly none).
+    Owned(Vec<ProcessIdentity>),
+}
+
 /// Process group ids are not recycled while the group exists, so the group
 /// is still ours when its leader is present with the recorded stamp; a
-/// leader pid held by a process with another stamp proves the recorded group
-/// is gone. When the leader is gone, every member must have started no
-/// earlier than the leader and share its session: one member that provably
-/// does not means a different group now holds the id.
-fn owned_members(
-    leader: &ProcessIdentity,
-    session_leader: i32,
-) -> std::io::Result<Option<Vec<ProcessIdentity>>> {
+/// leader pid held by another process (another stamp, another user) proves
+/// the recorded group is gone. When the leader is gone, every member of ours
+/// must have started no earlier than the leader and share its session: one
+/// member that provably does not means a different group holds the id.
+fn owned_members(leader: &ProcessIdentity, session_leader: i32) -> std::io::Result<GroupOwnership> {
     let pgid = leader.pid;
-    let leader_present = match sys::snapshot(leader.pid)? {
-        Some(snapshot) if snapshot.start != leader.start => return Ok(None),
-        Some(_) => true,
-        None => false,
+    let leader_present = match sys::probe(leader.pid)? {
+        ProcessProbe::Observed(snapshot) if snapshot.start == leader.start => true,
+        ProcessProbe::Observed(_) | ProcessProbe::Foreign => {
+            return Ok(GroupOwnership::Reassigned);
+        }
+        ProcessProbe::Absent => false,
     };
     let mut members = Vec::new();
-    for (pid, member) in group_members_checked(pgid)? {
+    for (pid, probe) in group_members_checked(pgid)? {
+        let ProcessProbe::Observed(member) = probe else {
+            continue;
+        };
         if !leader_present {
             if leader.start.not_after(&member.start) != Some(true) {
-                return Ok(None);
+                return Ok(GroupOwnership::Reassigned);
             }
             match member_session(pid)? {
                 // Exited between listing and this probe: nothing to prove.
                 None => continue,
-                Some(sid) if sid != session_leader => return Ok(None),
+                Some(sid) if sid != session_leader => return Ok(GroupOwnership::Reassigned),
                 Some(_) => {}
             }
         }
@@ -712,42 +874,46 @@ fn owned_members(
             start: member.start,
         });
     }
-    Ok(Some(members))
+    Ok(GroupOwnership::Owned(members))
 }
 
 fn member_session(pid: i32) -> std::io::Result<Option<i32>> {
     match nix::unistd::getsid(Some(nix::unistd::Pid::from_raw(pid))) {
         Ok(sid) => Ok(Some(sid.as_raw())),
-        Err(nix::errno::Errno::ESRCH) => Ok(None),
+        Err(nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM) => Ok(None),
         Err(error) => Err(std::io::Error::from(error)),
     }
 }
 
-/// SIGKILL the group and wait on kernel exit notification for every member,
-/// re-listing and re-signalling until the listing is empty. A SIGKILLed
-/// process cannot fork, so this converges; the deadline only fails recovery
-/// closed.
+fn observed_members(pgid: i32) -> std::io::Result<Vec<ProcessIdentity>> {
+    Ok(group_members_checked(pgid)?
+        .into_iter()
+        .filter_map(|(pid, probe)| match probe {
+            ProcessProbe::Observed(member) => Some(ProcessIdentity {
+                pid,
+                start: member.start,
+            }),
+            ProcessProbe::Absent | ProcessProbe::Foreign => None,
+        })
+        .collect())
+}
+
+/// SIGKILL the verified members (per-member pidfds on Linux, the group on
+/// macOS) and wait on kernel exit notification for each, re-listing and
+/// re-signalling until the listing is empty or holds only notified zombies.
+/// A SIGKILLed process cannot fork, so this converges; the deadline only
+/// fails recovery closed.
 fn kill_group_and_await_exit(
     entry_id: Uuid,
     pgid: i32,
     observed: Vec<ProcessIdentity>,
     deadline: Instant,
 ) -> Result<ToolProcessCessation, ProcessCustodyError> {
-    use nix::sys::signal::{Signal, killpg};
-
-    let mut killed: std::collections::BTreeSet<i32> =
-        observed.iter().map(|member| member.pid).collect();
+    let mut killed: BTreeSet<i32> = observed.iter().map(|member| member.pid).collect();
     let mut members = observed;
     loop {
-        match killpg(nix::unistd::Pid::from_raw(pgid), Signal::SIGKILL) {
-            Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-            Err(error) => {
-                return Err(ProcessCustodyError::io(
-                    "kill prior tool process group",
-                    std::io::Error::from(error),
-                ));
-            }
-        }
+        sys::kill_members(pgid, &members)
+            .map_err(|error| ProcessCustodyError::io("kill prior tool process group", error))?;
         let watch = sys::ExitWatch::new(&members)
             .map_err(|error| ProcessCustodyError::io("watch killed process exit", error))?;
         match watch
@@ -763,14 +929,8 @@ fn kill_group_and_await_exit(
                 });
             }
         }
-        members = group_members_checked(pgid)
-            .map_err(|error| ProcessCustodyError::io("inspect killed process group", error))?
-            .into_iter()
-            .map(|(pid, member)| ProcessIdentity {
-                pid,
-                start: member.start,
-            })
-            .collect();
+        members = observed_members(pgid)
+            .map_err(|error| ProcessCustodyError::io("inspect killed process group", error))?;
         // Members that already exited are unreaped zombies; their exit
         // watches fire immediately, so the loop only repeats while the
         // listing still changes.

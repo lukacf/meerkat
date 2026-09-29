@@ -114,17 +114,32 @@ them.
   handle it. A submission whose delivery correlation and supplied
   transcript interaction id (on the `WorkSpec` or in `MemberTurnOptions`)
   disagree now returns it instead of `MobError::Internal` (#1264).
+- `meerkat_tools::CompositeDispatcherError` (re-exported as
+  `meerkat::CompositeDispatcherError`) gains the variant `ProcessCustody`
+  (native targets), carrying a typed
+  `meerkat_tools::builtin::shell::ProcessCustodyError` through
+  `BuildAgentError::ToolDispatcher`.
 - Behaviour-only (not measured by the gate): on Linux and macOS, an
   `AgentFactory` with a realm `runtime_root` now settles durable shell process
   custody while it builds a shell-enabled dispatcher (`build_agent`,
   `build_builtin_dispatcher*`). The build fails closed with
-  `CompositeDispatcherError::ToolInitFailed { name: "shell", .. }` when a
-  shell tool process left by an earlier host incarnation of the same session
-  cannot be proven stopped: its host is still alive and supervising it, its
-  custody record is unreadable, or its killed process group did not exit.
-  Custody-bound foreground shell calls are spawned through a `/bin/sh` spawn
-  gate that `exec`s the configured shell in place (same pid and process
-  group). Factories without a `runtime_root` are unchanged.
+  `CompositeDispatcherError::ProcessCustody` when a shell tool process left
+  by an earlier host incarnation of the same session cannot be proven
+  stopped. Operator action per `ProcessCustodyError` variant (records live at
+  `<runtime_root>/tool_process_custody/<session_id>/<entry_id>.json`):
+  `PriorIncarnationAlive` - stop the live host process it names, then retry;
+  `CessationUnproven` - end the named process group (or the stuck I/O), then
+  retry; `CorruptRecord` - confirm the tool it named is not running, then
+  delete the named file; `UnsupportedRecordVersion` (a record written by a
+  newer release in the same boot and pid namespace, for example after a
+  rollback) - run the newer release again, or confirm the tool is not
+  running and delete the file; `Io` - fix the named I/O condition. A reused
+  pid (another user's process, a thread id, a different start stamp) is
+  always classified, never an error. Custody-bound foreground shell calls
+  are spawned through a `/bin/sh` spawn gate that `exec`s the configured
+  shell in place (same pid and process group), and a failure to write the
+  custody record now fails the shell call before anything is spawned.
+  Factories without a `runtime_root` are unchanged.
 - `meerkat_mob::MemberReloadDisposition` gains the variant `Reattached`
   (appended last, so existing discriminants do not move); exhaustive matches
   must handle it. `MobHandle::reload_member_registration` returns it when a
@@ -514,7 +529,7 @@ them.
   proven stopped (or proven never started) before the dispatcher, and so any
   new work for that session, exists. The settlement is reported per tool
   call with a typed `ToolProcessCessation` (`NeverStarted`, `AlreadyExited`,
-  `KilledByRecovery`, `PriorEnvironmentEnded`) (#1265).
+  `GroupReassigned`, `KilledByRecovery`, `PriorEnvironmentEnded`) (#1265).
 - `MobHandle::subscribe_mob_events` returns only once the router is
   subscribed to every member it starts with (local session streams and
   placed members' pump taps). Those subscriptions used to be made inside the

@@ -27,7 +27,12 @@ const GATE_SHELL: &str = "/bin/sh";
 /// holder of the pipe (for example a descriptor inherited by a concurrent
 /// spawn before close-on-exec was set) can never release it by accident.
 /// Descriptor 3 is closed before the exec so the tool never inherits it.
-const GATE_PROLOGUE: &str = "IFS= read -r meerkat_custody_gate <&3 && [ \"$meerkat_custody_gate\" = \"$1\" ] || exit 125; exec 3<&-; shift; exec \"$@\"";
+///
+/// Tracing is switched off first (`set +x`): a `bash` running as `sh` with
+/// `SHELLOPTS=xtrace` inherited from the host would otherwise print the
+/// expanded token to the tool's stderr. The configured shell still sees the
+/// unchanged environment after the `exec`.
+const GATE_PROLOGUE: &str = "set +x; IFS= read -r meerkat_custody_gate <&3 && [ \"$meerkat_custody_gate\" = \"$1\" ] || exit 125; exec 3<&-; shift; exec \"$@\"";
 /// `$0` of the prologue, as shown by process listings.
 const GATE_ARGV0: &str = "meerkat-custody-gate";
 

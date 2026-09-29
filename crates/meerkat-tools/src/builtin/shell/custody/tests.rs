@@ -101,23 +101,17 @@ fn write_prior_record_in(
     };
     let dir = root.join(scope.as_str());
     let path = dir.join(format!("{}.{RECORD_EXTENSION}", record.entry_id));
-    write_record_blocking(&dir, &path, &serde_json::to_vec(&record).unwrap()).unwrap();
+    let temp = temp_path(&dir, record.entry_id, record.incarnation);
+    write_record_blocking(&dir, &path, &temp, &serde_json::to_vec(&record).unwrap()).unwrap();
     path
 }
 
 fn live_members(pgid: i32) -> Vec<i32> {
-    sys::group_members(pgid)
+    observed_members(pgid)
         .unwrap()
         .into_iter()
-        .filter(|(pid, member)| {
-            member.pgid == pgid
-                && sys::is_running(&ProcessIdentity {
-                    pid: *pid,
-                    start: member.start,
-                })
-                .unwrap()
-        })
-        .map(|(pid, _)| pid)
+        .filter(|member| member.is_running().unwrap())
+        .map(|member| member.pid)
         .collect()
 }
 
@@ -288,7 +282,7 @@ async fn recovery_never_signals_a_process_that_reused_the_leader_pid() {
 
     assert_eq!(
         report.recovered[0].cessation,
-        ToolProcessCessation::AlreadyExited
+        ToolProcessCessation::GroupReassigned
     );
     assert!(process_running(pid), "an unrelated process must survive");
     unrelated.kill().unwrap();
@@ -465,6 +459,292 @@ async fn spawn_gate_ignores_a_line_without_its_token() {
 
     assert_eq!(status.code(), Some(gate::GATE_NOT_RELEASED_EXIT));
     assert!(!effect.exists());
+}
+
+/// Spawn a group whose leader exits while a background member keeps the
+/// group alive. Returns the leader identity (captured while it ran), its
+/// session, and the reaped leader handle.
+fn leaderless_group() -> (ProcessIdentity, i32) {
+    let mut leader = Command::new("/bin/sh")
+        .args(["-c", "sleep 60 & read line"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pgid = leader.id() as i32;
+    let CustodyPhase::Spawned {
+        leader: identity,
+        session_leader,
+    } = spawned_phase(pgid)
+    else {
+        unreachable!()
+    };
+    for _ in 0..500 {
+        if live_members(pgid).len() >= 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(leader.stdin.take());
+    leader.wait().unwrap();
+    assert!(
+        !process_running(pgid),
+        "the leader has exited and been reaped"
+    );
+    assert!(
+        !live_members(pgid).is_empty(),
+        "the background member remains"
+    );
+    (identity, session_leader)
+}
+
+fn kill_test_group(pgid: i32) {
+    let _ = nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(pgid),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+}
+
+#[tokio::test]
+async fn recovery_kills_a_leaderless_prior_group_through_its_members() {
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let (leader, session_leader) = leaderless_group();
+    write_prior_record(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        CustodyPhase::Spawned {
+            leader,
+            session_leader,
+        },
+    );
+
+    let (_custody, report) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            report.recovered[0].cessation,
+            ToolProcessCessation::KilledByRecovery { members } if members >= 1
+        ),
+        "{report:?}"
+    );
+    assert!(live_members(leader.pid).is_empty());
+}
+
+#[tokio::test]
+async fn recovery_never_touches_a_live_group_of_the_current_incarnation() {
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    // Same session, member started after the recorded leader: the start and
+    // session checks alone would accept this group as the prior tool's.
+    let (leader, session_leader) = leaderless_group();
+    register_live_group(leader.pid);
+    write_prior_record(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        CustodyPhase::Spawned {
+            leader,
+            session_leader,
+        },
+    );
+
+    let result = ProcessCustody::recover_and_open(root.path(), scope).await;
+    let survivors = live_members(leader.pid);
+    release_live_group(leader.pid);
+    kill_test_group(leader.pid);
+
+    let (_custody, report) = result.unwrap();
+    assert_eq!(
+        report.recovered[0].cessation,
+        ToolProcessCessation::GroupReassigned
+    );
+    assert!(
+        !survivors.is_empty(),
+        "a live current-incarnation group must never be signalled"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn another_users_process_holding_a_recorded_pid_is_classified_not_errored() {
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    // pid 1 exists in every pid namespace and belongs to another user (or,
+    // when the tests run as root, has another start stamp).
+    let ProcessProbe::Observed(init) = sys::probe(1).unwrap() else {
+        // Hidden or unreadable: already the foreign classification.
+        return;
+    };
+    let bogus = |start: ProcessStartStamp| match start {
+        ProcessStartStamp::LinuxBoot {
+            boot_id,
+            start_ticks,
+        } => ProcessStartStamp::LinuxBoot {
+            boot_id,
+            start_ticks: start_ticks.wrapping_add(1),
+        },
+        other => other,
+    };
+    let foreign = ProcessIdentity {
+        pid: 1,
+        start: bogus(init.start),
+    };
+    assert!(!foreign.is_running().unwrap());
+    write_prior_record(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        foreign,
+        CustodyPhase::Spawned {
+            leader: foreign,
+            session_leader: 1,
+        },
+    );
+
+    let (_custody, report) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.recovered[0].cessation,
+        ToolProcessCessation::GroupReassigned
+    );
+}
+
+#[test]
+fn a_record_removed_between_listing_and_reading_is_already_settled() {
+    let root = TempDir::new().unwrap();
+    let missing = root.path().join(format!("{}.json", Uuid::new_v4()));
+    assert!(matches!(
+        read_listed_record(&missing).unwrap(),
+        ListedRecord::Gone
+    ));
+}
+
+#[tokio::test]
+async fn recovery_deletes_only_earlier_incarnations_temp_files() {
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let dir = root.path().join(scope.as_str());
+    std::fs::create_dir_all(&dir).unwrap();
+    let current = super::incarnation().unwrap().id;
+    let live_write = temp_path(&dir, Uuid::new_v4(), current);
+    let interrupted = temp_path(&dir, Uuid::new_v4(), Uuid::new_v4());
+    std::fs::write(&live_write, b"{}").unwrap();
+    std::fs::write(&interrupted, b"{}").unwrap();
+
+    ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+
+    assert!(
+        live_write.exists(),
+        "a current-incarnation write may be in flight"
+    );
+    assert!(!interrupted.exists());
+}
+
+#[tokio::test]
+async fn unknown_record_version_fails_closed_unless_its_environment_ended() {
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let dir = root.path().join(scope.as_str());
+    std::fs::create_dir_all(&dir).unwrap();
+    let current = super::incarnation().unwrap().environment;
+    let entry = Uuid::new_v4();
+    let path = dir.join(format!("{entry}.json"));
+    let newer = |environment: HostEnvironment| {
+        serde_json::json!({
+            "version": 99,
+            "entry_id": entry,
+            "incarnation": Uuid::new_v4(),
+            "environment": environment,
+            "phase": "something_new",
+        })
+    };
+    std::fs::write(&path, serde_json::to_vec(&newer(current)).unwrap()).unwrap();
+
+    let error = ProcessCustody::recover_and_open(root.path(), scope.clone())
+        .await
+        .expect_err("an uninterpretable same-environment record cannot prove cessation");
+    assert!(
+        matches!(
+            error,
+            ProcessCustodyError::UnsupportedRecordVersion { version: 99, .. }
+        ),
+        "{error:?}"
+    );
+
+    let ended = match current {
+        HostEnvironment::Linux {
+            pid_namespace_dev,
+            pid_namespace_ino,
+            ..
+        } => HostEnvironment::Linux {
+            boot_id: Uuid::new_v4(),
+            pid_namespace_dev,
+            pid_namespace_ino,
+        },
+        HostEnvironment::Darwin { .. } => HostEnvironment::Darwin {
+            boot_session: Some(Uuid::new_v4()),
+        },
+    };
+    std::fs::write(&path, serde_json::to_vec(&newer(ended)).unwrap()).unwrap();
+    let (_custody, report) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+    assert_eq!(
+        report.recovered[0].cessation,
+        ToolProcessCessation::PriorEnvironmentEnded
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn darwin_records_without_boot_identity_parse_and_are_unknown_not_ended() {
+    let legacy: HostEnvironment = serde_json::from_str(r#"{"kind":"darwin"}"#).unwrap();
+    assert_eq!(legacy, HostEnvironment::Darwin { boot_session: None });
+    let current = HostEnvironment::Darwin {
+        boot_session: Some(Uuid::new_v4()),
+    };
+    assert_eq!(legacy.relation_to(&current), EnvironmentRelation::Unknown);
+    let other_boot = HostEnvironment::Darwin {
+        boot_session: Some(Uuid::new_v4()),
+    };
+    assert_eq!(other_boot.relation_to(&current), EnvironmentRelation::Ended);
+    assert_eq!(current.relation_to(&current), EnvironmentRelation::Same);
+}
+
+#[tokio::test]
+async fn recovery_removes_an_emptied_scope_directory() {
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let dir = root.path().join(scope.as_str());
+    write_prior_record(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        CustodyPhase::Reserved,
+    );
+
+    let (custody, _) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+    assert!(!dir.exists());
+
+    // A later reservation recreates it.
+    let reservation = custody.reserve(Some("call")).await.unwrap();
+    assert_eq!(record_files(&dir).len(), 1);
+    drop(reservation);
+    assert!(record_files(&dir).is_empty());
 }
 
 #[tokio::test]

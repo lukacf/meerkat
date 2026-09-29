@@ -5402,16 +5402,11 @@ impl AgentFactory {
             );
             return Ok(());
         };
-        let custody_failed = |message: String| CompositeDispatcherError::ToolInitFailed {
-            name: "shell".to_string(),
-            message,
-        };
         let (custody, report) = ProcessCustody::recover_and_open(
             &runtime_root.join(PROCESS_CUSTODY_DIR),
             ProcessCustodyScope::session(&session_id),
         )
-        .await
-        .map_err(|error| custody_failed(error.to_string()))?;
+        .await?;
         for recovered in &report.recovered {
             tracing::warn!(
                 %session_id,
@@ -5422,9 +5417,12 @@ impl AgentFactory {
                 "settled a shell tool process left by a prior host incarnation"
             );
         }
-        job_manager
-            .bind_process_custody(custody)
-            .map_err(|_| custody_failed("shell process custody is already bound".to_string()))
+        job_manager.bind_process_custody(custody).map_err(|_| {
+            CompositeDispatcherError::ToolInitFailed {
+                name: "shell".to_string(),
+                message: "shell process custody is already bound".to_string(),
+            }
+        })
     }
 
     /// Build a fully-configured, type-erased agent ready to run.
@@ -16270,7 +16268,9 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                CompositeDispatcherError::ToolInitFailed { name, .. } if name == "shell"
+                CompositeDispatcherError::ProcessCustody(
+                    meerkat_tools::builtin::shell::ProcessCustodyError::CorruptRecord { .. }
+                )
             ),
             "{error:?}"
         );

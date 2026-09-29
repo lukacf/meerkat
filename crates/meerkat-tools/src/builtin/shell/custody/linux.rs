@@ -1,21 +1,28 @@
-//! Linux process identity, group enumeration, and exit notification.
+//! Linux process identity, group enumeration, signalling, and exit
+//! notification.
 //!
 //! Identity is `(boot id, start time in clock ticks since boot)` read from
 //! `/proc/<pid>/stat`; a recycled pid can never carry the same pair. Exit
-//! notification uses `pidfd_open(2)`: a pidfd becomes readable when its
-//! process terminates, whether or not this process is its parent.
+//! notification and signalling use pidfds: a pidfd pins one process, becomes
+//! readable only when that whole thread group has exited, and
+//! `pidfd_send_signal` can never reach a process that later reuses the pid.
+//!
+//! Every observation that shows a pid cannot be one of ours (absent, hidden
+//! by `hidepid`, not readable, a thread id rather than a process) is a typed
+//! [`ProcessProbe`] or a not-running answer, never an I/O error.
 
 #![allow(unsafe_code)]
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::MetadataExt;
 use std::time::Instant;
 
 use uuid::Uuid;
 
 use super::{
-    ExitWaitOutcome, HostEnvironment, ProcessIdentity, ProcessSnapshot, ProcessStartStamp,
+    ExitWaitOutcome, HostEnvironment, ProcessIdentity, ProcessProbe, ProcessSnapshot,
+    ProcessStartStamp,
 };
 
 const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
@@ -27,7 +34,6 @@ fn boot_id() -> io::Result<Uuid> {
 
 /// Parsed fields of `/proc/<pid>/stat` that custody needs.
 struct ProcStat {
-    #[cfg_attr(not(test), allow(dead_code))]
     state: u8,
     pgrp: i32,
     start_ticks: u64,
@@ -66,17 +72,30 @@ fn parse_stat(raw: &str) -> io::Result<ProcStat> {
     })
 }
 
-fn read_stat(pid: i32) -> io::Result<Option<ProcStat>> {
-    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(raw) => parse_stat(&raw).map(Some),
-        Err(error)
-            if matches!(error.kind(), io::ErrorKind::NotFound)
-                || error.raw_os_error() == Some(nix::libc::ESRCH) =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(error),
+/// Outcome of reading `/proc/<pid>/stat`.
+enum StatRead {
+    Absent,
+    /// Not readable by us (`hidepid`, another user's hardened process): it
+    /// cannot be a process this host spawned and may signal.
+    Foreign,
+    Stat(ProcStat),
+}
+
+/// Classify a `/proc/<pid>/stat` read.
+fn classify_stat_read(read: io::Result<String>) -> io::Result<StatRead> {
+    match read {
+        Ok(raw) => parse_stat(&raw).map(StatRead::Stat),
+        Err(error) => match error.raw_os_error() {
+            Some(nix::libc::ENOENT | nix::libc::ESRCH) => Ok(StatRead::Absent),
+            Some(nix::libc::EACCES | nix::libc::EPERM) => Ok(StatRead::Foreign),
+            _ if error.kind() == io::ErrorKind::NotFound => Ok(StatRead::Absent),
+            _ => Err(error),
+        },
     }
+}
+
+fn read_stat(pid: i32) -> io::Result<StatRead> {
+    classify_stat_read(std::fs::read_to_string(format!("/proc/{pid}/stat")))
 }
 
 fn snapshot_from_stat(stat: &ProcStat, boot_id: Uuid) -> ProcessSnapshot {
@@ -89,12 +108,19 @@ fn snapshot_from_stat(stat: &ProcStat, boot_id: Uuid) -> ProcessSnapshot {
     }
 }
 
-pub(super) fn snapshot(pid: i32) -> io::Result<Option<ProcessSnapshot>> {
+pub(super) fn probe(pid: i32) -> io::Result<ProcessProbe> {
     let boot_id = boot_id()?;
-    Ok(read_stat(pid)?.map(|stat| snapshot_from_stat(&stat, boot_id)))
+    Ok(match read_stat(pid)? {
+        StatRead::Absent => ProcessProbe::Absent,
+        StatRead::Foreign => ProcessProbe::Foreign,
+        StatRead::Stat(stat) => ProcessProbe::Observed(snapshot_from_stat(&stat, boot_id)),
+    })
 }
 
-pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessSnapshot)>> {
+/// Readable members of group `pgid`. Unreadable processes are omitted: their
+/// group cannot be known and they cannot be ours. Callers cross-check an
+/// empty result against `kill(-pgid, 0)`.
+pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessProbe)>> {
     let boot_id = boot_id()?;
     let mut members = Vec::new();
     for entry in std::fs::read_dir("/proc")? {
@@ -106,10 +132,13 @@ pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessSnapshot)>
         else {
             continue;
         };
-        if let Some(stat) = read_stat(pid)?
+        if let StatRead::Stat(stat) = read_stat(pid)?
             && stat.pgrp == pgid
         {
-            members.push((pid, snapshot_from_stat(&stat, boot_id)));
+            members.push((
+                pid,
+                ProcessProbe::Observed(snapshot_from_stat(&stat, boot_id)),
+            ));
         }
     }
     Ok(members)
@@ -118,49 +147,121 @@ pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessSnapshot)>
 /// The boot and pid namespace this process observes. Pids and start stamps
 /// are only comparable within one environment.
 pub(super) fn host_environment() -> io::Result<HostEnvironment> {
-    let namespace = std::fs::metadata("/proc/self/ns/pid")?;
+    let namespace = std::fs::metadata("/proc/self/ns/pid").ok();
     Ok(HostEnvironment::Linux {
         boot_id: boot_id()?,
-        pid_namespace_dev: namespace.dev(),
-        pid_namespace_ino: namespace.ino(),
+        pid_namespace_dev: namespace.as_ref().map(MetadataExt::dev),
+        pid_namespace_ino: namespace.as_ref().map(MetadataExt::ino),
     })
 }
 
-fn pidfd_open(pid: i32) -> io::Result<Option<OwnedFd>> {
+/// Outcome of `pidfd_open(2)`.
+enum PidfdOpen {
+    Opened(OwnedFd),
+    /// ESRCH: no such process.
+    Gone,
+    /// EINVAL, or ENOENT on kernels with `PIDFD_THREAD` (6.9+): the id is
+    /// not a thread-group leader (for example a thread id that reused a
+    /// recorded pid), so it is not the recorded process.
+    NotAProcess,
+    /// ENOSYS or EPERM: pidfds are unavailable (pre-5.3 kernel, seccomp).
+    Unsupported,
+}
+
+fn classify_pidfd_error(error: io::Error) -> io::Result<PidfdOpen> {
+    match error.raw_os_error() {
+        Some(nix::libc::ESRCH) => Ok(PidfdOpen::Gone),
+        Some(nix::libc::EINVAL | nix::libc::ENOENT) => Ok(PidfdOpen::NotAProcess),
+        Some(nix::libc::ENOSYS | nix::libc::EPERM) => Ok(PidfdOpen::Unsupported),
+        _ => Err(error),
+    }
+}
+
+fn pidfd_open(pid: i32) -> io::Result<PidfdOpen> {
     // SAFETY: pidfd_open takes a pid and a flags word and returns a new file
     // descriptor or -1; it touches no caller memory.
     let raw = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid, 0) };
     if raw < 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(nix::libc::ESRCH) {
-            return Ok(None);
-        }
-        return Err(error);
+        return classify_pidfd_error(io::Error::last_os_error());
     }
     let fd = i32::try_from(raw)
         .map_err(|_| io::Error::other("pidfd_open returned an out-of-range descriptor"))?;
     // SAFETY: `fd` was just returned by pidfd_open and has no other owner.
-    Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
+    Ok(PidfdOpen::Opened(unsafe { OwnedFd::from_raw_fd(fd) }))
 }
 
-/// Open an exit handle pinned to exactly `identity`: `None` when that process
-/// is already fully gone or the pid now names a different process.
-fn pinned_pidfd(identity: &ProcessIdentity) -> io::Result<Option<OwnedFd>> {
-    let Some(pidfd) = pidfd_open(identity.pid)? else {
-        return Ok(None);
+fn stamp_matches(identity: &ProcessIdentity) -> io::Result<bool> {
+    Ok(matches!(
+        probe(identity.pid)?,
+        ProcessProbe::Observed(current) if current.start == identity.start
+    ))
+}
+
+/// Whether `pid` is a thread-group leader (a process), from the `Tgid` key
+/// of `/proc/<pid>/status`. Used only without pidfd support, where EINVAL is
+/// not available to reject thread ids.
+fn is_thread_group_leader(pid: i32) -> io::Result<bool> {
+    let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        Ok(status) => status,
+        Err(error) => {
+            return match classify_stat_read(Err(error))? {
+                StatRead::Absent | StatRead::Foreign | StatRead::Stat(_) => Ok(false),
+            };
+        }
     };
-    // The pidfd pins the pid, so the stamp read after opening it describes
-    // the process the handle refers to.
-    match snapshot(identity.pid)? {
-        Some(current) if current.start == identity.start => Ok(Some(pidfd)),
-        _ => Ok(None),
+    let tgid = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Tgid:"))
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "status record lacks Tgid"))?;
+    Ok(tgid == pid)
+}
+
+/// A handle on exactly `identity`, or why there is none.
+enum Pinned {
+    Pidfd(OwnedFd),
+    /// The recorded process is gone, or the pid names something else.
+    NotRunning,
+    /// Pidfds are unavailable; the stamp matched and the pid is a process.
+    StampOnly,
+}
+
+/// Pin `identity`: compare stamps from `/proc` first (so a foreign or absent
+/// pid is classified before any pidfd call), then open a pidfd and re-check
+/// the stamp, which the pidfd now pins.
+fn pin(identity: &ProcessIdentity) -> io::Result<Pinned> {
+    if !stamp_matches(identity)? {
+        return Ok(Pinned::NotRunning);
+    }
+    match pidfd_open(identity.pid)? {
+        PidfdOpen::Opened(pidfd) => Ok(if stamp_matches(identity)? {
+            Pinned::Pidfd(pidfd)
+        } else {
+            Pinned::NotRunning
+        }),
+        PidfdOpen::Gone | PidfdOpen::NotAProcess => Ok(Pinned::NotRunning),
+        PidfdOpen::Unsupported => Ok(if is_thread_group_leader(identity.pid)? {
+            Pinned::StampOnly
+        } else {
+            Pinned::NotRunning
+        }),
     }
 }
 
-fn poll_ready(pollfds: &mut [nix::libc::pollfd], timeout_ms: i32) -> io::Result<()> {
+/// Poll until readiness or the deadline (`None`: a non-blocking probe). The
+/// timeout is recomputed after an interrupted call so EINTR cannot stretch
+/// the wait past the deadline.
+fn poll_until(pollfds: &mut [nix::libc::pollfd], deadline: Option<Instant>) -> io::Result<()> {
     let nfds = nix::libc::nfds_t::try_from(pollfds.len())
         .map_err(|_| io::Error::other("too many exit watches"))?;
     loop {
+        let timeout_ms = match deadline {
+            None => 0,
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX)
+            }
+        };
         // SAFETY: `pollfds` is a live, correctly sized array of pollfd
         // records for the duration of the call.
         let ready = unsafe { nix::libc::poll(pollfds.as_mut_ptr(), nfds, timeout_ms) };
@@ -174,20 +275,80 @@ fn poll_ready(pollfds: &mut [nix::libc::pollfd], timeout_ms: i32) -> io::Result<
     }
 }
 
+/// Fallback liveness from `/proc` when pidfds are unavailable: a zombie
+/// thread-group leader still runs while it has other live threads.
+fn running_from_proc(pid: i32) -> io::Result<bool> {
+    let StatRead::Stat(stat) = read_stat(pid)? else {
+        return Ok(false);
+    };
+    if !matches!(stat.state, b'Z' | b'X') {
+        return Ok(true);
+    }
+    match std::fs::read_dir(format!("/proc/{pid}/task")) {
+        Ok(tasks) => Ok(tasks.count() > 1),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Whether exactly this process is still running. A pidfd becomes readable
 /// only once the whole thread group has exited, so a zombie main thread with
 /// live threads still counts as running.
 pub(super) fn is_running(identity: &ProcessIdentity) -> io::Result<bool> {
-    let Some(pidfd) = pinned_pidfd(identity)? else {
-        return Ok(false);
-    };
-    let mut pollfd = [nix::libc::pollfd {
-        fd: pidfd.as_raw_fd(),
-        events: nix::libc::POLLIN,
-        revents: 0,
-    }];
-    poll_ready(&mut pollfd, 0)?;
-    Ok(pollfd[0].revents == 0)
+    match pin(identity)? {
+        Pinned::NotRunning => Ok(false),
+        Pinned::StampOnly => running_from_proc(identity.pid),
+        Pinned::Pidfd(pidfd) => {
+            let mut pollfd = [nix::libc::pollfd {
+                fd: pidfd.as_raw_fd(),
+                events: nix::libc::POLLIN,
+                revents: 0,
+            }];
+            poll_until(&mut pollfd, None)?;
+            Ok(pollfd[0].revents == 0)
+        }
+    }
+}
+
+/// SIGKILL each verified member through its own pidfd, so a pid reused since
+/// it was listed can never be signalled. Without pidfd support, fall back to
+/// `kill(2)` right after the stamp and thread-group checks.
+pub(super) fn kill_members(_pgid: i32, members: &[ProcessIdentity]) -> io::Result<()> {
+    for member in members {
+        match pin(member)? {
+            Pinned::NotRunning => {}
+            Pinned::Pidfd(pidfd) => {
+                // SAFETY: pidfd_send_signal takes a live pidfd, a signal
+                // number, a null siginfo and zero flags; it touches no caller
+                // memory.
+                let rc = unsafe {
+                    nix::libc::syscall(
+                        nix::libc::SYS_pidfd_send_signal,
+                        pidfd.as_raw_fd(),
+                        nix::libc::SIGKILL,
+                        std::ptr::null::<nix::libc::siginfo_t>(),
+                        0,
+                    )
+                };
+                if rc < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(nix::libc::ESRCH) {
+                        return Err(error);
+                    }
+                }
+            }
+            Pinned::StampOnly => {
+                match nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(member.pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                ) {
+                    Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                    Err(error) => return Err(io::Error::from(error)),
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Exit notification handles for a set of processes.
@@ -199,8 +360,15 @@ impl ExitWatch {
     pub(super) fn new(members: &[ProcessIdentity]) -> io::Result<Self> {
         let mut pidfds = Vec::with_capacity(members.len());
         for member in members {
-            if let Some(pidfd) = pinned_pidfd(member)? {
-                pidfds.push(pidfd);
+            match pin(member)? {
+                Pinned::Pidfd(pidfd) => pidfds.push(pidfd),
+                Pinned::NotRunning => {}
+                Pinned::StampOnly => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "kernel exit notification (pidfd) is unavailable",
+                    ));
+                }
             }
         }
         Ok(Self { pidfds })
@@ -208,11 +376,9 @@ impl ExitWatch {
 
     pub(super) fn wait_all(mut self, deadline: Instant) -> io::Result<ExitWaitOutcome> {
         while !self.pidfds.is_empty() {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if Instant::now() >= deadline {
                 return Ok(ExitWaitOutcome::DeadlineElapsed);
             }
-            let timeout_ms = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
             let mut pollfds: Vec<nix::libc::pollfd> = self
                 .pidfds
                 .iter()
@@ -222,7 +388,7 @@ impl ExitWatch {
                     revents: 0,
                 })
                 .collect();
-            poll_ready(&mut pollfds, timeout_ms)?;
+            poll_until(&mut pollfds, Some(deadline))?;
             let mut index = 0;
             self.pidfds.retain(|_| {
                 let exited = pollfds[index].revents != 0;
@@ -235,7 +401,7 @@ impl ExitWatch {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -249,15 +415,84 @@ mod tests {
     }
 
     #[test]
-    fn own_process_snapshot_is_stable() {
+    fn unreadable_stat_is_foreign_and_missing_stat_is_absent() {
+        for errno in [nix::libc::EACCES, nix::libc::EPERM] {
+            assert!(matches!(
+                classify_stat_read(Err(io::Error::from_raw_os_error(errno))).unwrap(),
+                StatRead::Foreign
+            ));
+        }
+        for errno in [nix::libc::ENOENT, nix::libc::ESRCH] {
+            assert!(matches!(
+                classify_stat_read(Err(io::Error::from_raw_os_error(errno))).unwrap(),
+                StatRead::Absent
+            ));
+        }
+        assert!(classify_stat_read(Err(io::Error::from_raw_os_error(nix::libc::EIO))).is_err());
+    }
+
+    #[test]
+    fn pidfd_errors_classify_without_failing() {
+        let classify = |errno| classify_pidfd_error(io::Error::from_raw_os_error(errno)).unwrap();
+        assert!(matches!(classify(nix::libc::ESRCH), PidfdOpen::Gone));
+        assert!(matches!(
+            classify(nix::libc::EINVAL),
+            PidfdOpen::NotAProcess
+        ));
+        assert!(matches!(
+            classify(nix::libc::ENOENT),
+            PidfdOpen::NotAProcess
+        ));
+        assert!(matches!(
+            classify(nix::libc::ENOSYS),
+            PidfdOpen::Unsupported
+        ));
+        assert!(matches!(classify(nix::libc::EPERM), PidfdOpen::Unsupported));
+        assert!(classify_pidfd_error(io::Error::from_raw_os_error(nix::libc::EMFILE)).is_err());
+    }
+
+    #[test]
+    fn own_process_is_running_and_stable() {
         let pid = std::process::id() as i32;
-        let first = snapshot(pid).unwrap().unwrap();
-        let second = snapshot(pid).unwrap().unwrap();
+        let ProcessProbe::Observed(first) = probe(pid).unwrap() else {
+            panic!("own process must be observable");
+        };
+        let ProcessProbe::Observed(second) = probe(pid).unwrap() else {
+            panic!("own process must be observable");
+        };
         assert_eq!(first.start, second.start);
         let identity = ProcessIdentity {
             pid,
             start: first.start,
         };
         assert!(is_running(&identity).unwrap());
+        assert!(running_from_proc(pid).unwrap());
+        assert!(is_thread_group_leader(pid).unwrap());
+    }
+
+    #[test]
+    fn a_thread_id_is_never_the_recorded_process() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            sender.send(nix::unistd::gettid().as_raw()).unwrap();
+            let _ = wait.recv();
+        });
+        let tid = receiver.recv().unwrap();
+        // /proc/<tid>/stat is readable for a thread id, and pidfd_open on it
+        // fails with EINVAL; neither may surface as an error, and the thread
+        // (and so this process) must never be signalled.
+        let ProcessProbe::Observed(thread_stat) = probe(tid).unwrap() else {
+            panic!("a live thread id is readable through /proc");
+        };
+        let as_recorded = ProcessIdentity {
+            pid: tid,
+            start: thread_stat.start,
+        };
+        assert!(!is_running(&as_recorded).unwrap());
+        assert!(!is_thread_group_leader(tid).unwrap());
+        kill_members(tid, &[as_recorded]).unwrap();
+        release.send(()).unwrap();
+        thread.join().unwrap();
     }
 }

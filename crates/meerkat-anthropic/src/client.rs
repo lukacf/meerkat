@@ -258,10 +258,15 @@ fn project_anthropic_tool_result(
 }
 
 fn anthropic_server_tool_content_replayable(content: &Value) -> bool {
-    matches!(
-        content.get("type").and_then(Value::as_str),
-        Some("server_tool_use" | "web_search_tool_result")
-    )
+    match content.get("type").and_then(Value::as_str) {
+        Some("server_tool_use" | "web_search_tool_result") => true,
+        // Sessions recorded before the streamed result kept its `type` hold
+        // the result body alone (`{"content": [...]}`). It is still the result
+        // of the preceding `server_tool_use`, and replaying one without the
+        // other is a request Anthropic refuses.
+        None => content.get("content").is_some(),
+        Some(_) => false,
+    }
 }
 
 fn project_anthropic_assistant_blocks(
@@ -1796,11 +1801,23 @@ impl LlmClient for AnthropicClient {
                                         accumulated_server_tool_input.clear();
                                     }
                                     "web_search_tool_result" => {
+                                        // `extra` is the block minus the fields
+                                        // serde consumed; restore its `type` so
+                                        // the stored block is recognised as the
+                                        // result that pairs the preceding
+                                        // `server_tool_use` on replay.
+                                        let mut content = content_block.extra.clone();
+                                        if let Some(object) = content.as_object_mut() {
+                                            object.insert(
+                                                "type".to_string(),
+                                                Value::String("web_search_tool_result".to_string()),
+                                            );
+                                        }
                                         chunk_yielded.set(true);
                                         yield LlmEvent::ServerToolContent {
                                             id: content_block.tool_use_id.clone(),
                                             kind: ServerToolKind::WebSearch,
-                                            content: content_block.extra.clone(),
+                                            content,
                                             meta: None,
                                         };
                                     }
@@ -3030,6 +3047,83 @@ mod tests {
         assert_eq!(assistant_content[1]["type"], "text");
         assert_eq!(assistant_content[1]["text"], "The answer is 42.");
 
+        Ok(())
+    }
+
+    /// A web search turn replays as a `server_tool_use` immediately followed
+    /// by its `web_search_tool_result`, both for results stored with their
+    /// `type` and for the untyped result body older sessions recorded; an
+    /// orphaned `server_tool_use` is a request Anthropic refuses.
+    #[test]
+    fn test_build_request_body_replays_web_search_use_with_its_result()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let results = serde_json::json!([{
+            "type": "web_search_result",
+            "title": "Paris",
+            "url": "https://example.com",
+            "encrypted_content": "enc"
+        }]);
+        for stored_result in [
+            serde_json::json!({"type": "web_search_tool_result", "content": results}),
+            serde_json::json!({"content": results}),
+        ] {
+            let assistant_msg = Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![
+                    AssistantBlock::Text {
+                        text: "I'll look that up.".to_string(),
+                        meta: None,
+                    },
+                    AssistantBlock::ServerToolContent {
+                        id: Some("srvtoolu_1".to_string()),
+                        kind: ServerToolKind::WebSearch,
+                        content: serde_json::json!({
+                            "type": "server_tool_use",
+                            "input": {"query": "Paris population"}
+                        }),
+                        meta: None,
+                    },
+                    AssistantBlock::ServerToolContent {
+                        id: Some("srvtoolu_1".to_string()),
+                        kind: ServerToolKind::WebSearch,
+                        content: stored_result,
+                        meta: None,
+                    },
+                    AssistantBlock::Text {
+                        text: "About 2.1 million.".to_string(),
+                        meta: None,
+                    },
+                ],
+                stop_reason: Some(StopReason::EndTurn),
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
+            });
+            let request = LlmRequest::new(
+                "claude-sonnet-4-5",
+                vec![
+                    Message::User(UserMessage::text("Population of Paris?".to_string())),
+                    assistant_msg,
+                    Message::User(UserMessage::text("As JSON please.".to_string())),
+                ],
+            );
+
+            let body = client.build_request_body(&request)?;
+            let content = body["messages"][1]["content"]
+                .as_array()
+                .ok_or("assistant content")?;
+            let kinds = content
+                .iter()
+                .map(|block| block["type"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                kinds,
+                ["text", "server_tool_use", "web_search_tool_result", "text"]
+            );
+            assert_eq!(content[1]["id"], "srvtoolu_1");
+            assert_eq!(content[2]["tool_use_id"], "srvtoolu_1");
+            assert_eq!(content[2]["content"], results);
+        }
         Ok(())
     }
 
@@ -4750,6 +4844,7 @@ mod tests {
             "latest meerkat runtime"
         );
         assert_eq!(server_blocks[1].0.as_deref(), Some("srvtoolu_1"));
+        assert_eq!(server_blocks[1].2["type"], "web_search_tool_result");
         assert_eq!(
             server_blocks[1].2["content"][0]["url"],
             "https://example.com"

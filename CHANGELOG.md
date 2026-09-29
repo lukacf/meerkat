@@ -763,6 +763,21 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   inventory, pair report and audit writer tests), and the parity field
   evaluator lacked `pending_external_route_installs`. The generated MobMachine
   contract moves the four inputs to its Runtime-Internal Inputs section.
+- Model fallback from GPT-6 no longer skips every target as
+  `request_unsupported`. Since the GPT-6 rows gained the prompt-cache
+  capabilities, their build-derived cache defaults (mode, TTL and a
+  model-named cache key) are merged into each request, and the fallback
+  admission gate read them as caller requirements no other model could meet.
+  The gate now clears each side's build-derived request defaults
+  (`ProviderTag::clear_matching_defaults`, the inverse of
+  `merge_missing_from`) before comparing provider tags. Explicit caller knobs
+  still block a target that cannot carry them.
+- Anthropic web search turns replay intact. The streamed
+  `web_search_tool_result` block was stored without its `type`, so replay
+  dropped it and the next request (such as a structured-output extraction
+  after the model searched) sent an orphaned `server_tool_use`, which
+  Anthropic refuses. The stored block keeps its `type`, and results recorded
+  by earlier versions are recognised and replayed too.
 - The ripgrep tombstone scans (`legacy-surface-gate`,
   `session-control-gate`, `deprecated-backend-gate`) now run in pull-request
   CI's always-on fmt-governance lane, after installing ripgrep, which the

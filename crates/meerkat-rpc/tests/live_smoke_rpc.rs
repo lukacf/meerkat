@@ -707,7 +707,9 @@ async fn e2e_scenario_16_kitchen_sink() {
     eprintln!("[scenario 16] session B structured_output: {structured}");
     assert!(
         !structured.is_null(),
-        "Session B should have structured_output"
+        "Session B should have structured_output; extraction_error: {}, text: {}",
+        resp["result"]["extraction_error"],
+        resp["result"]["text"]
     );
     assert!(
         structured["city"].is_string(),

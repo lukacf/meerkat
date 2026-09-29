@@ -29,11 +29,55 @@ pub struct ModelFallbackClient {
     auth_lease: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
 }
 
+/// The provider-tag knobs a caller explicitly asked for: `params`' tag with
+/// build-derived request defaults (`defaults`: prompt-cache policy, native
+/// tool bodies), web search and structured output cleared. Web search is
+/// judged by tool parity and structured output by schema compilation, so
+/// neither is a tag requirement here. `None` when nothing is left.
+fn provider_tag_requirements(
+    params: &ProviderParamsOverride,
+    defaults: Option<&meerkat_core::lifecycle::run_primitive::ProviderTag>,
+) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+    use meerkat_core::lifecycle::run_primitive::ProviderTag;
+    let mut remaining = params.clone();
+    remaining.clear_web_search();
+    let mut tag = remaining.provider_tag?;
+    if let Some(defaults) = defaults {
+        tag.clear_matching_defaults(defaults);
+    }
+    let has_requirements = match &mut tag {
+        ProviderTag::Anthropic(tag) => {
+            tag.structured_output = None;
+            *tag != Default::default()
+        }
+        ProviderTag::OpenAi(tag) => {
+            tag.structured_output = None;
+            *tag != Default::default()
+        }
+        ProviderTag::Gemini(tag) => {
+            tag.structured_output = None;
+            *tag != Default::default()
+        }
+        ProviderTag::Unknown { .. } => true,
+    };
+    has_requirements.then_some(tag)
+}
+
+/// Whether `target` keeps every requirement the caller placed on the failed
+/// request.
+///
+/// `request.provider_params` is the effective per-request value: explicit
+/// params with the source candidate's build-derived request defaults merged
+/// in, and `target` likewise carries the target's own. Those defaults describe
+/// how each provider lowers a request, not what the caller asked for (the
+/// OpenAI prompt-cache key even names the model), so each side's defaults are
+/// cleared before the provider tags are compared.
 fn preserves_request_requirements(
     request: &ModelFallbackRequest<'_>,
+    source_defaults: Option<&meerkat_core::lifecycle::run_primitive::ProviderTag>,
     target: &ProviderParamsOverride,
+    target_defaults: Option<&meerkat_core::lifecycle::run_primitive::ProviderTag>,
 ) -> bool {
-    use meerkat_core::lifecycle::run_primitive::ProviderTag;
     let Some(source) = request.provider_params else {
         return true;
     };
@@ -60,25 +104,12 @@ fn preserves_request_requirements(
     {
         return false;
     }
-    let mut remaining = source.clone();
-    remaining.clear_web_search();
-    let has_specific_requirements = match remaining.provider_tag.as_mut() {
-        Some(ProviderTag::Anthropic(tag)) => {
-            tag.structured_output = None;
-            *tag != Default::default()
+    match provider_tag_requirements(source, source_defaults) {
+        None => true,
+        Some(required) => {
+            provider_tag_requirements(target, target_defaults).as_ref() == Some(&required)
         }
-        Some(ProviderTag::OpenAi(tag)) => {
-            tag.structured_output = None;
-            *tag != Default::default()
-        }
-        Some(ProviderTag::Gemini(tag)) => {
-            tag.structured_output = None;
-            *tag != Default::default()
-        }
-        Some(_) => true,
-        None => false,
-    };
-    !has_specific_requirements || source.provider_tag == target.provider_tag
+    }
 }
 
 impl ModelFallbackClient {
@@ -267,7 +298,12 @@ impl AgentLlmClient for ModelFallbackClient {
                 ));
                 continue;
             };
-            if !preserves_request_requirements(request, &params) {
+            if !preserves_request_requirements(
+                request,
+                current.request_policy.provider_tool_defaults.as_ref(),
+                &params,
+                next.request_policy.provider_tool_defaults.as_ref(),
+            ) {
                 skipped_targets.push(AgentLlmFallbackSkippedTarget::new(
                     next.identity.clone(),
                     ModelFallbackSkipReason::RequestUnsupported,
@@ -864,6 +900,132 @@ mod tests {
             rejected[0].reason,
             ModelFallbackSkipReason::RequestUnsupported
         );
+    }
+
+    /// The source candidate's build-derived request defaults (the GPT-6
+    /// prompt-cache policy and its model-named cache key) are merged into the
+    /// effective request params, but they are not caller requirements: a
+    /// cross-provider target stays admissible, same-provider targets with
+    /// their own defaults stay admissible, and an explicit caller knob still
+    /// blocks a target that cannot carry it.
+    #[test]
+    fn model_fallback_ignores_source_request_defaults_but_keeps_caller_requirements() {
+        use meerkat_core::lifecycle::run_primitive::{
+            OpenAiPromptCacheOptions, OpenAiProviderTag, ProviderParamsCarrier, ProviderTag,
+        };
+        use meerkat_core::model_profile::capabilities::{
+            OpenAiPromptCacheMode, OpenAiPromptCacheTtl,
+        };
+        let cache_defaults = |model: &str| {
+            ProviderTag::OpenAi(OpenAiProviderTag {
+                prompt_cache_enabled: Some(true),
+                prompt_cache_key: Some(format!("meerkat:profile:openai:{model}")),
+                prompt_cache_options: Some(OpenAiPromptCacheOptions {
+                    mode: Some(OpenAiPromptCacheMode::Implicit),
+                    ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+                }),
+                ..Default::default()
+            })
+        };
+        let with_defaults = |mut candidate: ModelFallbackCandidate| {
+            candidate.request_policy.provider_tool_defaults =
+                Some(cache_defaults(&candidate.identity.model));
+            candidate
+        };
+        let effective = |explicit: ProviderParamsOverride| {
+            ProviderParamsCarrier {
+                params: explicit,
+                tool_defaults: Some(cache_defaults("primary")),
+            }
+            .effective_params()
+            .expect("same-family defaults merge")
+        };
+        let primary = || {
+            with_defaults(candidate(
+                Provider::OpenAI,
+                "primary",
+                Some(200_000),
+                Some(4096),
+                Arc::default(),
+            ))
+        };
+
+        let cross = ModelFallbackClient::new(
+            vec![
+                primary(),
+                candidate(
+                    Provider::Anthropic,
+                    "target",
+                    Some(200_000),
+                    Some(4096),
+                    Arc::default(),
+                ),
+            ],
+            cross_provider_policy(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let defaults_only = effective(ProviderParamsOverride::default());
+        let switch = cross
+            .prepare_model_fallback(
+                &retryable_error(Provider::OpenAI),
+                &ModelFallbackRequest {
+                    provider_params: Some(&defaults_only),
+                    ..request(&[])
+                },
+            )
+            .expect("source cache defaults do not block a cross-provider target");
+        assert_eq!(switch.new_identity.provider, Provider::Anthropic);
+
+        let seeded = effective(ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                seed: Some(7),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        let rejected = cross
+            .prepare_model_fallback(
+                &retryable_error(Provider::OpenAI),
+                &ModelFallbackRequest {
+                    provider_params: Some(&seeded),
+                    ..request(&[])
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            rejected[0].reason,
+            ModelFallbackSkipReason::RequestUnsupported,
+            "an explicit caller knob the target cannot carry still blocks"
+        );
+
+        let same = ModelFallbackClient::new(
+            vec![
+                primary(),
+                with_defaults(candidate(
+                    Provider::OpenAI,
+                    "target",
+                    Some(200_000),
+                    Some(4096),
+                    Arc::default(),
+                )),
+            ],
+            Default::default(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let switch = same
+            .prepare_model_fallback(
+                &retryable_error(Provider::OpenAI),
+                &ModelFallbackRequest {
+                    provider_params: Some(&defaults_only),
+                    ..request(&[])
+                },
+            )
+            .expect("a same-provider target brings its own cache defaults");
+        assert_eq!(switch.new_identity.model, "target");
     }
 
     #[test]

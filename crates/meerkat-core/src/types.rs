@@ -2068,6 +2068,9 @@ pub enum SystemNoticeKind {
     /// `auth_binding` needs manual re-authentication before the next LLM
     /// call can proceed (Phase 1.5-rev).
     AuthReauthRequired,
+    /// A tool process from an interrupted run was settled by the host's
+    /// process-custody recovery; the run's input was not replayed.
+    ToolProcessRecovery,
 }
 
 impl SystemNoticeKind {
@@ -2084,9 +2087,10 @@ impl SystemNoticeKind {
 
     pub const fn render_class(self) -> RenderClass {
         match self {
-            Self::Generic | Self::McpPending | Self::AuthReauthRequired => {
-                RenderClass::SystemNotice
-            }
+            Self::Generic
+            | Self::McpPending
+            | Self::AuthReauthRequired
+            | Self::ToolProcessRecovery => RenderClass::SystemNotice,
             Self::Comms => RenderClass::PeerMessage,
             Self::ExternalEvent => RenderClass::ExternalEvent,
             Self::Mcp => RenderClass::SystemNotice,
@@ -2306,6 +2310,16 @@ pub enum SystemNoticeBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<Value>,
     },
+    /// A tool process of an interrupted run was settled by the host's
+    /// process-custody recovery. The run's input was settled as interrupted
+    /// and not replayed; the tool's effects may be partial or complete.
+    ToolProcessInterrupted {
+        /// Provider tool-call id of the interrupted call, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        spawner: crate::tool_process::ToolProcessSpawner,
+        cessation: crate::tool_process::ToolProcessCessation,
+    },
     Unknown {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
@@ -2389,6 +2403,12 @@ enum SystemNoticeBlockKnown {
         detail: Option<String>,
         #[serde(default, deserialize_with = "deserialize_present_json_value")]
         payload: Option<Value>,
+    },
+    ToolProcessInterrupted {
+        #[serde(default)]
+        tool_call_id: Option<String>,
+        spawner: crate::tool_process::ToolProcessSpawner,
+        cessation: crate::tool_process::ToolProcessCessation,
     },
     Unknown {
         #[serde(default)]
@@ -2495,6 +2515,15 @@ impl From<SystemNoticeBlockKnown> for SystemNoticeBlock {
                 detail,
                 payload,
             },
+            SystemNoticeBlockKnown::ToolProcessInterrupted {
+                tool_call_id,
+                spawner,
+                cessation,
+            } => Self::ToolProcessInterrupted {
+                tool_call_id,
+                spawner,
+                cessation,
+            },
             SystemNoticeBlockKnown::Unknown { summary, payload } => {
                 Self::Unknown { summary, payload }
             }
@@ -2511,8 +2540,15 @@ impl<'de> Deserialize<'de> for SystemNoticeBlock {
         let block_type = value.get("type").and_then(Value::as_str);
         match block_type {
             Some(
-                "comms" | "external_event" | "tool_config" | "mcp" | "background_job" | "auth"
-                | "runtime_notice" | "unknown",
+                "comms"
+                | "external_event"
+                | "tool_config"
+                | "mcp"
+                | "background_job"
+                | "auth"
+                | "runtime_notice"
+                | "tool_process_interrupted"
+                | "unknown",
             ) => serde_json::from_value::<SystemNoticeBlockKnown>(value)
                 .map(Into::into)
                 .map_err(serde::de::Error::custom),
@@ -2544,7 +2580,7 @@ impl SystemNoticeBlock {
             | Self::BackgroundJob { detail, .. }
             | Self::Auth { detail, .. }
             | Self::RuntimeNotice { detail, .. } => detail.as_deref(),
-            Self::ToolConfig { .. } => None,
+            Self::ToolConfig { .. } | Self::ToolProcessInterrupted { .. } => None,
         }
     }
 
@@ -2690,6 +2726,23 @@ impl SystemNoticeBlock {
             }
             Self::ToolConfig { payload } => {
                 format!("Tool configuration changed: {}", payload.status_text())
+            }
+            Self::ToolProcessInterrupted {
+                tool_call_id,
+                spawner,
+                cessation,
+            } => {
+                let call = tool_call_id
+                    .as_deref()
+                    .map(|id| format!(" (tool call {id})"))
+                    .unwrap_or_default();
+                format!(
+                    "A previous run was interrupted when the host stopped abruptly. Its {}{call} {}. \
+                     The interrupted request was not re-run automatically; its effects may be \
+                     partial or complete. Verify the current state before repeating the action.",
+                    spawner.description(),
+                    cessation.description(),
+                )
             }
             _ => self.summary().unwrap_or_default().to_string(),
         }
@@ -2843,6 +2896,20 @@ impl SystemNoticeMessage {
                 detail: Some(detail),
                 persisted: true,
             }],
+        )
+    }
+
+    /// The typed record that an interrupted run's tool processes were settled
+    /// by the host's process-custody recovery and the run's input was not
+    /// replayed. One block per interrupted tool process.
+    pub fn tool_process_interrupted(blocks: Vec<SystemNoticeBlock>) -> Self {
+        Self::with_blocks(
+            SystemNoticeKind::ToolProcessRecovery,
+            Some(
+                "The host stopped abruptly during a previous run; that run was not re-run."
+                    .to_string(),
+            ),
+            blocks,
         )
     }
 

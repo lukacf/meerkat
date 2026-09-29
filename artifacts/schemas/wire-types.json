@@ -5469,6 +5469,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -5517,6 +5545,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -5786,6 +5819,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,
@@ -27630,6 +27808,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -27678,6 +27884,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -27947,6 +28158,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,
@@ -29546,6 +29902,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -29594,6 +29978,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -29814,6 +30203,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptUserRole": {
         "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
@@ -41401,6 +41935,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -41449,6 +42011,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -41745,6 +42312,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,
@@ -59189,6 +59901,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -59237,6 +59977,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -59596,6 +60341,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,
@@ -76901,6 +77791,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -76949,6 +77867,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -77245,6 +78168,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,
@@ -86535,6 +87603,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -86583,6 +87679,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -86852,6 +87953,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,
@@ -107884,6 +109130,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -107932,6 +109206,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -108152,6 +109431,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptUserRole": {
         "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
@@ -133112,6 +134536,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -133160,6 +134612,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -133380,6 +134837,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptUserRole": {
         "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
@@ -142570,6 +144172,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -142618,6 +144248,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -142887,6 +144522,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,
@@ -145098,6 +146878,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -145146,6 +146954,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -145366,6 +147179,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptUserRole": {
         "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
@@ -152625,6 +154583,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -152673,6 +154659,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -152893,6 +154884,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptUserRole": {
         "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
@@ -159955,6 +162091,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -160003,6 +162167,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -160223,6 +162392,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptUserRole": {
         "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
@@ -162352,6 +164666,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -162400,6 +164742,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -162620,6 +164967,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptUserRole": {
         "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",
@@ -165209,6 +167701,34 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an interrupted run was settled by the host's\nprocess-custody recovery. The run's input was settled as interrupted\nand not replayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawner",
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -165257,6 +167777,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -165477,6 +168002,151 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "cessation": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "cessation": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "cessation": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cessation",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot or pid namespace that has since\nbeen replaced; every process of it has ended. Nothing was signalled.",
+            "properties": {
+              "cessation": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cessation"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptUserRole": {
         "description": "Typed transcript role for a user-channel message.\n\nThis is the canonical replacement for `[Context compacted]` string-prefix\nfolklore in the transcript-continuity save-guard. A user message produced as\na runtime compaction boundary carries [`TranscriptUserRole::CompactionSummary`];\neverything else stays [`TranscriptUserRole::Conversational`]. The producer of\nthe compaction summary sets this typed marker; the save-guard reads the typed\nfield instead of classifying the rendered message body by content.",

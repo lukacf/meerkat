@@ -52,6 +52,8 @@ import type {
   ToolConfigChangeStatus,
   ToolConfigChangedPayload,
   ToolName,
+  ToolProcessCessation,
+  ToolProcessSpawner,
   TranscriptEditRewriteRange,
   TranscriptRewriteReason,
   TranscriptRewriteSelection,

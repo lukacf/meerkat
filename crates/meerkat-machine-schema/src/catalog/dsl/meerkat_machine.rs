@@ -2320,6 +2320,12 @@ pub enum InputAbandonReason {
     /// refused a run it could not prove had started. `ResolveInputPublicTerminalOutcome`
     /// therefore resolves it to the public `Abandoned` class, not `Cancelled`.
     NeverExecuted,
+    /// The input's run was in flight when its host stopped abruptly, and the
+    /// host's process custody proved that a tool process of that run had
+    /// already started (it was killed by recovery or had already exited). The
+    /// input is settled instead of replayed so the tool's effects cannot be
+    /// repeated unknowingly. Resolves to the public `Abandoned` class.
+    ToolProcessInterrupted,
 }
 
 /// Typed work-lane assignment for admitted inputs. Replaces the former

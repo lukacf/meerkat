@@ -6,35 +6,9 @@
 
 use std::path::PathBuf;
 
+pub use meerkat_core::tool_process::{ToolProcessCessation, ToolProcessSpawner};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-/// How recovery established that an earlier incarnation's tool has ceased.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "cessation", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ToolProcessCessation {
-    /// The host died before releasing the spawn gate, so the command never
-    /// started.
-    NeverStarted,
-    /// The recorded group had no member left when recovery inspected it: the
-    /// tool had already finished or been killed. Its result was not
-    /// delivered.
-    AlreadyExited,
-    /// The recorded leader pid or group id now names a different process or
-    /// group (another start stamp, another user, a member that cannot descend
-    /// from the recorded leader, or a live group of the current
-    /// incarnation). Group ids are not reused while a group exists, so the
-    /// recorded group is gone. Nothing was signalled.
-    GroupReassigned,
-    /// Recovery SIGKILLed the group and observed every member exit.
-    KilledByRecovery { members: usize },
-    /// The earlier incarnation ran in a boot or pid namespace that has since
-    /// been replaced. A reboot ends every process; the kernel SIGKILLs every
-    /// process of a pid namespace when its init exits. Recovery cannot
-    /// observe that environment, so it signals nothing.
-    PriorEnvironmentEnded,
-}
 
 /// One earlier-incarnation tool settled by recovery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +18,10 @@ pub struct RecoveredToolProcess {
     pub prior_incarnation: Uuid,
     /// Provider tool-call id of the interrupted call, when known.
     pub tool_call_id: Option<String>,
+    /// The run the process belonged to, when it was spawned inside one.
+    pub run_id: Option<meerkat_core::RunId>,
+    /// What spawned the process.
+    pub spawner: ToolProcessSpawner,
     pub cessation: ToolProcessCessation,
 }
 
@@ -52,6 +30,27 @@ pub struct RecoveredToolProcess {
 #[non_exhaustive]
 pub struct ProcessCustodyRecoveryReport {
     pub recovered: Vec<RecoveredToolProcess>,
+}
+
+/// Result of settling one scope during a realm sweep.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ScopeSweep {
+    /// The scope (session id) the records belonged to.
+    pub scope: String,
+    /// The scope's settlement, or why it could not be settled now (for
+    /// example [`ProcessCustodyError::PriorIncarnationAlive`] for a session
+    /// another live host still serves). A failed scope keeps its records and
+    /// is settled again when the session is next built or swept.
+    pub outcome: Result<ProcessCustodyRecoveryReport, ProcessCustodyError>,
+}
+
+/// Outcome of a realm-level custody sweep over every scope under a custody
+/// root, including sessions that are never resumed.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct ProcessCustodySweepReport {
+    pub scopes: Vec<ScopeSweep>,
 }
 
 /// Errors establishing or recovering process custody.

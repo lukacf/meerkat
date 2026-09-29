@@ -66,6 +66,14 @@ pub enum InputAbandonReason {
     /// run, and "cancelled" would answer that question with something that
     /// never happened.
     NeverExecuted,
+    /// The input's run was in flight when its host stopped abruptly, and the
+    /// host's durable process custody proved that a tool process of that run
+    /// had already started (killed by recovery, or already exited). The input
+    /// is settled instead of replayed, so the tool's effects are never
+    /// repeated unknowingly; the model is told through a typed
+    /// tool-process-interrupted notice. Abandoned silently, without a receipt,
+    /// like a recovered predecessor input.
+    ToolProcessInterrupted,
 }
 
 /// Terminal outcome for an input.
@@ -1385,6 +1393,10 @@ pub(crate) fn input_terminal_completion_outcome(
 ///   staging (stage realization or staged-binding persistence) rolls its
 ///   inputs back through `ResolveStagedRollback`, which abandons an input at
 ///   the stage-attempt cap without a receipt.
+/// - `Abandoned { ToolProcessInterrupted }`: plain-session materialization
+///   silently settles the recovered inputs of a run whose tool process host
+///   custody proved had started
+///   (`PendingRuntimeExecutorAttachment::abandon_interrupted_run_inputs`).
 ///
 /// `Cancelled` and `MaxAttemptsExhausted` are also reached with a receipt
 /// (tracked cancel, attachment replacement, a failed run's batch); a row of
@@ -1411,7 +1423,9 @@ pub(crate) fn receipt_less_terminal(
         InputTerminalOutcome::Superseded { .. } | InputTerminalOutcome::Coalesced { .. } => true,
         InputTerminalOutcome::Consumed => target.seed.last_run_id.is_none(),
         InputTerminalOutcome::Abandoned { reason } => match reason {
-            InputAbandonReason::Cancelled | InputAbandonReason::MaxAttemptsExhausted { .. } => true,
+            InputAbandonReason::Cancelled
+            | InputAbandonReason::MaxAttemptsExhausted { .. }
+            | InputAbandonReason::ToolProcessInterrupted => true,
             InputAbandonReason::Retired
             | InputAbandonReason::Reset
             | InputAbandonReason::Stopped

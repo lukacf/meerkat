@@ -10,8 +10,10 @@
 
 #![allow(unsafe_code)]
 
+use std::ffi::{OsStr, OsString};
 use std::io::Write as _;
 use std::os::fd::{AsRawFd, OwnedFd};
+#[cfg(test)]
 use std::path::Path;
 
 use tokio::process::Command;
@@ -77,10 +79,24 @@ impl SpawnGate {
     }
 
     /// Build the gated command that will run `shell_path -c command`.
+    #[cfg(test)]
     pub(in crate::builtin::shell) fn command(
         &self,
         shell_path: &Path,
         command: &str,
+    ) -> std::io::Result<Command> {
+        self.command_argv(
+            shell_path.as_os_str(),
+            &[OsString::from("-c"), OsString::from(command)],
+        )
+    }
+
+    /// Build the gated command that will run `program args...` once the gate
+    /// is released.
+    pub(in crate::builtin::shell) fn command_argv(
+        &self,
+        program: &OsStr,
+        args: &[OsString],
     ) -> std::io::Result<Command> {
         let read_fd = self
             .read
@@ -92,9 +108,8 @@ impl SpawnGate {
             .arg(GATE_PROLOGUE)
             .arg(GATE_ARGV0)
             .arg(&self.token)
-            .arg(shell_path)
-            .arg("-c")
-            .arg(command);
+            .arg(program)
+            .args(args);
         // SAFETY: the closure runs in the forked child before exec and calls
         // only async-signal-safe functions (dup2, fcntl) on integer
         // descriptors; it allocates nothing and touches no shared state.

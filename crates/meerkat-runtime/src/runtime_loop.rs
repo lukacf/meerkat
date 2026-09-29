@@ -143,6 +143,19 @@ pub(crate) fn for_detached_job_completed()
     }
 }
 
+/// Canonical turn metadata of an interrupted tool process notice (see
+/// `PromptInput::interrupted_tool_process`): `Steer` handling and nothing
+/// else, so a running turn takes it as a steer and an idle session runs one
+/// turn that sees it. Lives HERE because this file is the single sanctioned
+/// construction site for `RuntimeTurnMetadata`.
+pub(crate) fn for_interrupted_tool_process()
+-> meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+        ..Default::default()
+    }
+}
+
 /// Merge the per-input turn metadata carried by a staged batch into a single
 /// typed carrier. Scalar conflicts (two inputs disagreeing on e.g. `model`)
 /// are refused with a typed error so caller policy is not silently replaced by

@@ -151,6 +151,31 @@ them.
   handle it. A submission whose delivery correlation and supplied
   transcript interaction id (on the `WorkSpec` or in `MemberTurnOptions`)
   disagree now returns it instead of `MobError::Internal` (#1264).
+- `meerkat_core::SystemNoticeKind` gains the variant `ToolProcessRecovery`,
+  and `meerkat_core::SystemNoticeBlock` gains the variant
+  `ToolProcessInterrupted { tool_call_id, spawner, cessation }`: the typed
+  transcript record that a run interrupted by an abrupt host stop was not
+  re-run because tool processes it started were settled by process custody.
+- Behaviour-only (not measured by the gate): runtime materialization of a
+  session whose previous host stopped abruptly no longer replays a recovered
+  input whose run had a tool process that durable process custody proved had
+  started (killed by recovery, or already exited). The input is abandoned
+  with the typed `meerkat_runtime::InputAbandonReason::ToolProcessInterrupted`
+  before the attachment serves, and the model receives one
+  `ToolProcessRecovery` notice turn per interrupted run (idempotent per run).
+  Inputs of runs without such evidence still replay as before.
+- Behaviour-only (not measured by the gate): on Linux and macOS, every
+  `AgentFactory` agent build under a realm `runtime_root` now settles the
+  session's earlier-incarnation tool processes (shell calls, background
+  shell jobs, monitors, command hooks) before the agent exists, even when the
+  new build enables no shell, and fails closed with
+  `CompositeDispatcherError::ProcessCustody` as before. Background shell job
+  and monitor attempts and command hooks now spawn through the custody spawn
+  gate (`/bin/sh` prologue that `exec`s the program in place), and a failure
+  to write their custody record fails the job attempt or hook before
+  anything runs. `AgentFactory::runtime_root` also starts, once per root per
+  process, a background sweep that settles custody for every session under
+  the root, including sessions that are never resumed.
 - `meerkat_tools::CompositeDispatcherError` (re-exported as
   `meerkat::CompositeDispatcherError`) gains the variant `ProcessCustody`
   (native targets), carrying a typed
@@ -434,6 +459,26 @@ them.
   and an empty selection is normalized to no selection. The existing
   `submit_host_human_input_bounded` / `start_host_human_input_bounded`
   delegate with default options and keep their replay identity (#1264).
+- Durable process custody for background shell jobs, monitors and command
+  hooks, not only foreground `shell` calls: `ProcessCustody::prepare_spawn`,
+  `PreparedCustodySpawn`, `CustodyGuard`, `ProcessCustody::sweep`,
+  `sweep_process_custody_once`, `ProcessCustodySweepReport` and `ScopeSweep`
+  (`meerkat_tools::builtin::shell`), and the meerkat-hooks seam
+  `CommandHookProcessCustody` / `CommandHookCustodySpawn` /
+  `CommandHookCustodyError` with `DefaultHookEngine::with_command_process_custody`
+  (implemented by the facade over the session's custody). Custody records now
+  carry the run id and the spawner (`ToolProcessSpawner`).
+- `meerkat_core::tool_process`: the platform-independent vocabulary
+  `ToolProcessCessation` and `ToolProcessSpawner` (re-exported by
+  `meerkat_tools::builtin::shell`), interrupted-run evidence
+  (`InterruptedToolCall`, `InterruptedToolSettlement`,
+  `InterruptedToolEvidence`, `InterruptedToolEvidenceError`,
+  `InterruptedToolEvidenceSlot`), and
+  `SessionRuntimeBindings::interrupted_tool_evidence`, the hand-off from agent
+  construction to runtime materialization.
+- `meerkat_runtime::PendingRuntimeExecutorAttachment::abandon_interrupted_run_inputs`,
+  `meerkat_runtime::PromptInput::interrupted_tool_process`, and
+  `meerkat_core::SystemNoticeMessage::tool_process_interrupted`.
 - `meerkat_tools::builtin::shell::ProcessCustody` and its vocabulary
   (`ProcessCustodyScope`, `ProcessCustodyRecoveryReport`,
   `RecoveredToolProcess`, `ToolProcessCessation`, `ProcessCustodyError`,
@@ -782,6 +827,13 @@ them.
   host-acknowledged peer ID, which spawn projects but replay dropped, is
   republished the same way after both Running and Stopped restarts; a
   Broken placed member publishes nothing.
+- A plain (non-mob) session whose gateway was SIGKILLed mid-tool no longer
+  re-runs the interrupted input on restart, so a tool effect that already
+  happened is not repeated unknowingly; the model is told with a typed
+  `ToolProcessInterrupted` notice instead. Background shell jobs, monitors and
+  command hooks of a dead host incarnation are killed (or proven gone) before
+  new work for the session, and a realm sweep settles sessions that are never
+  resumed (#1265).
 - A SIGKILLed host (gateway) no longer leaves an ordinary foreground shell
   tool running to perform its effect later. When the next incarnation builds
   the same session's agent, every earlier-incarnation shell process group is

@@ -97,6 +97,8 @@ fn write_prior_record_in(
         host,
         environment,
         tool_call_id: Some("call-prior".to_owned()),
+        spawner: ToolProcessSpawner::ShellCall,
+        run_id: None,
         phase,
     };
     let dir = root.join(scope.as_str());
@@ -104,6 +106,13 @@ fn write_prior_record_in(
     let temp = temp_path(&dir, record.entry_id, record.incarnation);
     write_record_blocking(&dir, &path, &temp, &serde_json::to_vec(&record).unwrap()).unwrap();
     path
+}
+
+/// Rewrite a written record with a run id (for interrupted-run evidence).
+fn set_run_id(path: &Path, run_id: meerkat_core::RunId) {
+    let mut record: CustodyRecord = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    record.run_id = Some(run_id);
+    std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
 }
 
 fn live_members(pgid: i32) -> Vec<i32> {
@@ -656,7 +665,10 @@ async fn a_cancelled_spawned_reservation_is_released_once_its_group_exits() {
         .unwrap();
     let mut leader = spawn_group("exec sleep 60");
     let pgid = leader.id() as i32;
-    let mut reservation = custody.reserve(Some("call-cancelled")).await.unwrap();
+    let mut reservation = custody
+        .reserve(ToolProcessSpawner::ShellCall, Some("call-cancelled"), None)
+        .await
+        .unwrap();
     reservation.record_spawned(pgid).await.unwrap();
     assert!(registered(pgid));
     // The call future is cancelled after spawn: the reservation is dropped
@@ -856,10 +868,142 @@ async fn recovery_removes_an_emptied_scope_directory() {
     assert!(!dir.exists());
 
     // A later reservation recreates it.
-    let reservation = custody.reserve(Some("call")).await.unwrap();
+    let reservation = custody
+        .reserve(ToolProcessSpawner::ShellCall, Some("call"), None)
+        .await
+        .unwrap();
     assert_eq!(record_files(&dir).len(), 1);
     drop(reservation);
     assert!(record_files(&dir).is_empty());
+}
+
+#[tokio::test]
+async fn a_killed_tool_of_an_in_flight_run_is_kept_as_interrupted_run_evidence() {
+    use meerkat_core::tool_process::{InterruptedToolEvidence, InterruptedToolSettlement};
+
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let mut leader = spawn_group("exec sleep 60");
+    let pgid = leader.id() as i32;
+    let run_id = meerkat_core::RunId::new();
+    let path = write_prior_record(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        spawned_phase(pgid),
+    );
+    set_run_id(&path, run_id.clone());
+    // A never-started reservation of the same run has no possible effect.
+    let never_started = write_prior_record(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        CustodyPhase::Reserved,
+    );
+    set_run_id(&never_started, run_id.clone());
+
+    let (custody, report) = ProcessCustody::recover_and_open(root.path(), scope.clone())
+        .await
+        .unwrap();
+    leader.wait().unwrap();
+
+    assert_eq!(report.recovered.len(), 2);
+    assert!(path.exists(), "the killed tool's record stays as evidence");
+    assert!(
+        !never_started.exists(),
+        "a never-started entry is not evidence"
+    );
+    let calls = custody.interrupted_calls().await.unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].run_id, run_id);
+    assert_eq!(calls[0].tool_call_id.as_deref(), Some("call-prior"));
+    assert!(matches!(
+        calls[0].cessation,
+        ToolProcessCessation::KilledByRecovery { .. }
+    ));
+    assert_eq!(calls[0].settlement, InterruptedToolSettlement::Pending);
+
+    // Evidence is never re-settled by a later recovery.
+    let (_again, report) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+    assert!(report.recovered.is_empty());
+
+    custody
+        .mark_inputs_settled(&[calls[0].entry_id])
+        .await
+        .unwrap();
+    assert_eq!(
+        custody.interrupted_calls().await.unwrap()[0].settlement,
+        InterruptedToolSettlement::InputsSettled
+    );
+    custody.acknowledge(&[calls[0].entry_id]).await.unwrap();
+    assert!(custody.interrupted_calls().await.unwrap().is_empty());
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn realm_sweep_settles_every_scope_and_leaves_live_hosts_alone() {
+    let root = TempDir::new().unwrap();
+    let orphaned = scope();
+    let served = scope();
+    let mut orphan_leader = spawn_group("exec sleep 60");
+    let orphan_pgid = orphan_leader.id() as i32;
+    write_prior_record(
+        root.path(),
+        &orphaned,
+        Uuid::new_v4(),
+        dead_identity(),
+        spawned_phase(orphan_pgid),
+    );
+    let mut host = Command::new("/bin/sh")
+        .args(["-c", "exec sleep 60"])
+        .spawn()
+        .unwrap();
+    let host_identity = ProcessIdentity::capture(host.id() as i32).unwrap().unwrap();
+    let mut served_leader = spawn_group("exec sleep 60");
+    let served_pgid = served_leader.id() as i32;
+    write_prior_record(
+        root.path(),
+        &served,
+        Uuid::new_v4(),
+        host_identity,
+        spawned_phase(served_pgid),
+    );
+
+    let report = ProcessCustody::sweep(root.path()).await.unwrap();
+
+    let outcome = |scope: &ProcessCustodyScope| {
+        report
+            .scopes
+            .iter()
+            .find(|swept| swept.scope == scope.as_str())
+            .map(|swept| &swept.outcome)
+            .unwrap()
+    };
+    assert!(matches!(
+        outcome(&orphaned),
+        Ok(settled) if matches!(
+            settled.recovered[0].cessation,
+            ToolProcessCessation::KilledByRecovery { .. }
+        )
+    ));
+    assert!(matches!(
+        outcome(&served),
+        Err(ProcessCustodyError::PriorIncarnationAlive { .. })
+    ));
+    assert!(live_members(orphan_pgid).is_empty(), "the orphan is killed");
+    assert!(
+        process_running(served_pgid),
+        "a live host's tool is left alone"
+    );
+    orphan_leader.wait().unwrap();
+    for child in [&mut served_leader, &mut host] {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
 }
 
 #[tokio::test]
@@ -878,6 +1022,7 @@ async fn custody_bound_shell_call_records_then_settles() {
         .call_with_tool_call_id(
             json!({"command": format!("ls '{}'", dir.display())}),
             Some("call-live"),
+            None,
         )
         .await
         .unwrap();
@@ -916,6 +1061,7 @@ async fn custody_gateway_child_role() {
         .call_with_tool_call_id(
             json!({"command": command, "timeout_secs": 60}),
             Some("call-gateway"),
+            None,
         )
         .await;
 }
@@ -1006,7 +1152,7 @@ async fn gateway_sigkill_mid_tool_is_recovered_before_new_work() {
     // New same-scope work runs under the fresh custody.
     let tool = ShellTool::new(sh_config(project.path()));
     tool.job_manager.bind_process_custody(custody).unwrap();
-    tool.call_with_tool_call_id(json!({"command": "true"}), Some("call-next"))
+    tool.call_with_tool_call_id(json!({"command": "true"}), Some("call-next"), None)
         .await
         .unwrap();
 

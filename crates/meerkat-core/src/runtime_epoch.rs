@@ -233,6 +233,9 @@ pub struct SessionRuntimeBindings {
     compaction_commit_coordinator: Arc<dyn crate::memory::CompactionCommitCoordinator>,
     /// Mechanical observe-only dispatcher shared with the runtime owner.
     post_commit_hooks: Arc<PostCommitHookDispatcher>,
+    /// Hand-off of the session's interrupted-run evidence from agent
+    /// construction (host process custody) to runtime materialization.
+    interrupted_tool_evidence: Arc<crate::tool_process::InterruptedToolEvidenceSlot>,
     runtime_authority: Arc<dyn Any + Send + Sync>,
 }
 
@@ -290,6 +293,7 @@ impl SessionRuntimeBindings {
             interaction_stream,
             compaction_commit_coordinator,
             post_commit_hooks,
+            interrupted_tool_evidence: Arc::default(),
             runtime_authority,
         }
     }
@@ -385,6 +389,15 @@ impl SessionRuntimeBindings {
         &self.post_commit_hooks
     }
 
+    /// Hand-off slot for the session's interrupted-run evidence, shared by
+    /// every clone of these bindings. The agent builder installs the host's
+    /// evidence store; runtime materialization settles it before serving.
+    pub fn interrupted_tool_evidence(
+        &self,
+    ) -> &Arc<crate::tool_process::InterruptedToolEvidenceSlot> {
+        &self.interrupted_tool_evidence
+    }
+
     #[doc(hidden)]
     pub fn __runtime_authority(&self) -> &(dyn Any + Send + Sync) {
         self.runtime_authority.as_ref()
@@ -425,6 +438,7 @@ impl SessionRuntimeBindings {
             interaction_stream: Arc::clone(&self.interaction_stream),
             compaction_commit_coordinator: Arc::clone(&self.compaction_commit_coordinator),
             post_commit_hooks: Arc::clone(&self.post_commit_hooks),
+            interrupted_tool_evidence: Arc::clone(&self.interrupted_tool_evidence),
             runtime_authority,
         }
     }

@@ -6221,6 +6221,50 @@ export type CommsNoticeKind = string;
 
 export type SystemNoticeDirection = "incoming" | "outgoing" | "internal";
 
+export interface ToolProcessCessationNeverStarted {
+  cessation: "never_started";
+}
+
+export interface ToolProcessCessationAlreadyExited {
+  cessation: "already_exited";
+}
+
+export interface ToolProcessCessationGroupReassigned {
+  cessation: "group_reassigned";
+}
+
+export interface ToolProcessCessationKilledByRecovery {
+  cessation: "killed_by_recovery";
+  members: number;
+}
+
+export interface ToolProcessCessationPriorEnvironmentEnded {
+  cessation: "prior_environment_ended";
+}
+
+export type ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded;
+
+export interface ToolProcessSpawnerShellCall {
+  kind: "shell_call";
+}
+
+export interface ToolProcessSpawnerBackgroundJob {
+  job_id: string;
+  kind: "background_job";
+}
+
+export interface ToolProcessSpawnerMonitor {
+  job_id: string;
+  kind: "monitor";
+}
+
+export interface ToolProcessSpawnerCommandHook {
+  hook_id: string;
+  kind: "command_hook";
+}
+
+export type ToolProcessSpawner = ToolProcessSpawnerShellCall | ToolProcessSpawnerBackgroundJob | ToolProcessSpawnerMonitor | ToolProcessSpawnerCommandHook;
+
 export interface SystemNoticeBlockComms {
   content?: ContentBlock[];
   direction: SystemNoticeDirection;
@@ -6283,15 +6327,22 @@ export interface SystemNoticeBlockRuntimeNotice {
   type: "runtime_notice";
 }
 
+export interface SystemNoticeBlockToolProcessInterrupted {
+  cessation: ToolProcessCessation;
+  spawner: ToolProcessSpawner;
+  tool_call_id?: string | null;
+  type: "tool_process_interrupted";
+}
+
 export interface SystemNoticeBlockUnknown {
   payload?: unknown;
   summary?: string | null;
   type: "unknown";
 }
 
-export type SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockUnknown;
+export type SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockToolProcessInterrupted | SystemNoticeBlockUnknown;
 
-export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required";
+export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required" | "tool_process_recovery";
 
 export type SystemPromptKey = string;
 

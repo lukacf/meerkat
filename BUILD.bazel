@@ -750,6 +750,7 @@ test_suite(
         "//crates/meerkat:session_runtime_staged_promotion_test",
         "//crates/meerkat:standalone_turn_lifecycle_test",
         "//crates/meerkat:storage_provider_seam_test",
+        "//crates/meerkat:tool_process_custody_restart_test",
         "//crates/xtask:buildbuddy_static_lanes_test",
         "//crates/xtask:ci_gate_requires_rmat_test",
         "//crates/xtask:effect_authority_test",

@@ -319,6 +319,8 @@ mod factory;
 #[cfg(not(target_arch = "wasm32"))]
 mod host_auth;
 mod model_fallback;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod process_custody;
 #[cfg(not(target_arch = "wasm32"))]
 pub use factory::ExperimentalLiveTargetPreparation;
 pub use factory::{

@@ -44,6 +44,8 @@ from .types import (  # noqa: F401
     ToolConfigChangeOperation,
     ToolConfigChangeStatus,
     ToolName,
+    ToolProcessCessation,
+    ToolProcessSpawner,
     TranscriptRewriteSelection,
 )
 

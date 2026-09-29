@@ -753,6 +753,11 @@ export type SystemNoticeBlock = {
   payload?: unknown;
   type: "runtime_notice";
 } | {
+  cessation: ToolProcessCessation;
+  spawner: ToolProcessSpawner;
+  tool_call_id?: string | null;
+  type: "tool_process_interrupted";
+} | {
   payload?: unknown;
   summary?: string | null;
   type: "unknown";
@@ -760,7 +765,7 @@ export type SystemNoticeBlock = {
 
 export type SystemNoticeDirection = "incoming" | "outgoing" | "internal";
 
-export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required";
+export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required" | "tool_process_recovery";
 
 export type SystemNoticeMessage = {
   blocks?: SystemNoticeBlock[];
@@ -818,6 +823,32 @@ export type ToolConfigChangedPayload = {
 };
 
 export type ToolName = string;
+
+export type ToolProcessCessation = {
+  cessation: "never_started";
+} | {
+  cessation: "already_exited";
+} | {
+  cessation: "group_reassigned";
+} | {
+  cessation: "killed_by_recovery";
+  members: number;
+} | {
+  cessation: "prior_environment_ended";
+};
+
+export type ToolProcessSpawner = {
+  kind: "shell_call";
+} | {
+  job_id: string;
+  kind: "background_job";
+} | {
+  job_id: string;
+  kind: "monitor";
+} | {
+  hook_id: string;
+  kind: "command_hook";
+};
 
 export interface TranscriptEditRewriteRange {
   end: number;

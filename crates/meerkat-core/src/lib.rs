@@ -110,6 +110,7 @@ pub mod tool_catalog;
 pub mod tool_consequence_policy;
 pub mod tool_execution;
 pub mod tool_execution_policy;
+pub mod tool_process;
 pub mod tool_scope;
 pub mod transcript_replay;
 pub mod turn_boundary;

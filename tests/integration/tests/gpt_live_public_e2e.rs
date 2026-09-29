@@ -5726,7 +5726,7 @@ async fn s106_reopen_cycle(
     evidence: &Journal,
     channel: u32,
     typed_prompt: Option<&str>,
-    utterances: &mut usize,
+    user_text: &mut Vec<String>,
     deterministic_failures: &mut Vec<String>,
     tolerant_failures: &mut Vec<String>,
 ) -> Result<(S106Cycle, u32, Option<SeedCase>), Box<dyn std::error::Error>> {
@@ -5741,10 +5741,18 @@ async fn s106_reopen_cycle(
     // delegation), so the channel's count is read only once it has settled:
     // read right after the last question, the reply to it may still be in
     // flight and its utterance still pending.
-    *utterances += live.peer.energy().await?.input_finals.len();
+    user_text.extend(
+        live.peer
+            .energy()
+            .await?
+            .input_finals
+            .iter()
+            .map(|input| normalize_words(&input.text)),
+    );
     live.record_uplink("S106").await?;
     let close = close_or_record(live, evidence, channel, "S106", deterministic_failures).await?;
     if let Some(prompt) = typed_prompt {
+        user_text.push(normalize_words(prompt));
         let typed = live
             .rpc
             .call_raw(
@@ -5858,9 +5866,9 @@ async fn s106_reopen_cycle(
 /// executor result artifact exceeds 1500 bytes; per reopen cycle a new
 /// framed summary landed, the instructions fragments number ceil(bytes/500)
 /// and are all acknowledged; exactly one delegation per delegated exchange
-/// and none for the native ones; canonical user rows equal the typed turns
-/// plus the user utterances closed by arrival across all channels; every
-/// close converges; WorkGraph parallel mode. Tolerant: the final summary
+/// and none for the native ones; canonical user rows carry exactly the words
+/// of the typed turns and of every user utterance across all channels, in
+/// order; every close converges; WorkGraph parallel mode. Tolerant: the final summary
 /// window carries the three planted tokens; median input_final -> first
 /// audio under 3 s; open -> connected under 5 s per channel.
 #[tokio::test]
@@ -5926,7 +5934,12 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
     let mut deterministic_failures: Vec<String> = Vec::new();
     let mut seen_executor_turns = std::collections::BTreeSet::new();
     let mut latencies: Vec<i64> = Vec::new();
-    let mut utterances = 0usize;
+    // Every user word the session heard or was typed, in order: the typed
+    // seed, each channel's input finals, and the typed note of the first
+    // closure. Canonical spoken rows must carry exactly these words.
+    let mut user_text = vec![normalize_words(&format!(
+        "For the record: the sponsor's name is {S106_SEED_TOKEN}. Just acknowledge in one short sentence."
+    ))];
     let mut delegation_windows: Vec<(String, usize)> = Vec::new();
     let mut stage_ms: Vec<(String, u128)> = vec![("connected".to_owned(), connected_ms)];
     let result = async {
@@ -6002,7 +6015,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             &evidence,
             channel,
             Some(S106_TYPED_PROMPT),
-            &mut utterances,
+            &mut user_text,
             &mut deterministic_failures,
             &mut tolerant_failures,
         )
@@ -6039,7 +6052,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             &evidence,
             channel,
             None,
-            &mut utterances,
+            &mut user_text,
             &mut deterministic_failures,
             &mut tolerant_failures,
         )
@@ -6102,20 +6115,32 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
         // Same rule as the reopen cycles: the channel's utterances are
         // counted once its last reply has settled.
-        utterances += live.peer.energy().await?.input_finals.len();
+        user_text.extend(
+            live.peer
+                .energy()
+                .await?
+                .input_finals
+                .iter()
+                .map(|input| normalize_words(&input.text)),
+        );
         live.record_uplink("S106").await?;
         let close3 = close_or_record(&mut live, &evidence, channel, "S106", &mut deterministic_failures).await?;
         stage_ms.push(("closed".to_owned(), started.elapsed().as_millis()));
 
-        // Canonical rows: typed turns (seed + typed note) + user utterances
-        // closed by arrival across the three channels.
+        // Canonical rows carry every user word of the typed turns (seed +
+        // typed note) and the utterances across the three channels, in order.
+        // Words, not row counts: the browser closes an utterance by arrival
+        // on the data channel and the runtime by arrival on the sideband, two
+        // separately ordered copies of the same provider events, so a late
+        // tail ("earlier", "call") can open a new row on one side and not the
+        // other. The row count is printed, not asserted.
         let history = live
             .rpc
             .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":600}), 30)
             .await?;
         // Rows the runtime injects itself (a delegation result merged after
         // its channel closed: "result of the voice request ...") are neither
-        // typed turns nor utterances and are excluded from the count.
+        // typed turns nor utterances and are excluded.
         let all_rows = s100_user_rows(&history);
         let spoken: Vec<String> = all_rows
             .spoken
@@ -6129,17 +6154,19 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             executor_inputs: all_rows.executor_inputs,
         };
         let typed_turns = 2usize;
-        let expected_rows = typed_turns + utterances;
+        let utterances = user_text.len() - typed_turns;
+        let heard_words = normalize_words(&user_text.join(" "));
+        let row_words = normalize_words(&rows.spoken.join(" "));
         println!(
-            "GPT_LIVE_S106_HISTORY spoken_user_rows={} merged_result_rows={merged_results} expected_rows={expected_rows} (typed {typed_turns} + utterances {utterances}) executor_inputs={}",
+            "GPT_LIVE_S106_HISTORY spoken_user_rows={} merged_result_rows={merged_results} expected_rows={} (typed {typed_turns} + utterances {utterances}) words_match={} executor_inputs={}",
             rows.spoken.len(),
+            typed_turns + utterances,
+            heard_words == row_words,
             rows.executor_inputs.len()
         );
-        if rows.spoken.len() != expected_rows {
+        if heard_words != row_words {
             deterministic_failures.push(format!(
-                "canonical spoken user rows ({}) differ from typed turns + utterances ({expected_rows}); rows: {:?}",
-                rows.spoken.len(),
-                rows.spoken
+                "canonical spoken user rows do not carry exactly the typed turns and heard utterances;\n    rows:  {row_words:?}\n    heard: {heard_words:?}"
             ));
         }
         latencies.sort_unstable();

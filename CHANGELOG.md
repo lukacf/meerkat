@@ -133,7 +133,10 @@ them.
   delete the named file; `UnsupportedRecordVersion` (a record written by a
   newer release in the same boot and pid namespace, for example after a
   rollback) - run the newer release again, or confirm the tool is not
-  running and delete the file; `Io` - fix the named I/O condition. A reused
+  running and delete the file; `ExitNotificationUnavailable` (Linux without
+  `pidfd_open`: kernel before 5.3 or a blocking seccomp profile; nothing is
+  signalled) - run the host where pidfds are available, or end the named
+  group manually and delete its record; `Io` - fix the named I/O condition. A reused
   pid (another user's process, a thread id, a different start stamp) is
   always classified, never an error. Custody-bound foreground shell calls
   are spawned through a `/bin/sh` spawn gate that `exec`s the configured
@@ -284,6 +287,13 @@ them.
   incarnation's recorded group identity, SIGKILLs the group, and waits for
   every member's exit through kernel exit notification (pidfd on Linux,
   kqueue `EVFILT_PROC` on macOS).
+- `meerkat_tools::builtin::shell::track_owned_process_group` and
+  `meerkat_hooks::set_command_hook_process_group_observer` (Unix): process
+  groups spawned by background shell jobs, non-custody shell calls and
+  command hooks are registered as live until kernel exit notification proves
+  them exited, so custody recovery never mistakes a running group of the
+  current process for an earlier incarnation's tool. `AgentFactory` installs
+  the hook observer.
 - `meerkat_runtime::RuntimeSessionAttachmentState` (`Unregistered`,
   `Attached`, `ReloadRequired { registration, attachment }`,
   `Detached { registration, unregister }`), `RuntimeDetachedUnregister`

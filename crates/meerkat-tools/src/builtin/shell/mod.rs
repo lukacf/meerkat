@@ -42,6 +42,7 @@ pub use config::{ShellConfig, ShellError};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use custody::{
     PROCESS_CUSTODY_DIR, ProcessCustody, ProcessCustodyScope, ProcessIdentity, ProcessStartStamp,
+    track_owned_process_group,
 };
 pub use custody_types::{
     ProcessCustodyError, ProcessCustodyRecoveryReport, RecoveredToolProcess, ToolProcessCessation,

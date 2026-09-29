@@ -101,14 +101,29 @@ pub enum ProcessCustodyError {
         host_pid: i32,
     },
     /// Recovery SIGKILLed the group but some member did not exit before the
-    /// deadline (a process stuck in an uninterruptible kernel wait), or a
-    /// member could not be signalled. Operator action: inspect and end
-    /// process group `pgid` (for example `kill -KILL -<pgid>`, or resolve
-    /// the stuck I/O), then retry.
+    /// deadline (a process stuck in an uninterruptible kernel wait), or the
+    /// kernel refused to let this host signal a member (EPERM, for example a
+    /// member that changed credentials). Operator action: end process group
+    /// `pgid` with sufficient privilege (for example `kill -KILL -<pgid>`),
+    /// or resolve the stuck I/O, then retry.
     #[error(
         "tool process group {pgid} of custody entry {entry_id} did not cease: {live_members} member(s) still running"
     )]
     CessationUnproven {
+        entry_id: Uuid,
+        pgid: i32,
+        live_members: usize,
+    },
+    /// An earlier incarnation's tool group is still running, but this host
+    /// has no kernel exit notification (Linux without `pidfd_open`: kernels
+    /// before 5.3, or a seccomp profile that blocks it), so cessation could
+    /// never be proven. Nothing was signalled. Operator action: run the host
+    /// where pidfds are available, or end process group `pgid` manually and
+    /// delete the entry's record, then retry.
+    #[error(
+        "tool process group {pgid} of custody entry {entry_id} is still running ({live_members} member(s)) and this host has no kernel exit notification"
+    )]
+    ExitNotificationUnavailable {
         entry_id: Uuid,
         pgid: i32,
         live_members: usize,

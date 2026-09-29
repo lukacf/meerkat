@@ -3529,6 +3529,8 @@ impl AgentFactory {
     /// fails with `FactoryError::TokenStore` — never silently degraded to
     /// `InteractiveLoginRequired`.
     pub fn new(store_path: impl Into<PathBuf>) -> Self {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Self::install_process_group_observers();
         #[cfg(not(target_arch = "wasm32"))]
         let provider_auth_persistence = open_provider_auth_persistence(
             meerkat_providers::auth_store::TokenStoreBackend::default_auto(),
@@ -5371,6 +5373,16 @@ impl AgentFactory {
         Ok(Arc::new(composite))
     }
 
+    /// Register command-hook process groups as live with durable shell
+    /// process custody, so custody recovery never mistakes a running hook
+    /// group for an earlier incarnation's tool. Idempotent.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn install_process_group_observers() {
+        let _ = meerkat_hooks::set_command_hook_process_group_observer(
+            meerkat_tools::builtin::shell::track_owned_process_group,
+        );
+    }
+
     /// Settle shell tool processes left running by an earlier host
     /// incarnation for this session, then bind durable custody for this
     /// incarnation's shell calls.
@@ -5389,6 +5401,7 @@ impl AgentFactory {
             PROCESS_CUSTODY_DIR, ProcessCustody, ProcessCustodyScope,
         };
 
+        Self::install_process_group_observers();
         let Some(job_manager) = composite.shell_job_manager() else {
             return Ok(());
         };

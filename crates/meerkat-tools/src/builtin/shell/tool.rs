@@ -363,7 +363,15 @@ impl ShellTool {
                 }
                 Some(reservation)
             }
-            None => None,
+            None => {
+                // Not custody-bound: still register the live group so a
+                // custody recovery in this process never mistakes it for an
+                // earlier incarnation's tool.
+                if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+                    super::custody::track_owned_process_group(pid);
+                }
+                None
+            }
         };
 
         let stdout = child.stdout.take();

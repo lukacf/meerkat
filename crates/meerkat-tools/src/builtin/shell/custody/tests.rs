@@ -543,7 +543,7 @@ async fn recovery_never_touches_a_live_group_of_the_current_incarnation() {
     // Same session, member started after the recorded leader: the start and
     // session checks alone would accept this group as the prior tool's.
     let (leader, session_leader) = leaderless_group();
-    register_live_group(leader.pid);
+    register_live_group(leader.pid, Some(leader.start));
     write_prior_record(
         root.path(),
         &scope,
@@ -557,7 +557,7 @@ async fn recovery_never_touches_a_live_group_of_the_current_incarnation() {
 
     let result = ProcessCustody::recover_and_open(root.path(), scope).await;
     let survivors = live_members(leader.pid);
-    release_live_group(leader.pid);
+    release_live_group(leader.pid, Some(leader.start));
     kill_test_group(leader.pid);
 
     let (_custody, report) = result.unwrap();
@@ -571,30 +571,130 @@ async fn recovery_never_touches_a_live_group_of_the_current_incarnation() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
-async fn another_users_process_holding_a_recorded_pid_is_classified_not_errored() {
+async fn a_stale_live_group_entry_never_shields_a_newer_orphan() {
     let root = TempDir::new().unwrap();
     let scope = scope();
-    // pid 1 exists in every pid namespace and belongs to another user (or,
-    // when the tests run as root, has another start stamp).
-    let ProcessProbe::Observed(init) = sys::probe(1).unwrap() else {
-        // Hidden or unreadable: already the foreign classification.
-        return;
-    };
-    let bogus = |start: ProcessStartStamp| match start {
+    let (leader, session_leader) = leaderless_group();
+    // An entry left for the same group id by an older leader (for example a
+    // cancelled call whose group ended) must not protect the recorded group.
+    let older = match leader.start {
         ProcessStartStamp::LinuxBoot {
             boot_id,
             start_ticks,
         } => ProcessStartStamp::LinuxBoot {
             boot_id,
-            start_ticks: start_ticks.wrapping_add(1),
+            start_ticks: start_ticks.saturating_sub(1),
         },
-        other => other,
+        ProcessStartStamp::Darwin {
+            start_sec,
+            start_usec,
+        } => ProcessStartStamp::Darwin {
+            start_sec: start_sec.saturating_sub(1),
+            start_usec,
+        },
+    };
+    register_live_group(leader.pid, Some(older));
+    write_prior_record(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        CustodyPhase::Spawned {
+            leader,
+            session_leader,
+        },
+    );
+
+    let result = ProcessCustody::recover_and_open(root.path(), scope).await;
+    release_live_group(leader.pid, Some(older));
+    kill_test_group(leader.pid);
+
+    let (_custody, report) = result.unwrap();
+    assert!(
+        matches!(
+            report.recovered[0].cessation,
+            ToolProcessCessation::KilledByRecovery { .. }
+        ),
+        "{report:?}"
+    );
+}
+
+fn registered(pgid: i32) -> bool {
+    live_groups().contains_key(&pgid)
+}
+
+fn await_release(pgid: i32) -> bool {
+    for _ in 0..500 {
+        if !registered(pgid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+#[test]
+fn tracked_groups_are_released_once_proven_exited() {
+    let mut leader = spawn_group("sleep 60 & exec sleep 60");
+    let pgid = leader.id() as i32;
+    track_owned_process_group(pgid);
+    assert!(registered(pgid));
+    kill_test_group(pgid);
+    leader.wait().unwrap();
+    assert!(
+        await_release(pgid),
+        "the release watcher must retire the entry after the group exits"
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_spawned_reservation_is_released_once_its_group_exits() {
+    let root = TempDir::new().unwrap();
+    let (custody, _) = ProcessCustody::recover_and_open(root.path(), scope())
+        .await
+        .unwrap();
+    let mut leader = spawn_group("exec sleep 60");
+    let pgid = leader.id() as i32;
+    let mut reservation = custody.reserve(Some("call-cancelled")).await.unwrap();
+    reservation.record_spawned(pgid).await.unwrap();
+    assert!(registered(pgid));
+    // The call future is cancelled after spawn: the reservation is dropped
+    // while the group is still alive.
+    drop(reservation);
+    assert!(registered(pgid), "a live group stays registered");
+    kill_test_group(pgid);
+    leader.wait().unwrap();
+    assert!(await_release(pgid));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn another_users_process_holding_a_recorded_pid_is_classified_not_errored() {
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    // pid 1 exists in every pid namespace. Run as a normal user it belongs to
+    // root and probes as Foreign; run as root it is Observed, and a bumped
+    // stamp makes it another process. Either way it is never ours.
+    let own = ProcessIdentity::capture(std::process::id() as i32)
+        .unwrap()
+        .unwrap();
+    let recorded_start = match sys::probe(1).unwrap() {
+        ProcessProbe::Observed(init) => init.start,
+        ProcessProbe::Absent | ProcessProbe::Foreign => own.start,
     };
     let foreign = ProcessIdentity {
         pid: 1,
-        start: bogus(init.start),
+        start: match recorded_start {
+            ProcessStartStamp::LinuxBoot {
+                boot_id,
+                start_ticks,
+            } => ProcessStartStamp::LinuxBoot {
+                boot_id,
+                start_ticks: start_ticks.wrapping_add(1),
+            },
+            other => other,
+        },
     };
     assert!(!foreign.is_running().unwrap());
     write_prior_record(
@@ -635,10 +735,21 @@ async fn recovery_deletes_only_earlier_incarnations_temp_files() {
     let dir = root.path().join(scope.as_str());
     std::fs::create_dir_all(&dir).unwrap();
     let current = super::incarnation().unwrap().id;
+    let ended = Uuid::new_v4();
+    // A settled record proves `ended`'s host is gone.
+    write_prior_record(
+        root.path(),
+        &scope,
+        ended,
+        dead_identity(),
+        CustodyPhase::Reserved,
+    );
     let live_write = temp_path(&dir, Uuid::new_v4(), current);
-    let interrupted = temp_path(&dir, Uuid::new_v4(), Uuid::new_v4());
-    std::fs::write(&live_write, b"{}").unwrap();
-    std::fs::write(&interrupted, b"{}").unwrap();
+    let unknown_host_write = temp_path(&dir, Uuid::new_v4(), Uuid::new_v4());
+    let interrupted = temp_path(&dir, Uuid::new_v4(), ended);
+    for temp in [&live_write, &unknown_host_write, &interrupted] {
+        std::fs::write(temp, b"{}").unwrap();
+    }
 
     ProcessCustody::recover_and_open(root.path(), scope)
         .await
@@ -647,6 +758,10 @@ async fn recovery_deletes_only_earlier_incarnations_temp_files() {
     assert!(
         live_write.exists(),
         "a current-incarnation write may be in flight"
+    );
+    assert!(
+        unknown_host_write.exists(),
+        "a host not proven gone (for example a concurrent host) may be writing"
     );
     assert!(!interrupted.exists());
 }

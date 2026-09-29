@@ -8,8 +8,11 @@
 //! `pidfd_send_signal` can never reach a process that later reuses the pid.
 //!
 //! Every observation that shows a pid cannot be one of ours (absent, hidden
-//! by `hidepid`, not readable, a thread id rather than a process) is a typed
-//! [`ProcessProbe`] or a not-running answer, never an I/O error.
+//! by `hidepid`, not readable, owned by another user, a thread id rather
+//! than a process) is a typed [`ProcessProbe`] or a not-running answer,
+//! never an I/O error. Ownership is the effective uid from the `Uid` key of
+//! `/proc/<pid>/status`, which (unlike the `/proc/<pid>` owner) does not
+//! depend on the process being dumpable.
 
 #![allow(unsafe_code)]
 
@@ -98,6 +101,65 @@ fn read_stat(pid: i32) -> io::Result<StatRead> {
     classify_stat_read(std::fs::read_to_string(format!("/proc/{pid}/stat")))
 }
 
+/// This process's effective uid.
+fn own_effective_uid() -> u32 {
+    // SAFETY: geteuid takes no arguments, cannot fail, and touches no caller
+    // memory.
+    unsafe { nix::libc::geteuid() }
+}
+
+/// Parse the effective uid (second field of the `Uid` key) of a
+/// `/proc/<pid>/status` record.
+fn parse_effective_uid(status: &str) -> io::Result<u32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|value| value.split_ascii_whitespace().nth(1))
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "status record lacks Uid"))
+}
+
+/// Outcome of reading a process's owner.
+enum OwnerRead {
+    Absent,
+    Foreign,
+    Ours,
+}
+
+fn classify_owner(read: io::Result<String>, own_uid: u32) -> io::Result<OwnerRead> {
+    match read {
+        Ok(status) => Ok(if parse_effective_uid(&status)? == own_uid {
+            OwnerRead::Ours
+        } else {
+            OwnerRead::Foreign
+        }),
+        Err(error) => Ok(match classify_stat_read(Err(error))? {
+            StatRead::Absent => OwnerRead::Absent,
+            StatRead::Foreign | StatRead::Stat(_) => OwnerRead::Foreign,
+        }),
+    }
+}
+
+fn read_owner(pid: i32) -> io::Result<OwnerRead> {
+    classify_owner(
+        std::fs::read_to_string(format!("/proc/{pid}/status")),
+        own_effective_uid(),
+    )
+}
+
+/// Stat plus ownership: a readable process of another user is foreign.
+fn read_own_stat(pid: i32) -> io::Result<StatRead> {
+    let stat = read_stat(pid)?;
+    if !matches!(stat, StatRead::Stat(_)) {
+        return Ok(stat);
+    }
+    Ok(match read_owner(pid)? {
+        OwnerRead::Ours => stat,
+        OwnerRead::Absent => StatRead::Absent,
+        OwnerRead::Foreign => StatRead::Foreign,
+    })
+}
+
 fn snapshot_from_stat(stat: &ProcStat, boot_id: Uuid) -> ProcessSnapshot {
     ProcessSnapshot {
         pgid: stat.pgrp,
@@ -110,16 +172,17 @@ fn snapshot_from_stat(stat: &ProcStat, boot_id: Uuid) -> ProcessSnapshot {
 
 pub(super) fn probe(pid: i32) -> io::Result<ProcessProbe> {
     let boot_id = boot_id()?;
-    Ok(match read_stat(pid)? {
+    Ok(match read_own_stat(pid)? {
         StatRead::Absent => ProcessProbe::Absent,
         StatRead::Foreign => ProcessProbe::Foreign,
         StatRead::Stat(stat) => ProcessProbe::Observed(snapshot_from_stat(&stat, boot_id)),
     })
 }
 
-/// Readable members of group `pgid`. Unreadable processes are omitted: their
-/// group cannot be known and they cannot be ours. Callers cross-check an
-/// empty result against `kill(-pgid, 0)`.
+/// Members of group `pgid`. Unreadable processes are omitted (their group
+/// cannot be known); readable members owned by another user are reported as
+/// [`ProcessProbe::Foreign`]. Callers cross-check an empty result against
+/// `kill(-pgid, 0)`.
 pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessProbe)>> {
     let boot_id = boot_id()?;
     let mut members = Vec::new();
@@ -135,10 +198,14 @@ pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessProbe)>> {
         if let StatRead::Stat(stat) = read_stat(pid)?
             && stat.pgrp == pgid
         {
-            members.push((
-                pid,
-                ProcessProbe::Observed(snapshot_from_stat(&stat, boot_id)),
-            ));
+            match read_owner(pid)? {
+                OwnerRead::Absent => {}
+                OwnerRead::Foreign => members.push((pid, ProcessProbe::Foreign)),
+                OwnerRead::Ours => members.push((
+                    pid,
+                    ProcessProbe::Observed(snapshot_from_stat(&stat, boot_id)),
+                )),
+            }
         }
     }
     Ok(members)
@@ -310,45 +377,19 @@ pub(super) fn is_running(identity: &ProcessIdentity) -> io::Result<bool> {
     }
 }
 
-/// SIGKILL each verified member through its own pidfd, so a pid reused since
-/// it was listed can never be signalled. Without pidfd support, fall back to
-/// `kill(2)` right after the stamp and thread-group checks.
-pub(super) fn kill_members(_pgid: i32, members: &[ProcessIdentity]) -> io::Result<()> {
-    for member in members {
-        match pin(member)? {
-            Pinned::NotRunning => {}
-            Pinned::Pidfd(pidfd) => {
-                // SAFETY: pidfd_send_signal takes a live pidfd, a signal
-                // number, a null siginfo and zero flags; it touches no caller
-                // memory.
-                let rc = unsafe {
-                    nix::libc::syscall(
-                        nix::libc::SYS_pidfd_send_signal,
-                        pidfd.as_raw_fd(),
-                        nix::libc::SIGKILL,
-                        std::ptr::null::<nix::libc::siginfo_t>(),
-                        0,
-                    )
-                };
-                if rc < 0 {
-                    let error = io::Error::last_os_error();
-                    if error.raw_os_error() != Some(nix::libc::ESRCH) {
-                        return Err(error);
-                    }
-                }
-            }
-            Pinned::StampOnly => {
-                match nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(member.pid),
-                    nix::sys::signal::Signal::SIGKILL,
-                ) {
-                    Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-                    Err(error) => return Err(io::Error::from(error)),
-                }
-            }
+/// Whether kernel exit notification (pidfds) is available to this process.
+pub(super) fn exit_notification_available() -> io::Result<bool> {
+    let pid =
+        i32::try_from(std::process::id()).map_err(|_| io::Error::other("own pid out of range"))?;
+    Ok(match pidfd_open(pid)? {
+        PidfdOpen::Opened(_) => true,
+        PidfdOpen::Unsupported => false,
+        PidfdOpen::Gone | PidfdOpen::NotAProcess => {
+            return Err(io::Error::other(
+                "own pid is not observable through pidfd_open",
+            ));
         }
-    }
-    Ok(())
+    })
 }
 
 /// Exit notification handles for a set of processes.
@@ -357,6 +398,35 @@ pub(super) struct ExitWatch {
 }
 
 impl ExitWatch {
+    /// SIGKILL every watched member through its own pidfd, so a pid reused
+    /// since it was listed can never be signalled. Returns how many members
+    /// the kernel refused to let us signal (EPERM).
+    pub(super) fn kill(&self, _pgid: i32) -> io::Result<usize> {
+        let mut refused = 0;
+        for pidfd in &self.pidfds {
+            // SAFETY: pidfd_send_signal takes a live pidfd, a signal number,
+            // a null siginfo and zero flags; it touches no caller memory.
+            let rc = unsafe {
+                nix::libc::syscall(
+                    nix::libc::SYS_pidfd_send_signal,
+                    pidfd.as_raw_fd(),
+                    nix::libc::SIGKILL,
+                    std::ptr::null::<nix::libc::siginfo_t>(),
+                    0,
+                )
+            };
+            if rc < 0 {
+                let error = io::Error::last_os_error();
+                match error.raw_os_error() {
+                    Some(nix::libc::ESRCH) => {}
+                    Some(nix::libc::EPERM) => refused += 1,
+                    _ => return Err(error),
+                }
+            }
+        }
+        Ok(refused)
+    }
+
     pub(super) fn new(members: &[ProcessIdentity]) -> io::Result<Self> {
         let mut pidfds = Vec::with_capacity(members.len());
         for member in members {
@@ -432,6 +502,40 @@ mod tests {
     }
 
     #[test]
+    fn another_users_readable_process_is_foreign() {
+        let status = |uid: u32| format!("Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n");
+        assert!(matches!(
+            classify_owner(Ok(status(1000)), 1000).unwrap(),
+            OwnerRead::Ours
+        ));
+        assert!(matches!(
+            classify_owner(Ok(status(0)), 1000).unwrap(),
+            OwnerRead::Foreign
+        ));
+        // Real uid differs, effective uid is ours: ours.
+        assert!(matches!(
+            classify_owner(Ok("Uid:\t0\t1000\t0\t1000\n".to_owned()), 1000).unwrap(),
+            OwnerRead::Ours
+        ));
+        for errno in [nix::libc::EACCES, nix::libc::EPERM] {
+            assert!(matches!(
+                classify_owner(Err(io::Error::from_raw_os_error(errno)), 1000).unwrap(),
+                OwnerRead::Foreign
+            ));
+        }
+        assert!(matches!(
+            classify_owner(Err(io::Error::from_raw_os_error(nix::libc::ENOENT)), 1000).unwrap(),
+            OwnerRead::Absent
+        ));
+        assert_eq!(parse_effective_uid(&status(42)).unwrap(), 42);
+    }
+
+    #[test]
+    fn pidfds_are_available_on_the_test_kernel() {
+        assert!(exit_notification_available().unwrap());
+    }
+
+    #[test]
     fn pidfd_errors_classify_without_failing() {
         let classify = |errno| classify_pidfd_error(io::Error::from_raw_os_error(errno)).unwrap();
         assert!(matches!(classify(nix::libc::ESRCH), PidfdOpen::Gone));
@@ -491,7 +595,12 @@ mod tests {
         };
         assert!(!is_running(&as_recorded).unwrap());
         assert!(!is_thread_group_leader(tid).unwrap());
-        kill_members(tid, &[as_recorded]).unwrap();
+        let watch = ExitWatch::new(&[as_recorded]).unwrap();
+        assert_eq!(watch.kill(tid).unwrap(), 0);
+        assert!(
+            watch.pidfds.is_empty(),
+            "a thread id is never pinned or signalled"
+        );
         release.send(()).unwrap();
         thread.join().unwrap();
     }

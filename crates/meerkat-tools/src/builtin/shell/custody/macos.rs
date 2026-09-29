@@ -126,11 +126,17 @@ pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessProbe)>> {
             libc::proc_listpgrppids(pgid, buffer.as_mut_ptr().cast::<libc::c_void>(), bytes)
         };
         // libproc reports some failures as a zero count; errno tells them
-        // apart from an empty group. Callers also cross-check an empty
-        // listing against kill(-pgid, 0).
+        // apart from an empty group. ESRCH means no process has this group
+        // id any more: the group is empty (for example right after every
+        // member of a killed group exited). Callers also cross-check an
+        // empty listing against kill(-pgid, 0).
         let error = io::Error::last_os_error();
-        if count < 0 || (count == 0 && error.raw_os_error().unwrap_or(0) != 0) {
-            return Err(error);
+        if count <= 0 {
+            match error.raw_os_error() {
+                Some(libc::ESRCH) => break Vec::new(),
+                Some(0) | None if count == 0 => break Vec::new(),
+                _ => return Err(error),
+            }
         }
         let count = usize::try_from(count).unwrap_or(0);
         if count < capacity {
@@ -195,17 +201,10 @@ pub(super) fn is_running(identity: &ProcessIdentity) -> io::Result<bool> {
     Ok(snapshot_from_info(&info)?.start == identity.start && info.pbi_status != libc::SZOMB)
 }
 
-/// SIGKILL group `pgid`. macOS has no pidfds; the caller has just verified
-/// the group's ownership. EPERM means no member could be signalled by us, so
-/// none is ours; exit watching and re-listing settle the rest.
-pub(super) fn kill_members(pgid: i32, _members: &[ProcessIdentity]) -> io::Result<()> {
-    match nix::sys::signal::killpg(
-        nix::unistd::Pid::from_raw(pgid),
-        nix::sys::signal::Signal::SIGKILL,
-    ) {
-        Ok(()) | Err(nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM) => Ok(()),
-        Err(error) => Err(io::Error::from(error)),
-    }
+/// kqueue `EVFILT_PROC` is always available on macOS.
+#[allow(clippy::unnecessary_wraps)]
+pub(super) fn exit_notification_available() -> io::Result<bool> {
+    Ok(true)
 }
 
 /// Exit notification registrations for a set of processes.
@@ -227,6 +226,22 @@ fn proc_exit_change(pid: i32) -> io::Result<libc::kevent> {
 }
 
 impl ExitWatch {
+    /// SIGKILL group `pgid`. macOS has no pidfds; the caller has just
+    /// verified the group's ownership and registered an exit watch on each
+    /// member. Returns how many watched members the kernel refused to let us
+    /// signal: `killpg` fails with EPERM only when no member could be
+    /// signalled.
+    pub(super) fn kill(&self, pgid: i32) -> io::Result<usize> {
+        match nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pgid),
+            nix::sys::signal::Signal::SIGKILL,
+        ) {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(0),
+            Err(nix::errno::Errno::EPERM) => Ok(self.pending.len()),
+            Err(error) => Err(io::Error::from(error)),
+        }
+    }
+
     pub(super) fn new(members: &[ProcessIdentity]) -> io::Result<Self> {
         // SAFETY: kqueue() takes no arguments and returns a descriptor or -1.
         let raw = unsafe { libc::kqueue() };

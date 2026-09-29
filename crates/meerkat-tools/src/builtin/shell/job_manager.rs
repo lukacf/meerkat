@@ -875,6 +875,12 @@ impl JobManager {
             }
         };
         let process_group = OwnedProcessGroup::new(&child);
+        // Recovery must never mistake this live group for an earlier
+        // incarnation's tool.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+            super::custody::track_owned_process_group(pid);
+        }
         let view = BackgroundJob {
             id: public_job_id.clone(),
             command: command.to_string(),
@@ -994,6 +1000,12 @@ impl JobManager {
             }
         };
         let process_group = OwnedProcessGroup::new(&child);
+        // Recovery must never mistake this live group for an earlier
+        // incarnation's tool.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+            super::custody::track_owned_process_group(pid);
+        }
         let started_at_unix = unix_time_secs();
         self.projections.lock().await.insert(
             public_job_id.clone(),

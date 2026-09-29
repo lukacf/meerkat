@@ -22,14 +22,19 @@ const GATE_FD: i32 = 3;
 #[cfg(test)]
 pub(in crate::builtin::shell) const GATE_NOT_RELEASED_EXIT: i32 = 125;
 const GATE_SHELL: &str = "/bin/sh";
-/// `$0` is the configured shell and `$@` its arguments. Descriptor 3 is
-/// closed before the exec so the tool never inherits it.
-const GATE_PROLOGUE: &str =
-    "IFS= read -r meerkat_custody_gate <&3 || exit 125; exec 3<&-; exec \"$0\" \"$@\"";
+/// `$1` is the release token, then the configured shell and its arguments.
+/// Only a line carrying exactly the token releases the gate, so a stray
+/// holder of the pipe (for example a descriptor inherited by a concurrent
+/// spawn before close-on-exec was set) can never release it by accident.
+/// Descriptor 3 is closed before the exec so the tool never inherits it.
+const GATE_PROLOGUE: &str = "IFS= read -r meerkat_custody_gate <&3 && [ \"$meerkat_custody_gate\" = \"$1\" ] || exit 125; exec 3<&-; shift; exec \"$@\"";
+/// `$0` of the prologue, as shown by process listings.
+const GATE_ARGV0: &str = "meerkat-custody-gate";
 
 pub(in crate::builtin::shell) struct SpawnGate {
     read: Option<OwnedFd>,
-    write: OwnedFd,
+    pub(super) write: OwnedFd,
+    token: String,
 }
 
 impl std::fmt::Debug for SpawnGate {
@@ -56,11 +61,12 @@ fn cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
 }
 
 impl SpawnGate {
-    pub(in crate::builtin::shell) fn new() -> std::io::Result<Self> {
+    pub(in crate::builtin::shell) fn new(token: uuid::Uuid) -> std::io::Result<Self> {
         let (read, write) = cloexec_pipe()?;
         Ok(Self {
             read: Some(read),
             write,
+            token: token.to_string(),
         })
     }
 
@@ -78,6 +84,8 @@ impl SpawnGate {
         let mut cmd = Command::new(GATE_SHELL);
         cmd.arg("-c")
             .arg(GATE_PROLOGUE)
+            .arg(GATE_ARGV0)
+            .arg(&self.token)
             .arg(shell_path)
             .arg("-c")
             .arg(command);
@@ -109,6 +117,6 @@ impl SpawnGate {
     /// identity is durably recorded.
     pub(in crate::builtin::shell) fn release(self) -> std::io::Result<()> {
         let mut writer = std::fs::File::from(self.write);
-        writer.write_all(b"\n")
+        writer.write_all(format!("{}\n", self.token).as_bytes())
     }
 }

@@ -250,10 +250,9 @@ impl ShellTool {
                     .reserve(tool_call_id)
                     .await
                     .map_err(|error| ShellError::Io(std::io::Error::other(error)))?;
-                Some((
-                    reservation,
-                    super::custody::SpawnGate::new().map_err(ShellError::Io)?,
-                ))
+                let gate = super::custody::SpawnGate::new(reservation.entry_id())
+                    .map_err(ShellError::Io)?;
+                Some((reservation, gate))
             }
             None => None,
         };

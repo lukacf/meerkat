@@ -5389,11 +5389,17 @@ impl AgentFactory {
             PROCESS_CUSTODY_DIR, ProcessCustody, ProcessCustodyScope,
         };
 
-        let (Some(job_manager), Some(runtime_root), Some(session_id)) = (
-            composite.shell_job_manager(),
+        let Some(job_manager) = composite.shell_job_manager() else {
+            return Ok(());
+        };
+        let (Some(runtime_root), Some(session_id)) = (
             self.runtime_root.as_ref(),
             session_id.and_then(|id| SessionId::parse(id).ok()),
         ) else {
+            tracing::debug!(
+                has_runtime_root = self.runtime_root.is_some(),
+                "shell dispatcher built without durable process custody (needs a realm runtime root and a session id)"
+            );
             return Ok(());
         };
         let custody_failed = |message: String| CompositeDispatcherError::ToolInitFailed {

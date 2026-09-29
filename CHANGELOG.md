@@ -514,7 +514,7 @@ them.
   proven stopped (or proven never started) before the dispatcher, and so any
   new work for that session, exists. The settlement is reported per tool
   call with a typed `ToolProcessCessation` (`NeverStarted`, `AlreadyExited`,
-  `KilledByRecovery`) (#1265).
+  `KilledByRecovery`, `PriorEnvironmentEnded`) (#1265).
 - `MobHandle::subscribe_mob_events` returns only once the router is
   subscribed to every member it starts with (local session streams and
   placed members' pump taps). Those subscriptions used to be made inside the

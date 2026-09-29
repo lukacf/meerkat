@@ -14,12 +14,30 @@ use std::time::Instant;
 
 use nix::libc;
 
-use super::{ExitWaitOutcome, ProcessSnapshot, ProcessStartStamp};
+use super::{
+    ExitWaitOutcome, HostEnvironment, ProcessIdentity, ProcessSnapshot, ProcessStartStamp,
+};
+
+/// Reset errno so a failure is never misread from a stale value.
+fn clear_errno() {
+    // SAFETY: `__error` returns this thread's errno slot, valid for writes.
+    unsafe { *libc::__error() = 0 };
+}
+
+/// Whether a process with `pid` exists, independent of proc_info.
+fn pid_exists(pid: i32) -> io::Result<bool> {
+    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
+        Ok(()) | Err(nix::errno::Errno::EPERM) => Ok(true),
+        Err(nix::errno::Errno::ESRCH) => Ok(false),
+        Err(error) => Err(io::Error::from(error)),
+    }
+}
 
 fn bsd_info(pid: i32) -> io::Result<Option<libc::proc_bsdinfo>> {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
     let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
         .map_err(|_| io::Error::other("proc_bsdinfo size out of range"))?;
+    clear_errno();
     // SAFETY: the buffer is a live, correctly sized proc_bsdinfo; the kernel
     // writes at most `size` bytes into it.
     let written = unsafe {
@@ -33,11 +51,16 @@ fn bsd_info(pid: i32) -> io::Result<Option<libc::proc_bsdinfo>> {
     };
     if written <= 0 {
         let error = io::Error::last_os_error();
-        return match error.raw_os_error() {
-            // Absent, or a zombie the kernel no longer describes.
-            Some(libc::ESRCH | 0) | None => Ok(None),
-            _ => Err(error),
-        };
+        // PROC_PIDTBSDINFO also describes zombies, so a failure means the
+        // process is gone; confirm that independently before believing it.
+        if pid_exists(pid)? {
+            return Err(if error.raw_os_error().unwrap_or(0) == 0 {
+                io::Error::other("proc_pidinfo failed for an existing process")
+            } else {
+                error
+            });
+        }
+        return Ok(None);
     }
     if written != size {
         return Err(io::Error::new(
@@ -58,12 +81,25 @@ fn snapshot_from_info(info: &libc::proc_bsdinfo) -> io::Result<ProcessSnapshot> 
             start_sec: info.pbi_start_tvsec,
             start_usec: info.pbi_start_tvusec,
         },
-        exited: info.pbi_status == libc::SZOMB,
     })
 }
 
 pub(super) fn snapshot(pid: i32) -> io::Result<Option<ProcessSnapshot>> {
     bsd_info(pid)?.as_ref().map(snapshot_from_info).transpose()
+}
+
+/// macOS has no pid namespaces, and start stamps are absolute wall-clock
+/// times, so every local process shares one environment.
+pub(super) fn host_environment() -> io::Result<HostEnvironment> {
+    Ok(HostEnvironment::Darwin)
+}
+
+/// Whether exactly this process is still running (not a zombie).
+pub(super) fn is_running(identity: &ProcessIdentity) -> io::Result<bool> {
+    let Some(info) = bsd_info(identity.pid)? else {
+        return Ok(false);
+    };
+    Ok(snapshot_from_info(&info)?.start == identity.start && info.pbi_status != libc::SZOMB)
 }
 
 pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessSnapshot)>> {
@@ -72,12 +108,17 @@ pub(super) fn group_members(pgid: i32) -> io::Result<Vec<(i32, ProcessSnapshot)>
         let mut buffer = vec![0 as libc::pid_t; capacity];
         let bytes = i32::try_from(capacity * std::mem::size_of::<libc::pid_t>())
             .map_err(|_| io::Error::other("process group too large"))?;
+        clear_errno();
         // SAFETY: `buffer` is a live pid_t array of exactly `bytes` bytes.
         let count = unsafe {
             libc::proc_listpgrppids(pgid, buffer.as_mut_ptr().cast::<libc::c_void>(), bytes)
         };
-        if count < 0 {
-            return Err(io::Error::last_os_error());
+        // libproc reports some failures as a zero count; errno tells them
+        // apart from an empty group. Callers also cross-check an empty
+        // listing against kill(-pgid, 0).
+        let error = io::Error::last_os_error();
+        if count < 0 || (count == 0 && error.raw_os_error().unwrap_or(0) != 0) {
+            return Err(error);
         }
         let count = usize::try_from(count).unwrap_or(0);
         if count < capacity {
@@ -118,7 +159,7 @@ fn proc_exit_change(pid: i32) -> io::Result<libc::kevent> {
 }
 
 impl ExitWatch {
-    pub(super) fn new(pids: &[i32]) -> io::Result<Self> {
+    pub(super) fn new(members: &[ProcessIdentity]) -> io::Result<Self> {
         // SAFETY: kqueue() takes no arguments and returns a descriptor or -1.
         let raw = unsafe { libc::kqueue() };
         if raw < 0 {
@@ -127,7 +168,8 @@ impl ExitWatch {
         // SAFETY: `raw` was just returned by kqueue() and has no other owner.
         let kqueue = unsafe { OwnedFd::from_raw_fd(raw) };
         let mut pending = BTreeSet::new();
-        for &pid in pids {
+        for member in members {
+            let pid = member.pid;
             let change = proc_exit_change(pid)?;
             // SAFETY: one live change record, no event buffer, no timeout.
             let rc = unsafe {
@@ -148,7 +190,16 @@ impl ExitWatch {
                 }
                 return Err(error);
             }
-            pending.insert(pid);
+            // The registration pins the process it attached to. If the pid
+            // was reused before registration, the recorded member is gone;
+            // events for the stranger are ignored.
+            let pinned = bsd_info(pid)?
+                .as_ref()
+                .map(snapshot_from_info)
+                .transpose()?;
+            if pinned.is_some_and(|current| current.start == member.start) {
+                pending.insert(pid);
+            }
         }
         Ok(Self { kqueue, pending })
     }

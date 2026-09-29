@@ -71,12 +71,31 @@ fn write_prior_record(
     host: ProcessIdentity,
     phase: CustodyPhase,
 ) -> PathBuf {
+    write_prior_record_in(
+        root,
+        scope,
+        incarnation,
+        host,
+        super::incarnation().unwrap().environment,
+        phase,
+    )
+}
+
+fn write_prior_record_in(
+    root: &Path,
+    scope: &ProcessCustodyScope,
+    incarnation: Uuid,
+    host: ProcessIdentity,
+    environment: HostEnvironment,
+    phase: CustodyPhase,
+) -> PathBuf {
     let record = CustodyRecord {
         version: RECORD_VERSION,
         entry_id: Uuid::new_v4(),
         scope: scope.as_str().to_owned(),
         incarnation,
         host,
+        environment,
         tool_call_id: Some("call-prior".to_owned()),
         phase,
     };
@@ -90,15 +109,22 @@ fn live_members(pgid: i32) -> Vec<i32> {
     sys::group_members(pgid)
         .unwrap()
         .into_iter()
-        .filter(|(_, member)| !member.exited)
+        .filter(|(pid, member)| {
+            member.pgid == pgid
+                && sys::is_running(&ProcessIdentity {
+                    pid: *pid,
+                    start: member.start,
+                })
+                .unwrap()
+        })
         .map(|(pid, _)| pid)
         .collect()
 }
 
 fn process_running(pid: i32) -> bool {
-    sys::snapshot(pid)
+    ProcessIdentity::capture(pid)
         .unwrap()
-        .is_some_and(|snapshot| !snapshot.exited)
+        .is_some_and(|identity| identity.is_running().unwrap())
 }
 
 fn record_files(dir: &Path) -> Vec<PathBuf> {
@@ -321,7 +347,7 @@ fn invalid_scope_is_rejected() {
 async fn unreleased_spawn_gate_never_runs_the_command() {
     let temp = TempDir::new().unwrap();
     let effect = temp.path().join("effect");
-    let mut gate = SpawnGate::new().unwrap();
+    let mut gate = SpawnGate::new(Uuid::new_v4()).unwrap();
     let mut command = gate
         .command(
             Path::new("/bin/sh"),
@@ -346,7 +372,7 @@ async fn unreleased_spawn_gate_never_runs_the_command() {
 async fn released_spawn_gate_execs_the_shell_in_place() {
     let temp = TempDir::new().unwrap();
     let pid_file = temp.path().join("pid");
-    let mut gate = SpawnGate::new().unwrap();
+    let mut gate = SpawnGate::new(Uuid::new_v4()).unwrap();
     let mut command = gate
         .command(
             Path::new("/bin/sh"),
@@ -370,6 +396,75 @@ async fn released_spawn_gate_execs_the_shell_in_place() {
         .parse()
         .unwrap();
     assert_eq!(recorded, spawned_pid, "the tool keeps the recorded pid");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn record_from_another_boot_or_namespace_is_never_signalled() {
+    let root = TempDir::new().unwrap();
+    let scope = scope();
+    let mut leader = spawn_group("exec sleep 60");
+    let pgid = leader.id() as i32;
+    let HostEnvironment::Linux {
+        pid_namespace_dev,
+        pid_namespace_ino,
+        ..
+    } = super::incarnation().unwrap().environment
+    else {
+        unreachable!()
+    };
+    // Same pids, but recorded under another boot: they name nothing here.
+    write_prior_record_in(
+        root.path(),
+        &scope,
+        Uuid::new_v4(),
+        dead_identity(),
+        HostEnvironment::Linux {
+            boot_id: Uuid::new_v4(),
+            pid_namespace_dev,
+            pid_namespace_ino,
+        },
+        spawned_phase(pgid),
+    );
+
+    let (_custody, report) = ProcessCustody::recover_and_open(root.path(), scope)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.recovered[0].cessation,
+        ToolProcessCessation::PriorEnvironmentEnded
+    );
+    assert!(
+        process_running(pgid),
+        "a local process must not be signalled"
+    );
+    leader.kill().unwrap();
+    leader.wait().unwrap();
+}
+
+#[tokio::test]
+async fn spawn_gate_ignores_a_line_without_its_token() {
+    use nix::unistd::write;
+
+    let temp = TempDir::new().unwrap();
+    let effect = temp.path().join("effect");
+    let mut gate = SpawnGate::new(Uuid::new_v4()).unwrap();
+    let mut command = gate
+        .command(
+            Path::new("/bin/sh"),
+            &format!("touch '{}'", effect.display()),
+        )
+        .unwrap();
+    let mut child = command.spawn().unwrap();
+    gate.spawned();
+    // A stray writer that does not know the token cannot release the gate.
+    write(&gate.write, b"\n").unwrap();
+
+    let status = child.wait().await.unwrap();
+
+    assert_eq!(status.code(), Some(gate::GATE_NOT_RELEASED_EXIT));
+    assert!(!effect.exists());
 }
 
 #[tokio::test]

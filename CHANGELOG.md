@@ -260,11 +260,15 @@ them.
   A member recorded Broken while the mob is Running (a missing bridge
   session, a terminal revival classification, a failed revival, a refused
   runtime binding) now clears its projected peer ID and key, local and
-  placed alike, consistent with the resume paths; a successful revival
-  republishes them from the live runtime or the durable host endpoint. A
-  placed revival whose host acknowledges a different endpoint than the
-  member's durable one now fails, recording the member Broken, instead of
-  being adopted.
+  placed alike, consistent with the resume paths. A successful revival
+  republishes them only after verifying the live runtime's endpoint (local)
+  or the durable host endpoint (placed) against the member's durable
+  generation endpoint: a warm revival that minted a new key (a lost identity
+  store), an unusable live endpoint, or a missing durable endpoint records
+  the member Broken with the respawn action instead. A placed revival whose
+  host acknowledges a different endpoint than the durable one, or that has
+  no durable endpoint to verify, likewise fails and records the member
+  Broken instead of being adopted.
 - A member restored from a cleanly Stopped mob now publishes its preserved
   comms endpoint (#1262). After `MobStopped`, a restart through
   `MobBuilder::for_resume` and an explicit `MobHandle::resume()`, the member

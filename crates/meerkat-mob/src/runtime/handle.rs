@@ -8837,7 +8837,9 @@ impl MobHandle {
     ///
     /// Returns `Ok(None)` when the member is absent, has no registered
     /// endpoint, or is Broken (a Broken member publishes no endpoint, exactly
-    /// like its roster projection). A query fault is `Err`, never `None`.
+    /// like its roster projection). A Retiring member still returns its
+    /// endpoint: retirement cleanup addresses exactly that endpoint until the
+    /// member is retired. A query fault is `Err`, never `None`.
     pub async fn member_peer_endpoint(
         &self,
         identity: &AgentIdentity,

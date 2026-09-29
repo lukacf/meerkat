@@ -13577,9 +13577,10 @@ impl MobHandle {
             // identity is not provable here and the persistent owner installs
             // no provider-authored breakpoint proof on this mob child. That
             // only withholds accounting evidence: the child's first request
-            // repeats the source prefix byte for byte and hits the provider
-            // cache whenever the source's entry is still alive. See
-            // `ForkCacheInheritance`.
+            // repeats the source prefix byte for byte, and reads the entry
+            // the source's running turn keeps at its previous run's output
+            // (`meerkat_core::prior_run_cache_anchor`) while that entry is
+            // alive. See `ForkCacheInheritance`.
             cache_identity: None,
             source_admission,
         };

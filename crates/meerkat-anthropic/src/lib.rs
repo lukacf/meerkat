@@ -19,6 +19,8 @@ pub(crate) mod request_support;
 pub mod runtime;
 #[cfg(test)]
 mod structured_output_request_tests;
+#[cfg(test)]
+mod turn_cache_anchor_tests;
 pub mod web_search;
 
 pub use client::AnthropicClient;

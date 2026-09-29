@@ -37,6 +37,22 @@ them.
 
 ### Breaking
 
+- Behaviour-only (not measured by the gate): the GPT-6 catalog rows
+  (`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`) now carry the GPT-5.6-and-later
+  prompt-cache capabilities. On the OpenAI API their requests default to
+  `prompt_cache_options = { mode = "explicit", ttl = "30m" }` with the
+  per-model `prompt_cache_key`, and an explicit
+  `prompt_cache_retention = "in_memory"` is now rejected locally for them, as
+  it already was for GPT-5.6 (#1235).
+- Behaviour-only (not measured by the gate): Anthropic `automatic` requests
+  now also carry one block-level `cache_control` breakpoint on the previous
+  run's last output block, and `system_and_conversation` marks the system
+  prefix, that block, and the two most recent conversation boundaries
+  instead of the three most recent. OpenAI `implicit` mode on a model that
+  accepts explicit breakpoints now adds one `prompt_cache_breakpoint` on the
+  last input before the previous run's output and lowers user, notice, and
+  tool-output inputs as content parts (#1235).
+
 - Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
   meerkat-runtime `meerkat_machine::dsl`) gains a run-fenced Stop (#1261). The
   input `StopCurrentRunForRun { run_id }` is added (`MeerkatMachineInput::*`,
@@ -268,6 +284,20 @@ them.
   module's largest frames by name).
 
 ### Fixed
+
+- A `fork_off` child re-billed the forker's whole transcript whenever the
+  forker's turn started on a cold cache (#1235). The child's first request is
+  the forker's transcript up to its previous turn end, but every provider
+  cache entry the forking turn wrote sat after its own prompt. Provider
+  lowerings now keep a breakpoint at the end of the previous run's output on
+  every request of a run (`meerkat_core::prior_run_cache_anchor`, derived from
+  typed assistant run identity and tool use): the run's first request writes
+  that entry even on a cold cache, later requests refresh it, and the child,
+  whose request computes the same anchor, reads the whole shared prefix. This
+  covers Anthropic `automatic` and `system_and_conversation`, OpenAI explicit
+  mode (now the GPT-6 default), and OpenAI implicit mode on models that accept
+  explicit breakpoints. The `ForkCacheInheritance` documentation no longer
+  claims the child hits whenever the source's entry is alive.
 
 - A host that stopped a selected run with `cancel_input_if_present` or
   `hard_cancel_run_if_current` saw a durable Steer that had already joined the

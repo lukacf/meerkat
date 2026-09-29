@@ -1058,32 +1058,32 @@ struct HeadCanonicalProvisionalIntent<'a> {
     successor_head_token: &'a str,
 }
 
-async fn load_committed_whole_blob_session(
-    runtime_store: &dyn RuntimeStore,
-    session_id: &SessionId,
-    role: &str,
-) -> Result<Option<(Session, CommittedWholeBlobSnapshot)>, SessionError> {
-    let snapshot = runtime_store
-        .load_committed_whole_blob_snapshot(&LogicalRuntimeId::for_session(session_id))
-        .await
-        .map_err(|error| whole_blob_read_error_to_session_error(session_id, role, error))?;
-    snapshot
-        .map(|snapshot| {
-            if snapshot.authority().session_id() != session_id
-                || snapshot.session().id() != session_id
-            {
-                return Err(SessionError::Agent(AgentError::InternalError(format!(
-                    "{role} WholeBlob snapshot identifies session {}/{}, not {session_id}",
-                    snapshot.authority().session_id(),
-                    snapshot.session().id()
-                ))));
-            }
-            // `CommittedWholeBlobSnapshot::new` already hashes and decodes the
-            // atomically paired store row. Reuse that typed result instead of
-            // parsing the same O(document) body a second time at materialization.
-            Ok((snapshot.session().clone(), snapshot))
-        })
-        .transpose()
+/// Sessions whose verified committed WholeBlob body one persistent service
+/// retains at a time (a mob's members plus headroom).
+const WHOLE_BLOB_BODY_CACHE_CAPACITY: usize = 64;
+
+/// One committed WholeBlob body as the store verified it: the decoded
+/// session and the exact store-issued authority its bytes hashed to.
+#[derive(Clone)]
+struct VerifiedWholeBlobBody {
+    authority: WholeBlobStoreAuthority,
+    session: Arc<Session>,
+}
+
+impl VerifiedWholeBlobBody {
+    fn from_snapshot(snapshot: &CommittedWholeBlobSnapshot) -> Self {
+        Self {
+            authority: snapshot.authority().clone(),
+            session: snapshot.session_arc(),
+        }
+    }
+}
+
+/// Row-identity token of exact WholeBlob bytes, in the format the store's
+/// authority records (`WholeBlobStoreAuthority::blob_sha256`).
+fn whole_blob_row_sha256_token(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    format!("row-sha256:{:x}", sha2::Sha256::digest(bytes))
 }
 
 /// Boundary-persistence plan derived from the previous runtime snapshot row.
@@ -2435,6 +2435,21 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// stored-only session is rebuilt at most once and archived snapshots
     /// cannot become writable again through rehydration races.
     recovery_gates: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
+    /// The verified committed WholeBlob body per session, keyed by the exact
+    /// store-issued authority it was verified against.
+    ///
+    /// Every WholeBlob body read re-parses the whole document and re-runs
+    /// its rewrite-graph validation and semantic replay. A cold resume used
+    /// to read the same committed document from half a dozen consumers. A
+    /// cached body is served only after a fresh body-free authority read
+    /// equals the authority it was verified against (the store revision
+    /// advances on every commit and the digest binds the exact bytes), so it
+    /// is the same verified document; any other authority takes the
+    /// authoritative read and replaces the entry. Bounded to
+    /// [`WHOLE_BLOB_BODY_CACHE_CAPACITY`] sessions, oldest insertion evicted
+    /// first, so a service that reads many archived sessions does not retain
+    /// all of their transcripts.
+    whole_blob_bodies: std::sync::Mutex<indexmap::IndexMap<SessionId, VerifiedWholeBlobBody>>,
     /// Mechanical cancellation carrier for rejected runtime-run cleanup.
     ///
     /// A successful compaction abort must be remembered before the cleanup
@@ -4513,6 +4528,84 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Self::load_runtime_session_snapshot(runtime_store, &runtime_id).await
     }
 
+    /// Read one session's committed WholeBlob body and its exact authority.
+    ///
+    /// Serves the verified body this service already holds when a fresh
+    /// body-free authority read equals the authority it was verified
+    /// against; otherwise performs the authoritative store read (which
+    /// re-hashes the bytes against the authority, decodes them and validates
+    /// the rewrite graph) and remembers the result.
+    async fn load_committed_whole_blob_session(
+        &self,
+        session_id: &SessionId,
+        role: &str,
+    ) -> Result<Option<(Session, WholeBlobStoreAuthority)>, SessionError> {
+        let runtime_id = Self::runtime_id_for_session(session_id);
+        if let Some(cached) = self.cached_whole_blob_body(session_id) {
+            let current = self
+                .runtime_store
+                .load_whole_blob_store_authority(&runtime_id)
+                .await
+                .map_err(|error| whole_blob_read_error_to_session_error(session_id, role, error))?;
+            if current.as_ref() == Some(&cached.authority) {
+                return Ok(Some((cached.session.as_ref().clone(), cached.authority)));
+            }
+        }
+        let snapshot = self
+            .runtime_store
+            .load_committed_whole_blob_snapshot(&runtime_id)
+            .await
+            .map_err(|error| whole_blob_read_error_to_session_error(session_id, role, error))?;
+        let Some(snapshot) = snapshot else {
+            self.forget_whole_blob_body(session_id);
+            return Ok(None);
+        };
+        if snapshot.authority().session_id() != session_id || snapshot.session().id() != session_id
+        {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "{role} WholeBlob snapshot identifies session {}/{}, not {session_id}",
+                snapshot.authority().session_id(),
+                snapshot.session().id()
+            ))));
+        }
+        let body = VerifiedWholeBlobBody::from_snapshot(&snapshot);
+        self.remember_whole_blob_body(session_id, body.clone());
+        Ok(Some((body.session.as_ref().clone(), body.authority)))
+    }
+
+    fn cached_whole_blob_body(&self, session_id: &SessionId) -> Option<VerifiedWholeBlobBody> {
+        self.whole_blob_bodies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned()
+    }
+
+    /// Remember a store-verified committed body. Its transcript digest is
+    /// taken once here, so every clone handed out serves it from the retained
+    /// midstate instead of hashing the transcript again.
+    fn remember_whole_blob_body(&self, session_id: &SessionId, body: VerifiedWholeBlobBody) {
+        // A transcript that cannot be digested simply stays unseeded; the
+        // consumer that needs the digest surfaces the typed error itself.
+        let _ = body.session.transcript_content_digest();
+        let mut bodies = self
+            .whole_blob_bodies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        bodies.shift_remove(session_id);
+        bodies.insert(session_id.clone(), body);
+        while bodies.len() > WHOLE_BLOB_BODY_CACHE_CAPACITY {
+            bodies.shift_remove_index(0);
+        }
+    }
+
+    fn forget_whole_blob_body(&self, session_id: &SessionId) {
+        self.whole_blob_bodies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shift_remove(session_id);
+    }
+
     async fn load_committed_runtime_session_for_body(
         &self,
         id: &SessionId,
@@ -4529,18 +4622,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         role: &str,
     ) -> Result<Option<(Session, RuntimeSessionAuthority)>, SessionError> {
         match self.runtime_store.session_persistence_profile() {
-            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
-                load_committed_whole_blob_session(self.runtime_store.as_ref(), id, role)
-                    .await
-                    .map(|loaded| {
-                        loaded.map(|(session, snapshot)| {
-                            (
-                                session,
-                                RuntimeSessionAuthority::WholeBlob(snapshot.authority().clone()),
-                            )
-                        })
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => self
+                .load_committed_whole_blob_session(id, role)
+                .await
+                .map(|loaded| {
+                    loaded.map(|(session, authority)| {
+                        (session, RuntimeSessionAuthority::WholeBlob(authority))
                     })
-            }
+                }),
             RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
                 let authority = self
                     .runtime_store
@@ -4892,26 +4981,38 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok((kind, reason))
     }
 
+    /// Runs store-owned durable-tail recovery, additionally returning the
+    /// verified committed WholeBlob snapshot an aligned outcome was decoded
+    /// from so the caller can reuse it instead of decoding it again.
     async fn store_owned_durable_tail_recovery_outcome(
         &self,
         id: &SessionId,
-    ) -> Result<meerkat_runtime::recovery::DurableTailRecoveryOutcome, SessionError> {
-        meerkat_runtime::recovery::recover_durable_tail(self.runtime_store.as_ref(), id)
-            .await
-            .map_err(|error| match error {
-                // Recovery reads the committed WholeBlob document before it
-                // can judge the tail. A document the current decoder refuses
-                // is the typed "session needs the sanctioned repair" fact,
-                // not an internal recovery fault: every resume runs recovery
-                // first, so laundering it here hid the hold from every host
-                // (HomeCore 2026-09-22 reload storm).
-                meerkat_runtime::recovery::DurableTailRecoveryError::Store(
-                    RuntimeStoreError::AuditedEndpointDivergence { .. },
-                ) => SessionError::WholeBlobAuditedEndpointDivergence { id: id.clone() },
-                error => SessionError::Agent(AgentError::InternalError(format!(
-                    "durable-tail recovery for session {id}: {error}"
-                ))),
-            })
+    ) -> Result<
+        (
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome,
+            Option<CommittedWholeBlobSnapshot>,
+        ),
+        SessionError,
+    > {
+        meerkat_runtime::recovery::recover_durable_tail_retaining_committed_whole_blob(
+            self.runtime_store.as_ref(),
+            id,
+        )
+        .await
+        .map_err(|error| match error {
+            // Recovery reads the committed WholeBlob document before it
+            // can judge the tail. A document the current decoder refuses
+            // is the typed "session needs the sanctioned repair" fact,
+            // not an internal recovery fault: every resume runs recovery
+            // first, so laundering it here hid the hold from every host
+            // (HomeCore 2026-09-22 reload storm).
+            meerkat_runtime::recovery::DurableTailRecoveryError::Store(
+                RuntimeStoreError::AuditedEndpointDivergence { .. },
+            ) => SessionError::WholeBlobAuditedEndpointDivergence { id: id.clone() },
+            error => SessionError::Agent(AgentError::InternalError(format!(
+                "durable-tail recovery for session {id}: {error}"
+            ))),
+        })
     }
 
     async fn discard_stale_live_session_if_needed(
@@ -4959,14 +5060,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let (durable, whole_blob_authority) = if self.runtime_store.session_persistence_profile()
             == RuntimeSessionPersistenceProfile::WholeBlobV1
         {
-            let (session, snapshot) = load_committed_whole_blob_session(
-                self.runtime_store.as_ref(),
-                id,
-                "live session synchronization",
-            )
-            .await?
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            (session, Some(snapshot.authority().clone()))
+            let (session, authority) = self
+                .load_committed_whole_blob_session(id, "live session synchronization")
+                .await?
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            (session, Some(authority))
         } else {
             (durable.clone(), None)
         };
@@ -8002,6 +8100,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             checkpointer_gates: Mutex::new(HashMap::new()),
             live_checkpointers: Mutex::new(HashMap::new()),
             recovery_gates: Mutex::new(HashMap::new()),
+            whole_blob_bodies: std::sync::Mutex::new(indexmap::IndexMap::new()),
             rejected_run_compaction_aborted: std::sync::Mutex::new(HashSet::new()),
             turn_finalization_gates: Mutex::new(HashMap::new()),
             live_projection_released_channels: std::sync::Mutex::new(HashMap::new()),
@@ -9347,6 +9446,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "runtime session control snapshot returned different WholeBlob authority for session {session_id}"
             ))));
         }
+        // The store committed exactly the bytes encoded from `session` (the
+        // authority's digest equals theirs), so `session` is the verified body
+        // for that authority; later body reads of this committed document
+        // reuse it instead of decoding it back. The cache keeps its own clone
+        // (the transcript buffer is shared copy-on-write): the typed control
+        // snapshot itself must not be retained past this commit.
+        self.remember_whole_blob_body(
+            &session_id,
+            VerifiedWholeBlobBody {
+                authority: authority.clone(),
+                session: Arc::new(session.as_ref().clone()),
+            },
+        );
         let committed_authority = meerkat_core::CommittedSessionBoundaryAuthority::WholeBlob {
             session_id: session_id.clone(),
             committed_store_revision: authority.store_revision(),
@@ -9912,30 +10024,36 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         // that exceptional path. Ordinary turn finalization instead uses
         // `acknowledge_whole_blob_runtime_boundary_after_commit`, whose input
         // is the store-issued fixed-size authority returned by the commit.
+        //
+        // The committed authority's digest binds the exact committed bytes
+        // (the store verifies every body read against it), so comparing the
+        // caller's bytes with that digest proves the same equality as reading
+        // and comparing the stored body, without decoding the whole document
+        // and re-validating its rewrite graph.
         let runtime_id = Self::runtime_id_for_session(id);
-        let durable_snapshot = self
+        let durable_authority = self
             .runtime_store
-            .load_committed_whole_blob_snapshot(&runtime_id)
+            .load_whole_blob_store_authority(&runtime_id)
             .await
             .map_err(|error| {
                 SessionError::Agent(AgentError::InternalError(format!(
                     "failed to verify committed runtime checkpoint for session {id}: {error}"
                 )))
             })?;
-        let Some(durable_snapshot) = durable_snapshot else {
+        let Some(durable_authority) = durable_authority else {
             return Err(SessionError::Agent(AgentError::InternalError(format!(
                 "committed runtime checkpoint bytes for session {id} do not match RuntimeStore authority"
             ))));
         };
-        if durable_snapshot.bytes() != session_snapshot.as_slice() {
+        if durable_authority.blob_sha256() != whole_blob_row_sha256_token(&session_snapshot) {
             return Err(SessionError::Agent(AgentError::InternalError(format!(
                 "committed runtime checkpoint bytes for session {id} do not match RuntimeStore authority"
             ))));
         }
-        if durable_snapshot.session().id() != id {
+        if durable_authority.session_id() != id {
             return Err(SessionError::Agent(AgentError::InternalError(format!(
                 "committed runtime checkpoint body identifies session {}, not {id}",
-                durable_snapshot.session().id()
+                durable_authority.session_id()
             ))));
         }
         if let Some(checkpointer) = self
@@ -9950,7 +10068,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 SessionError::Agent(AgentError::InternalError(format!(
                     "WholeBlob actor base authority lock is poisoned for session {id}"
                 )))
-            })? = Some(durable_snapshot.authority().clone());
+            })? = Some(durable_authority);
         }
         Ok(())
     }
@@ -11675,15 +11793,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     RuntimeSessionPersistenceProfile::WholeBlobV1,
                     ActorSessionSeedAuthority::DurableCommitted,
                 ) => {
-                    let (exact_session, exact_snapshot) = load_committed_whole_blob_session(
-                        self.runtime_store.as_ref(),
-                        resume_session_id,
-                        "live actor materialization",
-                    )
-                    .await?
-                    .ok_or_else(|| SessionError::NotFound {
-                        id: resume_session_id.clone(),
-                    })?;
+                    let (exact_session, exact_authority) = self
+                        .load_committed_whole_blob_session(
+                            resume_session_id,
+                            "live actor materialization",
+                        )
+                        .await?
+                        .ok_or_else(|| SessionError::NotFound {
+                            id: resume_session_id.clone(),
+                        })?;
                     req.build
                         .get_or_insert_with(Default::default)
                         .resume_session = Some(exact_session);
@@ -11694,7 +11812,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             SessionError::Agent(AgentError::InternalError(format!(
                                 "WholeBlob actor base authority lock is poisoned for session {resume_session_id}"
                             )))
-                        })? = Some(exact_snapshot.authority().clone());
+                        })? = Some(exact_authority);
                 }
                 (
                     RuntimeSessionPersistenceProfile::WholeBlobV1,
@@ -14092,7 +14210,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Err(SessionError::NotFound { id: id.clone() });
         }
 
-        match self.store_owned_durable_tail_recovery_outcome(id).await? {
+        let (outcome, committed_whole_blob) =
+            self.store_owned_durable_tail_recovery_outcome(id).await?;
+        match outcome {
             meerkat_runtime::recovery::DurableTailRecoveryOutcome::Committed {
                 recovered, ..
             } => Ok((
@@ -14102,12 +14222,24 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 None,
             )),
             meerkat_runtime::recovery::DurableTailRecoveryOutcome::AlreadyAligned { recovered } => {
-                // Only the HeadCanonical source is a verified materialization
-                // of the committed boundary head itself; other profiles keep
-                // their own exact committed-body read.
-                let aligned_body = (self.runtime_store.session_persistence_profile()
-                    == RuntimeSessionPersistenceProfile::HeadCanonicalV1)
-                    .then_some(*recovered);
+                // HeadCanonical: the source is a verified materialization of
+                // the committed boundary head itself. WholeBlob: the source is
+                // the store's own verified read of the committed snapshot,
+                // which this service also remembers for its exact authority so
+                // later body reads of the same document reuse it.
+                let aligned_body = match self.runtime_store.session_persistence_profile() {
+                    RuntimeSessionPersistenceProfile::HeadCanonicalV1 => Some(*recovered),
+                    RuntimeSessionPersistenceProfile::WholeBlobV1 => committed_whole_blob
+                        .filter(|snapshot| {
+                            snapshot.authority().session_id() == id && snapshot.session().id() == id
+                        })
+                        .map(|snapshot| {
+                            let body = VerifiedWholeBlobBody::from_snapshot(&snapshot);
+                            self.remember_whole_blob_body(id, body.clone());
+                            body.session.as_ref().clone()
+                        }),
+                    _ => None,
+                };
                 Ok((CommittedBoundaryRecovery::AlreadyCommitted, aligned_body))
             }
             meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held => Ok((
@@ -14141,13 +14273,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<PreparedCommittedBoundaryResume, SessionError> {
         let runtime_id = Self::runtime_id_for_session(id);
-        // HeadCanonical recovery verifies the committed boundary head itself.
+        // Recovery verifies the committed document itself (the HeadCanonical
+        // boundary head, or the store's verified WholeBlob snapshot).
         // Bracketing the recovery with resume observations lets an aligned
         // outcome's verified body serve as the bracketed resume body, so the
-        // committed head is materialized once per resume, not once per read.
-        let pre_recovery_observation = if self.runtime_store.session_persistence_profile()
-            == RuntimeSessionPersistenceProfile::HeadCanonicalV1
-        {
+        // committed document is materialized once per resume, not once per
+        // read.
+        let pre_recovery_observation = if matches!(
+            self.runtime_store.session_persistence_profile(),
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1
+                | RuntimeSessionPersistenceProfile::WholeBlobV1
+        ) {
             Some(
                 self.runtime_store
                     .load_session_resume_observation(&runtime_id)
@@ -14468,14 +14604,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 let session = self.export_session_with_labels(id).await?;
                 let persisted = self.save_normalized_session(session).await?;
                 let message_count = persisted.messages().len();
-                let revision = meerkat_core::transcript_messages_digest(persisted.messages())
-                    .map_err(|err| {
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            format!(
-                                "failed to digest persisted transcript for checkpoint seed: {err}"
-                            ),
-                        ))
-                    })?;
+                // Byte-identical to `transcript_messages_digest`, but served
+                // from the persisted session's retained midstate when the
+                // exported live session already carries it.
+                let revision = persisted.transcript_content_digest().map_err(|err| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to digest persisted transcript for checkpoint seed: {err}"
+                    )))
+                })?;
                 Ok((message_count, revision))
             }
             RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
@@ -25701,6 +25837,11 @@ mod tests {
                 session_snapshot: serde_json::to_vec(&successor).unwrap().into(),
             },
         );
+        // The save above cached the verified body, and a cache hit pairs the
+        // body with the one authority observation it was checked against, so
+        // it never reads the body the interloper races. Drop the cached body
+        // so the export takes the authoritative read this test pins.
+        service.forget_whole_blob_body(&id);
         let (boundary, token) = service
             .export_live_context_committed_boundary_nonblocking(&id)
             .await
@@ -25727,6 +25868,9 @@ mod tests {
                 session_snapshot: serde_json::to_vec(&next).unwrap().into(),
             },
         );
+        // No forget here: the body cached by the export above belongs to the
+        // pre-successor authority, so a fresh authority observation no longer
+        // equals it and the read falls back to the authoritative snapshot.
         let (captured, identity) = service
             .export_live_context_summary_snapshot(&id)
             .await
@@ -38296,6 +38440,78 @@ mod tests {
                 .await
                 .is_err(),
             "classification must not mutate or repair the document"
+        );
+    }
+
+    /// The verified WholeBlob body is reused only while the store authority
+    /// it was verified against is current. A commit that bypasses this
+    /// service changes the authority, so the next read takes the
+    /// authoritative store read and serves the new document.
+    #[tokio::test]
+    async fn cached_whole_blob_body_is_served_only_for_its_current_authority() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            store,
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        );
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("first")));
+        let id = session.id().clone();
+        let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&id);
+        let commit = |session: &Session| {
+            let bytes = session.to_persisted_bytes().expect("encode session");
+            let runtime_store = Arc::clone(&runtime_store);
+            let runtime_id = runtime_id.clone();
+            async move {
+                runtime_store
+                    .commit_session_snapshot(
+                        &runtime_id,
+                        meerkat_runtime::store::SerializedSessionSnapshot {
+                            session_snapshot: Arc::new(bytes),
+                        },
+                    )
+                    .await
+                    .expect("commit snapshot");
+            }
+        };
+        commit(&session).await;
+
+        let decodes = meerkat_core::global_whole_blob_decodes();
+        let (first, first_authority) = service
+            .load_committed_whole_blob_session(&id, "cache test")
+            .await
+            .expect("first read")
+            .expect("committed body");
+        let (again, again_authority) = service
+            .load_committed_whole_blob_session(&id, "cache test")
+            .await
+            .expect("second read")
+            .expect("committed body");
+        assert_eq!(first.messages().len(), 1);
+        assert_eq!(again.messages().len(), 1);
+        assert_eq!(again_authority, first_authority);
+        assert_eq!(
+            meerkat_core::global_whole_blob_decodes() - decodes,
+            1,
+            "an unchanged authority reuses the verified body instead of decoding it again"
+        );
+
+        session.push(Message::User(UserMessage::text("second")));
+        commit(&session).await;
+        let (changed, changed_authority) = service
+            .load_committed_whole_blob_session(&id, "cache test")
+            .await
+            .expect("read after an out-of-band commit")
+            .expect("committed body");
+        assert_ne!(changed_authority, first_authority);
+        assert_eq!(
+            changed.messages().len(),
+            2,
+            "a changed authority must serve the newly committed document"
         );
     }
 

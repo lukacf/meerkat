@@ -47058,7 +47058,17 @@ async fn empty_compaction_outbox_skips_the_identity_checkpoint_cycle_after_commi
         "PRESERVED OBLIGATION 2 (recovery): the reloaded snapshot is \
          re-projected onto the SessionStore compatibility row"
     );
-    assert_eq!(store.session_snapshot_loads(), 1);
+    // The in-memory store is WholeBlob, so the recovery reload is served as
+    // the committed bytes verified against their store authority digest
+    // (RuntimeSessionAuthorityOps::load_committed_whole_blob_bytes) rather
+    // than a decoding load_session_snapshot; the reloaded bytes are pinned
+    // above and the identity recommit below still runs exactly once.
+    assert_eq!(
+        store.session_snapshot_loads(),
+        0,
+        "a WholeBlob recovery reload does not decode the snapshot through \
+         load_session_snapshot just to hand the bytes back"
+    );
     assert_eq!(store.session_snapshot_commits(), 1);
 }
 

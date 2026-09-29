@@ -561,6 +561,39 @@ them.
   (lukacf/meerkat-mobkit#488). Stored strand names are read back from rows,
   never recomputed, so strands already written under revision names stay
   readable, and a rewrite refused this way succeeds on its next replay.
+- WholeBlob cold resume decodes each committed document twice instead of
+  about eight times (#1273): once for the store-owned recovery, whose
+  verified body every later consumer reuses, and once when the store
+  validates the startup compaction refresh's re-commit. Every WholeBlob
+  decode re-parses the document and re-runs its rewrite-graph validation and
+  semantic replay, so the cost grew with rewrite generations times
+  transcript size, per consumer.
+  - Resume preparation adopts the store-owned recovery's verified committed
+    snapshot under the same observation bracket as HeadCanonical (new
+    additive `meerkat_runtime::recovery::recover_durable_tail_retaining_committed_whole_blob`).
+  - `PersistentSessionService` keeps that verified body per session, and
+    the body it commits itself, keyed by the exact store authority. A read
+    reuses it only when a fresh body-free `load_whole_blob_store_authority`
+    equals that authority; any other authority takes the authoritative read.
+    The cache holds at most 64 sessions.
+  - The compaction checkpoint verifies the caller's bytes against the
+    authority digest instead of decoding the stored body. The startup
+    compaction refresh re-commits verified raw bytes instead of decoding
+    them first.
+  - `SqliteRuntimeStore::commit_session_snapshot_checked` decodes the
+    incoming snapshot once instead of twice.
+  - `persist_full_session` takes its checkpoint digest from the retained
+    midstate.
+
+  Every store-authority check still runs once per decode. With 60 and 120
+  rewrite generations, resume went from 24 decodes and 16 graph
+  validations to 6 and 4, and digest bytes from 8.70x to 2.87x of the
+  committed documents (7.41 s to 2.60 s at 120 generations). The first
+  turn after resume went from 5 decodes to 0 (2.29 s to 0.55 s).
+  `whole_blob_resume_cost` pins the bounds. Hidden
+  `global_whole_blob_decodes` and `global_transcript_graph_validations`
+  counters expose the cost.
+
 - Cold resume verifies each committed session head once instead of five
   times (#1258). HeadCanonical resume preparation now brackets the
   store-owned durable-tail recovery with resume observations and adopts the

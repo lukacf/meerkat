@@ -8210,10 +8210,24 @@ ORDER BY runtime_id";
     ) -> Result<(), RuntimeStoreError> {
         let session = meerkat_core::Session::from_persisted_bytes(snapshot)
             .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        upsert_decoded_runtime_snapshot(tx, runtime_id, snapshot, &session)
+    }
+
+    /// [`upsert_runtime_snapshot`] for a caller that already decoded
+    /// `snapshot` into `session` in this same commit (the checked snapshot
+    /// commit decodes the incoming bytes to run its save guards). Decoding
+    /// the identical bytes a second time would repeat the whole-document
+    /// parse and rewrite-graph validation for the same session.
+    fn upsert_decoded_runtime_snapshot(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        snapshot: &[u8],
+        session: &meerkat_core::Session,
+    ) -> Result<(), RuntimeStoreError> {
         let runtime_state = load_runtime_session_catalog_entry_in_txn(tx, runtime_id)?
             .and_then(|entry| entry.runtime_state());
         let catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_session(
-            &session,
+            session,
             RuntimeSessionPersistenceProfile::WholeBlobV1,
             runtime_state,
         )?;
@@ -9858,7 +9872,12 @@ ORDER BY runtime_id";
                     previous.as_ref(),
                 )
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
+                upsert_decoded_runtime_snapshot(
+                    &tx,
+                    &runtime_id,
+                    &session_delta.session_snapshot,
+                    &incoming,
+                )?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 Ok(())

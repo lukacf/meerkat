@@ -1047,6 +1047,43 @@ impl PersistentRuntimeDriver {
     pub(crate) async fn load_compaction_checkpoint_snapshot(
         &self,
     ) -> Result<Option<Arc<Vec<u8>>>, RuntimeDriverError> {
+        // The checkpoint refresh only re-commits these bytes (after clearing
+        // finalized intents); the store's commit decodes and validates them
+        // as a Session. A WholeBlob store can serve the committed bytes raw,
+        // so they are verified here against the digest the store authority
+        // binds them to instead of being decoded, rewrite graph and all, a
+        // second time just to be handed back as bytes.
+        if self.store.session_persistence_profile()
+            == crate::store::RuntimeSessionPersistenceProfile::WholeBlobV1
+        {
+            match self
+                .store
+                .session_authority_ops()
+                .load_committed_whole_blob_bytes(&self.runtime_id)
+                .await
+            {
+                Ok(None) => return Ok(None),
+                Ok(Some((bytes, authority))) => {
+                    use sha2::Digest as _;
+                    let observed =
+                        format!("row-sha256:{:x}", sha2::Sha256::digest(bytes.as_slice()));
+                    if observed != authority.blob_sha256() {
+                        return Err(RuntimeDriverError::Internal(format!(
+                            "authoritative compaction checkpoint bytes for {} do not match their \
+                             store authority",
+                            self.runtime_id
+                        )));
+                    }
+                    return Ok(Some(bytes));
+                }
+                Err(crate::store::RuntimeStoreError::Unsupported(_)) => {}
+                Err(error) => {
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "failed to load authoritative compaction checkpoint snapshot: {error}"
+                    )));
+                }
+            }
+        }
         self.store
             .load_session_snapshot(&self.runtime_id)
             .await

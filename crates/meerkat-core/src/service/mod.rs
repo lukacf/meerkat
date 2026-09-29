@@ -2576,11 +2576,18 @@ pub enum ForkCacheInheritanceUnavailableReason {
 /// `Unavailable` means no such proof was copied. Neither value changes the
 /// bytes the child sends: request lowering never reads this evidence, and
 /// providers key their caches on the request itself. A child whose first
-/// request repeats the source prefix (the ordinary mob fork) hits the
-/// provider cache whenever the source's entry is still alive, regardless of
-/// this disposition. A fork re-bills the full prefix only when the entry's
-/// TTL lapsed, the child resolves a different provider or model, or the
-/// prefix is below the provider's minimum cacheable size.
+/// request repeats the source prefix (the ordinary mob fork) can read only an
+/// entry the source wrote inside that prefix, regardless of this disposition.
+/// For a fork cut at the source's previous turn end, provider lowerings keep
+/// an explicit breakpoint at the end of the previous run's output on every
+/// request of the source's running turn (see
+/// [`crate::prior_run_cache_anchor`]), so the running turn's first request
+/// writes that entry even when it started on a cold cache and every later
+/// request refreshes it. A fork re-bills the full prefix when that entry's
+/// TTL lapsed, the child resolves a different provider or model, the
+/// provider route authors no explicit breakpoints (for example an OpenAI
+/// model whose catalog row admits only implicit caching), or the prefix is
+/// below the provider's minimum cacheable size.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -2952,6 +2959,34 @@ pub trait SessionService: Send + Sync {
     /// Services that do not support this capability return `StreamError::NotFound`.
     async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
         Err(StreamError::NotFound(format!("session {id}")))
+    }
+
+    /// Subscribe to session-wide events starting at a typed cursor.
+    ///
+    /// [`crate::comms::SessionEventCursor::Live`] is identical to
+    /// [`Self::subscribe_session_events`]. Replaying cursors need a service
+    /// that retains the session's events; the default refuses them with
+    /// [`StreamError::CursorRejected`] carrying
+    /// [`crate::comms::SessionEventCursorRejection::ReplayUnsupported`], so a
+    /// wrapper that forgets to forward this method fails loudly instead of
+    /// silently degrading to live-only delivery.
+    async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: crate::comms::SessionEventCursor,
+    ) -> Result<crate::comms::SessionEventSubscription, StreamError> {
+        match cursor {
+            crate::comms::SessionEventCursor::Live => {
+                Ok(crate::comms::SessionEventSubscription::new(
+                    None,
+                    self.subscribe_session_events(id).await?,
+                ))
+            }
+            cursor => Err(StreamError::CursorRejected {
+                cursor,
+                reason: crate::comms::SessionEventCursorRejection::ReplayUnsupported,
+            }),
+        }
     }
 
     /// Record a typed live-adapter terminal error against a session.

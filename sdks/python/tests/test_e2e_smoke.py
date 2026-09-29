@@ -266,6 +266,12 @@ if include_scenario(37):
             assert "pybot37" in text_lower
             assert "teal" in text_lower
 
+            # Run-fenced Stop against the real server: a stale run id is the
+            # typed not_current receipt and never interrupts anything.
+            stale = await session.stop_run(str(uuid4()), reason="stale stop")
+            assert stale.session_id == session.id
+            assert stale.receipt["outcome"] == "not_current"
+
             details = await client.read_session(session.id)
             assert details.session_id == session.id
             assert details.is_active is False

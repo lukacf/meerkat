@@ -651,6 +651,13 @@ pub(crate) const HOST_RELEASE_TIMEOUT: Duration = Duration::from_secs(60);
 /// transient resend reuses the byte-identical operation/run tuple.
 pub(crate) const HARD_CANCEL_BRIDGE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Transport budget for one `StopMemberRun` round trip. The member host
+/// replies only after every contributor of the stopped run is terminal. The
+/// budget bounds one transport attempt, never the stop: on timeout the
+/// controller resends the same `operation_id`, which the host joins to the
+/// in-flight stop, so the caller always receives the one typed receipt.
+pub(crate) const STOP_MEMBER_RUN_BRIDGE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Exact tracked-input cancellation waits for the member host to durably
 /// fence and, when necessary, quiesce a racing admission. Its transport
 /// envelope must remain strictly larger than the host's 5s settle budget.
@@ -1528,6 +1535,38 @@ pub trait MobProvisioner: Send + Sync {
             reason: "this provisioner serves no placed hard-cancel bridge lane".to_string(),
         })
     }
+    /// Run-fenced Stop of one exact run of a LOCAL member: stop
+    /// `expected_run_id` through the member session's MeerkatMachine and
+    /// terminalize every contributor bound to it. Default = typed reject.
+    async fn stop_member_run(
+        &self,
+        member_ref: &MemberRef,
+        expected_run_id: &CoreRunId,
+        reason: &str,
+    ) -> Result<meerkat_contracts::WireRunStopReceipt, MobError> {
+        let _ = (member_ref, expected_run_id, reason);
+        Err(MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            reason: "this provisioner serves no run-fenced member stop".to_string(),
+        })
+    }
+    /// Run-fenced Stop of one exact run of a PLACED member over the
+    /// supervisor bridge (`StopMemberRun`). Placement is the caller's machine
+    /// fact and the caller has already gated on the recorded host
+    /// `hard_cancel_member` capability. Default = typed reject.
+    async fn stop_placed_member_run(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: &super::bridge_protocol::BridgeMemberIncarnation,
+        expected_run_id: &CoreRunId,
+        reason: &str,
+    ) -> Result<meerkat_contracts::WireRunStopReceipt, MobError> {
+        let _ = (member_ref, expected_member, expected_run_id, reason);
+        Err(MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            reason: "this provisioner serves no placed run-fenced stop bridge lane".to_string(),
+        })
+    }
     /// Level-triggered cancellation of one exact tracked placed input.
     /// Implementations must preserve the full residency fence and return only
     /// an authenticated, replay-stable host receipt; transport failure is
@@ -1918,6 +1957,27 @@ pub trait MobProvisioner: Send + Sync {
         Err(MobError::Internal(
             "this provisioner cannot ensure a committed placed operation-owner registry"
                 .to_string(),
+        ))
+    }
+
+    /// Drop the exact registry binding a placed materialization bound for its
+    /// committed operation, without touching the operation itself. Used when a
+    /// revived runtime's acknowledged endpoint is refused, so no registry row
+    /// stays bound to an endpoint nothing durable vouches for. An absent
+    /// binding is idempotent.
+    async fn clear_placed_member_binding_exact(
+        &self,
+        operation_owner_session_id: &SessionId,
+        provision_operation_id: &OperationId,
+        display_name: &str,
+    ) -> Result<(), MobError> {
+        let _ = (
+            operation_owner_session_id,
+            provision_operation_id,
+            display_name,
+        );
+        Err(MobError::Internal(
+            "this provisioner holds no placed operation bindings".to_string(),
         ))
     }
 
@@ -10213,6 +10273,26 @@ mod tests {
     }
 }
 
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+struct MobTranscriptNoticeHandle {
+    session_service: Arc<dyn MobSessionService>,
+    session_id: SessionId,
+}
+
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle for MobTranscriptNoticeHandle {
+    async fn append_system_notice_under_turn_finalization_boundary(
+        &self,
+        record: meerkat_core::types::SystemNoticeRecord,
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .append_system_notice_under_runtime_turn_boundary(&self.session_id, record)
+            .await
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+}
+
 #[cfg(feature = "runtime-adapter")]
 pub(super) struct MobSessionRuntimeExecutor {
     session_service: Arc<dyn MobSessionService>,
@@ -10687,6 +10767,19 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             Arc::clone(&self.runtime_adapter),
             self.bridge_session_id.clone(),
         ))
+    }
+
+    /// Typed system notices (such as an interrupted-run notice after an
+    /// abrupt host stop) are recorded through the member's session service
+    /// without a turn.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transcript_notice_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle>> {
+        Some(Arc::new(MobTranscriptNoticeHandle {
+            session_service: Arc::clone(&self.session_service),
+            session_id: self.bridge_session_id.clone(),
+        }))
     }
 
     async fn apply(
@@ -12150,6 +12243,39 @@ impl MobProvisioner for SessionBackend {
         Err(MobError::Internal(format!(
             "mob session hard cancel for '{session_id}' requires MeerkatMachine runtime authority"
         )))
+    }
+
+    async fn stop_member_run(
+        &self,
+        member_ref: &MemberRef,
+        expected_run_id: &CoreRunId,
+        reason: &str,
+    ) -> Result<meerkat_contracts::WireRunStopReceipt, MobError> {
+        let session_id = Self::require_session(member_ref, "stop member run")?;
+        let Some(adapter) = &self.runtime_adapter else {
+            return Err(MobError::Internal(format!(
+                "mob session run stop for '{session_id}' requires MeerkatMachine runtime authority"
+            )));
+        };
+        // Like hard cancel: the stop resolves only through the member
+        // session's live runtime registration. An unregistered session (for
+        // example a legacy peer-only member whose session lives elsewhere) is
+        // a typed refusal, never a `NotCurrent` the local machine cannot vouch
+        // for.
+        if !adapter.contains_session(&session_id).await {
+            return Err(MobError::SessionError(SessionError::NotRunning {
+                id: session_id,
+            }));
+        }
+        let receipt = adapter
+            .stop_run(&session_id, expected_run_id, reason)
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "runtime-backed run stop must resolve through MeerkatMachine for '{session_id}': {error}"
+                ))
+            })?;
+        meerkat_runtime::run_stop_wire::wire_run_stop_receipt(&receipt).map_err(MobError::Internal)
     }
 
     async fn start_turn(
@@ -14920,6 +15046,19 @@ impl MobProvisioner for MultiBackendProvisioner {
         )
     }
 
+    async fn clear_placed_member_binding_exact(
+        &self,
+        operation_owner_session_id: &SessionId,
+        provision_operation_id: &OperationId,
+        display_name: &str,
+    ) -> Result<(), MobError> {
+        self.session.ops_adapter.clear_placed_member_binding_exact(
+            operation_owner_session_id,
+            provision_operation_id,
+            display_name,
+        )
+    }
+
     async fn retire_committed_placed_provision_operation(
         &self,
         operation_owner_session_id: &SessionId,
@@ -15514,6 +15653,132 @@ impl MobProvisioner for MultiBackendProvisioner {
             }
             _ => self.session.hard_cancel_member(member_ref, reason).await,
         }
+    }
+
+    async fn stop_member_run(
+        &self,
+        member_ref: &MemberRef,
+        expected_run_id: &CoreRunId,
+        reason: &str,
+    ) -> Result<meerkat_contracts::WireRunStopReceipt, MobError> {
+        // The UNPLACED lane: local runtime authority. The placed lane is the
+        // separate bridge verb below, selected by the actor's machine
+        // placement fact (ADJ-24: never the ref shape). A legacy unplaced
+        // peer-only member has no local runtime to stop: typed refusal.
+        if matches!(member_ref, MemberRef::BackendPeer { .. }) {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a legacy peer-only member has no local runtime to stop; run-fenced stop \
+                         reaches remote members only through host placement"
+                    .to_string(),
+            });
+        }
+        self.session
+            .stop_member_run(member_ref, expected_run_id, reason)
+            .await
+    }
+
+    async fn stop_placed_member_run(
+        &self,
+        member_ref: &MemberRef,
+        expected_member: &super::bridge_protocol::BridgeMemberIncarnation,
+        expected_run_id: &CoreRunId,
+        reason: &str,
+    ) -> Result<meerkat_contracts::WireRunStopReceipt, MobError> {
+        let MemberRef::BackendPeer {
+            peer_id,
+            address,
+            pubkey,
+            bootstrap_token,
+            ..
+        } = member_ref
+        else {
+            return self
+                .session
+                .stop_member_run(member_ref, expected_run_id, reason)
+                .await;
+        };
+        let peer = Self::peer_only_spec_from_parts(peer_id, address, *pubkey)?;
+        let authorization = self
+            .ensure_supervisor_authorized(
+                &peer,
+                Some((
+                    peer_id.as_str(),
+                    address.as_str(),
+                    bootstrap_token
+                        .as_ref()
+                        .map(super::bridge_protocol::BridgeBootstrapToken::as_str),
+                    *pubkey,
+                )),
+                None,
+            )
+            .await?;
+        if let Some(observation) = authorization.rebind_required {
+            return Err(MobError::BridgeCommandRejected {
+                cause: observation.rejection_cause,
+                reason: "run stop was rejected by the remote member".to_string(),
+            });
+        }
+        let peer = authorization.peer;
+        let authority = self.supervisor_bridge.authority().await;
+        let sup_spec = self
+            .supervisor_bridge
+            .supervisor_spec_for_recipient(&peer)
+            .await?;
+        let operation_id = OperationId::new();
+        // The caller supplies the exact run; the member host compares it
+        // under its session mutation gate, so a stale request yields the
+        // typed `not_current` receipt and never touches a newer run.
+        let command = super::bridge_protocol::BridgeCommand::StopMemberRun(
+            super::bridge_protocol::BridgeStopMemberRunPayload {
+                supervisor: sup_spec.into(),
+                epoch: authority.epoch,
+                protocol_version: super::bridge_protocol::BridgeProtocolVersion::V4,
+                expected_member: expected_member.clone(),
+                operation_id: operation_id.clone(),
+                expected_run_id: expected_run_id.clone(),
+                reason: reason.to_string(),
+            },
+        );
+        // The host keys the stop by `operation_id`: a byte-identical resend
+        // joins the in-flight stop or reads its cached receipt, so the stop
+        // runs once and every reply carries the same receipt. A transport
+        // timeout therefore never reports a committed stop as failed: the
+        // controller resends the same operation and waits for the typed
+        // receipt. `Unavailable` keeps the single ADJ-4 resend; any other
+        // failure (including a send that cannot reach the host) surfaces.
+        let mut unavailable_resent = false;
+        let response: super::bridge_protocol::BridgeMemberRunStopResponse = loop {
+            match self
+                .send_bridge_command_typed(&peer, &command, STOP_MEMBER_RUN_BRIDGE_TIMEOUT)
+                .await
+            {
+                Ok(response) => break response,
+                Err(MobError::BridgeRequestTimedOut { .. }) => {
+                    tracing::debug!(
+                        operation_id = %operation_id,
+                        expected_run_id = %expected_run_id,
+                        "StopMemberRun receipt still pending; resending the same operation"
+                    );
+                }
+                Err(error) if idempotent_bridge_resend_class(&error) && !unavailable_resent => {
+                    unavailable_resent = true;
+                    tracing::warn!(
+                        operation_id = %operation_id,
+                        error = %error,
+                        "StopMemberRun host unavailable; resending the same operation once"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        if &response.expected_member != expected_member || response.operation_id != operation_id {
+            return Err(MobError::Internal(
+                "remote run-stop reply echoed a different member residency or operation"
+                    .to_string(),
+            ));
+        }
+        Ok(response.receipt)
     }
 
     async fn cancel_tracked_placed_input(

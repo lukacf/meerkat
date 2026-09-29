@@ -25,6 +25,7 @@ trait CoreExecutor {
     fn post_stop_cleanup_handle(&self) -> Option<()> { None }
     fn turn_finalization_boundary_handle(&self) {}
     fn pre_dequeue_handle(&self) {}
+    fn transcript_notice_handle(&self) {}
     fn apply(&mut self) {}
     fn checkpoint_committed_session_snapshot(&mut self) {}
     fn acknowledge_committed_session_boundary(&mut self) {}
@@ -52,6 +53,7 @@ impl CoreExecutor for MachineManagedPostStopExecutor {
     fn post_stop_cleanup_handle(&self) -> Option<()> { None }
     fn turn_finalization_boundary_handle(&self) { self.inner.turn_finalization_boundary_handle() }
     fn pre_dequeue_handle(&self) { self.inner.pre_dequeue_handle() }
+    fn transcript_notice_handle(&self) { self.inner.transcript_notice_handle() }
     fn apply(&mut self) { self.inner.apply() }
     fn checkpoint_committed_session_snapshot(&mut self) { self.inner.checkpoint_committed_session_snapshot() }
     fn acknowledge_committed_session_boundary(&mut self) { self.inner.acknowledge_committed_session_boundary() }

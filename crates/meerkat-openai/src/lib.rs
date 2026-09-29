@@ -9,6 +9,7 @@
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::spawn;
     pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
@@ -41,6 +42,8 @@ mod structured_output_request_tests;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod text_adapter;
 pub mod tool_schema;
+#[cfg(test)]
+mod turn_cache_anchor_tests;
 pub mod web_search;
 
 pub use client::{AzureOpenAiWireConfig, OpenAiClient};

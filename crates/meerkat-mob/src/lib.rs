@@ -49,6 +49,7 @@ pub use meerkat_atif as atif;
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::spawn;
     pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
@@ -257,30 +258,31 @@ pub use runtime::{
     AdaptiveLayerResultDigest, AdaptiveLayerRetention, AdaptiveLayerRunStart,
     AdaptiveLayerSetupFault, AdaptiveLayerSetupFaultObservation, AdaptiveLayerSnapshot,
     AdaptivePlanningDecisionKind, AdaptiveRunLimits, AdaptiveRunPhaseView, AdaptiveRunSnapshot,
-    AdaptiveStopReasonView, AuthorizedSessionResume, BOUNDED_DELEGATION_REPORT_INSTRUCTION_V1,
-    BoundedFlowResult, BoundedHelperResult, BoundedHelperResultStatus, BoundedHelperRunOutcome,
-    BoundedMemberRunError, BoundedResultSpec, BoundedTurnFailure, BoundedTurnResult,
-    BoundedTurnWaitError, ControllingAcceptorConfig, CurrentMobAdmission,
-    DEFAULT_BOUNDED_HELPER_RESULT_BYTES, DelegationCancellationHandle, DelegationExecutionError,
-    DelegationExecutionHandle, DelegationExecutionOutcome, DelegationExecutionRequest,
-    DelegationExecutionService, DelegationExecutionSource, DelegationMemberOptions,
-    DelegationParentContext, DelegationTerminalizedExecution, DelegationTurnTerminal,
-    DurableBoundedMemberState, DurableBoundedWorkRecovery, DurableBoundedWorkState,
-    ExternalPeerBindingSpec, FlowRunHandle, FlowRunWaitError, FlowTargetProvisioner,
-    ForkBuildInheritance, ForkChildRun, ForkChildRunOutcome, ForkJobBinding, ForkJobRecord,
-    ForkMemberAtTurnBoundary, ForkMemberBoundedRunOutcome, ForkMemberResult, ForkOverlayOrigin,
-    HELPER_RESULT_TRUNCATION_MARKER, HelperOptions, HelperResult, HostBindReport, HostBindRequest,
-    HostCapabilityReport, HostRevokeReport, IdentityLocalExternalToolsError,
-    IdentityLocalExternalToolsProvider, IdentityLocalMaterializationKey,
-    InitializeAdaptiveRunRequest, LiveDelegationTerminalEvidence, LiveDurableSourceObservation,
-    MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT, MemberAdmissionBacklogGauge,
-    MemberAdmissionBacklogSnapshot, MemberBoundedTurnResult, MemberDeliveryReceipt, MemberHandle,
-    MemberHistoryPageDomain, MemberLiveStatusDomain, MemberPreviewUnavailable,
-    MemberReloadDisposition, MemberReloadOutcome, MemberRespawnReceipt, MemberRunState,
-    MemberStatusSessionView, MemberStatusViewSource, MemberTargetAbsence, MemberTurnEventSender,
-    MemberTurnHandle, MemberTurnOptions, MobBuilder, MobDestroyError, MobDestroyReport,
-    MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig,
-    MobHandle, MobMachineStateChanges, MobMemberSnapshot, MobMemberStatus,
+    AdaptiveStopReasonView, AgentEventSubscription, AuthorizedSessionResume,
+    BOUNDED_DELEGATION_REPORT_INSTRUCTION_V1, BoundedFlowResult, BoundedHelperResult,
+    BoundedHelperResultStatus, BoundedHelperRunOutcome, BoundedMemberRunError, BoundedResultSpec,
+    BoundedTurnFailure, BoundedTurnResult, BoundedTurnWaitError, ControllingAcceptorConfig,
+    CurrentMobAdmission, DEFAULT_BOUNDED_HELPER_RESULT_BYTES, DelegationCancellationHandle,
+    DelegationExecutionError, DelegationExecutionHandle, DelegationExecutionOutcome,
+    DelegationExecutionRequest, DelegationExecutionService, DelegationExecutionSource,
+    DelegationMemberOptions, DelegationParentContext, DelegationTerminalizedExecution,
+    DelegationTurnTerminal, DurableBoundedMemberState, DurableBoundedWorkRecovery,
+    DurableBoundedWorkState, ExternalPeerBindingSpec, FlowRunHandle, FlowRunWaitError,
+    FlowTargetProvisioner, ForkBuildInheritance, ForkChildRun, ForkChildRunOutcome, ForkJobBinding,
+    ForkJobRecord, ForkMemberAtTurnBoundary, ForkMemberBoundedRunOutcome, ForkMemberResult,
+    ForkOverlayOrigin, HELPER_RESULT_TRUNCATION_MARKER, HelperOptions, HelperResult,
+    HostBindReport, HostBindRequest, HostCapabilityReport, HostRevokeReport,
+    IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,
+    IdentityLocalMaterializationKey, InitializeAdaptiveRunRequest, LiveDelegationTerminalEvidence,
+    LiveDurableSourceObservation, MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT,
+    MemberAdmissionBacklogGauge, MemberAdmissionBacklogSnapshot, MemberBoundedTurnResult,
+    MemberDeliveryReceipt, MemberHandle, MemberHistoryPageDomain, MemberLiveStatusDomain,
+    MemberPreviewUnavailable, MemberReloadDisposition, MemberReloadOutcome, MemberRespawnReceipt,
+    MemberRunState, MemberStatusSessionView, MemberStatusViewSource, MemberTargetAbsence,
+    MemberTurnEventSender, MemberTurnHandle, MemberTurnOptions, MobBuilder, MobDestroyError,
+    MobDestroyReport, MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription,
+    MobEventsSubscriptionConfig, MobHandle, MobMachineStateChanges, MobMemberEndpointOwner,
+    MobMemberEndpointStatus, MobMemberPeerEndpoint, MobMemberSnapshot, MobMemberStatus,
     MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService, MobSpawnManyFailure, MobState,
     MobUnreachablePeer, MobWireMembersBatchReport, OwnedMemberTargetAdmission, PeerMessageReceipt,
     PeerTarget, PreviousMemberCleanupReport, ResumeRejectionKind, ResumeSessionLoad,
@@ -316,7 +318,7 @@ pub use runtime::{
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use runtime::{
-    IdentityRecoveryFailStopPoint, MemberStatusDeadlineTestObservation,
+    ForkSupervisorExitForTest, IdentityRecoveryFailStopPoint, MemberStatusDeadlineTestObservation,
     arm_identity_recovery_fail_stop_for_test, member_operator_tool_defs_for_test,
     member_status_deadline_after_snapshot_wait_for_test,
 };

@@ -2,6 +2,7 @@
 
 use super::*;
 use meerkat_core::lifecycle::run_primitive::TurnRequestContext;
+use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
 use meerkat_core::types::TranscriptUserRole;
 use meerkat_runtime::{LogicalRuntimeId, RuntimeStore};
 
@@ -243,6 +244,22 @@ impl Fixture {
     }
 
     async fn with_kickoff_blocked(blocked: bool) -> Self {
+        Self::build(blocked, &[]).await
+    }
+
+    /// Settled fixture whose member agent has a native skill engine over one
+    /// configured filesystem repository per `(source, skill, body)` entry.
+    async fn with_skills(skills: &[(&SourceUuid, &SkillName, &str)]) -> Self {
+        let fixture = Self::build(false, skills).await;
+        fixture
+            .handle
+            .wait_for_kickoff_complete(Some(WAIT))
+            .await
+            .expect("real autonomous kickoff commits");
+        fixture
+    }
+
+    async fn build(blocked: bool, skills: &[(&SourceUuid, &SkillName, &str)]) -> Self {
         let root = tempfile::Builder::new()
             .prefix(".host-human-input-")
             .tempdir_in(".")
@@ -261,6 +278,26 @@ impl Fixture {
         let mut config = meerkat::Config::default();
         config.agent.model = "gpt-5.5".to_string();
         config.compaction.auto_compact_threshold = 1_000_000;
+        for (index, (source_uuid, name, body)) in skills.iter().enumerate() {
+            let repository = root_path.join(format!("skills-{index}"));
+            let skill_dir = repository.join(name.as_str());
+            std::fs::create_dir_all(&skill_dir).expect("skill fixture directory");
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: fixture skill\n---\n{body}\n"),
+            )
+            .expect("skill fixture document");
+            config
+                .skills
+                .repositories
+                .push(meerkat_core::skills_config::SkillRepositoryConfig {
+                    name: format!("fixture-skills-{index}"),
+                    source_uuid: (*source_uuid).clone(),
+                    transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
+                        path: repository.to_string_lossy().into_owned(),
+                    },
+                });
+        }
         let client = ScriptedClient::new(!blocked);
         let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
         // A second controlling Mob reuses this service without the local
@@ -349,6 +386,44 @@ impl Fixture {
                 self.entry.fence_token,
                 spec,
                 mode,
+                delivery,
+                deadline(),
+            )
+            .await
+    }
+
+    async fn start_with_options(
+        &self,
+        spec: WorkSpec,
+        options: MemberTurnOptions,
+        delivery: MobDeliveryIdentity,
+    ) -> Result<WorkTurnHandle, MobError> {
+        self.handle
+            .start_host_human_input_with_options_bounded(
+                self.entry.agent_runtime_id.clone(),
+                self.entry.fence_token,
+                spec,
+                HandlingMode::Queue,
+                options,
+                delivery,
+                deadline(),
+            )
+            .await
+    }
+
+    async fn submit_with_options(
+        &self,
+        spec: WorkSpec,
+        options: MemberTurnOptions,
+        delivery: MobDeliveryIdentity,
+    ) -> Result<WorkDeliveryReceipt, MobError> {
+        self.handle
+            .submit_host_human_input_with_options_bounded(
+                self.entry.agent_runtime_id.clone(),
+                self.entry.fence_token,
+                spec,
+                HandlingMode::Queue,
+                options,
                 delivery,
                 deadline(),
             )
@@ -1594,5 +1669,182 @@ async fn closing_live_channel_does_not_cancel_queued_host_human_input() {
     assert_eq!(fixture.client.requests().len(), requests_before + 2);
     assert_eq!(llm_identity(&durable), llm_identity(&before));
     assert!(fixture.context.appends.lock().expect("context").is_empty());
+    fixture.finish().await;
+}
+
+/// A host-human delivery carries selected skills to the exact fenced target.
+/// Two sources host a skill with the same name; the source-pinned key picks
+/// exactly one. The member resolves it natively (typed `SkillsResolved`,
+/// durable `SkillContext`, the selected body and only that body in the
+/// provider request). A retry after a lost response (same delivery identity,
+/// same selection) returns the original admission with no second provider
+/// call, and a retry under the same identity with a changed selection is a
+/// typed idempotency conflict.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_human_selected_skills_resolve_natively_and_replay_exactly() {
+    use futures::StreamExt;
+    use meerkat_core::AgentEvent;
+
+    let chosen_source =
+        SourceUuid::parse("5b0c7c2e-4c61-4f2d-9d0e-2f5a8c6b1e11").expect("fixture source uuid");
+    let other_source =
+        SourceUuid::parse("9e4d2a10-7b3c-4c8e-a1f5-6d2b0c9e8f77").expect("fixture source uuid");
+    let name = SkillName::parse("house-style").expect("fixture skill name");
+    let chosen_body = "Answer in the chosen house style: numbered, terse, no hedging.";
+    let other_body = "Answer in the other house style: long prose with caveats.";
+    let fixture = Fixture::with_skills(&[
+        (&chosen_source, &name, chosen_body),
+        (&other_source, &name, other_body),
+    ])
+    .await;
+    let chosen = SkillKey::new(chosen_source, name.clone());
+    let other = SkillKey::new(other_source, name);
+    let options = MemberTurnOptions::new().with_skill_references(vec![chosen.clone()]);
+    let delivery = delivery("selected-skill");
+    let id = interaction(&delivery);
+    let spec = WorkSpec::new(HUMAN, WorkOrigin::External);
+    let mut events = fixture
+        .handle
+        .subscribe_agent_events(&fixture.entry.agent_identity)
+        .await
+        .expect("member agent events");
+    let requests_before = fixture.client.requests().len();
+
+    let receipt = completed(
+        fixture
+            .start_with_options(spec.clone(), options.clone(), delivery.clone())
+            .await
+            .expect("selected-skill host input admitted"),
+    )
+    .await;
+
+    let mut resolved = Vec::new();
+    tokio::time::timeout(WAIT, async {
+        while let Some(envelope) = events.next().await {
+            match envelope.payload {
+                AgentEvent::SkillsResolved { skills, .. } => resolved.push(skills),
+                AgentEvent::SkillResolutionFailed { reason, .. } => {
+                    panic!("selected skill must resolve, got {reason}")
+                }
+                // The member's own spawn turn may still be draining from
+                // this subscription; the selected turn ends at the first
+                // completion after its activation.
+                AgentEvent::RunCompleted { .. } if !resolved.is_empty() => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the selected turn's events arrive");
+    assert_eq!(
+        resolved,
+        vec![vec![chosen.clone()]],
+        "one native activation"
+    );
+
+    let durable = fixture.durable().await;
+    let skill_rows = durable
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) if user.identity.interaction_id == Some(id) => Some(user),
+            _ => None,
+        })
+        .flat_map(|user| user.content.iter())
+        .filter_map(|block| match block {
+            meerkat_core::types::ContentBlock::SkillContext { skill_key, text } => {
+                Some((skill_key.clone(), text.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(skill_rows.len(), 1, "exactly one durable SkillContext");
+    assert_eq!(skill_rows[0].0, chosen);
+    assert!(
+        skill_rows[0].1.contains(chosen_body),
+        "native rendered body"
+    );
+    let requests = fixture.client.requests();
+    assert_eq!(requests.len(), requests_before + 1);
+    let request_json =
+        serde_json::to_string(&requests[requests_before].messages).expect("request serializes");
+    assert!(
+        request_json.contains(chosen_body),
+        "selected body reaches the provider"
+    );
+    assert!(
+        !request_json.contains(other_body),
+        "the same-name skill is not selected"
+    );
+    let inputs = fixture.input_count().await;
+
+    // The response is lost; the host replays the same delivery.
+    let replay = fixture
+        .submit_with_options(spec.clone(), options, delivery.clone())
+        .await
+        .expect("same identity and selection replays the original admission");
+    assert_eq!(replay.work_ref, receipt.work_ref);
+    assert_eq!(replay.runtime_id, receipt.runtime_id);
+    assert_eq!(fixture.input_count().await, inputs);
+    assert_eq!(fixture.client.requests().len(), requests_before + 1);
+
+    let error = fixture
+        .submit_with_options(
+            spec,
+            MemberTurnOptions::new().with_skill_references(vec![other]),
+            delivery,
+        )
+        .await
+        .expect_err("a changed selection under the same identity is not a replay");
+    assert!(
+        matches!(error, MobError::WorkInputIdempotencyConflict { .. }),
+        "typed conflict, got {error:?}"
+    );
+    assert_eq!(fixture.input_count().await, inputs);
+    assert_eq!(fixture.client.requests().len(), requests_before + 1);
+    fixture.finish().await;
+}
+
+/// An empty skill selection is no selection (it keeps the metadata-less
+/// replay identity), and an options interaction id that differs from the
+/// delivery correlation is a typed refusal before admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_human_options_normalize_empty_selection_and_refuse_foreign_interaction() {
+    let fixture = Fixture::new().await;
+    let spec = WorkSpec::new(HUMAN, WorkOrigin::External);
+    let empty = delivery("empty-selection");
+    let first = fixture
+        .submit_with_options(
+            spec.clone(),
+            MemberTurnOptions::new().with_skill_references(Vec::new()),
+            empty.clone(),
+        )
+        .await
+        .expect("empty selection admitted");
+    let replay = fixture
+        .submit(spec.clone(), HandlingMode::Queue, empty)
+        .await
+        .expect("an empty selection replays as no selection");
+    assert_eq!(replay.work_ref, first.work_ref);
+
+    let inputs = fixture.input_count().await;
+    let foreign = delivery("foreign-interaction");
+    let error = fixture
+        .submit_with_options(
+            spec,
+            MemberTurnOptions::new().with_interaction_id(InteractionId(Uuid::new_v4())),
+            foreign.clone(),
+        )
+        .await
+        .expect_err("a foreign interaction id is not the delivery's interaction");
+    assert!(
+        matches!(
+            &error,
+            MobError::DeliveryInteractionConflict { correlation_id, .. }
+                if *correlation_id == foreign.correlation_id
+        ),
+        "typed conflict, got {error:?}"
+    );
+    assert_eq!(fixture.input_count().await, inputs);
     fixture.finish().await;
 }

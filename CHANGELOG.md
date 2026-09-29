@@ -37,6 +37,111 @@ them.
 
 ### Breaking
 
+- Session event subscriptions can replay from a typed cursor (#1236).
+  `meerkat_core::comms::StreamError` gains the variant
+  `CursorRejected { cursor, reason }`, and `meerkat_mob::MobError` gains
+  `MemberSessionNotLive { agent_identity, session_id }` and
+  `AgentEventCursorRejected { agent_identity, cursor, reason }`; exhaustive
+  matches must handle them. `MemberSessionNotLive` classifies as
+  `TargetMissing`.
+- Behaviour-only (not measured by the gate): `MobHandle::subscribe_agent_events`
+  (and the all-member and mob event router subscriptions) now report a member
+  whose authorized session has no live actor as
+  `MobError::MemberSessionNotLive` instead of `MobError::Internal(String)`
+  (#1236).
+- Behaviour-only (not measured by the gate): envelope sequences
+  (`EventEnvelope::seq`) of a session no longer restart at zero for each actor
+  incarnation inside one session service. A successor actor for the same
+  session, including one revived after archive, continues its predecessor's
+  sequence, so a replay cursor stays meaningful across incarnations (#1236).
+- `meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig` gains the
+  variant `AnthropicThinkingConfig::BetweenTools`, the wire mirror
+  `meerkat_contracts::wire::runtime::WireAnthropicThinkingConfig` gains
+  `WireAnthropicThinkingConfig::BetweenTools` (wire value
+  `{"type": "between_tools"}`), and
+  `meerkat_core::model_profile::capabilities::ThinkingSupport` gains
+  `ThinkingSupport::AnthropicAdaptiveOrBetweenTools` (enum variant added).
+  Exhaustive matches must handle them.
+- The `ThinkingSupport::AnthropicAdaptiveOrBetweenTools` insertion shifts
+  later `ThinkingSupport::*` discriminants (e.g. `GeminiThinkingLevel`).
+- Generated `MobMachineState` gains the field
+  `pending_external_route_installs` (constructible struct), and
+  `MobMachineEffectVariant` gains `ExternalRouteInstallRequested` mid-enum, so
+  later `MobMachineEffectVariant::*` discriminants and ordering move
+  (`MemberOperatorAdmitted`, `MemberOperatorRejected`,
+  `FlowStepDispatchClassified`, `AuthorizeExternalAgentEventSubscription`,
+  `GrantRecorded`, `GrantRevoked`, `ExplicitResumeMemberOutcomeClassified`).
+  Kernel `TransitionId` gains `RecordExternalRouteInstallInstall`,
+  `ResolveExternalRouteInstallRunning`, `ResolveExternalRouteInstallStopped`,
+  `ResolveExternalRouteInstallCompleted`, `ResolveExternalRouteInstallDestroyed`,
+  `RollbackExternalRouteInstallRunning`, `RollbackExternalRouteInstallStopped`,
+  `RollbackExternalRouteInstallCompleted` and
+  `RollbackExternalRouteInstallDestroyed`.
+- Behaviour-only (not measured by the gate): an Anthropic request whose
+  thinking type or `thinking_budget_tokens` (including the generic per-turn
+  override) the cataloged model does not accept, or that sets `top_k` on a
+  model without top-k support, now fails with a typed local refusal: when the
+  agent is built (`BuildAgentError::Config`) and before each request
+  (`LlmError::InvalidRequest`). Before, the request reached Anthropic and
+  failed with a 400. Uncatalogued model IDs keep the pass-through.
+
+- `meerkat_core::model_profile::capabilities::OpenAiResponsesParamCapabilities`
+  gains the public field `default_prompt_cache_mode:
+  Option<OpenAiPromptCacheMode>` (constructible struct adds field): the
+  catalog row, not the facade, now names the prompt-cache mode Meerkat
+  requests by default (GPT-5.6 `explicit`, GPT-6 `implicit`). New helpers
+  `default_prompt_cache_mode()` and `prompt_cache_retention_rejection()`
+  (#1235).
+- Behaviour-only (not measured by the gate): the GPT-6 catalog rows
+  (`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`) now carry the GPT-5.6-and-later
+  prompt-cache capabilities (implicit and explicit modes, `30m` TTL). On the
+  OpenAI API their requests now default to
+  `prompt_cache_options = { mode = "implicit", ttl = "30m" }` with the
+  per-model `prompt_cache_key`; explicit mode is an opt-in, and an explicit
+  `mode = "implicit"`, previously refused locally for GPT-6, is accepted.
+  `prompt_cache_retention = "in_memory"` is refused for GPT-5.6 and GPT-6,
+  now when the agent is built rather than on its first request, with a
+  message naming `prompt_cache_options.ttl` (the old text claimed only
+  `24h` was supported) (#1235).
+- Behaviour-only (not measured by the gate): Anthropic `automatic` requests
+  now also carry one block-level `cache_control` breakpoint on the previous
+  run's last output block, and `system_and_conversation` marks the system
+  prefix, that block, and the two most recent conversation boundaries
+  instead of the three most recent, never on a thinking block. OpenAI
+  `implicit` mode on a model that accepts explicit breakpoints (every GPT-6
+  default request, and GPT-5.6 implicit opt-ins) now adds one
+  `prompt_cache_breakpoint` on the last input before the previous run's
+  output and lowers user, notice, and tool-output inputs as content parts.
+  Sessions whose lowered request bytes change this way can see one full
+  prompt-cache miss on their first request after the upgrade: GPT-6
+  sessions (content parts, the anchor marker, and the new cache key and
+  options) and GPT-5.6 implicit-mode opt-ins (content parts). OpenAI does
+  not document a bare-string `content` as byte-equivalent to one
+  `input_text` part, so the miss is possible but not certain. Anthropic
+  sessions only gain a marker, which is not prefix content, and keep their
+  cache (#1235).
+- Generated `MobMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-mob `machines::mob_machine`) gains the placed-member external-edge
+  route ledger: state `pending_external_route_installs`, type
+  `ExternalRouteObligation`, inputs `RecordExternalRouteInstall`,
+  `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`
+  and `RollbackExternalRouteInstall`, and effect
+  `ExternalRouteInstallRequested` (`MobMachineInput::*`,
+  `MobMachineInputVariant::*`, `MobMachineEffect::*`, `MobMachineCatalogInput::*`
+  and kernel `Input::*` / `InputKind::*` / `Effect::*` / `EffectKind::*` /
+  `TransitionId::*` discriminants move; `ExternalRouteInstallRequested` lands
+  mid-enum in `EffectKind`).
+  `meerkat_contracts::wire::MobRouteInstallsResult` gains the field
+  `outstanding_external: Vec<WireExternalRouteInstallObligation>` (serde
+  default, omitted when empty, so the wire stays compatible); code that
+  constructs the struct must set it.
+- `meerkat_runtime::meerkat_machine_types::SupervisorBridgeCommandKind` gains
+  the variant `StopMemberRun` (inserted after `CancelTrackedMemberInput`, so
+  later `SupervisorBridgeCommandKind::*` discriminants move); exhaustive matches
+  must handle it. The supervisor bridge wire enums gain
+  `BridgeCommand::StopMemberRun(BridgeStopMemberRunPayload)` and
+  `BridgeReply::MemberRunStopped(BridgeMemberRunStopResponse)` (both enums are
+  `#[non_exhaustive]`).
 - Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
   meerkat-runtime `meerkat_machine::dsl`) gains a run-fenced Stop (#1261). The
   input `StopCurrentRunForRun { run_id }` is added (`MeerkatMachineInput::*`,
@@ -56,6 +161,169 @@ them.
   `InputLifecycleEvent::Abandoned` emitted by a staged-rollback abandonment
   now carries the reason the generated arm chose. Before, it was always
   `MaxAttemptsExhausted`; a stopped run's contributors now report `Cancelled`.
+- `meerkat_core::event::SkillResolutionFailureReason` (re-exported as
+  `meerkat_core::SkillResolutionFailureReason`) gains the variant
+  `NoSkillEngine { requested: Vec<SkillKey> }`, declared before `Unknown`
+  (so `SkillResolutionFailureReason::Unknown`'s implicit discriminant moves;
+  `SkillResolutionFailureReason::*`); exhaustive matches must handle it.
+  The wire form is `reason_type: "no_skill_engine"`; older
+  decoders fold it to `Unknown`. Behaviour: an explicit, nonempty
+  per-turn skill selection on an agent built without a skill engine now
+  fails the turn with `AgentError::SkillResolutionFailed` and the native
+  `AgentEvent::SkillResolutionFailed` before any provider call, instead of
+  silently running as an ordinary turn (#1263). This includes scheduled
+  jobs: a job whose persisted action carries `skill_refs` on a realm with
+  skills disabled now fails on every firing instead of running without the
+  skills. The hand-written TypeScript, Python and Web SDK event parsers
+  decode the new reason with its `requested` keys, and the Web SDK now folds
+  any `reason_type` it does not know to `unknown` (as the Rust, TypeScript
+  and Python decoders do) instead of rejecting the event and its poll batch.
+- `meerkat_mob::MobError` gains the variant `DeliveryInteractionConflict {
+  correlation_id, interaction_id }` (appended last); exhaustive matches must
+  handle it. A submission whose delivery correlation and supplied
+  transcript interaction id (on the `WorkSpec` or in `MemberTurnOptions`)
+  disagree now returns it instead of `MobError::Internal` (#1264).
+- `meerkat_core::SystemNoticeKind` gains the variant `ToolProcessRecovery`,
+  and `meerkat_core::SystemNoticeBlock` gains the variant
+  `ToolProcessInterrupted { run_id, tool_call_id, spawner, cessation,
+  disposition }`: the typed transcript record that tool processes of an
+  earlier run were settled by process custody after an abrupt host stop, and
+  what that did to the run (`InterruptedToolRunDisposition::InputsSettled {
+  inputs, unrestored }`: the run was in flight and its request, plus
+  `inputs - 1` inputs absorbed into it while it ran, were not re-run, and
+  `unrestored` names by `InterruptedInputKind` those not restored to the
+  transcript (peer messages, flow steps, and the like); `RunCompleted`: the
+  run had completed and only the process outlived it). The run id is part of
+  the block, so a notice delivered twice is a typed duplicate.
+- The machine vocabulary `InputAbandonReason` gains the variant
+  `ToolProcessInterrupted` in `meerkat_machine_kernels::generated::meerkat::InputAbandonReason`,
+  `meerkat_runtime::meerkat_machine::dsl::InputAbandonReason` and
+  `meerkat_runtime::InputAbandonReason` (`InputAbandonReason::*`); exhaustive
+  matches over the generated enums must handle it. The wire form is
+  `tool_process_interrupted` (domain) / `ToolProcessInterrupted` (kernel).
+- `meerkat_core::HookInvocation` gains the public field
+  `run_id: Option<RunId>` (constructible struct adds field), filled in by the
+  agent from its bound run and serialized as `run_id` in the command and HTTP
+  hook payload when present. Command hooks run in durable process custody
+  record it, so a hook interrupted by an abrupt host stop settles its run
+  instead of letting the run replay.
+- Behaviour-only (not measured by the gate): attaching a runtime executor to
+  a session whose previous host stopped abruptly no longer replays a
+  recovered input whose run had a tool process that durable process custody
+  proved had started (killed by recovery, already exited, or exited before
+  the run committed). This holds on every attach path (prepared
+  materialization, RPC on-demand attach, schedule hosts, detached owners):
+  the machine settles the session's custody through the host's
+  `InterruptedToolEvidenceSource` when it creates the pending attachment,
+  before anything recovered is served and even when no agent was built yet.
+  The run's queued inputs are abandoned with the typed
+  `meerkat_runtime::InputAbandonReason::ToolProcessInterrupted` (an input
+  recovery did not hand back as queued is left as is, logged and not
+  counted). A run whose provisional tail the runtime store holds is left to
+  durable-tail recovery, which commits it (for example when RPC builds the
+  agent on its first turn), instead of being settled too. One typed
+  `ToolProcessRecovery` system notice per settled run is recorded in the
+  durable transcript without a model call, as soon as the runtime loop is
+  idle under the turn-finalization boundary (at attach for an idle session,
+  otherwise before the next input is dequeued), so it is part of the
+  transcript the next real turn sees. It is preceded, once and atomically
+  with it, by the run's user requests with their original timestamp,
+  transcript identity and render metadata: the run never committed, so they
+  never reached the transcript. Their content is copied into the custody
+  evidence before the inputs are abandoned (at most 64 KiB per run, deleted
+  with the evidence), and an input that was already durably applied is not
+  repeated. A notice also reaches a session with no live actor yet, and an
+  RPC-hosted mob member. A
+  process of an already completed run that recovery killed (for example a
+  background job) is reported the same way with the `RunCompleted`
+  disposition instead of being dropped. Inputs of runs without such evidence
+  still replay as before.
+- Behaviour-only (not measured by the gate): a custody-bound process spawned
+  inside a run (foreground shell call, background job attempt, monitor,
+  command hook) that exits before its run ends now leaves an `Exited`
+  marker instead of removing its custody record; the runtime drops the
+  run's markers once the run reaches a durable terminal (committed, failed,
+  cancelled or stopped), and a process that exits after that leaves none
+  (post-commit hook invocations carry no run id). A crash in between no
+  longer replays the run (repeating a tool that already ran): recovery
+  settles the run with cessation `ToolProcessCessation::ExitedBeforeCommit`.
+  A marker guards no process, so one from another pid namespace settles
+  unless its host provably still runs.
+- Behaviour-only (not measured by the gate):
+  `meerkat_jobs::DetachedJobService::request_cancel` no longer fails with
+  `DetachedJobError::StaleRevision` after 8 lost compare-and-swaps against
+  the live attempt's own writes (lease heartbeats, progress). It re-reads
+  and re-applies the request until it lands or the job turns terminal, so a
+  cancellation request from another manager (for example `shell_job_cancel`)
+  can no longer surface a revision conflict as an I/O error on a slow host.
+- Behaviour-only (not measured by the gate): process custody recovery is
+  safe across host processes sharing a realm root, not only within one.
+  Every recoverer read-modify-write of a scope (recovery, the realm sweep,
+  interrupted-run evidence) holds an in-process lock plus `flock(2)` on the
+  scope's lock file (opened for writing, so it also works where flock is
+  emulated with POSIX locks, as on NFS); a record whose host still runs is
+  never rewritten or
+  removed (host liveness is checked first), so a record that host deletes is
+  never resurrected. A record from another pid namespace of the same boot is
+  no longer assumed ended from the namespace change alone: every host
+  incarnation now holds an exclusive `flock(2)` on
+  `<runtime_root>/tool_process_custody/.incarnations/<incarnation>.lock` for
+  its lifetime, and recovery settles such a record (new cessation
+  `ToolProcessCessation::ForeignIncarnationEnded`, nothing signalled) only
+  when that lock is free, which proves the host exited, as on a container
+  restart. A held lock (a live sibling host), a missing lock file (a record
+  written before this change) or a custody root on a network or userspace
+  filesystem (NFS, SMB/CIFS, 9P, AFS, Ceph, FUSE), where flock is not a
+  reliable proof, fails closed with the new
+  `ProcessCustodyError::ForeignPidNamespace { liveness }`. The realm sweep
+  removes lock files of ended incarnations that no unsettled record names.
+  Opening a session scope this process already holds open reuses the open
+  custody instead of recovering it again.
+- Behaviour-only (not measured by the gate): on Linux and macOS, every
+  `AgentFactory` agent build under a realm `runtime_root` now settles the
+  session's earlier-incarnation tool processes (shell calls, background
+  shell jobs, monitors, command hooks) before the agent exists, even when the
+  new build enables no shell, and fails closed with
+  `CompositeDispatcherError::ProcessCustody` as before. Background shell job
+  and monitor attempts and command hooks now spawn through the custody spawn
+  gate (`/bin/sh` prologue that `exec`s the program in place), and a failure
+  to write their custody record fails the job attempt or hook before
+  anything runs. `AgentFactory::runtime_root` also starts, once per root per
+  process, a background sweep that settles custody for every session under
+  the root, including sessions that are never resumed.
+- `meerkat_tools::CompositeDispatcherError` (re-exported as
+  `meerkat::CompositeDispatcherError`) gains the variant `ProcessCustody`
+  (native targets), carrying a typed
+  `meerkat_tools::builtin::shell::ProcessCustodyError` through
+  `BuildAgentError::ToolDispatcher`.
+- Behaviour-only (not measured by the gate): on Linux and macOS, an
+  `AgentFactory` with a realm `runtime_root` now settles durable shell process
+  custody while it builds a shell-enabled dispatcher (`build_agent`,
+  `build_builtin_dispatcher*`). The build fails closed with
+  `CompositeDispatcherError::ProcessCustody` when a shell tool process left
+  by an earlier host incarnation of the same session cannot be proven
+  stopped. Operator action per `ProcessCustodyError` variant (records live at
+  `<runtime_root>/tool_process_custody/<session_id>/<entry_id>.json`):
+  `PriorIncarnationAlive` - stop the live host process it names, then retry;
+  `CessationUnproven` - end the named process group (or the stuck I/O), then
+  retry; `CorruptRecord` - confirm the tool it named is not running, then
+  delete the named file; `UnsupportedRecordVersion` (a record written by a
+  newer release in the same boot, for example after a rollback) - run the
+  newer release again, or confirm the tool is not running and delete the
+  file; `ForeignPidNamespace` (a record written in this boot by a host in
+  another pid namespace whose incarnation lock does not prove it ended;
+  nothing is signalled) - for `Running`, stop the other host; for
+  `Unverifiable` (no lock file, or a network filesystem), confirm that
+  container has stopped, then delete the record (a reboot also settles it); `ExitNotificationUnavailable` (Linux without
+  `pidfd_open`: kernel before 5.3 or a blocking seccomp profile; nothing is
+  signalled) - run the host where pidfds are available, or end the named
+  group manually and delete its record; `Io` - fix the named I/O condition. A reused
+  pid (another user's process, a thread id, a different start stamp) is
+  always classified, never an error. Custody-bound foreground shell calls
+  are spawned through a `/bin/sh` spawn gate that `exec`s the configured
+  shell in place (same pid and process group), and a failure to write the
+  custody record now fails the shell call before anything is spawned.
+  Factories without a `runtime_root` are unchanged.
 - `meerkat_mob::MemberReloadDisposition` gains the variant `Reattached`
   (appended last, so existing discriminants do not move); exhaustive matches
   must handle it. `MobHandle::reload_member_registration` returns it when a
@@ -141,6 +409,185 @@ them.
 
 ### Added
 
+- Session event subscriptions replay from a typed cursor (#1236).
+  `SessionService::subscribe_session_events_from(id, SessionEventCursor)` and
+  `EphemeralSessionService`/`PersistentSessionService`
+  `subscribe_session_events_from` accept `SessionEventCursor::Live`,
+  `Earliest` or `After { epoch, seq }` and return a `SessionEventSubscription
+  { epoch, stream }`. Each actor incarnation retains a bounded window of its
+  latest envelopes, 1024 envelopes and 4 MiB of encoded bytes by default
+  (`SessionEventReplayLimits`, `set_session_event_replay_limits`); both
+  bounds evict. Replay and live delivery are captured atomically with
+  respect to publication, so nothing is repeated or skipped at the boundary.
+  A position older than the retained window starts with a typed
+  `StreamTruncated(StreamLagged { dropped })` marker whose event id is
+  stable across replays. A sequence the space never allocated is rejected
+  as `SessionEventCursorRejection::AheadOfTail { tail }`, and a cursor from
+  another sequence space (a restart, a cross-process revive) as
+  `EpochMismatch { current }` instead of silently skipping the new space's
+  first events. All of a session's actor incarnations in one service share
+  one sequence allocator, so a replaced incarnation still publishing (its
+  shutdown drain, a turn it could not interrupt) never reuses a successor's
+  sequence, and its late events appear on the successor's stream as a typed
+  gap. `subscribe_live_actor_session_events_from` also returns the exact
+  `LiveSessionActorWitness` the stream belongs to.
+- `MobHandle::subscribe_agent_events_from(identity, cursor)` (and
+  `MobMcpState::subscribe_agent_events_from`) returns an
+  `AgentEventSubscription { stream, actor, epoch }`. With
+  `SessionEventCursor::Earliest`, a host that attaches after a newly
+  materialized or restored member already began its first run still sees
+  that run's `RunStarted`/`TurnStarted`. `actor` names the local member's
+  exact actor incarnation. Placed members replay from their event pump's
+  window, bounded by the default limits (1024 envelopes, 4 MiB), shared
+  rather than copied, and kept across pump restarts of the same residency
+  (dropped when the member's pump stops for good), so a reconnecting
+  subscriber's cursor stays valid. A new residency (a host rebinding bumps
+  its binding generation) starts a new sequence space. A persistent session
+  with an event store starts a new sequence space above its durable event
+  log's tail, so its sequences keep counting up across a restart.
+  `MobSessionService::subscribe_agent_session_events_from` is the
+  forwarding seam, so session-service decorators must forward it.
+- Anthropic `thinking: {"type": "between_tools"}`
+  (`AnthropicThinkingConfig::BetweenTools`): turns off up-front thinking and
+  keeps only short progress updates between tool calls. Accepted for models
+  whose catalog row is `ThinkingSupport::AnthropicAdaptiveOrBetweenTools`
+  (Claude Sonnet 5.5) at `high` effort or below; other models and
+  `xhigh`/`max` effort are refused locally with a typed error.
+
+- Model catalog: Claude Sonnet 5.5 (`claude-sonnet-5-5`, released
+  September 28, 2026): 1M context, 128K output (300K on the Batch API with
+  the `output-300k-2026-03-24` beta), text and image input, adaptive
+  thinking or `between_tools` (Anthropic refuses `disabled` and
+  `budget_tokens`, and Meerkat refuses them locally), low..max effort with a
+  `high` default, no sampling parameters, mid-conversation system messages,
+  compaction, and `inference_geo`. It is the recommended Sonnet
+  model; the Anthropic default stays `claude-opus-5-5`.
+
+- `PreparedRuntimeSessionCommit::committing_whole_blob_session()` returns a
+  `CommittingWholeBlobSession`. This is the typed WholeBlob session the
+  boundary commits, kept across the commit so that a host projecting
+  committed state does not have to read and decode it back (#1273).
+  - `CommittingWholeBlobSession::bind_committed(&result)` returns the
+    committed `CommittedWholeBlobSnapshot` only when three things hold. The
+    result carries WholeBlob authority for that session. The store has
+    already materialized this carrier's document. The document's row digest
+    equals the digest the authority binds. It never encodes, decodes or
+    hashes.
+  - `reuse_or_load_committed_whole_blob_snapshot` reuses that snapshot only
+    while a fresh body-free `load_whole_blob_store_authority` equals its
+    authority exactly. Otherwise it falls back to the authoritative
+    `load_committed_whole_blob_snapshot`.
+  - `BoundSessionCommit::materialized_whole_blob_artifact()` peeks at an
+    already-materialized artifact without encoding.
+
+  All of these are additive.
+- `RuntimeSessionAuthorityOps::recorded_whole_blob_transcript_facts(&authority)`
+  is a provided method whose default is `None` (#1273). It returns a
+  `WholeBlobCommittedTranscriptFacts` (the transcript revision and message
+  count) for the committed WholeBlob document an exact authority
+  identifies, without reading its body. `SqliteRuntimeStore` records these
+  facts whenever it writes a document: prepared boundaries, snapshot CAS,
+  snapshot commits, and provisional tails. They are keyed by the row sha256,
+  and the store answers only for an authority with that exact digest.
+- `meerkat_runtime::recovery::recover_durable_tail_retaining_committed_whole_blob`
+  runs the same store-owned durable-tail recovery as `recover_durable_tail`
+  (#1273). For a WholeBlob `AlreadyAligned` outcome it also returns the
+  verified `CommittedWholeBlobSnapshot` the outcome was decoded from, so a
+  caller can reuse it instead of decoding the document again.
+- `PersistentSessionService::with_whole_blob_body_cache_bytes(bytes)` and
+  `meerkat_session::DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES` (64 MiB) bound the
+  verified WholeBlob bodies the service retains during a resume, measured in
+  committed document bytes (#1273). Zero disables retention.
+- `IncrementalSessionStore::verify_current_head` (provided method): a
+  body-free proof that a head is still the store's current physical head,
+  with `materialize_head`'s head-row checks (`NotFound`,
+  `TranscriptRevisionConflict`, and `Corrupted` for a stored CAS token that
+  no longer matches the stored head in backends that persist one). The
+  default compares recomputed tokens over `load_head`; `SqliteSessionStore`
+  and `MemoryStore` override it. Cold-resume body reuse uses it.
+- `MobHandle::member_endpoint_status(&identity)` returns a typed
+  `MobMemberEndpointStatus` (`Local(descriptor)`, `Host(descriptor)`,
+  `LocalUnavailable { reason }`, `HostUnavailable { reason }`), so who owns a
+  member's endpoint stays observable when no usable endpoint exists: a Broken
+  or restore-failed placed member is `HostUnavailable`, never mistaken for a
+  local member. `member_peer_endpoint` is its usable-endpoint view.
+- A placed (host-owned) member can be wired to an external peer (#1269).
+  `MobHandle::wire` / `unwire` with `PeerTarget::External` on a placed member
+  used to be refused outright. The edge is the ordinary machine-owned
+  external edge (`WireExternalPeer`, durable `ExternalPeerWired` /
+  `ExternalPeerUnwired`); its trust row lives on the member's host and is
+  realized through the existing V4 `InstallPeerTrust` / `RemovePeerTrust`
+  bridge commands (no protocol change), on a new MobMachine ledger that
+  mirrors placed member-member routes. A failed host install never unwinds
+  the committed edge: it stays pending, is reported in `route_installs()`
+  (`outstanding_external`), and drains on every route trigger (explicit
+  drive, host rebind and new host incarnation, placed revival, controlling
+  cold-boot recovery). Unwire removes the host row synchronously before it
+  commits, and a rejected removal leaves the edge wired with a typed error.
+  Retiring a placed member converges its external edges (its host rows die
+  with `ReleaseMember`) instead of failing. A wire whose host route cannot
+  be recorded (host not Bound, carrier binding inactive) is refused typed
+  (`BridgeCommandRejected { cause: NotBound }`) before the edge commits; a
+  second edge to an already-wired peer id under another name is refused (the
+  host keys trust rows by peer id); a failed or timed-out host removal
+  reinstalls the row; and unwire on a confirmed-revoked host commits without
+  a removal. Security: wiring a placed member to an external peer makes its
+  host's member runtime accept and dial the descriptor's address, so only a
+  caller with the mob's wiring authority can do it (the same admission as
+  local external wiring).
+- `MobHandle::member_peer_endpoint(&identity)` returns a member's canonical
+  comms endpoint as a `MobMemberPeerEndpoint`: the exact generation
+  endpoint MobMachine holds for its current incarnation (name, peer id,
+  transport address and Ed25519 key) plus a typed `MobMemberEndpointOwner`
+  (`Local` or `Host`), or `None` when the member is absent, has no endpoint,
+  or is Broken. For a placed member (`Host`) it is the host-acknowledged
+  endpoint with its real remote address, which a cross-process host can dial
+  even though the controlling process has no local comms runtime for the
+  member (#1269).
+- The run-fenced Stop is on the wire (#1261 follow-up). Clients read the run
+  id from the `run_started` event (`identity.run_id`) and stop exactly that run.
+  The typed receipt is `WireRunStopReceipt`
+  (`stopped { run_id, contributors[{input_id, completion, terminal}] }`,
+  `not_current { run_id, current_run_id }` or
+  `not_stoppable { run_id, state }`).
+  - RPC: `turn/stop_run` (`StopRunParams` -> `StopRunResult`) and
+    `mob/stop_member_run` (`MobStopMemberRunParams` -> `MobStopMemberRunResult`).
+  - REST: `POST /sessions/{id}/runs/{run_id}/stop` and
+    `POST /mob/{id}/members/{agent_identity}/runs/{run_id}/stop` (body
+    `StopRunRequest { reason }`).
+  - SDKs: Python `Session.stop_run`, `Mob.stop_member_run` and
+    `MeerkatClient.stop_mob_member_run`; TypeScript `Session.stopRun`,
+    `Mob.stopMemberRun` and `MeerkatClient.stopMobMemberRun`; web
+    `Session.stopRun` and `Mob.stopMemberRun` over the new wasm exports
+    `stop_session_run` and `mob_stop_member_run`. Every SDK validates the
+    receipt union on `outcome`.
+  - Rust: `MobHandle::stop_member_run(caller, identity, run_id, reason)` stops
+    one member run by identity. Placed members are served over the new
+    `StopMemberRun` supervisor-bridge command, gated on the host's recorded
+    `hard_cancel_member` capability; a host that predates the command rejects
+    it at decode. `MeerkatMachine::stop_run_for_member_incarnation` pins a stop
+    to one member residency, and
+    `meerkat_runtime::run_stop_wire::{wire_run_stop_receipt, parse_wire_run_id}`
+    is the shared projection every surface uses.
+  - A stale or malformed target never becomes an interrupt. A stale run id is
+    `not_current`, a malformed run id is invalid params (RPC) or `400` (REST),
+    and an unknown session is not found.
+  - A member stop never reports a false `not_current`. A retiring member's run
+    may still be draining, so its runtime answers the run-fenced stop. A
+    legacy peer-only member has no local runtime and is refused with
+    `UnsupportedForMode`; a member whose session is not registered in the
+    local runtime is refused with `SessionError::NotRunning`. An unknown
+    member is `MobError::MemberNotFound` for both `stop_member_run` and
+    `hard_cancel_member` (hard cancel used to report an invalid transition).
+  - Placed stops are deduplicated by `operation_id` on the host: a resend
+    joins the in-flight stop or returns the recorded receipt. The controller
+    resends the same operation when its 60 s bridge wait lapses, so a stop the
+    host committed is never reported as a transport error.
+  - REST maps stop failures by type: a session stop maps validation to `400`,
+    a missing or destroyed runtime to `404`, a not-ready runtime, stale
+    authority or in-progress teardown to `409`, and anything else to `500`. A
+    member stop maps an unknown member to `404`, a not-running session to
+    `409`, and internal mob faults to `500` instead of `400`.
 - `MeerkatMachine::stop_run(session_id, expected_run_id, reason)` stops one
   exact run and terminalizes every contributor already bound to it (#1261).
   The stop is linearized under the session mutation gate as the generated
@@ -156,6 +603,81 @@ them.
   `RunStopReceipt::NotStoppable { run_id, state }`. Once the stop is
   committed, a failed or unconfirmed interrupt dispatch does not fail the
   call; it returns at the stopped run's terminal.
+- `MobHandle::submit_host_human_input_with_options_bounded` and
+  `MobHandle::start_host_human_input_with_options_bounded` carry host-owned
+  `MemberTurnOptions` (for example `with_skill_references`) on the fenced
+  host-human seam. Selected skills resolve natively on the exact target
+  member (typed `SkillsResolved` / `SkillResolutionFailed`, durable
+  `SkillContext`), and the options join the runtime's exact replay
+  identity: a retry with the same delivery identity and options returns
+  the original admission, and a changed selection is
+  `MobError::WorkInputIdempotencyConflict`. The selection is
+  order-sensitive (a replay must repeat the same keys in the same order),
+  and an empty selection is normalized to no selection. The existing
+  `submit_host_human_input_bounded` / `start_host_human_input_bounded`
+  delegate with default options and keep their replay identity (#1264).
+- Durable process custody for background shell jobs, monitors and command
+  hooks, not only foreground `shell` calls: `ProcessCustody::prepare_spawn`,
+  `PreparedCustodySpawn`, `CustodyGuard`, `ProcessCustody::sweep`,
+  `sweep_process_custody_once`, `ProcessCustodySweepReport` and `ScopeSweep`
+  (`meerkat_tools::builtin::shell`), and the meerkat-hooks seam
+  `CommandHookProcessCustody` / `CommandHookCustodySpawn` /
+  `CommandHookCustodyError` with `DefaultHookEngine::with_command_process_custody`
+  (implemented by the facade over the session's custody). Custody records now
+  carry the run id and the spawner (`ToolProcessSpawner`).
+- `meerkat_core::tool_process`: the platform-independent vocabulary
+  `ToolProcessCessation` and `ToolProcessSpawner` (re-exported by
+  `meerkat_tools::builtin::shell`; both, and `InterruptedToolRunDisposition`,
+  decode variants written by a newer version as `Unknown`), interrupted-run
+  evidence (`InterruptedToolCall`, `InterruptedToolSettlement`,
+  `InterruptedRunInputs`, `InterruptedRunInput`, `InterruptedRequest`,
+  `InterruptedInputKind`, `InterruptedToolRunDisposition`,
+  `InterruptedToolEvidence`,
+  `InterruptedToolEvidenceError`, `InterruptedToolEvidenceSlot`,
+  `InterruptedToolEvidenceSource`), and
+  `SessionRuntimeBindings::interrupted_tool_evidence`, the hand-off from agent
+  construction to runtime materialization.
+- `meerkat_tools::builtin::shell::ForeignIncarnationLiveness` (carried by
+  `ProcessCustodyError::ForeignPidNamespace`).
+- `meerkat_runtime::MeerkatMachine::set_interrupted_tool_evidence_source`
+  (installed by `meerkat::surface::build_runtime_backed_service*` when the
+  factory has a realm `runtime_root`),
+  `meerkat_runtime::PendingRuntimeExecutorAttachment::abandon_interrupted_run_inputs`
+  and `meerkat_core::SystemNoticeMessage::tool_process_interrupted`.
+- Typed system notices recorded without a turn:
+  `meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle` with
+  `CoreExecutor::transcript_notice_handle` (default `None`),
+  `meerkat_core::SystemNoticeRecord` (a notice plus the user requests it
+  accounts for, appended once as a whole),
+  `meerkat_core::Session::append_system_notice_once`,
+  `PersistentSessionService::append_system_notice_under_runtime_turn_boundary`
+  (which also records into a session that has no live actor yet),
+  `meerkat::surface::persistent_runtime_transcript_notice_handle` (returned by
+  the facade, REST, RPC, CLI and MCP executors), and the defaulted
+  `meerkat_mob::MobSessionService::append_system_notice_under_runtime_turn_boundary`
+  (used by mob member executors).
+- `meerkat_tools::builtin::shell::ProcessCustody` and its vocabulary
+  (`ProcessCustodyScope`, `ProcessCustodyRecoveryReport`,
+  `RecoveredToolProcess`, `ToolProcessCessation`, `ProcessCustodyError`,
+  `ProcessIdentity`, `ProcessStartStamp`, `PROCESS_CUSTODY_DIR`) and
+  `JobManager::bind_process_custody` (Linux and macOS): durable,
+  incarnation-bound custody for foreground shell tool process groups. A
+  custody record naming the session scope, the host incarnation and the host
+  process identity is written before spawn; the tool starts in a fresh
+  process group behind a spawn gate that is released only after the leader's
+  pid and kernel start stamp are durably recorded; the record is removed only
+  after in-process containment is proven. `ProcessCustody::recover_and_open`
+  is the only way to obtain a handle: it first verifies each earlier
+  incarnation's recorded group identity, SIGKILLs the group, and waits for
+  every member's exit through kernel exit notification (pidfd on Linux,
+  kqueue `EVFILT_PROC` on macOS).
+- `meerkat_tools::builtin::shell::track_owned_process_group` and
+  `meerkat_hooks::set_command_hook_process_group_observer` (Unix): process
+  groups spawned by background shell jobs, non-custody shell calls and
+  command hooks are registered as live until kernel exit notification proves
+  them exited, so custody recovery never mistakes a running group of the
+  current process for an earlier incarnation's tool. `AgentFactory` installs
+  the hook observer.
 - `meerkat_runtime::RuntimeSessionAttachmentState` (`Unregistered`,
   `Attached`, `ReloadRequired { registration, attachment }`,
   `Detached { registration, unregister }`), `RuntimeDetachedUnregister`
@@ -210,9 +732,125 @@ them.
   actor's roster projection changed, instead of on every applied machine
   input. An input that leaves both unchanged no longer wakes watchers
   (#1250). Consumers already treat a wake as "re-project now".
+- The `@rkat/web` wasm runtime boxes every future it spawns before handing it
+  to `tokio_with_wasm`'s spawn wrapper (`meerkat_core::tokio::spawn` and
+  `task::JoinSet`, which every wasm crate's `tokio` alias now routes through).
+  The wrapper was monomorphized per future and moved the future by value, so
+  each instance's shadow-stack frame was about the size of its future: at the
+  release build (opt-level "s") the largest of 464 instances was 125,440
+  bytes. It is now instantiated per output type (70 instances), and the
+  largest is 4,512 bytes. A turn's shadow-stack high-water in the
+  packed-package smoke fell from 230,404 to 115,892 bytes (#1230). The
+  web SDK build now fails when a spawn wrapper frame of the release build
+  exceeds 8 KiB (`sdks/web/scripts/wasm-frames.mjs`, which also lists any
+  module's largest frames by name).
 
 ### Fixed
 
+- The ripgrep tombstone scans (`legacy-surface-gate`,
+  `session-control-gate`, `deprecated-backend-gate`) now run in pull-request
+  CI's always-on fmt-governance lane, after installing ripgrep, which the
+  hosted image does not ship. They previously ran only in `make ci` and the
+  uncalled `cargo.yml`, which let a retired route reach the release branch.
+  The legacy surface scan also passed without ripgrep (its searches end in
+  `|| true`, so a missing rg read as no matches); it now exits 2 like the
+  other two.
+- `MODULE.bazel.lock` recorded a stale hash for `crates/meerkat-runtime/Cargo.toml`
+  after its self dev-dependency gained `live`; it is refreshed. The
+  session-control and legacy-surface tombstone scans listed ten crates
+  without the `crates/` prefix and silently skipped them since the layout
+  move; they now scan the real paths and fail on a missing path. The
+  session-control scan excludes the historical `docs/internal/archive`, and
+  `docs/api/rpc.mdx` points `turn/stop_run` readers to `session/input_status`
+  instead of the retired `session/input_state`.
+- `MeerkatMachine::hard_cancel_run_if_current` no longer reports `false` for
+  an interrupt it delivered. When the interrupted run reached its terminal
+  before the dispatch reconciled (the interrupt usually ends it quickly), the
+  delivered exact-run interrupt was reported as if the run had already
+  ended. It now returns `true`, and releases the dispatch slot because no
+  retry can join a run that is no longer bound. A late retry is still `false`.
+- A host subscribing to a member's events could miss the first events of a
+  newly materialized or restored actor: the session broadcast had no replay
+  and each actor's sequence restarted at zero, and `NotFound` reached hosts
+  as `MobError::Internal(String)` (#1236). Cursor replay, cross-incarnation
+  sequences and the typed `MemberSessionNotLive` close all three.
+
+- A session whose host died after a run's end-of-run checkpoint wrote its
+  HeadCanonical provisional tail, but before the run's boundary committed,
+  now resumes on every cold attach path (#1285). Before, the next RPC lazy
+  resume failed `turn/start` with "rewrite rejected: previous transcript
+  revision ... did not match commit parent", with or without tool-process
+  custody.
+  - Cause: the physical head was ahead of the RuntimeStore authority, and
+    every host's cold precheck (`load_authoritative_session`) failed closed
+    on that mismatch. Durable-tail recovery, the only owner of the tail,
+    runs later, in actor resume preparation.
+  - Fix: the new `PersistentSessionService::prepare_cold_attach(id)` runs
+    the same store-owned, machine-authorized durable-tail recovery that
+    resume preparation runs. It acts only when the profile is HeadCanonical,
+    a provisional tail is recorded, and no live actor owns the session. Hosts
+    call it only on start and attach paths, before their prechecks: RPC
+    `turn/start`, external events, resume, rotation and
+    `ensure_runtime_executor`; MCP `meerkat_resume`; and the REST
+    persisted-only executor preparation. The interrupted run is then
+    committed exactly once, so a tool-process custody record has nothing
+    left to settle.
+  - Plain reads (`load_authoritative_session`, history, status) never
+    recover. They keep returning the typed conflict, because another process
+    may still be committing that run. Held or refused recovery, or a
+    recovery error, is logged and leaves the caller's read to surface the
+    original conflict.
+
+- `make wasm-check` failed on the release branch: the `test-support` fork
+  supervisor hook called `JoinError::is_panic`, which wasm32's
+  `tokio_with_wasm` does not have (it now classifies a non-cancelled join
+  error as the typed `Panicked` outcome on both targets), and clippy flagged
+  a hand-written `Default` for `ExternalRouteObligation` in the MobMachine
+  DSL and state types (now derived). The facade's
+  `RealtimeSessionOpenProjection::owner_session_id` is gated on the live
+  orchestrator that alone writes and reads it, and the MobMachine poster is
+  regenerated for the external route obligation inputs.
+- `meerkat-runtime` built with default features, or with only one of `live`
+  and `sqlite-store`, emitted 54 dead-code warnings (and so failed
+  `clippy -D warnings` and the feature-matrix lanes): live-context mirror
+  and live execution authority items used only by `live` code, and
+  HeadCanonical provisional-tail, recovery-codec and commit-payload items
+  used only by the SQLite RuntimeStore adapter. Each item is now gated on
+  the feature of its real users; the two SQLite-only field groups on types
+  every backend constructs carry a narrow, documented
+  `cfg_attr(not(feature = "sqlite-store"), allow(dead_code))`. The blanket
+  wasm32 `allow(dead_code)` on the live-context mirror is gone, and the
+  crate's self dev-dependency enables `live` so package-scoped test lanes
+  still run the live-only unit tests.
+- A `fork_off` child re-billed the forker's whole transcript whenever the
+  forker's turn started on a cold cache (#1235). The child's first request is
+  the forker's transcript up to its previous turn end, but every provider
+  cache entry the forking turn wrote sat after its own prompt. Provider
+  lowerings now keep a breakpoint at the end of the previous run's output on
+  every request of a run (`meerkat_core::prior_run_cache_anchor`, derived from
+  typed assistant run identity and tool use): the run's first request writes
+  that entry even on a cold cache, later requests refresh it, and the child,
+  whose request computes the same anchor, reads the whole shared prefix. This
+  covers Anthropic `automatic` and `system_and_conversation`, OpenAI explicit
+  mode, and OpenAI implicit mode on models that accept explicit breakpoints
+  (the GPT-6 default, which stays implicit). The implicit anchor authors no
+  cache-breakpoint evidence, so it stays off the per-request evidence path. The `ForkCacheInheritance` documentation no longer
+  claims the child hits whenever the source's entry is alive.
+- The `fork_relink` restart test
+  `a_failed_turn_deduplicated_against_restart_interrupted_keeps_its_child_seated`
+  was flaky under load (#1259). It re-links a child in the same process that
+  forked it, and the dropped run handle left the child's live fork supervisor
+  running, so when the turn failed that supervisor retired the child, racing
+  the assertion that the re-link keeps it seated. The product behaviour is
+  unchanged and correct: the automatic re-link only takes children forked
+  before this `MobMcpState` was created, which never have a live supervisor
+  in it. Test builds (`test-support`) of `meerkat-mob` now expose
+  `ForkChildRun::end_supervisor_as_process_exit_for_test`, which aborts the
+  supervisor task and awaits its end (reporting a typed
+  `ForkSupervisorExitForTest`: ended before an outcome, already settled, or
+  panicked). Every `fork_relink` restart test that dropped a run with a live
+  supervisor now ends it that way, as a process exit does, while the turn is
+  still held by the test gate, so the race cannot occur.
 - A host that stopped a selected run with `cancel_input_if_present` or
   `hard_cancel_run_if_current` saw a durable Steer that had already joined the
   run come back as `AppliedDiscarded`, because a persistent session discards
@@ -234,6 +872,72 @@ them.
   (lukacf/meerkat-mobkit#488). Stored strand names are read back from rows,
   never recomputed, so strands already written under revision names stay
   readable, and a rewrite refused this way succeeds on its next replay.
+- WholeBlob cold resume decodes each committed document once instead of
+  about eight times (#1273). The one decode is the store-owned recovery,
+  and every later consumer reuses its verified body. Every WholeBlob decode
+  re-parses the document and re-runs its rewrite-graph validation and
+  semantic replay, so the cost used to grow with rewrite generations times
+  transcript size, once per consumer.
+  - Resume preparation adopts the store-owned recovery's verified committed
+    snapshot under the same observation bracket as HeadCanonical.
+  - `PersistentSessionService` keeps that verified body, keyed by the exact
+    store authority. A read reuses it only when a fresh body-free
+    `load_whole_blob_store_authority` equals that authority; any other
+    authority takes the authoritative read.
+    - Only store decodes are cached, never a caller's in-memory session.
+    - An entry is dropped as soon as the service commits, acknowledges, or
+      observes a newer authority for that session: actor turn boundaries,
+      promotions, checkpoints, synchronization, and apply-path checks. In
+      practice that is the create-time save that follows actor
+      materialization, so nothing outlives the resume window.
+    - Eviction under the budget is least-recently-served first.
+    - Retention is bounded by committed document bytes (see Added).
+  - The compaction checkpoint verifies the caller's bytes against the
+    authority digest instead of decoding the stored body. The startup
+    compaction refresh loads the committed bytes raw and verifies them
+    against the authority digest, falling back to a decoding load on stores
+    that cannot serve raw bytes. The digests run on the blocking pool.
+  - `SqliteRuntimeStore` reaffirms a byte-identical WholeBlob re-commit
+    without decoding it. This is the startup refresh.
+    - When a typed control-plane commit (or a full re-commit) writes a
+      document, the store runs the boundary snapshot save guard on it. If
+      the guard passes, the store records the guard verdict, the validated
+      compaction intents, and the catalog projection, keyed by the exact
+      row sha256. No session or body is retained.
+    - A later commit of the same bytes, while they are still the current
+      authority's body, runs the outbox check against those intents, the
+      body check, the catalog upsert under the current runtime state, and
+      the quarantine clear. These are the steps the identical-digest upsert
+      ran after the decode.
+    - It also decodes other incoming snapshots once instead of twice.
+  - `persist_full_session` takes its checkpoint digest from the retained
+    midstate.
+
+  Every store-authority check still runs. With 60 and 120 rewrite
+  generations, resume went from 24 decodes and 16 graph validations to 3
+  and 2 (one per session), and digest bytes went from 8.70x to 1.89x of the
+  committed documents. At 120 generations resume time went from 7.41 s to
+  1.75 s. The first turn after resume went from 5 decodes to 0, and from
+  2.29 s to 0.50 s at 120 generations. The verified-body cache retains 0
+  bytes after resume. `whole_blob_resume_cost_slow` pins the bounds.
+  Hidden `global_whole_blob_decodes` and
+  `global_transcript_graph_validations` counters expose the cost.
+
+- The WholeBlob `live_session_authority` passes on every turn's apply path
+  no longer export the live session or decode the committed document
+  (#1273). These are the workgraph-overlay read and
+  `discard_stale_live_session_if_needed`. As on HeadCanonical, they classify
+  from bounded facts. The inputs are the actor's transcript authority and
+  the committed revision and message count, which come from the store's
+  recorded facts or the service's verified body for exactly the fresh
+  authority. They are the same inputs as the full-body comparison, so the
+  verdict is unchanged. Only a DurableAuthoritative verdict loads the body.
+  With 60 and 120 rewrite generations, two steady-state turns per member
+  went from 4 decodes and 4 graph validations to 0, and digest bytes went
+  from 3.78x to 1.82x of the committed documents. At 120 generations the
+  time went from 2.48 s to 0.92 s. `whole_blob_resume_cost_slow` bounds the
+  steady-state turns at zero decodes.
+
 - Cold resume verifies each committed session head once instead of five
   times (#1258). HeadCanonical resume preparation now brackets the
   store-owned durable-tail recovery with resume observations and adopts the
@@ -250,8 +954,54 @@ them.
   its row prefix. Every store-authority check still runs; only repeated
   materializations of the same committed head are gone. In a cold-resume
   harness, content-digest bytes dropped from 4.53x to 0.91x of the verified
-  transcript bytes for append-only heads, and from 7.19x to 0.96x for
+  transcript bytes for append-only heads, and from 7.19x to 0.97x for
   compacted heads. `cold_resume_digest_cost` pins both bounds.
+- Follow-ups to #1258 (cold resume verifies each head once). The body-free
+  physical-head check both prepared-body reuse sites run now uses the new
+  provided `IncrementalSessionStore::verify_current_head`, which keeps every
+  head-row check `materialize_head` runs. SQLite and memory stores override
+  it to also prove that the stored CAS token still equals the one recomputed
+  from the stored head (`Corrupted` otherwise); `load_head`, which the check
+  used before, drops the stored token. The store conformance incremental
+  profiles cover the new method. A new end-to-end test consumes a
+  preparation receipt through actor creation after advancing the physical
+  head and requires the seed site itself to refuse it, so deleting that
+  check fails a test (the gated archive re-check would otherwise catch it
+  silently). Actor creation also no longer keeps a second `Session` handle
+  of the resume body alive across actor construction, which could force a
+  whole-transcript copy-on-write at the actor's first append; the receipt's
+  own body clone shares the transcript allocation with the returned body,
+  now pinned by a test. `cold_resume_digest_cost` holds a serial guard over
+  the process-global digest counters, so its two harnesses no longer mix
+  measurements under plain `cargo test`, and it waits for members on the mob
+  actor's machine-state publications instead of a sleep loop.
+- The CI gate's push-to-terminal budget failed pull-request runs in which
+  every lane passed, and a re-run could never pass, because it measured
+  1200 s from the run's fixed `created_at`. Each lane is now timed from the
+  start of the run attempt it ran in, so a re-run lane gets a fresh clock
+  while a carried-over lane keeps its own attempt's clock (re-running only
+  the gate cannot launder an overrun). The budget is 1500 s, sized from the
+  last 64 pull-request runs (lane terminal p50 847 s, p90 1194 s, max
+  1244 s; the tail is the example-web lane under its own 20-minute
+  timeout), about 20% above the observed maximum and below the 40-minute
+  lane timeouts, which only stop hung lanes. The gate reports the
+  critical-path lane, the slowest lane and the latest lane terminals on
+  every run that was not cancelled, failed runs included. On a push to
+  `main`, where the budget is not enforced, a failure to measure it is a
+  warning, so a transient API error cannot turn `main` red.
+- `make verify-machine-poster-coverage` failed locally since the `crates/`
+  layout move (it opened `meerkat-machine-schema/...`), and CI never ran it:
+  only `cargo.yml`, which nothing calls, did. The paths are fixed, the
+  drifted posters are regenerated, and `ci.yml` runs the gate in the
+  generation-ratchets lane whenever machine authority or poster inputs
+  change. Poster inputs have their own classifier,
+  `scripts/machine-posters-changed`, so a poster-only change does not start
+  the machine-authority lanes (pre-push machine hook, remote TLC). The path-classifier pinning tests had also never run and had
+  failures of the same class: `machine-authority-changed` and the edge
+  classifier missed `crates/xtask/*-baseline.toml`, and
+  `scripts/cargo-agent-gate` missed `crates/meerkat-web-runtime/`, so it
+  never ran `wasm-check`. Those patterns are fixed and
+  `make path-classifier-selftest` runs in CI and `make ci`.
 - An aligned HeadCanonical durable-tail recovery source (no unapplied
   provisional intent) is now verified as the physical head as well as the
   runtime boundary, in one row replay. It used to be verified only with the
@@ -259,6 +1009,71 @@ them.
   recovery returned `AlreadyAligned` over a stray row beyond the head that a
   direct `materialize_head` rejects. Recovery now fails closed on that row
   (`head_canonical_aligned_recovery_rejects_a_stray_row_beyond_the_head`).
+- A placed (host-owned) member now publishes its transport key (#1269).
+  Spawn projected only its host-acknowledged peer id, so
+  `get_member(..).transport_public_key()` was always `None` for a placed
+  member and MobKit's `member_peer_info` failed for it even right after
+  spawn. The key now comes from the same host-acknowledged endpoint at spawn
+  and is republished from the durable MobMachine endpoint after Running and
+  Stopped restarts. Because a placed member now carries a roster key, the
+  roster-based fallback descriptor used by retirement and dispose cleanup
+  explicitly skips placed members, so it can never render one at an
+  `inproc://` address; their cleanup keeps using the durable host endpoint.
+  A member recorded Broken while the mob is Running (a missing bridge
+  session, a terminal revival classification, a failed revival, a refused
+  runtime binding) now clears its projected peer ID and key, local and
+  placed alike, consistent with the resume paths. A successful revival
+  republishes them only after verifying the live runtime's endpoint (local)
+  or the durable host endpoint (placed) against the member's durable
+  generation endpoint: a warm revival that minted a new key (a lost identity
+  store), an unusable live endpoint, or a missing durable endpoint records
+  the member Broken with the respawn action instead. A placed revival whose
+  host acknowledges a different endpoint than the durable one, or that has
+  no durable endpoint to verify, likewise fails and records the member
+  Broken instead of being adopted.
+- A member restored from a cleanly Stopped mob now publishes its preserved
+  comms endpoint (#1262). After `MobStopped`, a restart through
+  `MobBuilder::for_resume` and an explicit `MobHandle::resume()`, the member
+  kept its session and its live comms runtime kept the original peer ID and
+  key, but `get_member`, `list_members` and `list_all_members` reported no
+  `peer_id` or `transport_public_key` (so MobKit's `local_member_peer_info`
+  and cross-mob topology failed with `NoCommsInfo`): `MemberSpawned` replay
+  carries no live endpoint, and only the Running cold-boot path refreshed
+  it. The shared resume topology workflow, which both cold boot and
+  explicit Resume run, now publishes each local member's live peer ID and
+  key (read side-effect free, from one runtime observation) into the roster
+  projection through a typed delta bound to the member's incarnation and
+  bridge session, before Resume returns and before any new turn or topology
+  operation. No turn, respawn or host roster edit is needed. On both
+  paths, the Running cold boot and explicit Resume of a Stopped mob, a
+  restored member whose live endpoint disagrees with its durable generation
+  endpoint (for example a lost identity store or a changed advertise
+  address), or that exposes no usable endpoint, is recorded Broken on its
+  own, with a reason naming the mismatch and the respawn action. Nothing is
+  published for it, and the other members and the boot or Resume carry on;
+  the Running cold boot used to abort the whole mob instead. The verdict is
+  re-derived on every boot from the durable endpoint, so a member left
+  Broken by a Stopped Resume is Broken again after a later Running restart
+  until it is respawned. A placed (host-owned) member's durable
+  host-acknowledged peer ID, which spawn projects but replay dropped, is
+  republished the same way after both Running and Stopped restarts; a
+  Broken placed member publishes nothing.
+- A plain (non-mob) session whose gateway was SIGKILLed mid-tool no longer
+  re-runs the interrupted input on restart, so a tool effect that already
+  happened is not repeated unknowingly; a typed `ToolProcessInterrupted`
+  notice is recorded in the transcript instead, without an extra model call,
+  and the model sees it on the next real turn. Monitors submitted in a run
+  are covered too. Background shell jobs, monitors and
+  command hooks of a dead host incarnation are killed (or proven gone) before
+  new work for the session, and a realm sweep settles sessions that are never
+  resumed (#1265).
+- A SIGKILLed host (gateway) no longer leaves an ordinary foreground shell
+  tool running to perform its effect later. When the next incarnation builds
+  the same session's agent, every earlier-incarnation shell process group is
+  proven stopped (or proven never started) before the dispatcher, and so any
+  new work for that session, exists. The settlement is reported per tool
+  call with a typed `ToolProcessCessation` (`NeverStarted`, `AlreadyExited`,
+  `GroupReassigned`, `KilledByRecovery`, `PriorEnvironmentEnded`) (#1265).
 - `MobHandle::subscribe_mob_events` returns only once the router is
   subscribed to every member it starts with (local session streams and
   placed members' pump taps). Those subscriptions used to be made inside the

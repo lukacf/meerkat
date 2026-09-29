@@ -356,6 +356,19 @@ fn require_standalone_archive_verdict(
     }
 }
 
+/// Synthetic typed gap marker. It carries sequence zero because it is not a
+/// canonical session event.
+fn stream_lagged_marker(session_id: SessionId, dropped: u64) -> EventEnvelope<AgentEvent> {
+    EventEnvelope::new_session(
+        session_id,
+        0,
+        None,
+        AgentEvent::StreamTruncated {
+            reason: meerkat_core::event::StreamTruncationReason::StreamLagged { dropped },
+        },
+    )
+}
+
 fn lag_aware_session_event_stream(
     session_id: SessionId,
     rx: tokio::sync::broadcast::Receiver<Arc<EventEnvelope<AgentEvent>>>,
@@ -366,16 +379,7 @@ fn lag_aware_session_event_stream(
             match rx.recv().await {
                 Ok(event) => Some((Arc::unwrap_or_clone(event), (rx, stream_session_id))),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                    let marker = EventEnvelope::new_session(
-                        stream_session_id.clone(),
-                        0,
-                        None,
-                        AgentEvent::StreamTruncated {
-                            reason: meerkat_core::event::StreamTruncationReason::StreamLagged {
-                                dropped,
-                            },
-                        },
-                    );
+                    let marker = stream_lagged_marker(stream_session_id.clone(), dropped);
                     Some((marker, (rx, stream_session_id)))
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
@@ -484,16 +488,352 @@ impl Drop for QueuedLosslessEvent {
 pub(crate) type LosslessEventProjectionStream =
     std::pin::Pin<Box<dyn futures::Stream<Item = QueuedLosslessEvent> + Send>>;
 
-fn publish_session_event_to_broadcasts(
-    session_event_tx: &tokio::sync::broadcast::Sender<Arc<EventEnvelope<AgentEvent>>>,
-    raw_session_event_tx: &tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+/// A session event subscription bound to the exact live actor incarnation
+/// it attached to.
+#[non_exhaustive]
+pub struct LiveActorEventSubscription {
+    /// The actor incarnation whose events `stream` carries.
+    pub actor: LiveSessionActorWitness,
+    /// Sequence space of the stream's envelope sequences.
+    pub epoch: meerkat_core::comms::SessionEventEpoch,
+    /// That incarnation's events; ends when the actor ends.
+    pub stream: meerkat_core::comms::EventStream,
+}
+
+/// One session's event sequence space inside one session service, shared by
+/// all of the session's actor incarnations (including one revived after
+/// archive).
+///
+/// It allocates every envelope sequence, so a predecessor actor that is
+/// still publishing (a shutdown drain, a turn stuck in a tool) never reuses a
+/// sequence its successor allocated, and it names the journal of the
+/// current incarnation, so an event published by a replaced incarnation is
+/// reported on the current incarnation's stream as a typed gap instead of
+/// being skipped silently.
+pub(crate) struct SessionEventLine {
+    epoch: meerkat_core::comms::SessionEventEpoch,
+    allocated: std::sync::atomic::AtomicU64,
+    current: std::sync::Mutex<std::sync::Weak<SessionEventJournal>>,
+}
+
+impl SessionEventLine {
+    fn new() -> Self {
+        Self::starting_at(0)
+    }
+
+    fn starting_at(allocated: u64) -> Self {
+        Self {
+            epoch: meerkat_core::comms::SessionEventEpoch::new(),
+            allocated: std::sync::atomic::AtomicU64::new(allocated),
+            current: std::sync::Mutex::new(std::sync::Weak::new()),
+        }
+    }
+
+    /// Allocate the next sequence.
+    fn allocate(&self) -> u64 {
+        self.allocated
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
+    }
+
+    /// Newest allocated sequence.
+    fn allocated(&self) -> u64 {
+        self.allocated.load(Ordering::Acquire)
+    }
+
+    /// Reserve `count` sequences; returns the sequence just below the range.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    fn reserve(&self, count: u64) -> u64 {
+        self.allocated.fetch_add(count, Ordering::AcqRel)
+    }
+
+    /// Claim `(observed, through]` iff nothing was allocated since
+    /// `observed` was read.
+    fn try_claim(&self, observed: u64, through: u64) -> bool {
+        self.allocated
+            .compare_exchange(observed, through, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Record sequences assigned elsewhere (the durable event store).
+    fn advance_to(&self, seq: u64) {
+        self.allocated.fetch_max(seq, Ordering::AcqRel);
+    }
+
+    fn lock_current(&self) -> std::sync::MutexGuard<'_, std::sync::Weak<SessionEventJournal>> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn install(&self, journal: &Arc<SessionEventJournal>) {
+        *self.lock_current() = Arc::downgrade(journal);
+    }
+
+    fn current(&self) -> Option<Arc<SessionEventJournal>> {
+        self.lock_current().upgrade()
+    }
+}
+
+/// Tail of a session's durable event stream: the newest envelope sequence
+/// the session published durably, possibly before a restart. A new sequence
+/// space for such a session starts above it, so sequences stay monotonic
+/// against the durable log and a restarted host keeps counting up.
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[async_trait]
+pub(crate) trait SessionEventTailSource: Send + Sync {
+    async fn durable_stream_tail(&self, id: &SessionId) -> Option<u64>;
+}
+
+struct RetainedSessionEvent {
     envelope: Arc<EventEnvelope<AgentEvent>>,
-) {
-    let raw_envelope =
-        (raw_session_event_tx.receiver_count() > 0).then(|| envelope.as_ref().clone());
-    let _ = session_event_tx.send(envelope);
-    if let Some(raw_envelope) = raw_envelope {
-        let _ = raw_session_event_tx.send(raw_envelope);
+    bytes: usize,
+    position: u64,
+}
+
+/// Bounded replay window of one actor incarnation.
+struct SessionEventReplayWindow {
+    /// Retained envelopes with their encoded size and the sequence position
+    /// they stand for: an envelope's own sequence, or, for the typed gap
+    /// marker of a replaced incarnation's late event, that event's sequence.
+    retained: std::collections::VecDeque<RetainedSessionEvent>,
+    /// Encoded bytes of `retained`.
+    bytes: usize,
+    /// Sequence of the newest envelope no longer retained: the newest evicted
+    /// envelope, or the incarnation's starting sequence before any eviction.
+    floor_seq: u64,
+    /// Envelopes of this incarnation evicted from the window.
+    evicted: u64,
+}
+
+/// Live publication and bounded replay for one actor incarnation's events.
+///
+/// Publication appends to the replay window and fans out to the live
+/// broadcasts under one lock, and replaying subscriptions capture the window
+/// and their live receiver under the same lock, so replay and live delivery
+/// never overlap or leave a gap between them. Nothing is deep-copied under
+/// the lock: the window holds shared envelopes.
+pub(crate) struct SessionEventJournal {
+    session_id: SessionId,
+    session_event_tx: tokio::sync::broadcast::Sender<Arc<EventEnvelope<AgentEvent>>>,
+    /// Owned-event broadcast reserved for the public synchronous raw receiver.
+    /// Normal streams use the shared-envelope lane above, so large payloads
+    /// are cloned only while a raw receiver is actually attached.
+    raw_session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+    replay: std::sync::Mutex<SessionEventReplayWindow>,
+    limits: meerkat_core::comms::SessionEventReplayLimits,
+    line: Arc<SessionEventLine>,
+    /// Sequence this incarnation starts after.
+    start_seq: u64,
+}
+
+impl SessionEventJournal {
+    /// A journal for a new incarnation, installed as the line's current one.
+    fn install(
+        session_id: SessionId,
+        line: Arc<SessionEventLine>,
+        limits: meerkat_core::comms::SessionEventReplayLimits,
+    ) -> Arc<Self> {
+        Self::install_with_live_capacity(session_id, line, limits, EVENT_CHANNEL_CAPACITY)
+    }
+
+    fn install_with_live_capacity(
+        session_id: SessionId,
+        line: Arc<SessionEventLine>,
+        limits: meerkat_core::comms::SessionEventReplayLimits,
+        live_capacity: usize,
+    ) -> Arc<Self> {
+        let (session_event_tx, session_event_rx) = tokio::sync::broadcast::channel(live_capacity);
+        drop(session_event_rx);
+        let (raw_session_event_tx, raw_session_event_rx) =
+            tokio::sync::broadcast::channel(live_capacity);
+        drop(raw_session_event_rx);
+        let start_seq = line.allocated();
+        let journal = Arc::new(Self {
+            session_id,
+            session_event_tx,
+            raw_session_event_tx,
+            replay: std::sync::Mutex::new(SessionEventReplayWindow {
+                retained: std::collections::VecDeque::new(),
+                bytes: 0,
+                floor_seq: start_seq,
+                evicted: 0,
+            }),
+            limits,
+            line,
+            start_seq,
+        });
+        journal.line.install(&journal);
+        journal
+    }
+
+    fn lock_replay(&self) -> std::sync::MutexGuard<'_, SessionEventReplayWindow> {
+        self.replay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn is_current(&self) -> bool {
+        self.line
+            .current()
+            .is_some_and(|current| std::ptr::eq(Arc::as_ptr(&current), self))
+    }
+
+    fn publish(&self, envelope: Arc<EventEnvelope<AgentEvent>>) {
+        // Measure and copy outside the lock.
+        let bytes = meerkat_core::comms::encoded_envelope_len(envelope.as_ref());
+        let raw_envelope =
+            (self.raw_session_event_tx.receiver_count() > 0).then(|| envelope.as_ref().clone());
+        let seq = envelope.seq;
+        self.line.advance_to(seq);
+        self.retain_and_send(envelope, bytes, seq);
+        if let Some(raw_envelope) = raw_envelope {
+            let _ = self.raw_session_event_tx.send(raw_envelope);
+        }
+        // A replaced incarnation still publishing (its shutdown drain, a
+        // turn it could not interrupt): its event is on its own stream, and
+        // the current incarnation's stream reports it as a typed gap.
+        if !self.is_current()
+            && let Some(current) = self.line.current()
+        {
+            current.publish_foreign_gap(seq);
+        }
+    }
+
+    fn retain_and_send(
+        &self,
+        envelope: Arc<EventEnvelope<AgentEvent>>,
+        bytes: usize,
+        position: u64,
+    ) {
+        let mut replay = self.lock_replay();
+        replay.retained.push_back(RetainedSessionEvent {
+            envelope: Arc::clone(&envelope),
+            bytes,
+            position,
+        });
+        replay.bytes = replay.bytes.saturating_add(bytes);
+        while replay.retained.len() > self.limits.max_envelopes
+            || replay.bytes > self.limits.max_bytes
+        {
+            let Some(evicted) = replay.retained.pop_front() else {
+                break;
+            };
+            replay.bytes = replay.bytes.saturating_sub(evicted.bytes);
+            replay.floor_seq = replay.floor_seq.max(evicted.position);
+            replay.evicted = replay.evicted.saturating_add(1);
+        }
+        let _ = self.session_event_tx.send(envelope);
+    }
+
+    /// Record, on this (current) incarnation's stream, that a replaced
+    /// incarnation of the session published sequence `seq` on its own.
+    fn publish_foreign_gap(&self, seq: u64) {
+        let mut marker = stream_lagged_marker(self.session_id.clone(), 1);
+        marker.event_id = self.line.epoch.marker_event_id(seq, 1);
+        let marker = Arc::new(marker);
+        let bytes = meerkat_core::comms::encoded_envelope_len(marker.as_ref());
+        self.retain_and_send(marker, bytes, seq);
+    }
+
+    fn subscribe_raw(&self) -> tokio::sync::broadcast::Receiver<EventEnvelope<AgentEvent>> {
+        self.raw_session_event_tx.subscribe()
+    }
+
+    fn epoch(&self) -> meerkat_core::comms::SessionEventEpoch {
+        self.line.epoch
+    }
+
+    fn subscribe(
+        &self,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        use meerkat_core::comms::{SessionEventCursor, SessionEventCursorRejection};
+        let reject = |reason| meerkat_core::comms::StreamError::CursorRejected { cursor, reason };
+        let after = match cursor {
+            SessionEventCursor::Live => None,
+            SessionEventCursor::Earliest => Some(None),
+            SessionEventCursor::After { epoch, seq } => {
+                if epoch != self.line.epoch {
+                    return Err(reject(SessionEventCursorRejection::EpochMismatch {
+                        current: self.line.epoch,
+                    }));
+                }
+                let tail = self.line.allocated();
+                if seq > tail {
+                    return Err(reject(SessionEventCursorRejection::AheadOfTail { tail }));
+                }
+                Some(Some(seq))
+            }
+            _ => return Err(reject(SessionEventCursorRejection::ReplayUnsupported)),
+        };
+        // Capture the window (shared envelopes only) and the live receiver
+        // under the publication lock; copy nothing here.
+        let (dropped, gap_position, replayed, rx) = {
+            let replay = self.lock_replay();
+            let (dropped, replayed) = match after {
+                None => (0, Vec::new()),
+                Some(None) => (
+                    replay.evicted,
+                    replay
+                        .retained
+                        .iter()
+                        .map(|retained| Arc::clone(&retained.envelope))
+                        .collect::<Vec<_>>(),
+                ),
+                Some(Some(after)) => {
+                    // Sequences are monotonic per space, so the unretained
+                    // span `(after, floor_seq]` is bounded by its width.
+                    let dropped = if after < replay.floor_seq {
+                        let span = replay.floor_seq - after;
+                        if after >= self.start_seq {
+                            span.min(replay.evicted)
+                        } else {
+                            span
+                        }
+                    } else {
+                        0
+                    };
+                    // Resume right after the last retained entry whose
+                    // position is at or below the cursor, so a typed marker
+                    // that followed it is replayed, not stepped over, while
+                    // a marker standing for a sequence the cursor already
+                    // covers is not.
+                    let first = replay
+                        .retained
+                        .iter()
+                        .rposition(|retained| retained.position != 0 && retained.position <= after)
+                        .map_or(0, |last_seen| last_seen + 1);
+                    (
+                        dropped,
+                        replay
+                            .retained
+                            .iter()
+                            .skip(first)
+                            .map(|retained| Arc::clone(&retained.envelope))
+                            .collect::<Vec<_>>(),
+                    )
+                }
+            };
+            (
+                dropped,
+                replay.floor_seq,
+                replayed,
+                self.session_event_tx.subscribe(),
+            )
+        };
+        let gap = (dropped > 0).then(|| {
+            let mut marker = stream_lagged_marker(self.session_id.clone(), dropped);
+            marker.event_id = self.line.epoch.marker_event_id(gap_position, dropped);
+            marker
+        });
+        let head = gap
+            .into_iter()
+            .chain(replayed.into_iter().map(Arc::unwrap_or_clone));
+        Ok(Box::pin(futures::StreamExt::chain(
+            futures::stream::iter(head),
+            lag_aware_session_event_stream(self.session_id.clone(), rx),
+        )))
     }
 }
 
@@ -502,8 +842,7 @@ async fn publish_session_event_to_channels(
     lossless_event_projection_tx: &Arc<
         tokio::sync::Mutex<Option<Arc<LosslessEventProjectionSink>>>,
     >,
-    session_event_tx: &tokio::sync::broadcast::Sender<Arc<EventEnvelope<AgentEvent>>>,
-    raw_session_event_tx: &tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+    event_journal: &SessionEventJournal,
     envelope: EventEnvelope<AgentEvent>,
 ) {
     let envelope = Arc::new(envelope);
@@ -529,7 +868,7 @@ async fn publish_session_event_to_channels(
             lossless_sink.observe_backlog(envelope.source_session_id());
         }
     }
-    publish_session_event_to_broadcasts(session_event_tx, raw_session_event_tx, envelope);
+    event_journal.publish(envelope);
 }
 
 #[cfg(test)]
@@ -586,10 +925,18 @@ mod session_event_stream_tests {
     -> Result<(), String> {
         const EVENT_COUNT: u64 = 1_100;
         let session_id = SessionId::new();
-        let (broadcast_tx, broadcast_rx) = tokio::sync::broadcast::channel(2);
-        let (raw_broadcast_tx, raw_broadcast_rx) = tokio::sync::broadcast::channel(2);
-        drop(raw_broadcast_rx);
-        let mut broadcast_stream = lag_aware_session_event_stream(session_id.clone(), broadcast_rx);
+        let journal = SessionEventJournal::install_with_live_capacity(
+            session_id.clone(),
+            Arc::new(SessionEventLine::new()),
+            meerkat_core::comms::SessionEventReplayLimits {
+                max_envelopes: 2,
+                max_bytes: usize::MAX,
+            },
+            2,
+        );
+        let mut broadcast_stream = journal
+            .subscribe(meerkat_core::comms::SessionEventCursor::Live)
+            .map_err(|error| error.to_string())?;
         let (lossless_tx, mut lossless_rx) = mpsc::unbounded_channel::<QueuedLosslessEvent>();
         let queued_events = Arc::new(AtomicUsize::new(0));
         let lossless_sink = Arc::new(LosslessEventProjectionSink::new(lossless_tx, queued_events));
@@ -598,8 +945,7 @@ mod session_event_stream_tests {
         for seq in 1..=EVENT_COUNT {
             publish_session_event_to_channels(
                 &lossless_slot,
-                &broadcast_tx,
-                &raw_broadcast_tx,
+                &journal,
                 EventEnvelope::new_session(
                     session_id.clone(),
                     seq,
@@ -641,6 +987,411 @@ mod session_event_stream_tests {
                 }
             }
         ));
+        Ok(())
+    }
+
+    fn journal_event(session_id: &SessionId, seq: u64) -> Arc<EventEnvelope<AgentEvent>> {
+        Arc::new(EventEnvelope::new_session(
+            session_id.clone(),
+            seq,
+            None,
+            AgentEvent::StreamTruncated {
+                reason: meerkat_core::event::StreamTruncationReason::ChannelFull,
+            },
+        ))
+    }
+
+    fn limits(max_envelopes: usize) -> meerkat_core::comms::SessionEventReplayLimits {
+        meerkat_core::comms::SessionEventReplayLimits {
+            max_envelopes,
+            max_bytes: usize::MAX,
+        }
+    }
+
+    /// A journal on a fresh line, publishing through the line's allocator.
+    fn journal(max_envelopes: usize) -> (SessionId, Arc<SessionEventJournal>) {
+        let session_id = SessionId::new();
+        let journal = SessionEventJournal::install(
+            session_id.clone(),
+            Arc::new(SessionEventLine::new()),
+            limits(max_envelopes),
+        );
+        (session_id, journal)
+    }
+
+    fn publish_next(journal: &SessionEventJournal, session_id: &SessionId) -> u64 {
+        let seq = journal.line.allocate();
+        journal.publish(journal_event(session_id, seq));
+        seq
+    }
+
+    fn after(journal: &SessionEventJournal, seq: u64) -> meerkat_core::comms::SessionEventCursor {
+        meerkat_core::comms::SessionEventCursor::After {
+            epoch: journal.epoch(),
+            seq,
+        }
+    }
+
+    async fn next_seqs(
+        stream: &mut meerkat_core::comms::EventStream,
+        count: usize,
+    ) -> Result<Vec<u64>, String> {
+        let mut seqs = Vec::with_capacity(count);
+        for _ in 0..count {
+            let envelope = stream
+                .next()
+                .await
+                .ok_or_else(|| "stream ended early".to_string())?;
+            seqs.push(envelope.seq);
+        }
+        Ok(seqs)
+    }
+
+    fn lagged_by(envelope: &EventEnvelope<AgentEvent>) -> Option<u64> {
+        match envelope.payload {
+            AgentEvent::StreamTruncated {
+                reason: meerkat_core::event::StreamTruncationReason::StreamLagged { dropped },
+            } if envelope.seq == 0 => Some(dropped),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn earliest_subscription_replays_events_published_before_it_attached()
+    -> Result<(), String> {
+        use meerkat_core::comms::SessionEventCursor;
+        let (session_id, journal) = journal(1_024);
+        for _ in 1..=3 {
+            publish_next(&journal, &session_id);
+        }
+        let mut live = journal
+            .subscribe(SessionEventCursor::Live)
+            .map_err(|error| error.to_string())?;
+        let mut earliest = journal
+            .subscribe(SessionEventCursor::Earliest)
+            .map_err(|error| error.to_string())?;
+        let mut from_two = journal
+            .subscribe(after(&journal, 2))
+            .map_err(|error| error.to_string())?;
+        publish_next(&journal, &session_id);
+
+        assert_eq!(next_seqs(&mut earliest, 4).await?, vec![1, 2, 3, 4]);
+        assert_eq!(next_seqs(&mut from_two, 2).await?, vec![3, 4]);
+        assert_eq!(next_seqs(&mut live, 1).await?, vec![4]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replay_older_than_the_window_yields_a_typed_gap_first() -> Result<(), String> {
+        use meerkat_core::comms::SessionEventCursor;
+        let (session_id, journal) = journal(3);
+        for _ in 1..=5 {
+            publish_next(&journal, &session_id);
+        }
+        let mut earliest = journal
+            .subscribe(SessionEventCursor::Earliest)
+            .map_err(|error| error.to_string())?;
+        let gap = earliest.next().await.ok_or("expected a gap marker")?;
+        assert_eq!(lagged_by(&gap), Some(2));
+        assert_eq!(next_seqs(&mut earliest, 3).await?, vec![3, 4, 5]);
+
+        let mut from_one = journal
+            .subscribe(after(&journal, 1))
+            .map_err(|error| error.to_string())?;
+        let second_gap = from_one.next().await.ok_or("expected a gap marker")?;
+        assert_eq!(lagged_by(&second_gap), Some(1));
+        assert_eq!(next_seqs(&mut from_one, 3).await?, vec![3, 4, 5]);
+
+        // The same gap replayed again carries the same event id, so a
+        // consumer deduplicating by event id does not see it as new.
+        let mut again = journal
+            .subscribe(SessionEventCursor::Earliest)
+            .map_err(|error| error.to_string())?;
+        let replayed_gap = again.next().await.ok_or("expected a gap marker")?;
+        assert_eq!(replayed_gap.event_id, gap.event_id);
+
+        let mut retained = journal
+            .subscribe(after(&journal, 3))
+            .map_err(|error| error.to_string())?;
+        publish_next(&journal, &session_id);
+        assert_eq!(
+            next_seqs(&mut retained, 3).await?,
+            vec![4, 5, 6],
+            "a retained cursor replays without a gap marker"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_byte_budget_evicts_as_well_as_the_envelope_bound() -> Result<(), String> {
+        use meerkat_core::comms::SessionEventCursor;
+        let session_id = SessionId::new();
+        let one = meerkat_core::comms::encoded_envelope_len(journal_event(&session_id, 1).as_ref());
+        let journal = SessionEventJournal::install(
+            session_id.clone(),
+            Arc::new(SessionEventLine::new()),
+            meerkat_core::comms::SessionEventReplayLimits {
+                max_envelopes: 1_024,
+                max_bytes: one * 2 + one / 2,
+            },
+        );
+        for _ in 1..=5 {
+            publish_next(&journal, &session_id);
+        }
+        let mut earliest = journal
+            .subscribe(SessionEventCursor::Earliest)
+            .map_err(|error| error.to_string())?;
+        let gap = earliest.next().await.ok_or("expected a gap marker")?;
+        assert_eq!(lagged_by(&gap), Some(3), "byte evictions are counted");
+        assert_eq!(next_seqs(&mut earliest, 2).await?, vec![4, 5]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cursor_ahead_of_the_tail_or_from_another_space_is_rejected_typed() -> Result<(), String>
+    {
+        use meerkat_core::comms::{
+            SessionEventCursor, SessionEventCursorRejection, SessionEventEpoch, StreamError,
+        };
+        let (session_id, journal) = journal(1_024);
+        publish_next(&journal, &session_id);
+        let Err(ahead) = journal.subscribe(after(&journal, 7)) else {
+            return Err("a cursor ahead of the tail must be rejected".to_string());
+        };
+        assert_eq!(
+            ahead,
+            StreamError::CursorRejected {
+                cursor: after(&journal, 7),
+                reason: SessionEventCursorRejection::AheadOfTail { tail: 1 },
+            }
+        );
+        let foreign = SessionEventCursor::After {
+            epoch: SessionEventEpoch::new(),
+            seq: 0,
+        };
+        let Err(mismatch) = journal.subscribe(foreign) else {
+            return Err("a cursor from another sequence space must be rejected".to_string());
+        };
+        assert_eq!(
+            mismatch,
+            StreamError::CursorRejected {
+                cursor: foreign,
+                reason: SessionEventCursorRejection::EpochMismatch {
+                    current: journal.epoch(),
+                },
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn successor_incarnation_continues_the_session_sequence() -> Result<(), String> {
+        use meerkat_core::comms::SessionEventCursor;
+        let session_id = SessionId::new();
+        let line = Arc::new(SessionEventLine::new());
+        let predecessor =
+            SessionEventJournal::install(session_id.clone(), Arc::clone(&line), limits(1_024));
+        for _ in 1..=4 {
+            publish_next(&predecessor, &session_id);
+        }
+        drop(predecessor);
+
+        let successor = SessionEventJournal::install(session_id.clone(), line, limits(1_024));
+        assert_eq!(
+            successor.start_seq, 4,
+            "the successor continues after seq 4"
+        );
+        publish_next(&successor, &session_id);
+        // A cursor from the predecessor stays meaningful: nothing the
+        // successor published is skipped, and the predecessor's unretained
+        // events are reported as a typed gap rather than silently lost.
+        let mut from_predecessor = successor
+            .subscribe(after(&successor, 2))
+            .map_err(|error| error.to_string())?;
+        let gap = from_predecessor
+            .next()
+            .await
+            .ok_or("expected a gap marker")?;
+        assert_eq!(lagged_by(&gap), Some(2));
+        assert_eq!(next_seqs(&mut from_predecessor, 1).await?, vec![5]);
+
+        let mut earliest = successor
+            .subscribe(SessionEventCursor::Earliest)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            next_seqs(&mut earliest, 1).await?,
+            vec![5],
+            "earliest is the current incarnation's first event, without a gap"
+        );
+        Ok(())
+    }
+
+    /// A replaced incarnation still publishing after its successor started
+    /// (its shutdown drain, a turn it could not interrupt) allocates from the
+    /// shared space: no sequence is reused, a cursor at its sequence is not
+    /// rejected as ahead of the successor's tail, and the successor's stream
+    /// reports the event as a typed gap instead of skipping it silently.
+    #[tokio::test]
+    async fn a_predecessor_publishing_after_its_successor_started_never_overlaps()
+    -> Result<(), String> {
+        let session_id = SessionId::new();
+        let line = Arc::new(SessionEventLine::new());
+        let predecessor =
+            SessionEventJournal::install(session_id.clone(), Arc::clone(&line), limits(1_024));
+        publish_next(&predecessor, &session_id);
+        let successor =
+            SessionEventJournal::install(session_id.clone(), Arc::clone(&line), limits(1_024));
+        let mut successor_stream = successor
+            .subscribe(meerkat_core::comms::SessionEventCursor::Earliest)
+            .map_err(|error| error.to_string())?;
+
+        let own = publish_next(&successor, &session_id);
+        let late = publish_next(&predecessor, &session_id);
+        let own_after = publish_next(&successor, &session_id);
+        assert_eq!((own, late, own_after), (2, 3, 4), "one shared allocation");
+
+        let first = successor_stream.next().await.ok_or("successor event")?;
+        assert_eq!(first.seq, own);
+        let gap = successor_stream.next().await.ok_or("typed gap")?;
+        assert_eq!(
+            lagged_by(&gap),
+            Some(1),
+            "the predecessor's late event is not silent"
+        );
+        let next = successor_stream.next().await.ok_or("successor event")?;
+        assert_eq!(next.seq, own_after);
+
+        let mut from_late = successor
+            .subscribe(after(&successor, late))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            next_seqs(&mut from_late, 1).await?,
+            vec![own_after],
+            "the predecessor's sequence is inside the shared tail, not ahead of it"
+        );
+
+        // Resuming right after the successor's own event replays the marker
+        // that followed it: window [own 2, marker(pred 3), own 4], After(2).
+        let mut from_own = successor
+            .subscribe(after(&successor, own))
+            .map_err(|error| error.to_string())?;
+        let marker = from_own.next().await.ok_or("the marker after the cursor")?;
+        assert_eq!(
+            lagged_by(&marker),
+            Some(1),
+            "the marker is not stepped over"
+        );
+        assert_eq!(next_seqs(&mut from_own, 1).await?, vec![own_after]);
+        Ok(())
+    }
+
+    /// Exact terminal batches plan against the shared allocation and claim
+    /// the planned range only if nothing was allocated meanwhile; under
+    /// contention with other allocations every sequence is still unique and
+    /// every batch contiguous.
+    #[test]
+    fn terminal_batches_under_allocation_contention_stay_unique_and_contiguous()
+    -> Result<(), String> {
+        const THREADS: usize = 4;
+        const ROUNDS: usize = 200;
+        let line = Arc::new(SessionEventLine::new());
+        let workers: Vec<_> = (0..THREADS)
+            .map(|worker| {
+                let line = Arc::clone(&line);
+                std::thread::spawn(move || {
+                    let mut journal = RuntimeInteractionTerminalJournal::default();
+                    let mut seqs = Vec::new();
+                    for round in 0..ROUNDS {
+                        if (round + worker) % 2 == 0 {
+                            seqs.push(vec![line.allocate()]);
+                        } else {
+                            let batch = (0..3)
+                                .map(|_| AgentEvent::InteractionComplete {
+                                    interaction_id: meerkat_core::InteractionId::new(),
+                                    result: "done".to_owned(),
+                                    structured_output: None,
+                                })
+                                .collect();
+                            let (_, envelopes) = journal
+                                .append_exact_batch(&line, batch)
+                                .map_err(|error| error.to_string())?;
+                            seqs.push(envelopes.iter().map(|envelope| envelope.seq).collect());
+                        }
+                    }
+                    Ok::<_, String>(seqs)
+                })
+            })
+            .collect();
+        let mut all = Vec::new();
+        for worker in workers {
+            let batches = worker
+                .join()
+                .unwrap_or_else(|_| Err("worker panicked".to_string()))?;
+            for batch in batches {
+                assert!(
+                    batch.windows(2).all(|pair| pair[1] == pair[0] + 1),
+                    "a terminal batch is contiguous: {batch:?}"
+                );
+                all.extend(batch);
+            }
+        }
+        let total = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), total, "no sequence is allocated twice");
+        assert_eq!(line.allocated(), u64::try_from(total).unwrap_or(u64::MAX));
+        Ok(())
+    }
+
+    /// Replay and live delivery never overlap or leave a gap, whenever a
+    /// subscriber attaches relative to concurrent publication.
+    #[test]
+    fn subscriptions_racing_publication_see_every_event_exactly_once() -> Result<(), String> {
+        use meerkat_core::comms::SessionEventCursor;
+        const EVENTS: u64 = 2_000;
+        const SUBSCRIBERS: usize = 16;
+        // The live lane holds every event, so only the replay/live handover
+        // is exercised (a lagging live lane is covered above).
+        let session_id = SessionId::new();
+        let journal = SessionEventJournal::install_with_live_capacity(
+            session_id.clone(),
+            Arc::new(SessionEventLine::new()),
+            limits(usize::MAX),
+            usize::try_from(EVENTS).unwrap_or(usize::MAX) + 1,
+        );
+        let publisher = {
+            let journal = Arc::clone(&journal);
+            std::thread::spawn(move || {
+                for _ in 0..EVENTS {
+                    publish_next(&journal, &session_id);
+                }
+            })
+        };
+        let mut subscriptions = Vec::with_capacity(SUBSCRIBERS);
+        for _ in 0..SUBSCRIBERS {
+            subscriptions.push(
+                journal
+                    .subscribe(SessionEventCursor::Earliest)
+                    .map_err(|error| error.to_string())?,
+            );
+            std::thread::yield_now();
+        }
+        publisher
+            .join()
+            .map_err(|_| "publisher panicked".to_string())?;
+        drop(journal);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .map_err(|error| error.to_string())?;
+        for stream in subscriptions {
+            let seqs: Vec<u64> = runtime.block_on(async move {
+                stream
+                    .map(|envelope| envelope.seq)
+                    .collect::<Vec<_>>()
+                    .await
+            });
+            assert_eq!(seqs, (1..=EVENTS).collect::<Vec<_>>());
+        }
         Ok(())
     }
 }
@@ -1364,6 +2115,13 @@ enum SessionCommand {
             Result<meerkat_core::service::AppendSystemContextStatus, AgentError>,
         >,
     },
+    #[cfg_attr(not(feature = "session-store"), allow(dead_code))]
+    AppendSystemNoticeControl {
+        record: meerkat_core::types::SystemNoticeRecord,
+        reply_tx: oneshot::Sender<
+            Result<meerkat_core::service::AppendSystemContextStatus, AgentError>,
+        >,
+    },
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     ActivateInstructionControl {
         request: meerkat_core::InstructionActivationRequest,
@@ -1490,12 +2248,8 @@ struct SessionHandle {
     /// Typed command sender for cancel-after-boundary requests; the agent
     /// task owns the receiver and drains it at the next boundary.
     cancel_after_boundary_handle: Option<CancelAfterBoundarySender>,
-    /// Broadcast channel for session-wide event subscription.
-    session_event_tx: tokio::sync::broadcast::Sender<Arc<EventEnvelope<AgentEvent>>>,
-    /// Owned-event broadcast reserved for the public synchronous raw receiver.
-    /// Normal streams use the shared-envelope lane above, so large payloads
-    /// are cloned only while a raw receiver is actually attached.
-    raw_session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+    /// Live broadcast and bounded replay for session-wide event subscription.
+    event_journal: Arc<SessionEventJournal>,
     /// Singular unbounded queue reserved for an installed persistent event
     /// projector. UI subscribers stay on the lossy broadcast lane, so UI lag
     /// cannot drop projector input.
@@ -1709,8 +2463,7 @@ struct SessionTaskControl {
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
     interrupt_notify: Arc<tokio::sync::Notify>,
     shutdown_notify: Arc<tokio::sync::Notify>,
-    session_event_tx: tokio::sync::broadcast::Sender<Arc<EventEnvelope<AgentEvent>>>,
-    raw_session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+    event_journal: Arc<SessionEventJournal>,
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     lossless_event_projection_tx: Arc<tokio::sync::Mutex<Option<Arc<LosslessEventProjectionSink>>>>,
     archive_snapshot_gate: Arc<ArchiveSnapshotGate>,
@@ -1733,17 +2486,12 @@ impl SessionTaskControl {
         #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
         publish_session_event_to_channels(
             &self.lossless_event_projection_tx,
-            &self.session_event_tx,
-            &self.raw_session_event_tx,
+            &self.event_journal,
             envelope,
         )
         .await;
         #[cfg(not(all(feature = "session-store", not(target_arch = "wasm32"))))]
-        publish_session_event_to_broadcasts(
-            &self.session_event_tx,
-            &self.raw_session_event_tx,
-            Arc::new(envelope),
-        );
+        self.event_journal.publish(Arc::new(envelope));
     }
 
     fn advance_session_context_at(&self, observed_at: SystemTime, reason: &'static str) {
@@ -2292,6 +3040,17 @@ pub trait SessionAgent: Send {
         ))
     }
 
+    /// Append one typed system notice to the canonical Session document once
+    /// (no turn).
+    fn append_system_notice_control(
+        &mut self,
+        _record: meerkat_core::types::SystemNoticeRecord,
+    ) -> Result<meerkat_core::service::AppendSystemContextStatus, AgentError> {
+        Err(AgentError::ConfigError(
+            "typed system-notice control append is not supported by this session agent".to_string(),
+        ))
+    }
+
     /// Append one typed chronological instruction activation to the actor-owned
     /// canonical Session document.
     fn activate_instruction_control(
@@ -2587,6 +3346,18 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     /// across every current holder and waiter without retaining rejected or
     /// retired session IDs forever.
     turn_finalization_gates: Mutex<HashMap<SessionId, std::sync::Weak<Mutex<()>>>>,
+    /// Event sequence space per session, shared by the session's successive
+    /// actor incarnations. Kept for the service's lifetime (like
+    /// `archived_views`, one small entry per session), so a session revived
+    /// after archive keeps counting up instead of reusing sequences a
+    /// subscriber already observed.
+    session_event_lines: std::sync::Mutex<HashMap<SessionId, Arc<SessionEventLine>>>,
+    /// Bounds of each actor incarnation's replay window.
+    session_event_replay_limits: std::sync::RwLock<meerkat_core::comms::SessionEventReplayLimits>,
+    /// Durable stream tail a new sequence space starts above (installed by
+    /// the persistent service when it projects events durably).
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    session_event_tail_source: std::sync::RwLock<Option<Arc<dyn SessionEventTailSource>>>,
     builder: B,
     /// Single typed owner of session materialization status, staged-capacity
     /// custody, and the global active-capacity admission seam.
@@ -2833,12 +3604,88 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Ok(())
     }
 
+    /// The session's event sequence space, shared with every actor
+    /// incarnation of the session in this service. A new space starts above
+    /// the session's durable stream tail when one is known.
+    async fn session_event_line(&self, id: &SessionId) -> Arc<SessionEventLine> {
+        if let Some(line) = self
+            .session_event_lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
+            return Arc::clone(line);
+        }
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        let durable_tail = {
+            let source = self
+                .session_event_tail_source
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            match source {
+                Some(source) => source.durable_stream_tail(id).await,
+                None => None,
+            }
+        };
+        let line = Arc::clone(
+            self.session_event_lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(id.clone())
+                .or_insert_with(|| Arc::new(SessionEventLine::new())),
+        );
+        #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+        if let Some(tail) = durable_tail {
+            line.advance_to(tail);
+        }
+        line
+    }
+
+    /// Start new sequence spaces above the session's durable stream tail.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) fn install_session_event_tail_source(
+        &self,
+        source: Arc<dyn SessionEventTailSource>,
+    ) {
+        *self
+            .session_event_tail_source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
+    }
+
+    /// Bound the replay window each subsequently created actor incarnation
+    /// keeps ([`meerkat_core::comms::SessionEventReplayLimits`]; default 1024
+    /// envelopes and 4 MiB per live actor).
+    pub fn set_session_event_replay_limits(
+        &self,
+        limits: meerkat_core::comms::SessionEventReplayLimits,
+    ) {
+        *self
+            .session_event_replay_limits
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = limits;
+    }
+
+    fn session_event_replay_limits(&self) -> meerkat_core::comms::SessionEventReplayLimits {
+        *self
+            .session_event_replay_limits
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Create a new ephemeral session service.
     pub fn new(builder: B, max_sessions: usize) -> Self {
         Self {
             sessions: RwLock::new(IndexMap::new()),
             archived_views: RwLock::new(IndexMap::new()),
             turn_finalization_gates: Mutex::new(HashMap::new()),
+            session_event_lines: std::sync::Mutex::new(HashMap::new()),
+            session_event_replay_limits: std::sync::RwLock::new(
+                meerkat_core::comms::SessionEventReplayLimits::default(),
+            ),
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            session_event_tail_source: std::sync::RwLock::new(None),
             builder,
             staged_registry: Arc::new(StagedSessionRegistry::bounded(max_sessions)),
             session_registered: tokio::sync::Notify::new(),
@@ -4567,6 +5414,39 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map_err(SessionError::Agent)
     }
 
+    #[cfg_attr(not(feature = "session-store"), allow(dead_code))]
+    pub(crate) async fn append_system_notice_control(
+        &self,
+        id: &SessionId,
+        record: meerkat_core::types::SystemNoticeRecord,
+    ) -> Result<meerkat_core::service::AppendSystemContextStatus, SessionError> {
+        let command_tx = self
+            .sessions
+            .read()
+            .await
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+            .command_tx
+            .clone();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::AppendSystemNoticeControl { record, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
     pub(crate) async fn append_system_message_control(
         &self,
         id: &SessionId,
@@ -5283,8 +6163,61 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let handle = sessions
             .get(id)
             .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
-        let rx = handle.session_event_tx.subscribe();
-        Ok(lag_aware_session_event_stream(id.clone(), rx))
+        handle
+            .event_journal
+            .subscribe(meerkat_core::comms::SessionEventCursor::Live)
+    }
+
+    /// Subscribe to session-wide events starting at a typed cursor.
+    ///
+    /// Each actor incarnation retains a bounded window of its latest envelopes
+    /// ([`Self::set_session_event_replay_limits`]; by default 1024 envelopes
+    /// and 4 MiB), so a subscriber that attaches after a freshly created or
+    /// restored actor already started its first run still observes that run
+    /// from its first event with [`meerkat_core::comms::SessionEventCursor::Earliest`].
+    /// Replay and live delivery are captured atomically with respect to
+    /// publication; a position older than the retained window yields a typed
+    /// `StreamTruncated(StreamLagged)` marker before the first retained event,
+    /// and a sequence the session has not published is rejected as
+    /// [`meerkat_core::comms::SessionEventCursorRejection::AheadOfTail`].
+    pub async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::SessionEventSubscription, meerkat_core::comms::StreamError>
+    {
+        self.subscribe_live_actor_session_events_from(id, cursor)
+            .await
+            .map(|subscription| {
+                meerkat_core::comms::SessionEventSubscription::new(
+                    Some(subscription.epoch),
+                    subscription.stream,
+                )
+            })
+    }
+
+    /// [`Self::subscribe_session_events_from`], also returning the exact live
+    /// actor incarnation the stream belongs to.
+    ///
+    /// The witness and the stream are captured under the same registry read,
+    /// so the stream is that incarnation's for its whole life: it ends when
+    /// that actor ends, and the witness is revoked before the actor is
+    /// removed or replaced. Hosts use it to order a predecessor's remaining
+    /// events before a successor's.
+    pub async fn subscribe_live_actor_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<LiveActorEventSubscription, meerkat_core::comms::StreamError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
+        Ok(LiveActorEventSubscription {
+            actor: handle.actor_witness.clone(),
+            epoch: handle.event_journal.epoch(),
+            stream: handle.event_journal.subscribe(cursor)?,
+        })
     }
 
     /// Install the singular lossless event stream consumed by the persistent
@@ -5374,7 +6307,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let handle = sessions
             .get(id)
             .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
-        Ok(handle.raw_session_event_tx.subscribe())
+        Ok(handle.event_journal.subscribe_raw())
     }
 
     fn is_session_state_active(state: SessionState) -> bool {
@@ -5597,13 +6530,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             last_assistant_text: initial_summary.last_assistant_text,
         });
         let (llm_identity_tx, llm_identity_rx) = watch::channel(llm_identity);
-        let (session_event_tx, session_event_rx) = tokio::sync::broadcast::channel::<
-            Arc<EventEnvelope<AgentEvent>>,
-        >(EVENT_CHANNEL_CAPACITY);
-        drop(session_event_rx);
-        let (raw_session_event_tx, raw_session_event_rx) =
-            tokio::sync::broadcast::channel::<EventEnvelope<AgentEvent>>(EVENT_CHANNEL_CAPACITY);
-        drop(raw_session_event_rx);
+        let event_journal = SessionEventJournal::install(
+            session_id.clone(),
+            self.session_event_line(&session_id).await,
+            self.session_event_replay_limits(),
+        );
         #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
         let lossless_event_projection_tx = Arc::new(tokio::sync::Mutex::new(None));
         let interrupt_notify = Arc::new(tokio::sync::Notify::new());
@@ -5626,8 +6557,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
                 shutdown_notify: Arc::clone(&shutdown_notify),
-                session_event_tx: session_event_tx.clone(),
-                raw_session_event_tx: raw_session_event_tx.clone(),
+                event_journal: Arc::clone(&event_journal),
                 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
                 lossless_event_projection_tx: Arc::clone(&lossless_event_projection_tx),
                 session_context: session_context.clone(),
@@ -5635,7 +6565,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             },
         ));
         #[cfg(target_arch = "wasm32")]
-        tokio_with_wasm::alias::task::spawn(session_task(
+        crate::tokio::task::spawn(session_task(
             agent,
             session_id.clone(),
             agent_event_tx,
@@ -5650,8 +6580,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
                 shutdown_notify: Arc::clone(&shutdown_notify),
-                session_event_tx: session_event_tx.clone(),
-                raw_session_event_tx: raw_session_event_tx.clone(),
+                event_journal: Arc::clone(&event_journal),
                 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
                 lossless_event_projection_tx: Arc::clone(&lossless_event_projection_tx),
                 session_context: session_context.clone(),
@@ -5684,8 +6613,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             interrupt_notify,
             shutdown_notify,
             cancel_after_boundary_handle,
-            session_event_tx,
-            raw_session_event_tx,
+            event_journal,
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             lossless_event_projection_tx,
         };
@@ -6222,6 +7150,15 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
         EphemeralSessionService::<B>::subscribe_session_events(self, id).await
     }
+
+    async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::SessionEventSubscription, meerkat_core::comms::StreamError>
+    {
+        EphemeralSessionService::<B>::subscribe_session_events_from(self, id, cursor).await
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -6345,13 +7282,13 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for EphemeralSes
 
 /// Long-lived task that exclusively owns a session agent and processes commands.
 fn stamp_event_envelope(
-    next_seq: &mut u64,
+    next_seq: &SessionEventLine,
     source: &EventSourceIdentity,
     event: AgentEvent,
 ) -> EventEnvelope<AgentEvent> {
-    *next_seq += 1;
+    let seq = next_seq.allocate();
     // mob_id is optional and only set when a surface/runtime has mob context.
-    EventEnvelope::new_with_source(source.clone(), *next_seq, None, event)
+    EventEnvelope::new_with_source(source.clone(), seq, None, event)
 }
 
 /// Exact publication journal for an ephemeral session actor. It stores
@@ -6367,7 +7304,7 @@ impl RuntimeInteractionTerminalJournal {
     /// never rebroadcast terminal events.
     fn append_exact_batch(
         &mut self,
-        next_seq: &mut u64,
+        next_seq: &SessionEventLine,
         events: Vec<AgentEvent>,
     ) -> Result<
         (
@@ -6376,15 +7313,45 @@ impl RuntimeInteractionTerminalJournal {
         ),
         SessionError,
     > {
+        // The sequence space is shared with any other incarnation of the
+        // session: plan against the current allocation and claim the planned
+        // range only if nothing was allocated meanwhile, else plan again.
+        loop {
+            let observed = next_seq.allocated();
+            let (receipts, inserted, candidate_seq) = self.plan_exact_batch(observed, &events)?;
+            if candidate_seq == observed || next_seq.try_claim(observed, candidate_seq) {
+                for receipt in &receipts {
+                    self.rows.insert(receipt.interaction_id(), receipt.clone());
+                }
+                return Ok((receipts, inserted));
+            }
+        }
+    }
+
+    /// Validate a batch against the published rows and assign its new
+    /// terminals the sequences after `observed`, without recording anything.
+    #[allow(clippy::type_complexity)]
+    fn plan_exact_batch(
+        &self,
+        observed: u64,
+        events: &[AgentEvent],
+    ) -> Result<
+        (
+            Vec<CoreInteractionTerminalPublicationReceipt>,
+            Vec<EventEnvelope<AgentEvent>>,
+            u64,
+        ),
+        SessionError,
+    > {
         let mut identities = std::collections::HashSet::with_capacity(events.len());
         let mut receipts = Vec::with_capacity(events.len());
         let mut inserted = Vec::new();
-        let mut candidate_seq = *next_seq;
+        let mut candidate_seq = observed;
         let mut replay_tail = None;
         for event in events {
             // The typed receipt constructor validates the event family and
             // binds its canonical identity and payload digest.
-            let candidate = CoreInteractionTerminalPublicationReceipt::try_new(&event, 1)
+            let candidate = CoreInteractionTerminalPublicationReceipt::try_new(event, 1)
                 .map_err(runtime_terminal_publication_error)?;
             if !identities.insert(candidate.interaction_id()) {
                 return Err(runtime_terminal_publication_error(
@@ -6413,21 +7380,17 @@ impl RuntimeInteractionTerminalJournal {
             candidate_seq = candidate_seq.checked_add(1).ok_or_else(|| {
                 runtime_terminal_publication_error("session event sequence overflow")
             })?;
-            let receipt = CoreInteractionTerminalPublicationReceipt::try_new(&event, candidate_seq)
+            let receipt = CoreInteractionTerminalPublicationReceipt::try_new(event, candidate_seq)
                 .map_err(runtime_terminal_publication_error)?;
             inserted.push(EventEnvelope::new_with_source(
                 EventSourceIdentity::interaction(receipt.interaction_id()),
                 candidate_seq,
                 None,
-                event,
+                event.clone(),
             ));
             receipts.push(receipt);
         }
-        for receipt in &receipts {
-            self.rows.insert(receipt.interaction_id(), receipt.clone());
-        }
-        *next_seq = candidate_seq;
-        Ok((receipts, inserted))
+        Ok((receipts, inserted, candidate_seq))
     }
 }
 
@@ -6451,14 +7414,12 @@ mod runtime_interaction_terminal_journal_tests {
     #[test]
     fn exact_batch_replays_receipts_without_advancing_or_rebroadcasting() {
         let mut journal = RuntimeInteractionTerminalJournal::default();
-        let mut seq = 7;
+        let seq = SessionEventLine::starting_at(7);
         let first = terminal(meerkat_core::InteractionId::new(), "first");
         let second = terminal(meerkat_core::InteractionId::new(), "second");
         let events = vec![first, second];
-        let (published, envelopes) = journal
-            .append_exact_batch(&mut seq, events.clone())
-            .unwrap();
-        assert_eq!(seq, 9);
+        let (published, envelopes) = journal.append_exact_batch(&seq, events.clone()).unwrap();
+        assert_eq!(seq.allocated(), 9);
         assert_eq!(envelopes.len(), 2);
         for (receipt, envelope) in published.iter().zip(&envelopes) {
             assert_eq!(receipt.terminal_seq(), envelope.seq);
@@ -6467,20 +7428,20 @@ mod runtime_interaction_terminal_journal_tests {
                 EventSourceIdentity::interaction(receipt.interaction_id())
             );
         }
-        let (replayed, envelopes) = journal.append_exact_batch(&mut seq, events).unwrap();
+        let (replayed, envelopes) = journal.append_exact_batch(&seq, events).unwrap();
         assert_eq!(published, replayed);
         assert!(envelopes.is_empty());
-        assert_eq!(seq, 9);
+        assert_eq!(seq.allocated(), 9);
     }
 
     #[test]
     fn conflicting_duplicate_nonterminal_and_nonprefix_batches_commit_nothing() {
         let mut journal = RuntimeInteractionTerminalJournal::default();
-        let mut seq = 0;
+        let seq = SessionEventLine::starting_at(0);
         let prior_id = meerkat_core::InteractionId::new();
         let prior = terminal(prior_id, "prior");
         journal
-            .append_exact_batch(&mut seq, vec![prior.clone()])
+            .append_exact_batch(&seq, vec![prior.clone()])
             .unwrap();
         let next = terminal(meerkat_core::InteractionId::new(), "next");
         for invalid in [
@@ -6495,28 +7456,26 @@ mod runtime_interaction_terminal_journal_tests {
             ],
             vec![next.clone(), prior.clone()],
         ] {
-            assert!(journal.append_exact_batch(&mut seq, invalid).is_err());
-            assert_eq!(seq, 1);
+            assert!(journal.append_exact_batch(&seq, invalid).is_err());
+            assert_eq!(seq.allocated(), 1);
             assert_eq!(journal.rows.len(), 1);
         }
-        let (receipts, envelopes) = journal
-            .append_exact_batch(&mut seq, vec![prior, next])
-            .unwrap();
+        let (receipts, envelopes) = journal.append_exact_batch(&seq, vec![prior, next]).unwrap();
         assert_eq!(receipts.len(), 2);
         assert_eq!(envelopes.len(), 1);
-        assert_eq!(seq, 2);
+        assert_eq!(seq.allocated(), 2);
     }
 
     #[test]
     fn sequence_overflow_commits_no_partial_terminal_batch() {
         let mut journal = RuntimeInteractionTerminalJournal::default();
-        let mut seq = u64::MAX - 1;
+        let seq = SessionEventLine::starting_at(u64::MAX - 1);
         let events = vec![
             terminal(meerkat_core::InteractionId::new(), "first"),
             terminal(meerkat_core::InteractionId::new(), "second"),
         ];
-        assert!(journal.append_exact_batch(&mut seq, events).is_err());
-        assert_eq!(seq, u64::MAX - 1);
+        assert!(journal.append_exact_batch(&seq, events).is_err());
+        assert_eq!(seq.allocated(), u64::MAX - 1);
         assert!(journal.rows.is_empty());
     }
 }
@@ -6524,7 +7483,7 @@ mod runtime_interaction_terminal_journal_tests {
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 async fn publish_interaction_terminal_batch(
     session_id: &SessionId,
-    next_seq: &mut u64,
+    next_seq: &SessionEventLine,
     control: &SessionTaskControl,
     event_store: &dyn crate::event_store::EventStore,
     expected_actor: Option<&LiveSessionActorWitness>,
@@ -6582,7 +7541,16 @@ async fn publish_interaction_terminal_batch(
         return Ok(Vec::new());
     }
 
-    let stream_seq_floor = *next_seq;
+    // Reserve the batch's sequences in the shared space; the store assigns
+    // canonical sequences above the floor (possibly above the reservation,
+    // when its durable tail is ahead), which are then recorded. Sequences a
+    // failed append or a store assignment above the reservation leaves
+    // unused are numbering gaps with no events behind them: nothing was
+    // published under them, so no gap marker is published (a marker would
+    // claim dropped events that never existed). Seeding new spaces from the
+    // durable stream tail keeps the store's assignment inside the
+    // reservation in the ordinary case.
+    let stream_seq_floor = next_seq.reserve(u64::try_from(terminals.len()).unwrap_or(u64::MAX));
     let appends = event_store
         .append_interaction_terminals_exact_batch(session_id, stream_seq_floor, &terminals)
         .await
@@ -6701,8 +7669,8 @@ async fn publish_interaction_terminal_batch(
     let actor_still_exact = expected_actor.is_none_or(|expected_actor| {
         expected_actor.same_incarnation(&control.actor_witness) && expected_actor.is_live()
     });
+    next_seq.advance_to(canonical_tail);
     if actor_still_exact {
-        *next_seq = canonical_tail;
         for (_, envelope) in inserted {
             control.publish_session_event(envelope).await;
         }
@@ -6869,7 +7837,7 @@ async fn drain_session_task_commands<A: SessionAgent>(
     agent: &mut A,
     session_id: &SessionId,
     control: &SessionTaskControl,
-    next_seq: &mut u64,
+    next_seq: &SessionEventLine,
     source: &EventSourceIdentity,
     transcript_authority_generation: &mut u64,
 ) -> SessionTeardownAuthorization {
@@ -7034,6 +8002,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::AppendSystemMessageControl { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
             }
+            SessionCommand::AppendSystemNoticeControl { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(AgentError::Cancelled));
+            }
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             SessionCommand::ActivateInstructionControl { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
@@ -7093,7 +8064,9 @@ async fn session_task<A: SessionAgent>(
     deferred_turn_state: Arc<std::sync::Mutex<SessionDeferredTurnState>>,
     control: SessionTaskControl,
 ) {
-    let mut next_seq: u64 = 0;
+    // Every sequence comes from the session's shared sequence space, so a
+    // predecessor incarnation still publishing never reuses one of ours.
+    let next_seq = Arc::clone(&control.event_journal.line);
     let mut runtime_interaction_terminals = RuntimeInteractionTerminalJournal::default();
     // Lives on the SessionTask incarnation, not inside replaceable Session
     // state. Durable sync and compaction rollback therefore cannot recreate a
@@ -7113,7 +8086,7 @@ async fn session_task<A: SessionAgent>(
                     &mut agent,
                     &session_id,
                     &control,
-                    &mut next_seq,
+                    &next_seq,
                     &source,
                     &mut transcript_authority_generation,
                 )
@@ -7143,7 +8116,7 @@ async fn session_task<A: SessionAgent>(
                 &mut agent,
                 &session_id,
                 &control,
-                &mut next_seq,
+                &next_seq,
                 &source,
                 &mut transcript_authority_generation,
             )
@@ -7609,7 +8582,7 @@ async fn session_task<A: SessionAgent>(
                                     &mut agent,
                                     &session_id,
                                     &control,
-                                    &mut next_seq,
+                                    &next_seq,
                                     &source,
                                     &mut transcript_authority_generation,
                                 )
@@ -7745,7 +8718,7 @@ async fn session_task<A: SessionAgent>(
                             }
                             Some(event) = agent_event_rx.recv() => {
                                 let envelope = stamp_event_envelope(
-                                    &mut next_seq,
+                                    &next_seq,
                                     &source,
                                     event,
                                 );
@@ -7774,7 +8747,7 @@ async fn session_task<A: SessionAgent>(
                         .ok()
                         .or_else(|| dropped_run_terminal.take())
                     {
-                        let envelope = stamp_event_envelope(&mut next_seq, &source, event);
+                        let envelope = stamp_event_envelope(&next_seq, &source, event);
                         control.publish_session_event(envelope.clone()).await;
                         if event_stream_open
                             && let Some(ref tx) = event_tx
@@ -7896,7 +8869,7 @@ async fn session_task<A: SessionAgent>(
                         &mut agent,
                         &session_id,
                         &control,
-                        &mut next_seq,
+                        &next_seq,
                         &source,
                         &mut transcript_authority_generation,
                     )
@@ -7960,7 +8933,7 @@ async fn session_task<A: SessionAgent>(
             } => {
                 let result = publish_interaction_terminal_batch(
                     &session_id,
-                    &mut next_seq,
+                    &next_seq,
                     &control,
                     event_store.as_ref(),
                     expected_actor.as_ref(),
@@ -7984,7 +8957,7 @@ async fn session_task<A: SessionAgent>(
                 } else {
                     if !discarded.input_ids.is_empty() {
                         let event = stamp_event_envelope(
-                            &mut next_seq,
+                            &next_seq,
                             &source,
                             AgentEvent::BoundaryAppendsDiscarded(discarded),
                         );
@@ -8006,7 +8979,7 @@ async fn session_task<A: SessionAgent>(
                         id: expected_actor.session_id().clone(),
                     })
                 } else {
-                    match runtime_interaction_terminals.append_exact_batch(&mut next_seq, events) {
+                    match runtime_interaction_terminals.append_exact_batch(&next_seq, events) {
                         Ok((receipts, inserted)) => {
                             for envelope in inserted {
                                 control.publish_session_event(envelope).await;
@@ -8021,7 +8994,7 @@ async fn session_task<A: SessionAgent>(
             SessionCommand::RecordLiveTerminalError { cause, reply_tx } => {
                 let message = render_live_terminal_error_message(&cause);
                 let failed = stamp_event_envelope(
-                    &mut next_seq,
+                    &next_seq,
                     &source,
                     AgentEvent::RunFailed {
                         identity: Default::default(),
@@ -8039,7 +9012,7 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::RecordLiveOutputAudioDegraded { dropped, reply_tx } => {
                 let truncated = stamp_event_envelope(
-                    &mut next_seq,
+                    &next_seq,
                     &source,
                     AgentEvent::StreamTruncated {
                         reason: meerkat_core::event::StreamTruncationReason::OutputAudioDegraded {
@@ -8099,7 +9072,7 @@ async fn session_task<A: SessionAgent>(
                     });
                     if !text_content.is_empty() {
                         let envelope = stamp_event_envelope(
-                            &mut next_seq,
+                            &next_seq,
                             &source,
                             AgentEvent::TextComplete {
                                 content: text_content,
@@ -8113,7 +9086,7 @@ async fn session_task<A: SessionAgent>(
                     // number is missing would let an accounting gap erase a
                     // semantic fact the caller has already observed.
                     let envelope = stamp_event_envelope(
-                        &mut next_seq,
+                        &next_seq,
                         &source,
                         AgentEvent::TurnCompleted {
                             stop_reason,
@@ -8155,7 +9128,7 @@ async fn session_task<A: SessionAgent>(
                         {
                             if !text.is_empty() {
                                 let envelope = stamp_event_envelope(
-                                    &mut next_seq,
+                                    &next_seq,
                                     &source,
                                     AgentEvent::TextComplete {
                                         content: text.clone(),
@@ -8165,7 +9138,7 @@ async fn session_task<A: SessionAgent>(
                                 control.publish_session_event(envelope).await;
                             }
                             let envelope = stamp_event_envelope(
-                                &mut next_seq,
+                                &next_seq,
                                 &source,
                                 AgentEvent::TurnCompleted {
                                     stop_reason: *stop_reason,
@@ -8385,6 +9358,23 @@ async fn session_task<A: SessionAgent>(
                 reply_tx,
             } => {
                 let _ = reply_tx.send(agent.update_mob_tool_authority_context(authority_context));
+            }
+            SessionCommand::AppendSystemNoticeControl { record, reply_tx } => {
+                let result = match control.archive_snapshot_gate.enter_apply() {
+                    Ok(_gate) => agent.append_system_notice_control(record),
+                    Err(error) => Err(AgentError::InternalError(error.to_string())),
+                };
+                if result.is_ok() {
+                    let snap = agent.snapshot();
+                    control.publish_summary(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                }
+                let _ = reply_tx.send(result);
             }
             SessionCommand::AppendSystemMessageControl { req, reply_tx } => {
                 let result = match control.archive_snapshot_gate.enter_apply() {
@@ -8720,6 +9710,44 @@ mod runtime_turn_metadata_tests {
                 Arc::clone(handle) as Arc<dyn meerkat_core::handles::SessionContextHandle>
             })
         }
+    }
+
+    /// A session that already published durably (before a restart) starts its
+    /// new sequence space above the durable stream tail, so its sequences stay
+    /// monotonic against the durable log.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_new_sequence_space_starts_above_the_durable_stream_tail() {
+        struct Tail(u64);
+        #[async_trait]
+        impl SessionEventTailSource for Tail {
+            async fn durable_stream_tail(&self, _id: &SessionId) -> Option<u64> {
+                Some(self.0)
+            }
+        }
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references: Arc::new(Mutex::new(Vec::new())),
+                observed_context_texts: Arc::new(Mutex::new(Vec::new())),
+                run_context_counts: Arc::new(Mutex::new(Vec::new())),
+                fail_flow_overlay_set: false,
+                session_context_handle: None,
+            },
+            2,
+        );
+        service.install_session_event_tail_source(Arc::new(Tail(41)));
+        let session = SessionId::new();
+        let line = service.session_event_line(&session).await;
+        assert_eq!(
+            line.allocate(),
+            42,
+            "the space continues above the durable tail"
+        );
+        let same = service.session_event_line(&session).await;
+        assert!(
+            Arc::ptr_eq(&line, &same),
+            "one space per session in the service"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

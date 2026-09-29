@@ -1090,6 +1090,14 @@ impl SessionService for RpcMobSessionService {
     async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
         self.service.subscribe_session_events(id).await
     }
+
+    async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::SessionEventSubscription, StreamError> {
+        self.service.subscribe_session_events_from(id, cursor).await
+    }
 }
 
 #[cfg(feature = "mob")]
@@ -1152,6 +1160,19 @@ impl SessionServiceHistoryExt for RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RpcMobSessionService {
+    async fn subscribe_agent_session_events_from(
+        &self,
+        session_id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_mob::AgentEventSubscription, StreamError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::subscribe_agent_session_events_from(
+            self.service.as_ref(),
+            session_id,
+            cursor,
+        )
+        .await
+    }
+
     /// The persistent service this RPC service wraps owns the durable
     /// session bodies, so it is the source runtime for forked council
     /// participants, exactly as when it serves mobs directly.
@@ -1161,6 +1182,21 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::forked_participant_source_runtime(
             Arc::clone(&self.service),
         )
+    }
+
+    /// Interrupted-run notices of RPC-hosted mob members land in the wrapped
+    /// persistent service, so their evidence is acknowledged.
+    async fn append_system_notice_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        record: meerkat_core::types::SystemNoticeRecord,
+    ) -> Result<(), SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::append_system_notice_under_runtime_turn_boundary(
+            &self.service,
+            session_id,
+            record,
+        )
+        .await
     }
 
     async fn commit_live_delegation_final_transcript(
@@ -2723,6 +2759,18 @@ impl SessionRuntime {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    /// Resolve a crash-window provisional tail before this host starts or
+    /// attaches `session_id` (see
+    /// [`PersistentSessionService::prepare_cold_attach`]). Called at every
+    /// start/attach entry point before its archive and existence prechecks,
+    /// never on plain reads.
+    pub(crate) async fn prepare_cold_attach(&self, session_id: &SessionId) -> Result<(), RpcError> {
+        self.service
+            .prepare_cold_attach(session_id)
+            .await
+            .map_err(session_error_to_rpc)
     }
 
     pub async fn reject_archived_persisted_session_without_live(
@@ -6941,6 +6989,7 @@ impl SessionRuntime {
         // schedules against this runtime's store — the firing host must be
         // live in the same process (see arm_schedule_host_for_agent_tools).
         self.arm_schedule_host_for_agent_tools().await;
+        self.prepare_cold_attach(session_id).await?;
         if self
             .archived_persisted_session_without_live(session_id)
             .await?
@@ -7064,6 +7113,7 @@ impl SessionRuntime {
         self: &Arc<Self>,
         session_id: &SessionId,
     ) -> Result<(), meerkat_core::service::SessionError> {
+        self.service.prepare_cold_attach(session_id).await?;
         self.reject_archived_persisted_session_without_live(session_id)
             .await
             .map_err(|_| meerkat_core::service::SessionError::NotFound {
@@ -7154,6 +7204,7 @@ impl SessionRuntime {
                 data: None,
             });
         }
+        self.prepare_cold_attach(session_id).await?;
         self.reject_archived_persisted_session_without_live(session_id)
             .await?;
         let effective_identity = self
@@ -7587,6 +7638,7 @@ impl SessionRuntime {
             ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
         };
 
+        self.prepare_cold_attach(session_id).await?;
         self.reject_archived_persisted_session_without_live(session_id)
             .await?;
 
@@ -8572,6 +8624,7 @@ impl SessionRuntime {
                     return Err(session_error_to_rpc(SessionError::Busy { id: id.clone() }));
                 }
                 let session = if resume_id.is_some() {
+                    runtime.prepare_cold_attach(&id).await?;
                     runtime
                         .reject_archived_persisted_session_without_live(&id)
                         .await?;
@@ -9636,6 +9689,49 @@ impl SessionRuntime {
         {
             None
         }
+    }
+
+    /// Stop one exact run on the given session and terminalize every
+    /// contributor bound to it (the run-fenced Stop). A stale run is the
+    /// typed `NotCurrent` receipt; an archived session is not found.
+    pub async fn stop_run(
+        &self,
+        session_id: &SessionId,
+        run_id: &meerkat_core::lifecycle::RunId,
+        reason: String,
+    ) -> Result<meerkat_runtime::RunStopReceipt, RpcError> {
+        let staged = self
+            .staged_sessions
+            .info(session_id)
+            .await
+            .map_err(|err| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("staged session lifecycle error: {err}"),
+                data: None,
+            })?
+            .is_some();
+        // A staged (deferred) session has no run yet: the machine reports the
+        // stop as `NotCurrent`. Any other session must exist and be live.
+        if !staged {
+            let Some(session) = self
+                .service
+                .load_authoritative_session(session_id)
+                .await
+                .map_err(session_error_to_rpc)?
+            else {
+                return Err(Self::session_not_found_rpc(session_id));
+            };
+            if self
+                .session_archived_by_authority(session_id, &session)
+                .await?
+            {
+                return Err(Self::archived_session_not_found_rpc(session_id));
+            }
+        }
+        self.runtime_adapter
+            .stop_run(session_id, run_id, reason)
+            .await
+            .map_err(runtime_driver_error_to_rpc)
     }
 
     /// Interrupt a running turn on the given session.
@@ -14490,6 +14586,140 @@ mod tests {
             assert!(runtime.service.has_live_session(&retried).await.unwrap());
             runtime.try_shutdown().await.unwrap();
         }
+    }
+
+    /// Read the runtime run id from the first `run_started` event of a turn.
+    async fn run_started_run_id(
+        event_rx: &mut mpsc::Receiver<EventEnvelope<AgentEvent>>,
+    ) -> meerkat_core::lifecycle::RunId {
+        tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, async {
+            loop {
+                let envelope = event_rx.recv().await.expect("event stream open");
+                if let AgentEvent::RunStarted { identity, .. } = envelope.payload
+                    && let Some(run_id) = identity.run_id
+                {
+                    return run_id;
+                }
+            }
+        })
+        .await
+        .expect("run_started carries the runtime run id")
+    }
+
+    /// `turn/stop_run` end to end through `SessionRuntime`: a stale run id
+    /// racing the live turn is `NotCurrent` and leaves the turn running; the
+    /// exact run id stops it with a canonical receipt; a late stop of the
+    /// same run is `NotCurrent` and harmless.
+    #[tokio::test]
+    async fn stop_run_stops_the_exact_runtime_turn_and_stale_or_late_stops_are_not_current() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let (build, calls, _release) = blocking_build_config();
+        let id = runtime
+            .create_or_resume_session_without_turn(build, None, None, Default::default())
+            .await
+            .unwrap();
+        let turn_runtime = Arc::clone(&runtime);
+        let turn_id = id.clone();
+        let (event_tx, mut event_rx) = mpsc::channel(100);
+        let turn = tokio::spawn(async move {
+            turn_runtime
+                .start_turn_via_runtime(
+                    &turn_id,
+                    "stop me".into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+        wait_for_llm_calls(&calls, 1, "provider in flight").await;
+        let run_id = run_started_run_id(&mut event_rx).await;
+
+        let stale = meerkat_core::lifecycle::RunId::new();
+        match runtime
+            .stop_run(&id, &stale, "stale selection".into())
+            .await
+            .expect("stale stop")
+        {
+            meerkat_runtime::RunStopReceipt::NotCurrent {
+                run_id: reported,
+                current_run_id,
+            } => {
+                assert_eq!(reported, stale);
+                assert_eq!(current_run_id, Some(run_id.clone()));
+            }
+            other => panic!("a stale run id must be NotCurrent, got {other:?}"),
+        }
+        assert!(
+            !turn.is_finished(),
+            "a stale stop never interrupts the live run"
+        );
+
+        match runtime
+            .stop_run(&id, &run_id, "user pressed stop".into())
+            .await
+            .expect("stop the live run")
+        {
+            meerkat_runtime::RunStopReceipt::Stopped {
+                run_id: stopped,
+                contributors,
+            } => {
+                assert_eq!(stopped, run_id);
+                assert_eq!(contributors.len(), 1, "{contributors:?}");
+                assert_eq!(
+                    contributors[0].terminal,
+                    Some(
+                        meerkat_runtime::input_state::InputTerminalOutcome::Abandoned {
+                            reason: meerkat_runtime::input_state::InputAbandonReason::Cancelled,
+                        }
+                    )
+                );
+            }
+            other => panic!("the live run must be Stopped, got {other:?}"),
+        }
+        let turn_result = tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, turn)
+            .await
+            .expect("stopped turn returns")
+            .expect("turn task");
+        assert!(turn_result.is_err(), "a stopped turn reports cancellation");
+
+        match runtime
+            .stop_run(&id, &run_id, "late".into())
+            .await
+            .expect("late stop")
+        {
+            meerkat_runtime::RunStopReceipt::NotCurrent {
+                run_id: reported, ..
+            } => {
+                assert_eq!(reported, run_id);
+            }
+            other => panic!("a late stop must be NotCurrent, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "no successor provider call"
+        );
+        runtime.try_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_run_of_an_unknown_session_is_not_found() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let error = runtime
+            .stop_run(
+                &SessionId::new(),
+                &meerkat_core::lifecycle::RunId::new(),
+                "stop".into(),
+            )
+            .await
+            .expect_err("unknown session");
+        assert_eq!(error.code, error::SESSION_NOT_FOUND);
     }
 
     #[tokio::test]
@@ -21086,6 +21316,30 @@ mod tests {
         assert!(
             matches!(abort, Err(SessionError::NotFound { ref id }) if id == &missing_session),
             "uncommitted abort must reach the persistent owner instead of taking the SessionService default: {abort:?}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_session_service_forwards_interrupted_run_notices_to_persistent_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let service = runtime.session_service();
+        let missing_session = SessionId::new();
+        let record = meerkat_core::types::SystemNoticeRecord::from(
+            meerkat_core::types::SystemNoticeMessage::tool_process_interrupted(Vec::new()),
+        );
+
+        let appended =
+            meerkat_mob::MobSessionService::append_system_notice_under_runtime_turn_boundary(
+                service.as_ref(),
+                &missing_session,
+                record,
+            )
+            .await;
+        assert!(
+            matches!(appended, Err(SessionError::NotFound { ref id }) if id == &missing_session),
+            "RPC-hosted mob members must reach the persistent owner instead of the Unsupported default: {appended:?}"
         );
     }
 

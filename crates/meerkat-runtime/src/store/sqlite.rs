@@ -8210,10 +8210,24 @@ ORDER BY runtime_id";
     ) -> Result<(), RuntimeStoreError> {
         let session = meerkat_core::Session::from_persisted_bytes(snapshot)
             .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        upsert_decoded_runtime_snapshot(tx, runtime_id, snapshot, &session)
+    }
+
+    /// [`upsert_runtime_snapshot`] for a caller that already decoded
+    /// `snapshot` into `session` in this same commit (the checked snapshot
+    /// commit decodes the incoming bytes to run its save guards). Decoding
+    /// the identical bytes a second time would repeat the whole-document
+    /// parse and rewrite-graph validation for the same session.
+    fn upsert_decoded_runtime_snapshot(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        snapshot: &[u8],
+        session: &meerkat_core::Session,
+    ) -> Result<(), RuntimeStoreError> {
         let runtime_state = load_runtime_session_catalog_entry_in_txn(tx, runtime_id)?
             .and_then(|entry| entry.runtime_state());
         let catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_session(
-            &session,
+            session,
             RuntimeSessionPersistenceProfile::WholeBlobV1,
             runtime_state,
         )?;
@@ -9507,10 +9521,154 @@ ORDER BY runtime_id";
         })
     }
 
+    /// Most runtimes [`RecordedWholeBlobTranscriptFacts`] keeps. Each holds at
+    /// most [`RECORDED_WHOLE_BLOB_DOCUMENTS_PER_RUNTIME`] small records, so the
+    /// bound is generous.
+    const RECORDED_WHOLE_BLOB_FACTS_CAPACITY: usize = 1024;
+
+    /// Evidence that lets a byte-identical re-commit of one exact WholeBlob
+    /// document skip its decode.
+    ///
+    /// Recorded only after this store ran the boundary snapshot save guard
+    /// (with no legacy predecessor row, exactly as the re-commit would) on a
+    /// typed session whose encoding has exactly the recorded row digest, and
+    /// it passed. The guard is a function of the serialized document, so its
+    /// verdict holds for every copy of those bytes. The validated compaction
+    /// intents and the catalog projection are kept so that the checks which
+    /// depend on current store state (the outbox rows and the runtime state)
+    /// still run on every re-commit.
+    #[derive(Debug)]
+    struct WholeBlobReaffirmEvidence {
+        compaction_projection_intents: Vec<meerkat_core::CompactionProjectionIntent>,
+        catalog_template: crate::store::RuntimeSessionCatalogEntry,
+    }
+
+    /// One recorded document: its row digest, bounded transcript facts, and
+    /// (when recorded) its reaffirm evidence.
+    #[derive(Debug, Clone)]
+    struct RecordedWholeBlobDocument {
+        blob_sha256: String,
+        facts: crate::store::WholeBlobCommittedTranscriptFacts,
+        reaffirm: Option<Arc<WholeBlobReaffirmEvidence>>,
+    }
+
+    /// Documents recorded per runtime. A runtime writes its committed base and
+    /// then provisional candidates on top of it; keeping a few lets a
+    /// candidate's record coexist with the base authority's instead of
+    /// evicting it.
+    const RECORDED_WHOLE_BLOB_DOCUMENTS_PER_RUNTIME: usize = 4;
+
+    /// Bounded facts about the WholeBlob documents this store wrote, keyed by
+    /// runtime and then by the exact row digest of each document. No
+    /// `Session` or document body is retained.
+    ///
+    /// Everything recorded is a pure function of the document bytes, so an
+    /// entry can never be stale: it is served only for an exact row digest,
+    /// and any other digest takes the full path.
+    #[derive(Debug, Default)]
+    struct RecordedWholeBlobTranscriptFacts {
+        entries:
+            std::sync::Mutex<indexmap::IndexMap<LogicalRuntimeId, Vec<RecordedWholeBlobDocument>>>,
+    }
+
+    impl RecordedWholeBlobTranscriptFacts {
+        fn record(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            blob_sha256: &str,
+            facts: crate::store::WholeBlobCommittedTranscriptFacts,
+            reaffirm: Option<WholeBlobReaffirmEvidence>,
+        ) {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut documents = entries.shift_remove(runtime_id).unwrap_or_default();
+            // Evidence already recorded for these exact bytes stays valid.
+            let previous = documents
+                .iter()
+                .position(|document| document.blob_sha256 == blob_sha256)
+                .map(|index| documents.remove(index));
+            let reaffirm = reaffirm
+                .map(Arc::new)
+                .or_else(|| previous.and_then(|document| document.reaffirm));
+            documents.push(RecordedWholeBlobDocument {
+                blob_sha256: blob_sha256.to_string(),
+                facts,
+                reaffirm,
+            });
+            while documents.len() > RECORDED_WHOLE_BLOB_DOCUMENTS_PER_RUNTIME {
+                documents.remove(0);
+            }
+            entries.insert(runtime_id.clone(), documents);
+            while entries.len() > RECORDED_WHOLE_BLOB_FACTS_CAPACITY {
+                entries.shift_remove_index(0);
+            }
+        }
+
+        fn document(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            blob_sha256: &str,
+        ) -> Option<RecordedWholeBlobDocument> {
+            self.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(runtime_id)
+                .and_then(|documents| {
+                    documents
+                        .iter()
+                        .find(|document| document.blob_sha256 == blob_sha256)
+                        .cloned()
+                })
+        }
+
+        fn for_authority(
+            &self,
+            authority: &WholeBlobStoreAuthority,
+        ) -> Option<crate::store::WholeBlobCommittedTranscriptFacts> {
+            let runtime_id = LogicalRuntimeId::for_session(authority.session_id());
+            self.document(&runtime_id, authority.blob_sha256())
+                .map(|document| document.facts)
+        }
+
+        fn reaffirm_evidence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            blob_sha256: &str,
+        ) -> Option<Arc<WholeBlobReaffirmEvidence>> {
+            self.document(runtime_id, blob_sha256)
+                .and_then(|document| document.reaffirm)
+        }
+    }
+
+    /// Reaffirm evidence for `session`, when the boundary snapshot save guard
+    /// accepts it with no predecessor. Never fails: a session the guard
+    /// refuses simply gets no evidence, and its re-commit takes the full
+    /// decode path, which refuses it there exactly as before.
+    fn whole_blob_reaffirm_evidence(
+        session: &meerkat_core::Session,
+        compaction_projection_intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Option<WholeBlobReaffirmEvidence> {
+        meerkat_core::session_store::run_boundary_snapshot_save_guard(session, None).ok()?;
+        let catalog_template = crate::store::RuntimeSessionCatalogEntry::from_session(
+            session,
+            RuntimeSessionPersistenceProfile::WholeBlobV1,
+            None,
+        )
+        .ok()?;
+        Some(WholeBlobReaffirmEvidence {
+            compaction_projection_intents: compaction_projection_intents.to_vec(),
+            catalog_template,
+        })
+    }
+
     /// SQLite-backed runtime store sharing the same sqlite file as `SqliteSessionStore`.
     pub struct SqliteRuntimeStore {
         path: PathBuf,
         session_persistence_profile: RuntimeSessionPersistenceProfile,
+        /// Transcript facts of the WholeBlob documents this store wrote.
+        whole_blob_transcript_facts: Arc<RecordedWholeBlobTranscriptFacts>,
         #[cfg(test)]
         unregister_finalization_fault: AtomicU8,
         /// Candidate bytes shipped into the snapshot byte-equality probe.
@@ -9614,6 +9772,7 @@ ORDER BY runtime_id";
             Ok(Self {
                 path,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::WholeBlobV1,
+                whole_blob_transcript_facts: Arc::default(),
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
                 #[cfg(test)]
@@ -9715,6 +9874,7 @@ ORDER BY runtime_id";
             Ok(Self {
                 path,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+                whole_blob_transcript_facts: Arc::default(),
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
                 #[cfg(test)]
@@ -9779,10 +9939,85 @@ ORDER BY runtime_id";
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
+            let recorded_facts = Arc::clone(&self.whole_blob_transcript_facts);
             #[cfg(test)]
             let snapshot_byte_probe_bytes = std::sync::Arc::clone(&self.snapshot_byte_probe_bytes);
             tokio::task::spawn_blocking(move || {
-                let incoming: meerkat_core::Session =
+                use sha2::Digest as _;
+                let incoming_sha256 = format!(
+                    "row-sha256:{:x}",
+                    sha2::Sha256::digest(session_delta.session_snapshot.as_ref())
+                );
+                // Reaffirm: the startup compaction refresh re-commits the
+                // committed bytes verbatim. When this store recorded reaffirm
+                // evidence for exactly these bytes, they are the current
+                // authority's body, and there is no legacy predecessor row, the
+                // full path below would decode them, pass the save guard the
+                // evidence already recorded, and take the identical-digest
+                // upsert. This branch runs that upsert's steps directly: the
+                // outbox check against the recorded intents, the body check,
+                // the catalog projection under the current runtime state, and
+                // the quarantine clear. It skips only the decode and the graph
+                // re-validation. Anything else takes the full path.
+                if let Some(evidence) =
+                    recorded_facts.reaffirm_evidence(&runtime_id, &incoming_sha256)
+                {
+                    let mut conn = open_runtime_connection(&path)?;
+                    let tx = begin_runtime_transaction(&mut conn)?;
+                    refuse_whole_blob_write_under_head_authority(
+                        &tx,
+                        &runtime_id,
+                        "whole-BLOB session snapshot reaffirm",
+                    )?;
+                    let authority_matches = load_whole_blob_store_authority(&tx, &runtime_id)?
+                        .is_some_and(|current| {
+                            current.blob_sha256() == incoming_sha256
+                                && current.session_id() == evidence.catalog_template.session_id()
+                        });
+                    let legacy_predecessor = tx
+                        .query_row(
+                            "SELECT 1 FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                            params![runtime_id_text(&runtime_id)],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()
+                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                        .is_some();
+                    if authority_matches && !legacy_predecessor {
+                        ensure_compaction_intents_already_outboxed_list(
+                            &tx,
+                            &runtime_id,
+                            &evidence.compaction_projection_intents,
+                        )?;
+                        let body_exists = tx
+                            .query_row(
+                                "SELECT 1 FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
+                                params![&incoming_sha256],
+                                |_row| Ok(()),
+                            )
+                            .optional()
+                            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                            .is_some();
+                        if !body_exists {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "WholeBlob authority references a missing body",
+                            ));
+                        }
+                        let mut catalog_entry = evidence.catalog_template.clone();
+                        catalog_entry.set_runtime_state(
+                            load_runtime_session_catalog_entry_in_txn(&tx, &runtime_id)?
+                                .and_then(|entry| entry.runtime_state()),
+                        );
+                        upsert_runtime_session_catalog_entry_in_txn(&tx, &runtime_id, &catalog_entry)?;
+                        clear_runtime_projection_quarantine(&tx, &runtime_id)?;
+                        tx.commit()
+                            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                        return Ok(());
+                    }
+                    drop(tx);
+                }
+                let incoming =
                     meerkat_core::Session::from_persisted_bytes(&session_delta.session_snapshot)
                         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
@@ -9841,6 +10076,11 @@ ORDER BY runtime_id";
                     clear_runtime_projection_quarantine(&tx, &runtime_id)?;
                     tx.commit()
                         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                    if let Some(facts) =
+                        crate::store::WholeBlobCommittedTranscriptFacts::from_session(&incoming)
+                    {
+                        recorded_facts.record(&runtime_id, &incoming_sha256, facts, None);
+                    }
                     return Ok(());
                 }
                 let previous = tx
@@ -9858,9 +10098,39 @@ ORDER BY runtime_id";
                     previous.as_ref(),
                 )
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
+                upsert_decoded_runtime_snapshot(
+                    &tx,
+                    &runtime_id,
+                    &session_delta.session_snapshot,
+                    &incoming,
+                )?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                if let Some(facts) =
+                    crate::store::WholeBlobCommittedTranscriptFacts::from_session(&incoming)
+                {
+                    // The save guard above ran with no predecessor on this
+                    // exact decode, so its verdict is reaffirm evidence.
+                    let evidence = if previous.is_none() {
+                        crate::store::validated_compaction_projection_intents(&incoming)
+                            .ok()
+                            .and_then(|intents| {
+                                crate::store::RuntimeSessionCatalogEntry::from_session(
+                                    &incoming,
+                                    RuntimeSessionPersistenceProfile::WholeBlobV1,
+                                    None,
+                                )
+                                .ok()
+                                .map(|catalog_template| WholeBlobReaffirmEvidence {
+                                    compaction_projection_intents: intents,
+                                    catalog_template,
+                                })
+                            })
+                    } else {
+                        None
+                    };
+                    recorded_facts.record(&runtime_id, &incoming_sha256, facts, evidence);
+                }
                 Ok(())
             })
             .await
@@ -9917,6 +10187,27 @@ ORDER BY runtime_id";
                 ));
             }
 
+            let remembered_runtime_id = runtime_id.clone();
+            // Facts for every written document; reaffirm evidence only for
+            // receipt-less control-plane snapshots (create, direct
+            // persistence), whose bytes the startup compaction refresh
+            // re-commits. A per-turn boundary skips the coherence evaluation.
+            let recorded_facts = prepared_session.as_ref().and_then(|prepared| {
+                crate::store::WholeBlobCommittedTranscriptFacts::from_session(prepared.session())
+                    .map(|facts| {
+                        let evidence = receipt.is_none().then(|| {
+                            whole_blob_reaffirm_evidence(
+                                prepared.session(),
+                                &compaction_projection_intents,
+                            )
+                        });
+                        (
+                            prepared.blob_sha256().to_string(),
+                            facts,
+                            evidence.flatten(),
+                        )
+                    })
+            });
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let lifecycle_expected = machine_lifecycle
@@ -9927,7 +10218,7 @@ ORDER BY runtime_id";
                 .into_iter()
                 .map(InputStatePersistenceRecord::into_stored_and_expected)
                 .collect::<Vec<_>>();
-            tokio::task::spawn_blocking(move || {
+            let authority = tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 refuse_whole_blob_write_under_head_authority(
@@ -9982,7 +10273,19 @@ ORDER BY runtime_id";
                 Ok(authority)
             })
             .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))??;
+            if let (Some(authority), Some((blob_sha256, facts, evidence))) =
+                (authority.as_ref(), recorded_facts)
+                && authority.blob_sha256() == blob_sha256
+            {
+                self.whole_blob_transcript_facts.record(
+                    &remembered_runtime_id,
+                    &blob_sha256,
+                    facts,
+                    evidence,
+                );
+            }
+            Ok(authority)
         }
 
         async fn commit_whole_blob_provisional_promotion(
@@ -10499,6 +10802,13 @@ ORDER BY runtime_id";
     impl crate::store::RuntimeSessionAuthorityOps for SqliteRuntimeStore {
         fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
             self.session_persistence_profile
+        }
+
+        fn recorded_whole_blob_transcript_facts(
+            &self,
+            authority: &WholeBlobStoreAuthority,
+        ) -> Option<crate::store::WholeBlobCommittedTranscriptFacts> {
+            self.whole_blob_transcript_facts.for_authority(authority)
         }
 
         fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost {
@@ -12455,9 +12765,13 @@ ORDER BY runtime_id";
             }
             let compaction_projection_intents =
                 crate::store::validated_compaction_projection_intents(candidate_session.as_ref())?;
+            let recorded_sha256 = candidate_blob_sha256.clone();
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            let cas_runtime_id = runtime_id.clone();
+            let recorded_facts =
+                crate::store::WholeBlobCommittedTranscriptFacts::from_session(&candidate_session);
+            let outcome = tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 refuse_whole_blob_write_under_head_authority(
@@ -12505,7 +12819,19 @@ ORDER BY runtime_id";
                 Ok(WholeBlobSnapshotCasOutcome::Committed(authority))
             })
             .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))??;
+            if let WholeBlobSnapshotCasOutcome::Committed(authority) = &outcome
+                && authority.blob_sha256() == recorded_sha256
+                && let Some(facts) = recorded_facts
+            {
+                self.whole_blob_transcript_facts.record(
+                    &cas_runtime_id,
+                    &recorded_sha256,
+                    facts,
+                    None,
+                );
+            }
+            Ok(outcome)
         }
 
         async fn write_prepared_whole_blob_provisional_tail(
@@ -12538,6 +12864,18 @@ ORDER BY runtime_id";
                     "WholeBlob provisional artifact/catalog does not bind this runtime/session authority",
                 ));
             }
+            // The candidate's facts are a pure function of its bytes; recording
+            // them before the write is safe because they are served only for
+            // an authority whose row digest is exactly this candidate's.
+            self.whole_blob_transcript_facts.record(
+                runtime_id,
+                authority.candidate_blob_sha256(),
+                crate::store::WholeBlobCommittedTranscriptFacts::new(
+                    conversation_digest.clone(),
+                    message_count,
+                ),
+                None,
+            );
             let catalog_json = serde_json::to_vec(&catalog_entry)
                 .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
             let compaction_intents_json = serde_json::to_vec(&compaction_projection_intents)
@@ -19648,6 +19986,363 @@ ORDER BY runtime_id";
             let mut out = bytes.to_vec();
             out[position..position + needle.len()].copy_from_slice(replacement);
             out
+        }
+
+        #[tokio::test]
+        async fn recorded_whole_blob_facts_answer_only_for_their_exact_authority() {
+            let (_dir, store) = temp_store();
+            let mut session = Session::new();
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            session.push(Message::User(UserMessage::text("first turn".to_string())));
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&session).unwrap().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let first = RuntimeStore::load_whole_blob_store_authority(&store, &runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let facts = store
+                .session_authority_ops()
+                .recorded_whole_blob_transcript_facts(&first)
+                .expect("a commit records the facts of the document it wrote");
+            assert_eq!(
+                facts.transcript_revision(),
+                session.transcript_content_digest().unwrap()
+            );
+            assert_eq!(facts.message_count(), 1);
+
+            // A well-formed row digest of other bytes: the authority must be
+            // valid (issued refuses non-canonical tokens) and still not match.
+            let foreign_digest =
+                WholeBlobStoreAuthority::issued(session.id().clone(), first.store_revision(), {
+                    use sha2::Digest as _;
+                    format!(
+                        "row-sha256:{:x}",
+                        sha2::Sha256::digest(b"not this document")
+                    )
+                })
+                .unwrap();
+            assert!(
+                store
+                    .session_authority_ops()
+                    .recorded_whole_blob_transcript_facts(&foreign_digest)
+                    .is_none(),
+                "facts are never served for another row digest"
+            );
+
+            session.push(Message::User(UserMessage::text("second turn".to_string())));
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&session).unwrap().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let second = RuntimeStore::load_whole_blob_store_authority(&store, &runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                store
+                    .session_authority_ops()
+                    .recorded_whole_blob_transcript_facts(&second)
+                    .map(|facts| facts.message_count()),
+                Some(2)
+            );
+            assert_eq!(
+                store
+                    .session_authority_ops()
+                    .recorded_whole_blob_transcript_facts(&first)
+                    .map(|facts| facts.message_count()),
+                Some(1),
+                "facts are a pure function of the bytes, so a superseded authority's \
+                 record still answers truthfully for exactly that digest"
+            );
+        }
+
+        /// Commit `session` through the typed receipt-less control-plane path
+        /// (the create-time save shape) and return the exact committed bytes.
+        async fn commit_typed_control_snapshot(
+            store: &SqliteRuntimeStore,
+            session: &Session,
+        ) -> Arc<Vec<u8>> {
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            RuntimeStore::commit_prepared_session_boundary(
+                store,
+                &runtime_id,
+                crate::store::PreparedRuntimeSessionCommit::snapshot_only(
+                    BoundSessionCommit::sealed(Arc::new(session.clone())).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            store
+                .session_authority_ops()
+                .load_committed_whole_blob_bytes(&runtime_id)
+                .await
+                .unwrap()
+                .expect("committed WholeBlob bytes")
+                .0
+        }
+
+        fn whole_blob_row_sha256(bytes: &[u8]) -> String {
+            use sha2::Digest as _;
+            format!("row-sha256:{:x}", sha2::Sha256::digest(bytes))
+        }
+
+        async fn recommit(
+            store: &SqliteRuntimeStore,
+            runtime_id: &LogicalRuntimeId,
+            bytes: &[u8],
+        ) -> Result<(), RuntimeStoreError> {
+            store
+                .commit_session_snapshot(
+                    runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: bytes.to_vec().into(),
+                    },
+                )
+                .await
+        }
+
+        /// The reaffirm evidence rests on the save guard giving the same
+        /// verdict for the typed session and for a decode of its bytes.
+        #[test]
+        fn save_guard_verdict_matches_between_a_typed_session_and_its_decode() {
+            let plain = session_with_user("plain turn");
+            let (rewritten, _intent) = session_with_compaction_intent();
+            for session in [plain, rewritten] {
+                let bytes = session.to_persisted_bytes().unwrap();
+                let decoded = meerkat_core::Session::decode_whole_blob_document(&bytes)
+                    .unwrap()
+                    .into_session();
+                assert_eq!(
+                    meerkat_core::session_store::run_boundary_snapshot_save_guard(&session, None)
+                        .map_err(|error| error.to_string()),
+                    meerkat_core::session_store::run_boundary_snapshot_save_guard(&decoded, None)
+                        .map_err(|error| error.to_string()),
+                    "the typed session and its decode must get the same guard verdict"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn reaffirm_still_refuses_a_finalized_or_unbacked_intent() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+            let (session, _intent) = session_with_compaction_intent();
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            let committed = commit_typed_control_snapshot(&store, &session).await;
+            assert!(
+                store
+                    .whole_blob_transcript_facts
+                    .reaffirm_evidence(&runtime_id, &whole_blob_row_sha256(&committed))
+                    .is_some(),
+                "the typed control-plane commit recorded reaffirm evidence"
+            );
+            let conn = Connection::open(&path).unwrap();
+
+            conn.execute(
+                "UPDATE runtime_compaction_projection_outbox SET state = 'finalized' WHERE runtime_id = ?1",
+                params![runtime_id_text(&runtime_id)],
+            )
+            .unwrap();
+            let decodes = meerkat_core::global_whole_blob_decodes();
+            let error = recommit(&store, &runtime_id, &committed).await.unwrap_err();
+            assert!(
+                error.to_string().contains("finalized compaction intent"),
+                "{error}"
+            );
+            assert_eq!(
+                meerkat_core::global_whole_blob_decodes(),
+                decodes,
+                "the refusal came from the reaffirm path itself"
+            );
+
+            conn.execute(
+                "DELETE FROM runtime_compaction_projection_outbox WHERE runtime_id = ?1",
+                params![runtime_id_text(&runtime_id)],
+            )
+            .unwrap();
+            let error = recommit(&store, &runtime_id, &committed).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("without atomic outbox authority"),
+                "{error}"
+            );
+            assert_eq!(meerkat_core::global_whole_blob_decodes(), decodes);
+        }
+
+        #[tokio::test]
+        async fn reaffirm_preserves_the_catalog_runtime_state() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+            let session = session_with_user("control snapshot");
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            let committed = commit_typed_control_snapshot(&store, &session).await;
+
+            let conn = Connection::open(&path).unwrap();
+            let encoded: Vec<u8> = conn
+                .query_row(
+                    "SELECT entry_json FROM runtime_session_catalog WHERE runtime_id = ?1",
+                    params![runtime_id_text(&runtime_id)],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .unwrap();
+            let mut entry: crate::store::RuntimeSessionCatalogEntry =
+                serde_json::from_slice(&encoded).unwrap();
+            entry.set_runtime_state(Some(RuntimeState::Idle));
+            conn.execute(
+                "UPDATE runtime_session_catalog SET entry_json = ?2 WHERE runtime_id = ?1",
+                params![
+                    runtime_id_text(&runtime_id),
+                    serde_json::to_vec(&entry).unwrap()
+                ],
+            )
+            .unwrap();
+
+            let decodes = meerkat_core::global_whole_blob_decodes();
+            recommit(&store, &runtime_id, &committed).await.unwrap();
+            assert_eq!(meerkat_core::global_whole_blob_decodes(), decodes);
+            assert_eq!(
+                store
+                    .load_runtime_session_catalog_entry(&runtime_id)
+                    .await
+                    .unwrap()
+                    .and_then(|entry| entry.runtime_state()),
+                Some(RuntimeState::Idle),
+                "the reaffirmed catalog entry keeps the current runtime state"
+            );
+        }
+
+        #[tokio::test]
+        async fn reaffirm_falls_back_when_the_authority_moved_or_a_legacy_row_exists() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+            let mut session = session_with_user("first turn");
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            let first = commit_typed_control_snapshot(&store, &session).await;
+
+            // The authority moves past the evidenced bytes.
+            session.push(Message::User(UserMessage::text("second turn".to_string())));
+            let second = serde_json::to_vec(&session).unwrap();
+            recommit(&store, &runtime_id, &second).await.unwrap();
+            assert!(
+                store
+                    .whole_blob_transcript_facts
+                    .reaffirm_evidence(&runtime_id, &whole_blob_row_sha256(&first))
+                    .is_some(),
+                "the older document's evidence is still recorded"
+            );
+            let decodes = meerkat_core::global_whole_blob_decodes();
+            let _ = recommit(&store, &runtime_id, &first).await;
+            assert!(
+                meerkat_core::global_whole_blob_decodes() > decodes,
+                "bytes that are not the current authority's body take the full decode path"
+            );
+
+            // A legacy predecessor row routes even current bytes to the full
+            // path, which owns the legacy comparison.
+            let current = store
+                .session_authority_ops()
+                .load_committed_whole_blob_bytes(&runtime_id)
+                .await
+                .unwrap()
+                .expect("committed bytes")
+                .0;
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO runtime_session_snapshots (runtime_id, session_snapshot) VALUES (?1, ?2)",
+                params![runtime_id_text(&runtime_id), current.as_ref().as_slice()],
+            )
+            .unwrap();
+            let decodes = meerkat_core::global_whole_blob_decodes();
+            let _ = recommit(&store, &runtime_id, &current).await;
+            assert!(
+                meerkat_core::global_whole_blob_decodes() > decodes,
+                "a present legacy row takes the full decode path"
+            );
+        }
+
+        #[tokio::test]
+        async fn byte_identical_refresh_recommit_reaffirms_without_decoding() {
+            let (_dir, store) = temp_store();
+            let mut session = Session::new();
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            session.push(Message::User(UserMessage::text("first turn".to_string())));
+            // A receipt-less typed control-plane commit (the create-time save)
+            // records reaffirm evidence for the exact bytes it wrote.
+            RuntimeStore::commit_prepared_session_boundary(
+                &store,
+                &runtime_id,
+                crate::store::PreparedRuntimeSessionCommit::snapshot_only(
+                    meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(
+                        session.clone(),
+                    ))
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            let (committed, _authority) = store
+                .session_authority_ops()
+                .load_committed_whole_blob_bytes(&runtime_id)
+                .await
+                .unwrap()
+                .expect("committed WholeBlob bytes");
+
+            // The startup compaction refresh shape: the committed bytes,
+            // loaded raw and re-committed verbatim.
+            let decodes = meerkat_core::global_whole_blob_decodes();
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: committed.as_ref().clone().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                meerkat_core::global_whole_blob_decodes(),
+                decodes,
+                "a byte-identical re-commit of evidenced bytes is reaffirmed without a decode"
+            );
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(Arc::clone(&committed))
+            );
+
+            // Different bytes always take the full decode.
+            session.push(Message::User(UserMessage::text("second turn".to_string())));
+            let grown = serde_json::to_vec(&session).unwrap();
+            let decodes = meerkat_core::global_whole_blob_decodes();
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: grown.clone().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(meerkat_core::global_whole_blob_decodes() > decodes);
+            assert_eq!(
+                store.load_session_snapshot(&runtime_id).await.unwrap(),
+                Some(Arc::new(grown))
+            );
         }
 
         #[tokio::test]

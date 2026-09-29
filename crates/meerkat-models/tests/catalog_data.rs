@@ -247,6 +247,69 @@ fn claude_opus_5_5_is_cataloged_and_owns_the_anthropic_default() {
 }
 
 #[test]
+fn claude_sonnet_5_5_is_cataloged_without_changing_the_anthropic_default() {
+    let entry = entry_for(Provider::Anthropic, "claude-sonnet-5-5")
+        .expect("claude-sonnet-5-5 must be in catalog");
+    assert_eq!(entry.provider, "anthropic");
+    assert_eq!(entry.display_name, "Claude Sonnet 5.5");
+    assert_eq!(entry.tier, ModelTier::Recommended);
+    assert_eq!(entry.context_window, Some(1_000_000));
+    assert_eq!(entry.max_output_tokens, Some(128_000));
+    assert!(
+        allowed_models(Provider::Anthropic).any(|id| id == "claude-sonnet-5-5"),
+        "claude-sonnet-5-5 must be in the Anthropic allowlist"
+    );
+    assert_eq!(
+        infer_provider("claude-sonnet-5-5"),
+        Some(Provider::Anthropic)
+    );
+    assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-5-5"));
+}
+
+#[test]
+fn claude_sonnet_5_5_capability_row_matches_the_official_model_page() {
+    let caps = capabilities_for(Provider::Anthropic, "claude-sonnet-5-5")
+        .expect("claude-sonnet-5-5 must be in the Anthropic catalog");
+    assert_eq!(caps.provider, Provider::Anthropic);
+    assert_eq!(caps.model_family, "claude-sonnet-5");
+    assert_eq!(caps.context_window, Some(1_000_000));
+    assert_eq!(caps.max_output_tokens, Some(128_000));
+    assert_eq!(
+        caps.max_output_tokens_beta.map(|beta| beta.value),
+        Some(300_000),
+        "Sonnet 5.5 is listed for the output-300k batch beta"
+    );
+    assert_eq!(
+        caps.thinking,
+        ThinkingSupport::AnthropicAdaptiveOrBetweenTools
+    );
+    assert!(
+        !caps.supports_temperature && !caps.supports_top_p && !caps.supports_top_k,
+        "non-default sampling parameters return 400 on Sonnet 5.5"
+    );
+    assert!(
+        !caps.supports_thinking_budget_legacy,
+        "budget_tokens returns 400 on Sonnet 5.5"
+    );
+    assert!(caps.vision);
+    assert!(caps.supports_mid_conversation_system_messages);
+    assert!(caps.supports_inference_geo);
+    assert!(caps.supports_compaction);
+    assert!(caps.supports_structured_output);
+    assert!(caps.supports_web_search);
+    assert_eq!(
+        caps.effort_levels,
+        &[
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::Xhigh,
+            EffortLevel::Max,
+        ]
+    );
+}
+
+#[test]
 fn gpt_6_sol_and_luna_are_cataloged_without_changing_the_openai_default() {
     for (id, name) in [("gpt-6-sol", "GPT-6 Sol"), ("gpt-6-luna", "GPT-6 Luna")] {
         let entry = entry_for(Provider::OpenAI, id)

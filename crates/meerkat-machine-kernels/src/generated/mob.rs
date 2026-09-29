@@ -1025,6 +1025,8 @@ impl std::fmt::Display for ExternalMemberRebindCapability {
 }
 pub type ExternalPeerEdge = meerkat_machine_schema::catalog::dsl::mob_machine::ExternalPeerEdge;
 pub type ExternalPeerKey = meerkat_machine_schema::catalog::dsl::mob_machine::ExternalPeerKey;
+pub type ExternalRouteObligation =
+    meerkat_machine_schema::catalog::dsl::mob_machine::ExternalRouteObligation;
 #[derive(
     Debug,
     Clone,
@@ -6872,6 +6874,7 @@ pub struct State {
         std::collections::BTreeSet<PlacedCompletionObligation>,
     pub resolved_placed_completion_outcomes: std::collections::BTreeSet<PlacedCompletionObligation>,
     pub pending_route_installs: std::collections::BTreeSet<RouteInstallObligation>,
+    pub pending_external_route_installs: std::collections::BTreeSet<ExternalRouteObligation>,
     pub operator_grant_scopes:
         std::collections::BTreeMap<PrincipalId, std::collections::BTreeSet<ControlScope>>,
     pub operator_grant_expiries: std::collections::BTreeMap<PrincipalId, Option<u64>>,
@@ -7571,6 +7574,22 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RollbackRouteInstall {
         pub obligation: RouteInstallObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordExternalRouteInstall {
+        pub obligation: ExternalRouteObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeExternalRouteRemovalBeforeUnwire {
+        pub obligation: ExternalRouteObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveExternalRouteInstall {
+        pub obligation: ExternalRouteObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RollbackExternalRouteInstall {
+        pub obligation: ExternalRouteObligation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordRemoteTurnObligation {
@@ -8331,6 +8350,10 @@ pub enum Input {
     AuthorizeRouteRemovalBeforeUnwire(inputs::AuthorizeRouteRemovalBeforeUnwire),
     ResolveRouteInstall(inputs::ResolveRouteInstall),
     RollbackRouteInstall(inputs::RollbackRouteInstall),
+    RecordExternalRouteInstall(inputs::RecordExternalRouteInstall),
+    AuthorizeExternalRouteRemovalBeforeUnwire(inputs::AuthorizeExternalRouteRemovalBeforeUnwire),
+    ResolveExternalRouteInstall(inputs::ResolveExternalRouteInstall),
+    RollbackExternalRouteInstall(inputs::RollbackExternalRouteInstall),
     RecordRemoteTurnObligation(inputs::RecordRemoteTurnObligation),
     AbortRemoteTurnObligation(inputs::AbortRemoteTurnObligation),
     CommitRemoteTurnOutcome(inputs::CommitRemoteTurnOutcome),
@@ -8588,6 +8611,12 @@ impl Input {
             }
             Self::ResolveRouteInstall(_) => InputKind::ResolveRouteInstall,
             Self::RollbackRouteInstall(_) => InputKind::RollbackRouteInstall,
+            Self::RecordExternalRouteInstall(_) => InputKind::RecordExternalRouteInstall,
+            Self::AuthorizeExternalRouteRemovalBeforeUnwire(_) => {
+                InputKind::AuthorizeExternalRouteRemovalBeforeUnwire
+            }
+            Self::ResolveExternalRouteInstall(_) => InputKind::ResolveExternalRouteInstall,
+            Self::RollbackExternalRouteInstall(_) => InputKind::RollbackExternalRouteInstall,
             Self::RecordRemoteTurnObligation(_) => InputKind::RecordRemoteTurnObligation,
             Self::AbortRemoteTurnObligation(_) => InputKind::AbortRemoteTurnObligation,
             Self::CommitRemoteTurnOutcome(_) => InputKind::CommitRemoteTurnOutcome,
@@ -8848,6 +8877,10 @@ pub enum InputKind {
     AuthorizeRouteRemovalBeforeUnwire,
     ResolveRouteInstall,
     RollbackRouteInstall,
+    RecordExternalRouteInstall,
+    AuthorizeExternalRouteRemovalBeforeUnwire,
+    ResolveExternalRouteInstall,
+    RollbackExternalRouteInstall,
     RecordRemoteTurnObligation,
     AbortRemoteTurnObligation,
     CommitRemoteTurnOutcome,
@@ -10444,6 +10477,10 @@ pub mod effects {
         pub obligation: RouteInstallObligation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExternalRouteInstallRequested {
+        pub obligation: ExternalRouteObligation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MemberOperatorAdmitted {
         pub agent_identity: AgentIdentity,
         pub request_id: String,
@@ -10635,6 +10672,7 @@ pub enum Effect {
     PlacedCarrierCleanupResolved(effects::PlacedCarrierCleanupResolved),
     RequestMemberRelease(effects::RequestMemberRelease),
     RouteInstallRequested(effects::RouteInstallRequested),
+    ExternalRouteInstallRequested(effects::ExternalRouteInstallRequested),
     MemberOperatorAdmitted(effects::MemberOperatorAdmitted),
     MemberOperatorRejected(effects::MemberOperatorRejected),
     FlowStepDispatchClassified(effects::FlowStepDispatchClassified),
@@ -10783,6 +10821,7 @@ pub enum EffectKind {
     PlacedCarrierCleanupResolved,
     RequestMemberRelease,
     RouteInstallRequested,
+    ExternalRouteInstallRequested,
     MemberOperatorAdmitted,
     MemberOperatorRejected,
     FlowStepDispatchClassified,
@@ -11797,6 +11836,16 @@ pub enum TransitionId {
     RollbackRouteInstallStopped,
     RollbackRouteInstallCompleted,
     RollbackRouteInstallDestroyed,
+    RecordExternalRouteInstallInstall,
+    AuthorizeExternalRouteRemovalBeforeUnwire,
+    ResolveExternalRouteInstallRunning,
+    ResolveExternalRouteInstallStopped,
+    ResolveExternalRouteInstallCompleted,
+    ResolveExternalRouteInstallDestroyed,
+    RollbackExternalRouteInstallRunning,
+    RollbackExternalRouteInstallStopped,
+    RollbackExternalRouteInstallCompleted,
+    RollbackExternalRouteInstallDestroyed,
     RecoverRemoteTurnDispatchSequenceAdvance,
     RecoverRemoteTurnDispatchSequenceReplay,
     RecordRemoteTurnObligationFresh,
@@ -12587,6 +12636,7 @@ pub fn initial_state() -> State {
         cancel_requested_placed_completion_outcomes: Default::default(),
         resolved_placed_completion_outcomes: Default::default(),
         pending_route_installs: Default::default(),
+        pending_external_route_installs: Default::default(),
         operator_grant_scopes: Default::default(),
         operator_grant_expiries: Default::default(),
         spawn_profile_authority_resolved_spec_digests: Default::default(),

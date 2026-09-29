@@ -104,6 +104,8 @@ export type AnthropicThinkingConfig = {
 } | {
   budget_tokens: number;
   type: "enabled";
+} | {
+  type: "between_tools";
 };
 
 export interface AssistantImageEvent {
@@ -342,6 +344,18 @@ export type InteractionFailureReason = {
 export type InteractionId = string;
 
 export type InteractionStreamAbandonReason = "send_failed" | "admission_rejected" | "response_rejected" | "terminal_delivery_failed";
+
+export type InterruptedInputKind = "prompt" | "peer" | "flow_step" | "external_event" | "continuation" | "operation" | "unknown";
+
+export type InterruptedToolRunDisposition = {
+  inputs: number;
+  kind: "inputs_settled";
+  unrestored?: InterruptedInputKind[];
+} | {
+  kind: "run_completed";
+} | {
+  kind: "unknown";
+};
 
 export type LiveChannelId = string;
 
@@ -656,6 +670,9 @@ export type SkillResolutionFailureReason = {
   skill_name: string;
   source_uuid: string;
 } | {
+  reason_type: "no_skill_engine";
+  requested: SkillKey[];
+} | {
   message: string;
   reason_type: "unknown";
 };
@@ -748,6 +765,13 @@ export type SystemNoticeBlock = {
   payload?: unknown;
   type: "runtime_notice";
 } | {
+  cessation: ToolProcessCessation;
+  disposition: InterruptedToolRunDisposition;
+  run_id: RunId;
+  spawner: ToolProcessSpawner;
+  tool_call_id?: string | null;
+  type: "tool_process_interrupted";
+} | {
   payload?: unknown;
   summary?: string | null;
   type: "unknown";
@@ -755,7 +779,7 @@ export type SystemNoticeBlock = {
 
 export type SystemNoticeDirection = "incoming" | "outgoing" | "internal";
 
-export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required";
+export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required" | "tool_process_recovery";
 
 export type SystemNoticeMessage = {
   blocks?: SystemNoticeBlock[];
@@ -813,6 +837,40 @@ export type ToolConfigChangedPayload = {
 };
 
 export type ToolName = string;
+
+export type ToolProcessCessation = {
+  kind: "never_started";
+} | {
+  kind: "already_exited";
+} | {
+  kind: "group_reassigned";
+} | {
+  kind: "killed_by_recovery";
+  members: number;
+} | {
+  kind: "prior_environment_ended";
+} | {
+  kind: "exited_before_commit";
+} | {
+  kind: "foreign_incarnation_ended";
+} | {
+  kind: "unknown";
+};
+
+export type ToolProcessSpawner = {
+  kind: "shell_call";
+} | {
+  job_id: string;
+  kind: "background_job";
+} | {
+  job_id: string;
+  kind: "monitor";
+} | {
+  hook_id: string;
+  kind: "command_hook";
+} | {
+  kind: "unknown";
+};
 
 export interface TranscriptEditRewriteRange {
   end: number;

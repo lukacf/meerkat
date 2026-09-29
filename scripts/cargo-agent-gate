@@ -267,7 +267,7 @@ if [[ "${#changed[@]}" -gt 0 ]]; then
       sdks/web/*)
         web_sdk+=("${path}")
         ;;
-      meerkat-web-runtime/*)
+      crates/meerkat-web-runtime/*)
         wasm_runtime+=("${path}")
         ;;
     esac

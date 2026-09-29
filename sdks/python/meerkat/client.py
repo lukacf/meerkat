@@ -65,6 +65,9 @@ from .generated.types import (
     GoalStatusRequest,
     GoalStatusResult,
     InterruptResult,
+    StopRunParams,
+    StopRunResult,
+    WireRunStopReceipt,
     JobArtifactRef,
     JobHealthCoverage,
     JobHealthSummary,
@@ -109,6 +112,8 @@ from .generated.types import (
     MobFlowRunResult,
     MobGrantScopesParams,
     MobHardCancelParams,
+    MobStopMemberRunParams,
+    MobStopMemberRunResult,
     MobHostStatus,
     MobIdParams,
     MobIngressInteractionParams,
@@ -177,6 +182,7 @@ from .generated.types import (
     WireProjectionProvenance,
     WireReachability,
     WireMemberPreviewUnavailable,
+    WireExternalRouteInstallObligation,
     WireRouteInstallObligation,
     WireRuntimeBinding,
     WireToolAccessPolicy,
@@ -3118,9 +3124,24 @@ class MeerkatClient:
             )
             for index, row in enumerate(outstanding)
         ]
+        # Omitted on the wire when empty (and by servers that predate it).
+        outstanding_external_raw = result.get("outstanding_external", [])
+        if not isinstance(outstanding_external_raw, list):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: outstanding_external must be a list",
+            )
+        external_obligations = [
+            self._parse_external_route_install_obligation(
+                row,
+                f"{context}: outstanding_external[{index}]",
+            )
+            for index, row in enumerate(outstanding_external_raw)
+        ]
         return MobRouteInstallsResult(
             complete=self._require_bool_field(result, "complete", context),
             outstanding=obligations,
+            outstanding_external=external_obligations,
         )
 
     async def bind_mob_host(
@@ -3182,6 +3203,32 @@ class MeerkatClient:
             result,
             "cancelled",
             "Invalid mob/hard_cancel_member response",
+        )
+
+    async def stop_mob_member_run(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        run_id: str,
+        reason: str,
+    ) -> MobStopMemberRunResult:
+        """Stop one exact run of a mob member (run-fenced Stop).
+
+        A stale ``run_id`` returns a ``not_current`` receipt; it never
+        interrupts a newer run or queued input.
+        """
+        params = MobStopMemberRunParams(
+            mob_id=mob_id,
+            agent_identity=agent_identity,
+            run_id=run_id,
+            reason=reason,
+        )
+        result = await self._request("mob/stop_member_run", _wire_params(params))
+        context = "Invalid mob/stop_member_run response"
+        return MobStopMemberRunResult(
+            mob_id=self._require_string_field(result, "mob_id", context),
+            agent_identity=self._require_string_field(result, "agent_identity", context),
+            receipt=self._parse_run_stop_receipt(result.get("receipt"), context),
         )
 
     async def open_mob_member_live(
@@ -4203,6 +4250,59 @@ class MeerkatClient:
 
     async def _interrupt(self, session_id: str) -> InterruptResult:
         return await self._request("turn/interrupt", {"session_id": session_id})
+
+    async def _stop_run(
+        self, session_id: str, run_id: str, reason: str
+    ) -> StopRunResult:
+        params = StopRunParams(session_id=session_id, run_id=run_id, reason=reason)
+        result = await self._request("turn/stop_run", _wire_params(params))
+        context = "Invalid turn/stop_run response"
+        return StopRunResult(
+            session_id=self._require_string_field(result, "session_id", context),
+            receipt=self._parse_run_stop_receipt(result.get("receipt"), context),
+        )
+
+    @staticmethod
+    def _parse_run_stop_receipt(raw: Any, context: str) -> WireRunStopReceipt:
+        """Validate the run-stop receipt discriminator and required fields.
+
+        The receipt is a tagged union on ``outcome``: ``stopped`` carries the
+        contributors, ``not_current`` the current run (if any), and
+        ``not_stoppable`` the runtime state that refused the stop.
+        """
+        if not isinstance(raw, dict):
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: receipt must be an object")
+        outcome = raw.get("outcome")
+        if not isinstance(raw.get("run_id"), str):
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: receipt.run_id must be a string")
+        if outcome == "stopped":
+            contributors = raw.get("contributors")
+            if not isinstance(contributors, list) or not all(
+                isinstance(row, dict)
+                and isinstance(row.get("input_id"), str)
+                and isinstance(row.get("completion"), str)
+                for row in contributors
+            ):
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    f"{context}: stopped receipt contributors are malformed",
+                )
+        elif outcome == "not_current":
+            current = raw.get("current_run_id")
+            if current is not None and not isinstance(current, str):
+                raise MeerkatError(
+                    "INVALID_RESPONSE", f"{context}: current_run_id must be a string"
+                )
+        elif outcome == "not_stoppable":
+            if not isinstance(raw.get("state"), str):
+                raise MeerkatError(
+                    "INVALID_RESPONSE", f"{context}: not_stoppable receipt needs a state"
+                )
+        else:
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: unknown receipt outcome {outcome!r}"
+            )
+        return cast(WireRunStopReceipt, raw)
 
     async def _archive(self, session_id: str) -> None:
         await self._request("session/archive", {"session_id": session_id})
@@ -6503,6 +6603,19 @@ class MeerkatClient:
                 "edge_b",
                 context,
             ),
+            host=MeerkatClient._require_string_field(obligation, "host", context),
+        )
+
+    @staticmethod
+    def _parse_external_route_install_obligation(
+        raw: Any,
+        context: str,
+    ) -> WireExternalRouteInstallObligation:
+        obligation = MeerkatClient._require_dict(raw, "obligation", context)
+        return WireExternalRouteInstallObligation(
+            local=MeerkatClient._require_string_field(obligation, "local", context),
+            peer_id=MeerkatClient._require_string_field(obligation, "peer_id", context),
+            peer_name=MeerkatClient._require_string_field(obligation, "peer_name", context),
             host=MeerkatClient._require_string_field(obligation, "host", context),
         )
 

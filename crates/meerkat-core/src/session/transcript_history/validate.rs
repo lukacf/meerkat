@@ -418,6 +418,7 @@ fn validate_transcript_rewrite_record_with_digest(
 pub(crate) fn validate_transcript_history_state(
     state: &TranscriptHistoryState,
 ) -> Result<(), TranscriptEditError> {
+    crate::digest_observability::record_transcript_graph_validation();
     if state.format() != TRANSCRIPT_HISTORY_FORMAT_CURRENT {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
             "unsupported transcript graph format {}",

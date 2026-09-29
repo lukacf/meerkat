@@ -729,6 +729,17 @@ impl CoreExecutor for SessionRuntimeExecutor {
         ))
     }
 
+    fn transcript_notice_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle>> {
+        Some(
+            meerkat::surface::persistent_runtime_transcript_notice_handle(
+                self.runtime.persistent_service(),
+                self.session_id.clone(),
+            ),
+        )
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -1086,6 +1097,17 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         self.runtime.as_ref().map(|runtime| {
             meerkat::surface::persistent_runtime_pre_dequeue_handle(
                 runtime.runtime_adapter(),
+                self.session_id.clone(),
+            )
+        })
+    }
+
+    fn transcript_notice_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle>> {
+        self.runtime.as_ref().map(|runtime| {
+            meerkat::surface::persistent_runtime_transcript_notice_handle(
+                runtime.persistent_service(),
                 self.session_id.clone(),
             )
         })

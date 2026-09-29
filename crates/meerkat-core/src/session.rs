@@ -1898,6 +1898,7 @@ impl Session {
     /// Decode one current Session envelope without a full-byte pre-hash or a
     /// process-global memo lookup.
     pub fn from_persisted_bytes(serialized: &[u8]) -> Result<Self, serde_json::Error> {
+        crate::digest_observability::record_whole_blob_decode(serialized.len() as u64);
         serde_json::from_slice(serialized)
     }
 
@@ -5636,6 +5637,35 @@ impl Session {
         Ok(crate::service::AppendSystemContextStatus::Applied)
     }
 
+    /// Append a typed system notice once, preceded by the user requests it
+    /// accounts for.
+    ///
+    /// A notice whose kind and typed blocks equal a notice already in the
+    /// transcript is a duplicate (the blocks carry the notice's typed
+    /// identity): nothing is appended, requests included, so retried delivery
+    /// converges. No turn is started.
+    pub fn append_system_notice_once(
+        &mut self,
+        record: crate::types::SystemNoticeRecord,
+    ) -> crate::service::AppendSystemContextStatus {
+        let crate::types::SystemNoticeRecord { requests, notice } = record;
+        let duplicate = self.messages().iter().any(|message| {
+            matches!(
+                message,
+                Message::SystemNotice(existing)
+                    if existing.kind == notice.kind && existing.blocks == notice.blocks
+            )
+        });
+        if duplicate {
+            return crate::service::AppendSystemContextStatus::Duplicate;
+        }
+        for request in requests {
+            self.push(Message::User(request));
+        }
+        self.push(Message::SystemNotice(notice));
+        crate::service::AppendSystemContextStatus::Applied
+    }
+
     /// Clone the active ordered transcript for a model request.
     ///
     /// Ordinary System messages remain ordered durable rows. For an explicitly
@@ -8547,6 +8577,46 @@ impl PersistedSessionMetadataView {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+
+    #[test]
+    fn a_system_notice_record_appends_its_requests_once_with_its_notice() {
+        use crate::tool_process::{
+            InterruptedToolRunDisposition, ToolProcessCessation, ToolProcessSpawner,
+        };
+        use crate::types::{SystemNoticeBlock, SystemNoticeMessage, SystemNoticeRecord};
+
+        let run_id = crate::lifecycle::RunId::new();
+        let record = SystemNoticeRecord {
+            requests: vec![crate::types::UserMessage::text("create the effect file")],
+            notice: SystemNoticeMessage::tool_process_interrupted(vec![
+                SystemNoticeBlock::ToolProcessInterrupted {
+                    run_id,
+                    tool_call_id: Some("call-1".to_owned()),
+                    spawner: ToolProcessSpawner::ShellCall,
+                    cessation: ToolProcessCessation::KilledByRecovery { members: 1 },
+                    disposition: InterruptedToolRunDisposition::InputsSettled {
+                        inputs: 1,
+                        unrestored: Vec::new(),
+                    },
+                },
+            ]),
+        };
+        let mut session = Session::new();
+        assert_eq!(
+            session.append_system_notice_once(record.clone()),
+            crate::service::AppendSystemContextStatus::Applied
+        );
+        // Redelivery after a crash between recording and acknowledgement.
+        assert_eq!(
+            session.append_system_notice_once(record),
+            crate::service::AppendSystemContextStatus::Duplicate
+        );
+        let messages = session.messages();
+        assert_eq!(messages.len(), 2, "the request and the notice, once each");
+        assert!(matches!(&messages[0], Message::User(user)
+            if user.text_content() == "create the effect file"));
+        assert!(matches!(&messages[1], Message::SystemNotice(_)));
+    }
 
     fn test_turn_usage(usage: Usage) -> crate::types::TurnUsage {
         crate::types::TurnUsage::host_declared(crate::Provider::Other, "session-test", usage)

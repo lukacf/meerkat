@@ -229,6 +229,9 @@ mod identity_recovery_test_support;
 mod live_bridge_operation;
 #[cfg(any(test, feature = "test-support"))]
 mod member_status_test_support;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use handle::ForkSupervisorExitForTest;
 pub(crate) use handle::MemberTurnLlmIdentityAppliedSender;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use identity_recovery_test_support::trigger_identity_recovery_fail_stop;
@@ -425,14 +428,14 @@ pub use handle::{
     MemberRunState, MemberTargetAbsence, MemberTurnEventSender, MemberTurnHandle,
     MemberTurnOptions, MobDestroyError, MobDestroyReport, MobEventsSubscription,
     MobEventsSubscriptionConfig, MobEventsView, MobHandle, MobMachineStateChanges,
-    MobMemberListEntry, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-    MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer, MobWireMembersBatchReport,
-    OwnedMemberTargetAdmission, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
-    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
-    SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult,
-    SpawnSource, SpawnSystemPromptOverride, SpawnToolAdmission, SupervisorRotationReport,
-    WorkBoundedTurnResult, WorkDeliveryReceipt, WorkTurnHandle, mob_error_wire_code,
-    profile_to_wire, stored_realm_profile_to_wire,
+    MobMemberEndpointOwner, MobMemberEndpointStatus, MobMemberListEntry, MobMemberPeerEndpoint,
+    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
+    MobSpawnManyFailure, MobUnreachablePeer, MobWireMembersBatchReport, OwnedMemberTargetAdmission,
+    PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, SpawnContinuityIntent,
+    SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberAdmissionObservations,
+    SpawnMemberCustomizer, SpawnMemberSpec, SpawnResult, SpawnSource, SpawnSystemPromptOverride,
+    SpawnToolAdmission, SupervisorRotationReport, WorkBoundedTurnResult, WorkDeliveryReceipt,
+    WorkTurnHandle, mob_error_wire_code, profile_to_wire, stored_realm_profile_to_wire,
 };
 pub(crate) use handle::{
     CanonicalOpsOwnerContext, ExactTurnCompletionSender, FlowOperationCustody, MemberSpawnReceipt,
@@ -466,11 +469,11 @@ pub use recovery::RestoreIncompatible;
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::LiveDurableSourceObservation;
 pub use session_service::{
-    AuthorizedSessionResume, MemberStatusSessionView, MemberStatusViewSource, MobSessionService,
-    PersistedSessionAuthorityReadCost, ResumeRejectionKind, ResumeSessionLoad,
-    ResumeVerdictTerminality, SessionResumeAuthority, SessionResumeLifecycle,
-    SessionResumeMaterialization, SessionResumePreparationReceipt, SessionResumeRejection,
-    SessionResumeVerdict, materialize_nonpersistent_session_resume_verdict,
+    AgentEventSubscription, AuthorizedSessionResume, MemberStatusSessionView,
+    MemberStatusViewSource, MobSessionService, PersistedSessionAuthorityReadCost,
+    ResumeRejectionKind, ResumeSessionLoad, ResumeVerdictTerminality, SessionResumeAuthority,
+    SessionResumeLifecycle, SessionResumeMaterialization, SessionResumePreparationReceipt,
+    SessionResumeRejection, SessionResumeVerdict, materialize_nonpersistent_session_resume_verdict,
     observe_live_durable_source_via_projection_visibility, observe_member_status_view_via_read,
 };
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
@@ -534,6 +537,46 @@ pub(crate) fn recovery_member_edge_trust_is_desired(
             .and_then(|runtime_id| state.member_state_markers.get(runtime_id))
             != Some(&mob_dsl::MobMemberState::Retiring)
     })
+}
+
+/// Install obligations for external-peer edges whose local member is placed
+/// on a bound host (optionally one host). Same posture as
+/// [`derive_install_obligations`]: every input is durable and over-recording
+/// is safe. A retiring member's edge is excluded: retirement owns its
+/// teardown, and reinstalling it could resurrect trust just before cleanup.
+pub(crate) fn derive_external_install_obligations(
+    state: &crate::machines::mob_machine::MobMachineState,
+    host_filter: Option<&crate::machines::mob_machine::HostId>,
+) -> BTreeSet<crate::machines::mob_machine::ExternalRouteObligation> {
+    use crate::machines::mob_machine as mob_dsl;
+
+    let mut derived = BTreeSet::new();
+    for edge in &state.external_peer_edges {
+        let Some(host) = state.member_placement.get(&edge.local) else {
+            continue;
+        };
+        if host_filter.is_some_and(|filter| filter != host) {
+            continue;
+        }
+        if state.host_bind_phase.get(host) != Some(&mob_dsl::HostBindPhase::Bound) {
+            continue;
+        }
+        if state.member_restore_failures.contains_key(&edge.local)
+            || state
+                .identity_to_runtime
+                .get(&edge.local)
+                .and_then(|runtime| state.member_state_markers.get(runtime))
+                == Some(&mob_dsl::MobMemberState::Retiring)
+        {
+            continue;
+        }
+        derived.insert(mob_dsl::ExternalRouteObligation {
+            edge: edge.clone(),
+            host: host.clone(),
+            kind: mob_dsl::RouteObligationKind::Install,
+        });
+    }
+    derived
 }
 
 /// Single owner of the §6.2 route-install derivation rule (multi-host mobs

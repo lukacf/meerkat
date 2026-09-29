@@ -107,6 +107,19 @@ impl RosterAuthority {
         self.roster.apply(event);
     }
 
+    /// Project the resolved comms identity (peer id and transport key) for an
+    /// existing member. Returns whether the member was present.
+    pub(crate) fn set_comms_identity(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        peer_id: Option<meerkat_core::comms::PeerId>,
+        transport_public_key: Option<String>,
+    ) -> bool {
+        self.bump();
+        self.roster
+            .set_comms_identity(agent_identity, peer_id, transport_public_key)
+    }
+
     pub(crate) fn replace_backend_peer_binding_for_identities(
         &mut self,
         identities: &std::collections::BTreeSet<AgentIdentity>,

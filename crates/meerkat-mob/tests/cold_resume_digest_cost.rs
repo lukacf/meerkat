@@ -19,6 +19,13 @@
 //!
 //! Scale is adjustable for measurement:
 //!   MEERKAT_COLD_RESUME_TURNS=<n> MEERKAT_COLD_RESUME_TOOL_ROUNDS=<n>
+//!
+//! The digest counters are process-global, and the verification they count
+//! runs on blocking-pool threads, so per-thread counters cannot attribute it.
+//! Nextest runs each test in its own process; under plain `cargo test` the
+//! harnesses in this binary share one process, so each holds
+//! [`DIGEST_WINDOW_SERIAL`] for its whole run and no other harness can move
+//! the counters inside its measured windows.
 
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -37,7 +44,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::time::{Duration, Instant, sleep};
+use tokio::time::{Duration, Instant};
 
 const LEAD_ID: &str = "lead-1";
 const LARGE_MEMBER_IDS: [&str; 2] = ["w-large-a", "w-large-b"];
@@ -56,15 +63,23 @@ const DEFAULT_TOOL_ROUNDS: usize = 30;
 const ASSISTANT_FILLER_BYTES: usize = 512;
 
 /// Resume verifies each committed head against its store authority, which
-/// hashes every durable message row about once. A second materialization of
-/// any large head pushes resume past 1.4x (measured before the fix: 4.5x for
-/// append-only heads, 3.0x of the live bytes for rewritten heads).
+/// hashes every durable message row about once. Relative to the verified
+/// bytes (live transcripts plus retained pre-rewrite anchors), resume hashed
+/// 4.53x for append-only heads and 7.19x for compacted heads before #1258,
+/// and 0.91x and 0.97x after it (the CHANGELOG entry for #1258). Each large
+/// member holds a bit under half of the verified bytes, so a second
+/// materialization of any large head adds about 0.45x and exceeds this bound.
 const MAX_RESUME_DIGEST_MULTIPLE: f64 = 1.25;
 
 /// A single-shot turn after a verified resume must reuse the digest state the
 /// verification seeded; it hashes its own two-message delta and fixed-size
 /// metadata only. Re-seeding either large transcript alone exceeds this.
 const MAX_FIRST_TURN_DIGEST_MULTIPLE: f64 = 0.1;
+
+/// Serializes the harnesses of this binary so that each owns the
+/// process-global digest counters for its measured windows (see the module
+/// documentation).
+static DIGEST_WINDOW_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -274,8 +289,13 @@ fn persistent_service(
     ))
 }
 
+/// Settles on the mob actor's own machine-state publications: the member
+/// status projection is re-read after every published change, never on a
+/// timer. The deadline only bounds a broken run, so it fails with the roster
+/// instead of hanging until the harness timeout.
 async fn wait_all_active(handle: &MobHandle, expected: usize, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(300);
+    let mut changes = handle.machine_state_changes();
     loop {
         let members = handle.list_members().await;
         let active = members
@@ -285,11 +305,17 @@ async fn wait_all_active(handle: &MobHandle, expected: usize, what: &str) {
         if active >= expected {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {expected} active members {what}; roster: {members:?}"
-        );
-        sleep(Duration::from_millis(50)).await;
+        tokio::select! {
+            changed = changes.changed() => changed.unwrap_or_else(|_| {
+                panic!(
+                    "the mob actor stopped before {expected} members were active {what}; \
+                     roster: {members:?}"
+                )
+            }),
+            () = tokio::time::sleep_until(deadline) => panic!(
+                "timed out waiting for {expected} active members {what}; roster: {members:?}"
+            ),
+        }
     }
 }
 
@@ -376,6 +402,7 @@ async fn cold_resume_of_compacted_transcripts_digest_bytes_stay_proportional() {
 }
 
 async fn run_cold_resume_harness(fixture: Fixture) {
+    let _digest_window = DIGEST_WINDOW_SERIAL.lock().await;
     let seed_turns = env_usize("MEERKAT_COLD_RESUME_TURNS", DEFAULT_SEED_TURNS);
     let tool_rounds = env_usize("MEERKAT_COLD_RESUME_TOOL_ROUNDS", DEFAULT_TOOL_ROUNDS);
     let auto_compact_threshold = match fixture {

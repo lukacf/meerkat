@@ -61,6 +61,9 @@ import {
   type CommsPeersResult,
   type CommsSendResult,
   type InterruptResult,
+  type MobStopMemberRunResult,
+  type StopRunResult,
+  type WireRunStopReceipt,
   type JobsArtifactsParams,
   type JobsArtifactsResult,
   type JobsCancelParams,
@@ -221,6 +224,7 @@ import type {
   WireHostBindingDescriptor as RpcWireHostBindingDescriptor,
   WireHostCapabilityFlags as RpcWireHostCapabilityFlags,
   WireRouteInstallObligation as RpcWireRouteInstallObligation,
+  WireExternalRouteInstallObligation as RpcWireExternalRouteInstallObligation,
   ExportAtifParams as RpcExportAtifParams,
   ProvisionApiKeyParams as RpcProvisionApiKeyParams,
   ReadSessionHistoryParams as RpcReadSessionHistoryParams,
@@ -2675,6 +2679,19 @@ export class MeerkatClient {
         `${context}: outstanding[${index}]`,
       ),
     );
+    // Omitted on the wire when empty (and by servers that predate it).
+    if (result.outstanding_external !== undefined) {
+      const outstandingExternal = MeerkatClient.requireRecordArray(
+        result.outstanding_external,
+        `${context}: outstanding_external`,
+      );
+      outstandingExternal.forEach((row, index) =>
+        MeerkatClient.parseExternalRouteInstallObligation(
+          row,
+          `${context}: outstanding_external[${index}]`,
+        ),
+      );
+    }
     MeerkatClient.requireBooleanField(result, "complete", context);
     return result as unknown as RpcMobRouteInstallsResult;
   }
@@ -2731,6 +2748,33 @@ export class MeerkatClient {
       );
     }
     return result.cancelled;
+  }
+
+  /**
+   * Stop one exact run of a mob member (run-fenced Stop). A stale `runId`
+   * returns a `not_current` receipt and never interrupts newer work.
+   */
+  async stopMobMemberRun(
+    mobId: string,
+    agentIdentity: string,
+    runId: string,
+    reason: string,
+  ): Promise<MobStopMemberRunResult> {
+    const result = await this.request("mob/stop_member_run", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+      run_id: runId,
+      reason,
+    });
+    const context = "Invalid mob/stop_member_run response";
+    if (typeof result.mob_id !== "string" || typeof result.agent_identity !== "string") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing mob_id or agent_identity`);
+    }
+    return {
+      mob_id: result.mob_id,
+      agent_identity: result.agent_identity,
+      receipt: MeerkatClient.parseRunStopReceipt(result.receipt, context),
+    };
   }
 
   /** Open a live realtime channel on a mob member. */
@@ -3911,6 +3955,83 @@ export class MeerkatClient {
     return (await this.request("turn/interrupt", {
       session_id: sessionId,
     })) as unknown as InterruptResult;
+  }
+
+  /** @internal Run-fenced Stop of one exact run. */
+  async _stopRun(
+    sessionId: string,
+    runId: string,
+    reason: string,
+  ): Promise<StopRunResult> {
+    const result = await this.request("turn/stop_run", {
+      session_id: sessionId,
+      run_id: runId,
+      reason,
+    });
+    const context = "Invalid turn/stop_run response";
+    if (typeof result.session_id !== "string") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing session_id`);
+    }
+    return {
+      session_id: result.session_id,
+      receipt: MeerkatClient.parseRunStopReceipt(result.receipt, context),
+    };
+  }
+
+  /**
+   * Validate the run-stop receipt discriminator. `stopped` carries the
+   * contributors, `not_current` the current run (if any), and
+   * `not_stoppable` the runtime state that refused the stop.
+   */
+  private static parseRunStopReceipt(raw: unknown, context: string): WireRunStopReceipt {
+    if (typeof raw !== "object" || raw === null) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: receipt must be an object`);
+    }
+    const receipt = raw as Record<string, unknown>;
+    if (typeof receipt.run_id !== "string") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: receipt.run_id must be a string`);
+    }
+    switch (receipt.outcome) {
+      case "stopped": {
+        const contributors = receipt.contributors;
+        if (
+          !Array.isArray(contributors) ||
+          !contributors.every(
+            (row) =>
+              typeof row === "object" &&
+              row !== null &&
+              typeof (row as Record<string, unknown>).input_id === "string" &&
+              typeof (row as Record<string, unknown>).completion === "string",
+          )
+        ) {
+          throw new MeerkatError(
+            "INVALID_RESPONSE",
+            `${context}: stopped receipt contributors are malformed`,
+          );
+        }
+        break;
+      }
+      case "not_current":
+        if (
+          receipt.current_run_id !== undefined &&
+          receipt.current_run_id !== null &&
+          typeof receipt.current_run_id !== "string"
+        ) {
+          throw new MeerkatError("INVALID_RESPONSE", `${context}: current_run_id must be a string`);
+        }
+        break;
+      case "not_stoppable":
+        if (typeof receipt.state !== "string") {
+          throw new MeerkatError("INVALID_RESPONSE", `${context}: not_stoppable receipt needs a state`);
+        }
+        break;
+      default:
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: unknown receipt outcome ${String(receipt.outcome)}`,
+        );
+    }
+    return receipt as unknown as WireRunStopReceipt;
   }
 
   /** @internal */
@@ -5304,6 +5425,18 @@ export class MeerkatClient {
     MeerkatClient.requireStringField(obligation, "edge_b", context);
     MeerkatClient.requireStringField(obligation, "host", context);
     return obligation as unknown as RpcWireRouteInstallObligation;
+  }
+
+  private static parseExternalRouteInstallObligation(
+    raw: unknown,
+    context: string,
+  ): RpcWireExternalRouteInstallObligation {
+    const obligation = MeerkatClient.requireRecord(raw, "obligation", context);
+    MeerkatClient.requireStringField(obligation, "local", context);
+    MeerkatClient.requireStringField(obligation, "peer_id", context);
+    MeerkatClient.requireStringField(obligation, "peer_name", context);
+    MeerkatClient.requireStringField(obligation, "host", context);
+    return obligation as unknown as RpcWireExternalRouteInstallObligation;
   }
 
   private static requireBooleanField(

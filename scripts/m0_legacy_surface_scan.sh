@@ -12,6 +12,13 @@ ALLOWLIST_FILE="$ROOT_DIR/scripts/m0_legacy_surface_allowlist.txt"
 OUTPUT_FILE="$ROOT_DIR/artifacts/m0_legacy_surface_inventory.txt"
 FAIL_ON_BLOCKED=true
 
+# Every scan below ends in `rg ... || true`, so a missing rg would read as
+# "no matches". Refuse instead of reporting a false green.
+if ! command -v rg >/dev/null 2>&1; then
+  echo "legacy surface scan requires ripgrep (rg); refusing a false-green scan" >&2
+  exit 2
+fi
+
 for arg in "$@"; do
   case "$arg" in
     --no-fail)
@@ -53,13 +60,13 @@ SCAN_PATHS=(
   "sdks"
   "CHANGELOG.md"
   "crates/meerkat/src"
-  "meerkat-cli"
-  "meerkat-core"
-  "meerkat-comms"
-  "meerkat-rest"
-  "meerkat-rpc"
-  "meerkat-session"
-  "meerkat-tools"
+  "crates/meerkat-cli"
+  "crates/meerkat-core"
+  "crates/meerkat-comms"
+  "crates/meerkat-rest"
+  "crates/meerkat-rpc"
+  "crates/meerkat-session"
+  "crates/meerkat-tools"
   "crates/meerkat-contracts/src/version.rs"
 )
 
@@ -79,8 +86,11 @@ ALLOWED=()
 BLOCKED=()
 
 for scan_path in "${SCAN_PATHS[@]}"; do
+  # A missing path is an error, not a skip: after the crates/ layout move this
+  # list silently stopped scanning seven crates listed without crates/.
   if [ ! -e "$ROOT_DIR/$scan_path" ]; then
-    continue
+    echo "legacy surface scan path does not exist: $scan_path" >&2
+    exit 2
   fi
 
   while IFS= read -r match; do

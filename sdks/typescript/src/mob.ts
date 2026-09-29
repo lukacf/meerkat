@@ -43,6 +43,7 @@ import type {
   WireMemberProgressSnapshot,
   WireNonPortableResourceKind,
   WireReachability,
+  MobStopMemberRunResult,
 } from "./generated/types.js";
 import type { MeerkatClient, MobMemberLiveOpenOptions } from "./client.js";
 import type { Usage } from "./events.js";
@@ -343,6 +344,15 @@ export class Mob {
    */
   async hardCancel(agentIdentity: string, reason: string): Promise<boolean> {
     return this.client.hardCancelMobMember(this.mobId, agentIdentity, reason);
+  }
+
+  /** Stop one exact run of a member and terminalize its contributors. */
+  async stopMemberRun(
+    agentIdentity: string,
+    runId: string,
+    reason: string,
+  ): Promise<MobStopMemberRunResult> {
+    return this.client.stopMobMemberRun(this.mobId, agentIdentity, runId, reason);
   }
 
   /**

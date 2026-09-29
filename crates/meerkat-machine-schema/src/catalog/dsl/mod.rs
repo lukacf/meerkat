@@ -1707,6 +1707,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Cancelled",
                     "MaxAttemptsExhausted",
                     "NeverExecuted",
+                    "ToolProcessInterrupted",
                 ],
             ),
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),
@@ -4054,6 +4055,15 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "crate::catalog::dsl::mob_machine::RouteInstallObligation",
                 vec![
                     TypePathStructField::named("edge", "WiringEdge"),
+                    TypePathStructField::named("host", "HostId"),
+                    TypePathStructField::named("kind", "RouteObligationKind"),
+                ],
+            ),
+            NamedTypeBinding::type_path_struct(
+                "ExternalRouteObligation",
+                "crate::catalog::dsl::mob_machine::ExternalRouteObligation",
+                vec![
+                    TypePathStructField::named("edge", "ExternalPeerEdge"),
                     TypePathStructField::named("host", "HostId"),
                     TypePathStructField::named("kind", "RouteObligationKind"),
                 ],

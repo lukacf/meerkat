@@ -82,6 +82,7 @@ This overview follows the generated OpenAPI artifact at
 | `POST` | `/sessions/{id}/external-events` | Queue a runtime-backed external event |
 | `POST` | `/sessions/{id}/peer-response-terminal` | Queue a typed peer terminal response event |
 | `POST` | `/sessions/{id}/interrupt` | Interrupt an in-flight turn |
+| `POST` | `/sessions/{id}/runs/{run_id}/stop` | Stop one exact run and terminalize every contributor bound to it |
 | `DELETE` | `/sessions/{id}` | Archive (remove) a session |
 | `GET` | `/sessions/{id}/events` | SSE stream for real-time updates |
 | `GET` | `/schedule/tools` | List schedule tool definitions |
@@ -130,6 +131,7 @@ This overview follows the generated OpenAPI artifact at
 | `POST` | `/mob/{id}/members/{agent_identity}/identity-adoption` | Adopt an existing member under an expected-absent precondition: `RestAdoptMemberIdentityDeclarationRequest` → `MobAdoptMemberIdentityDeclarationResult` (mob feature) |
 | `POST` | `/mob/{id}/members/{agent_identity}/tool-convergence/resolve` | Resolve blocked identity convergence against desired/active revisions: `RestResolveIdentityConvergenceBlockRequest` → `MobResolveIdentityConvergenceBlockResult` (mob feature) |
 | `POST` | `/mob/{id}/members/{agent_identity}/cancel` | Force-cancel a member (mob feature) |
+| `POST` | `/mob/{id}/members/{agent_identity}/runs/{run_id}/stop` | Stop one exact run of a member (mob feature) |
 | `POST` | `/mob/{id}/members/{agent_identity}/respawn` | Respawn a member (mob feature) |
 | `GET` | `/mob/{id}/members/{agent_identity}/history` | Read a mob member transcript page by identity (mob feature) |
 | `GET` | `/mob/{id}/hosts` | List tracked member hosts with bind phase and capabilities (mob feature) |
@@ -683,6 +685,38 @@ proof that a live turn was cancelled. The shared result type also has
 `"staged_noop"`/`false` for staged sessions on RPC's deferred-create path;
 REST does not expose deferred creation. Typed failures remain HTTP errors,
 not successful interrupt results.
+
+### POST /sessions/\{id\}/runs/\{run_id\}/stop
+
+Stop one exact run and terminalize every input already bound to it, including
+durable steers that joined it. Learn the run id from the `run_started` event
+(`identity.run_id`). The response is the same `StopRunResult` as the RPC
+`turn/stop_run` method.
+
+```json Request
+{"reason": "user pressed stop"}
+```
+
+```json Response
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "receipt": {
+    "outcome": "stopped",
+    "run_id": "01936f8b-0000-7000-8000-000000000042",
+    "contributors": [
+      {"input_id": "01936f8b-0000-7000-8000-0000000000a1", "completion": "cancelled", "terminal": "cancelled"}
+    ]
+  }
+}
+```
+
+`receipt.outcome` is `stopped`, `not_current` (the run is no longer current;
+nothing was touched), or `not_stoppable` (a runtime stop or teardown owns the
+still-bound run). A malformed `run_id` is `400`.
+
+`POST /mob/{id}/members/{agent_identity}/runs/{run_id}/stop` stops one exact
+run of a mob member and returns `MobStopMemberRunResult`
+(`{mob_id, agent_identity, receipt}`) with the same receipt.
 
 ### POST /requests/\{request_id\}/cancel
 

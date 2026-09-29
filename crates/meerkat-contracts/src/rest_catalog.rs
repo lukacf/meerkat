@@ -190,6 +190,15 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
+            "/sessions/{id}/runs/{run_id}/stop",
+            vec![RestOperationDescriptor::with_json_request(
+                "post",
+                "Stop one exact run and terminalize every contributor bound to it",
+                "StopRunRequest",
+                "StopRunResult",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/sessions/{id}/system_context",
             vec![RestOperationDescriptor::with_json_request(
                 "post",
@@ -543,6 +552,15 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
+            "/mob/{id}/members/{agent_identity}/runs/{run_id}/stop",
+            vec![RestOperationDescriptor::with_json_request(
+                "post",
+                "Stop one exact run of a mob member and terminalize its contributors",
+                "StopRunRequest",
+                "MobStopMemberRunResult",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/mob/{id}/members/{agent_identity}/respawn",
             vec![RestOperationDescriptor::json(
                 "post",
@@ -777,6 +795,7 @@ mod tests {
             "/mob/{id}/members/{agent_identity}/identity-adoption",
             "/mob/{id}/members/{agent_identity}/tool-convergence/resolve",
             "/mob/{id}/members/{agent_identity}/cancel",
+            "/mob/{id}/members/{agent_identity}/runs/{run_id}/stop",
             "/mob/{id}/members/{agent_identity}/respawn",
             "/mob/{id}/members/{agent_identity}/history",
             "/mob/{id}/hosts",

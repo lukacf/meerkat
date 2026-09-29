@@ -119,6 +119,7 @@ export interface WasmModule {
   start_turn: (handle: number, prompt: string, optionsJson?: string) => Promise<string>;
   get_session_state: (handle: number) => Promise<string>;
   interrupt_session: (handle: number) => Promise<void>;
+  stop_session_run: (handle: number, runId: string, reason: string) => Promise<string>;
   session_wire_peer: (handle: number, peerHandle: number) => Promise<void>;
   destroy_session: (handle: number) => Promise<void>;
   poll_events: (handle: number) => string;
@@ -146,6 +147,12 @@ export interface WasmModule {
   mob_member_status: (mobId: string, agentIdentity: string) => Promise<string>;
   mob_respawn: (mobId: string, agentIdentity: string, initialMessage?: string) => Promise<string>;
   mob_force_cancel: (mobId: string, agentIdentity: string) => Promise<void>;
+  mob_stop_member_run: (
+    mobId: string,
+    agentIdentity: string,
+    runId: string,
+    reason: string,
+  ) => Promise<string>;
   mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<string>;
@@ -368,6 +375,7 @@ export class MeerkatRuntime {
       mob_member_status: this.wasm.mob_member_status,
       mob_respawn: this.wasm.mob_respawn,
       mob_force_cancel: this.wasm.mob_force_cancel,
+      mob_stop_member_run: this.wasm.mob_stop_member_run,
       mob_spawn_helper: this.wasm.mob_spawn_helper,
       mob_fork_helper: this.wasm.mob_fork_helper,
       mob_status: this.wasm.mob_status,
@@ -408,6 +416,7 @@ export class MeerkatRuntime {
       this.wasm.append_system_context,
       this.wasm.interrupt_session,
       this.wasm.session_wire_peer,
+      this.wasm.stop_session_run,
     );
   }
 

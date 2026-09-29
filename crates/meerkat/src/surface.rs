@@ -26,6 +26,7 @@ mod live_projection;
 mod request_execution;
 #[cfg(feature = "session-store")]
 mod runtime_backed;
+pub use meerkat_runtime::run_stop_wire::{parse_wire_run_id, wire_run_stop_receipt};
 #[cfg(feature = "session-store")]
 mod runtime_schedule_host;
 mod schedule_host;
@@ -123,6 +124,7 @@ pub use runtime_backed::{
     persistent_runtime_post_stop_cleanup_handle_for_actor_slot,
     persistent_runtime_pre_dequeue_handle, persistent_runtime_publication_handle,
     persistent_runtime_publication_handle_for_actor_slot,
+    persistent_runtime_transcript_notice_handle,
     persistent_runtime_turn_finalization_boundary_handle,
     run_runtime_backed_initial_turn_with_machine, split_runtime_backed_eager_create_request,
 };
@@ -1186,7 +1188,7 @@ where
         }
     });
     #[cfg(target_arch = "wasm32")]
-    tokio_with_wasm::alias::task::spawn(async move {
+    crate::tokio::task::spawn(async move {
         while let Some(event) = rx.recv().await {
             callback(event);
         }

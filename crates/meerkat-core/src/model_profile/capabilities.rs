@@ -110,10 +110,58 @@ pub struct OpenAiResponsesParamCapabilities {
     pub reasoning_contexts: &'static [OpenAiReasoningContext],
     pub text_verbosity_levels: &'static [OpenAiTextVerbosity],
     pub prompt_cache_modes: &'static [OpenAiPromptCacheMode],
+    /// The prompt-cache mode Meerkat requests by default on the OpenAI API
+    /// when the caller sets none. Must be one of `prompt_cache_modes`.
+    pub default_prompt_cache_mode: Option<OpenAiPromptCacheMode>,
     pub prompt_cache_ttls: &'static [OpenAiPromptCacheTtl],
     /// Whether deprecated `prompt_cache_retention: "in_memory"` is accepted.
-    /// GPT-5.6 permits only the independent `24h` retention policy.
+    /// GPT-5.6 and later rows reject it: their cache lifetime is
+    /// `prompt_cache_options.ttl`.
     pub supports_in_memory_prompt_cache_retention: bool,
+}
+
+impl OpenAiResponsesParamCapabilities {
+    /// The row's default prompt-cache mode, if it names one it accepts.
+    pub fn default_prompt_cache_mode(&self) -> Option<OpenAiPromptCacheMode> {
+        self.default_prompt_cache_mode
+            .filter(|mode| self.prompt_cache_modes.contains(mode))
+    }
+
+    /// Why `model` (this row) rejects the deprecated `prompt_cache_retention`
+    /// value, or `None` when it accepts it.
+    pub fn prompt_cache_retention_rejection(
+        &self,
+        model: &str,
+        retention: crate::lifecycle::run_primitive::OpenAiPromptCacheRetention,
+    ) -> Option<String> {
+        use crate::lifecycle::run_primitive::OpenAiPromptCacheRetention;
+        match retention {
+            OpenAiPromptCacheRetention::InMemory
+                if !self.supports_in_memory_prompt_cache_retention =>
+            {
+                let ttls = self
+                    .prompt_cache_ttls
+                    .iter()
+                    .map(|ttl| format!("'{}'", ttl.as_wire_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Some(if ttls.is_empty() {
+                    format!(
+                        "OpenAI model '{model}' does not accept prompt_cache_retention 'in_memory'"
+                    )
+                } else {
+                    format!(
+                        "OpenAI model '{model}' does not accept prompt_cache_retention \
+                         'in_memory'; set its prompt cache lifetime with \
+                         prompt_cache_options.ttl ({ttls})"
+                    )
+                })
+            }
+            OpenAiPromptCacheRetention::InMemory | OpenAiPromptCacheRetention::TwentyFourHours => {
+                None
+            }
+        }
+    }
 }
 
 /// Full per-model capability record.
@@ -251,6 +299,68 @@ pub struct ModelCapabilities {
     pub call_timeout_secs: Option<u64>,
 }
 
+impl ModelCapabilities {
+    /// Why this Anthropic row refuses the request-shaping knobs in `tag`, or
+    /// `None` when the provider would accept them. Checked locally, before
+    /// the provider call, so an unsupported explicit setting is a typed
+    /// refusal and never a provider 400.
+    ///
+    /// Covers what the Anthropic lowering would actually send: the
+    /// `thinking` type, the legacy flat `thinking_budget_tokens` (sent as
+    /// `enabled` when `thinking` is unset), `top_k`, and `between_tools` at
+    /// an effort above `high`. Generic `temperature` is not refused here: the
+    /// lowering omits it for models without temperature support.
+    pub fn anthropic_provider_tag_rejection(
+        &self,
+        tag: &crate::lifecycle::run_primitive::AnthropicProviderTag,
+    ) -> Option<String> {
+        use crate::lifecycle::run_primitive::{AnthropicEffort, AnthropicThinkingConfig};
+        let model = self.id;
+        let accepted = || self.thinking.anthropic_thinking_wire_types().join(", ");
+        match tag.thinking.as_ref() {
+            Some(thinking) if !self.thinking.accepts_anthropic_thinking(thinking) => {
+                return Some(format!(
+                    "Anthropic model '{model}' does not accept thinking type '{}'; accepted: [{}]",
+                    thinking.wire_type(),
+                    accepted()
+                ));
+            }
+            Some(AnthropicThinkingConfig::BetweenTools)
+                if matches!(
+                    tag.effort,
+                    Some(AnthropicEffort::XHigh | AnthropicEffort::Max)
+                ) =>
+            {
+                return Some(format!(
+                    "Anthropic model '{model}' accepts thinking type 'between_tools' only at \
+                     'high' effort or below; use adaptive thinking for effort '{}'",
+                    tag.effort
+                        .map(AnthropicEffort::as_legacy_str)
+                        .unwrap_or_default()
+                ));
+            }
+            Some(_) => {}
+            None => {
+                if tag.thinking_budget_tokens.is_some()
+                    && !self.thinking.accepts_anthropic_thinking(
+                        &AnthropicThinkingConfig::Enabled { budget_tokens: 0 },
+                    )
+                {
+                    return Some(format!(
+                        "Anthropic model '{model}' does not accept a thinking budget \
+                         (thinking_budget_tokens); accepted thinking types: [{}]",
+                        accepted()
+                    ));
+                }
+            }
+        }
+        if tag.top_k.is_some() && !self.supports_top_k {
+            return Some(format!("Anthropic model '{model}' does not accept top_k"));
+        }
+        None
+    }
+}
+
 /// A capability value that is only available when a specific beta header is set.
 #[derive(Debug, Clone, Copy)]
 pub struct BetaValue<T: 'static> {
@@ -310,10 +420,54 @@ pub enum ThinkingSupport {
     AnthropicAdaptiveOnly,
     /// Anthropic: both `{type: "adaptive"}` and `{type: "enabled", budget_tokens: N}` are accepted.
     AnthropicAdaptiveAndEnabled,
+    /// Anthropic: `{type: "adaptive"}` (the default) or `{type: "between_tools"}`,
+    /// which turns off up-front thinking at `high` effort or below.
+    /// `disabled` and `enabled` (budget) return 400.
+    AnthropicAdaptiveOrBetweenTools,
     /// Gemini 3.x: `generationConfig.thinkingConfig.thinking_level`.
     /// Legacy `thinking_budget` is also accepted when
     /// `supports_thinking_budget_legacy = true`.
     GeminiThinkingLevel,
+}
+
+impl ThinkingSupport {
+    /// Whether an Anthropic request may carry `thinking` = `config` for a
+    /// model with this support mode.
+    pub fn accepts_anthropic_thinking(
+        self,
+        config: &crate::lifecycle::run_primitive::AnthropicThinkingConfig,
+    ) -> bool {
+        use crate::lifecycle::run_primitive::AnthropicThinkingConfig as Thinking;
+        match (self, config) {
+            (Self::AnthropicEnabledOnly, Thinking::Enabled { .. })
+            | (Self::AnthropicAdaptiveOnly, Thinking::Adaptive)
+            | (Self::AnthropicAdaptiveAndEnabled, Thinking::Adaptive | Thinking::Enabled { .. })
+            | (
+                Self::AnthropicAdaptiveOrBetweenTools,
+                Thinking::Adaptive | Thinking::BetweenTools,
+            ) => true,
+            (
+                Self::None
+                | Self::GeminiThinkingLevel
+                | Self::AnthropicEnabledOnly
+                | Self::AnthropicAdaptiveOnly
+                | Self::AnthropicAdaptiveAndEnabled
+                | Self::AnthropicAdaptiveOrBetweenTools,
+                _,
+            ) => false,
+        }
+    }
+
+    /// The Anthropic thinking `type` values this mode accepts, for messages.
+    pub const fn anthropic_thinking_wire_types(self) -> &'static [&'static str] {
+        match self {
+            Self::AnthropicEnabledOnly => &["enabled"],
+            Self::AnthropicAdaptiveOnly => &["adaptive"],
+            Self::AnthropicAdaptiveAndEnabled => &["adaptive", "enabled"],
+            Self::AnthropicAdaptiveOrBetweenTools => &["adaptive", "between_tools"],
+            Self::None | Self::GeminiThinkingLevel => &[],
+        }
+    }
 }
 
 /// Reasoning/effort control level, the shared typed vocabulary behind both

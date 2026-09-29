@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Exits 0 when any changed path is an input the machine-poster gate
+# (`make verify-machine-poster-coverage`) owns on its own: the poster
+# generator, the rendered posters, the xtask alphabet emitter, or this
+# classifier. The catalog, TLA specs and contracts the posters render are
+# machine authority; CI runs the poster gate when either classifier fires.
+# This classifier is deliberately separate from machine-authority-changed,
+# which also drives the pre-push machine hook and the remote machine lanes:
+# a poster-only change must not start TLC.
+# Exits 1 when the paths are unrelated, 2 on usage errors.
+
+usage() {
+  echo "usage: machine-posters-changed [--] [changed-path ...]" >&2
+}
+
+paths=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      paths+=("$@")
+      break
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "unknown argument: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      paths+=("$1")
+      shift
+      ;;
+  esac
+done
+
+for path in "${paths[@]+"${paths[@]}"}"; do
+  case "${path#./}" in
+    scripts/machine-posters/*|docs/internal/machine-posters/*|crates/xtask/src/machine_alphabet.rs|scripts/machine-posters-changed)
+      echo "machine posters changed: ${path}"
+      exit 0
+      ;;
+  esac
+done
+
+echo "machine posters unchanged"
+exit 1

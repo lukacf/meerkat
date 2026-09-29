@@ -11,6 +11,7 @@ from .generated.types import (
     MobBindHostResult,
     MobHostStatus,
     MobMemberHistoryResult,
+    MobStopMemberRunResult,
     MobAdoptMemberIdentityDeclarationParams,
     MobRevokeHostResult,
     MobRouteInstallsResult,
@@ -521,6 +522,14 @@ class Mob:
         """Hard-cancel a member (immediate user-interrupt authority)."""
         return await self._client.hard_cancel_mob_member(
             self.id, agent_identity, reason
+        )
+
+    async def stop_member_run(
+        self, agent_identity: str, run_id: str, *, reason: str
+    ) -> MobStopMemberRunResult:
+        """Stop one exact run of a member and terminalize its contributors."""
+        return await self._client.stop_mob_member_run(
+            self.id, agent_identity, run_id, reason
         )
 
     async def member_live_open(

@@ -344,14 +344,20 @@ list.
 
 **CI** (`.github/workflows/ci.yml`) runs on pushes to `main`, PRs, and
 manual dispatch (a branch head runs once, via its PR). It is Cargo-only on
-GitHub-hosted runners and sized to a 20-minute push-to-terminal budget:
+GitHub-hosted runners and sized to a 25-minute push-to-terminal budget:
 - `changes` classifies the diff with `scripts/ci-cargo-lanes.mjs` (fail
   closed: every Rust-relevant change yields lanes; unmapped Rust paths, a
   missing base, or global build configuration escalate to the workspace).
 - `fmt-governance` (always): fmt, docs-check, semver self-test, version
-  parity, lock consistency, `make ci-lanes-selftest`.
+  parity, lock consistency, `make ci-lanes-selftest`,
+  `make path-classifier-selftest`, and the ripgrep tombstone scans
+  (`legacy-surface-gate`, `session-control-gate`, `deprecated-backend-gate`;
+  ripgrep is installed first, and each scan refuses to run without it).
 - `ratchets`: generated-contract freshness when contract paths changed;
-  `machine-check-drift`/`protocol-check-drift` when machine authority changed.
+  `machine-check-drift`/`protocol-check-drift` when machine authority changed;
+  `verify-machine-poster-coverage` when machine authority or a poster input
+  (`scripts/machine-posters-changed`, a separate classifier so poster-only
+  changes never start the machine lanes) changed.
 - `clippy`: one lane per shard of every directly changed package
   (`clippy --no-deps --all-targets --all-features -D warnings`).
 - `unit`: `nextest --lib --bins --profile ci-pr` (identical to `fast`) for
@@ -366,7 +372,11 @@ GitHub-hosted runners and sized to a 20-minute push-to-terminal budget:
   eight shards, `wasm-check`, `sdk-host`. A red main run is a failed
   `CI gate` on the main commit and blocks `require_ci_green`.
 - `gate` (`CI gate`, the only required context): fail-closed aggregate,
-  1200-second budget from run creation, schema-4 attestation (backend
+  1500-second push-to-terminal budget on pull requests (each lane timed
+  from the start of the run attempt it ran in, so a re-run lane gets a fresh
+  clock but a gate-only re-run cannot launder an overrun; the slowest lane
+  and critical path are reported on every non-cancelled run, failed runs
+  included; a failure to measure only warns on `main`), schema-4 attestation (backend
   `github-hosted-cargo`) on successful `main` pushes. It runs under
   `!cancelled()` so superseded runs surface as cancelled.
 
@@ -608,7 +618,7 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 |----------|------------|
 | OpenAI | `gpt-5.6-sol` or `gpt-5.6-terra` or `gpt-5.6-luna` or `gpt-5.6` or `gpt-5.5` or `gpt-5.5-pro` or `gpt-5.4` or `gpt-5.4-mini` or `gpt-5.3-codex` |
 | Gemini | `gemini-3.5-flash` or `gemini-3.1-pro-preview` or `gemini-3.1-flash-lite-preview` |
-| Anthropic | `claude-opus-5-5` or `claude-opus-5` or `claude-fable-5` or `claude-opus-4-8` or `claude-sonnet-4-6` or `claude-sonnet-4-5` |
+| Anthropic | `claude-opus-5-5` or `claude-opus-5` or `claude-fable-5` or `claude-opus-4-8` or `claude-sonnet-5-5` or `claude-sonnet-4-6` or `claude-sonnet-4-5` |
 
 These are catalog text-model ids (`meerkat-models` is the source of truth; `rkat models` prints the live list); models outside the catalog require a config `[models.<id>]` entry.
 GPT-5.6 is a limited preview; use `gpt-5.5` for generally runnable OpenAI

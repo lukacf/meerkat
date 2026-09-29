@@ -86,6 +86,30 @@ impl PreparedUnstageableQueuedResolution {
     }
 }
 
+/// Row sha256 token of exact WholeBlob bytes, hashed on the blocking pool
+/// rather than on an async worker (inline on wasm32, which has no blocking
+/// pool).
+async fn whole_blob_row_sha256_off_worker(
+    bytes: Arc<Vec<u8>>,
+) -> Result<String, RuntimeDriverError> {
+    fn token(bytes: &[u8]) -> String {
+        use sha2::Digest as _;
+        format!("row-sha256:{:x}", sha2::Sha256::digest(bytes))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::tokio::task::spawn_blocking(move || token(bytes.as_slice()))
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!("WholeBlob row digest task failed: {error}"))
+            })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Ok(token(bytes.as_slice()))
+    }
+}
+
 impl PersistentRuntimeDriver {
     fn prepare_provisional_promotion(
         &self,
@@ -1047,6 +1071,41 @@ impl PersistentRuntimeDriver {
     pub(crate) async fn load_compaction_checkpoint_snapshot(
         &self,
     ) -> Result<Option<Arc<Vec<u8>>>, RuntimeDriverError> {
+        // The checkpoint refresh only re-commits these bytes (after clearing
+        // finalized intents); the store's commit decodes and validates them
+        // as a Session. A WholeBlob store can serve the committed bytes raw,
+        // so they are verified here against the digest the store authority
+        // binds them to instead of being decoded, rewrite graph and all, a
+        // second time just to be handed back as bytes.
+        if self.store.session_persistence_profile()
+            == crate::store::RuntimeSessionPersistenceProfile::WholeBlobV1
+        {
+            match self
+                .store
+                .session_authority_ops()
+                .load_committed_whole_blob_bytes(&self.runtime_id)
+                .await
+            {
+                Ok(None) => return Ok(None),
+                Ok(Some((bytes, authority))) => {
+                    let observed = whole_blob_row_sha256_off_worker(Arc::clone(&bytes)).await?;
+                    if observed != authority.blob_sha256() {
+                        return Err(RuntimeDriverError::Internal(format!(
+                            "authoritative compaction checkpoint bytes for {} do not match their \
+                             store authority",
+                            self.runtime_id
+                        )));
+                    }
+                    return Ok(Some(bytes));
+                }
+                Err(crate::store::RuntimeStoreError::Unsupported(_)) => {}
+                Err(error) => {
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "failed to load authoritative compaction checkpoint snapshot: {error}"
+                    )));
+                }
+            }
+        }
         self.store
             .load_session_snapshot(&self.runtime_id)
             .await

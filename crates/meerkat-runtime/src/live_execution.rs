@@ -842,6 +842,7 @@ impl LiveBridgeRecoveryImage {
     }
 }
 
+#[cfg(feature = "live")]
 pub(crate) fn live_execution_mode_to_dsl(
     mode: LiveExecutionMode,
 ) -> crate::meerkat_machine::dsl::LiveExecutionMode {
@@ -855,6 +856,7 @@ pub(crate) fn live_execution_mode_to_dsl(
     }
 }
 
+#[cfg(feature = "live")]
 pub(crate) const fn live_execution_mode_from_dsl(
     mode: crate::meerkat_machine::dsl::LiveExecutionMode,
 ) -> LiveExecutionMode {
@@ -885,6 +887,7 @@ struct LiveExecutionProfileDefinition {
 }
 
 impl LiveExecutionProfileDefinition {
+    #[cfg(any(feature = "live", test, feature = "test-support"))]
     pub(crate) fn new(
         profile_id: impl Into<String>,
         mode: LiveExecutionMode,
@@ -968,6 +971,7 @@ impl LiveExecutionProfileSelection {
 }
 
 impl LiveExecutionModeAdmission {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         session_id: &SessionId,
         channel_id: &LiveChannelId,
@@ -1031,6 +1035,7 @@ impl LiveExecutionModeAdmission {
     }
 }
 
+#[cfg(feature = "live")]
 pub(crate) fn bridge_effect_to_dsl(
     kind: LiveBridgeEffectKind,
 ) -> crate::meerkat_machine::dsl::LiveBridgeEffectKind {
@@ -1057,6 +1062,7 @@ pub(crate) fn bridge_effect_to_dsl(
     }
 }
 
+#[cfg(feature = "live")]
 pub(crate) fn bridge_effect_outcome_to_dsl(
     outcome: LiveBridgeEffectOutcome,
 ) -> crate::meerkat_machine::dsl::LiveBridgeEffectOutcome {
@@ -1088,6 +1094,7 @@ pub(crate) fn bridge_terminal_to_dsl(
     }
 }
 
+#[cfg(feature = "live")]
 pub(crate) fn bridge_output_kind_to_dsl(
     kind: LiveBridgeOutputKind,
 ) -> crate::meerkat_machine::dsl::LiveBridgeOutputKind {
@@ -1099,6 +1106,7 @@ pub(crate) fn bridge_output_kind_to_dsl(
     }
 }
 
+#[cfg(feature = "live")]
 pub(crate) fn bridge_submission_observation_to_dsl(
     observation: LiveBridgeSubmissionObservation,
 ) -> crate::meerkat_machine::dsl::LiveBridgeSubmissionObservation {
@@ -1112,6 +1120,7 @@ pub(crate) fn bridge_submission_observation_to_dsl(
     }
 }
 
+#[cfg(feature = "live")]
 pub(crate) const fn bridge_submission_state_for_observation(
     observation: LiveBridgeSubmissionObservation,
 ) -> LiveBridgeSubmissionState {
@@ -1171,6 +1180,7 @@ pub struct LiveBridgeRecoverySnapshot {
 
 impl LiveBridgeRecoverySnapshot {
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "live")]
     pub(crate) fn new(
         session_id: SessionId,
         operation: ExactOperationIdentity<LiveBridgeOperationCorrelation>,
@@ -1276,6 +1286,7 @@ impl std::fmt::Debug for LiveBridgeOperationAdmission {
 }
 
 impl LiveBridgeOperationAdmission {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         session_id: &SessionId,
         binding: &LiveDelegationRuntimeBinding,
@@ -1394,6 +1405,7 @@ pub struct LiveBridgeExecutionStartAuthority {
 }
 
 impl LiveBridgeExecutionStartAuthority {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         admission: &LiveBridgeOperationAdmission,
         effect: &MeerkatMachineEffect,
@@ -1440,6 +1452,7 @@ pub struct LiveBridgeRecoveredTerminalReceipt {
 }
 
 impl LiveBridgeRecoveredTerminalReceipt {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         snapshot: &LiveBridgeRecoverySnapshot,
         terminal: MeerkatExecutionTerminal,
@@ -1894,6 +1907,7 @@ pub struct LiveBridgeEffectAuthority {
 pub struct LiveBridgeFinalInputAuthority(LiveBridgeOperationAdmission);
 
 impl LiveBridgeFinalInputAuthority {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         admission: &LiveBridgeOperationAdmission,
         effect: &MeerkatMachineEffect,
@@ -1927,6 +1941,7 @@ impl LiveBridgeFinalInputAuthority {
 }
 
 impl LiveBridgeEffectAuthority {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         admission: &LiveBridgeOperationAdmission,
         authority_id: &str,
@@ -1978,6 +1993,7 @@ impl LiveBridgeEffectAuthority {
 #[derive(Debug)]
 pub struct LiveBridgeEffectDispatchAuthority {
     effect: LiveBridgeEffectAuthority,
+    #[cfg(feature = "live")]
     run_permit_sealed: AtomicBool,
 }
 
@@ -1995,6 +2011,7 @@ pub struct LiveBridgeEffectOutcomeReceipt {
 }
 
 impl LiveBridgeEffectOutcomeReceipt {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         dispatch: &LiveBridgeEffectDispatchAuthority,
         outcome: LiveBridgeEffectOutcome,
@@ -2115,6 +2132,7 @@ fn seal_live_bridge_noncommitting_run_permit(
 }
 
 impl LiveBridgeEffectDispatchAuthority {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         authority: &LiveBridgeEffectAuthority,
         effect: &MeerkatMachineEffect,
@@ -2182,6 +2200,7 @@ impl LiveBridgeEffectDispatchAuthority {
                 authority_id: "test-live-bridge-effect-authority".to_string(),
                 kind,
             },
+            #[cfg(feature = "live")]
             run_permit_sealed: AtomicBool::new(false),
         }
     }
@@ -2194,6 +2213,7 @@ pub struct LiveBridgeOperationCancellationAuthority {
 }
 
 impl LiveBridgeOperationCancellationAuthority {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         admission: &LiveBridgeOperationAdmission,
         reason: LiveBridgeCancellationReason,
@@ -2243,6 +2263,7 @@ pub struct LiveBridgeExecutionTerminalReceipt {
 }
 
 impl LiveBridgeExecutionTerminalReceipt {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         admission: &LiveBridgeOperationAdmission,
         terminal: MeerkatExecutionTerminal,
@@ -2322,6 +2343,7 @@ pub struct LiveBridgeSubmissionAuthority {
 }
 
 impl LiveBridgeSubmissionAuthority {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         terminal: &LiveBridgeExecutionTerminalReceipt,
         output_kind: LiveBridgeOutputKind,
@@ -2380,6 +2402,7 @@ impl LiveBridgeSubmissionAuthority {
 pub struct LiveBridgeSubmissionAttemptAuthority(LiveBridgeSubmissionAuthority);
 
 impl LiveBridgeSubmissionAttemptAuthority {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         submission: &LiveBridgeSubmissionAuthority,
         effect: &MeerkatMachineEffect,
@@ -2420,6 +2443,7 @@ pub struct LiveBridgeSubmissionReceipt {
 }
 
 impl LiveBridgeSubmissionReceipt {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         submission: &LiveBridgeSubmissionAuthority,
         state: LiveBridgeSubmissionState,
@@ -2500,6 +2524,7 @@ pub struct LiveBridgeRecoveredSubmissionReceipt {
 }
 
 impl LiveBridgeRecoveredSubmissionReceipt {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         session_id: &SessionId,
         operation: &ExactOperationIdentity<LiveBridgeOperationCorrelation>,
@@ -3226,6 +3251,7 @@ pub struct LiveDelegationRecoverySnapshot {
 
 impl LiveDelegationRecoverySnapshot {
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "live")]
     pub(crate) fn new(
         session_id: SessionId,
         channel_id: LiveChannelId,
@@ -3886,6 +3912,7 @@ pub struct LiveContextPreparationLease {
     #[cfg_attr(not(feature = "live"), allow(dead_code))]
     pub(crate) lease_id: String,
     pub(crate) reserved_cursor: u64,
+    #[cfg(feature = "live")]
     pub(crate) binding: LiveDelegationRuntimeBinding,
     pub(crate) cancellation: LiveContextPreparationCancellation,
 }
@@ -4072,6 +4099,7 @@ pub struct LiveContextQueuedRow {
 }
 
 impl LiveContextQueuedRow {
+    #[cfg(feature = "live")]
     pub(crate) fn from_generated_effect(
         binding: &LiveDelegationRuntimeBinding,
         append_id: &str,
@@ -4662,6 +4690,7 @@ pub(crate) fn live_delegation_result_digest(text: &str) -> String {
 pub struct LiveDelegationResultDeliveryAuthority {
     release: LiveDelegationResultReleaseAuthority,
     result_digest: String,
+    #[cfg(feature = "live")]
     provider_dispatch_consumed: Arc<AtomicBool>,
 }
 
@@ -4682,6 +4711,7 @@ impl LiveDelegationResultDeliveryAuthority {
         Self {
             release: release.clone(),
             result_digest,
+            #[cfg(feature = "live")]
             provider_dispatch_consumed: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -4721,6 +4751,7 @@ impl LiveDelegationResultDeliveryAuthority {
         Ok(Some(Self {
             release: release.clone(),
             result_digest: result_digest.clone(),
+            #[cfg(feature = "live")]
             provider_dispatch_consumed: Arc::new(AtomicBool::new(false)),
         }))
     }

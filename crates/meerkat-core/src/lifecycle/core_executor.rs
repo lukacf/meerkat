@@ -1049,6 +1049,29 @@ impl BoundSessionCommit {
         }
     }
 
+    /// The WholeBlob artifact this carrier has already materialized, without
+    /// materializing it.
+    ///
+    /// Clones of one carrier share a single-assignment artifact cell, so after
+    /// a store consumed one clone through [`Self::whole_blob_artifact`] every
+    /// other clone observes the exact bytes and row digest the store
+    /// committed. Returns `None` when nothing was materialized (or the
+    /// materialization failed), and for the head-canonical and provisional
+    /// promotion variants. Never encodes.
+    #[must_use]
+    pub fn materialized_whole_blob_artifact(&self) -> Option<&crate::SerializedSessionArtifact> {
+        let whole_blob = match &self.kind {
+            BoundSessionCommitKind::WholeBlobTyped { whole_blob, .. }
+            | BoundSessionCommitKind::WholeBlobUntyped { whole_blob } => whole_blob,
+            BoundSessionCommitKind::HeadCanonical { .. }
+            | BoundSessionCommitKind::ProvisionalPromotion { .. } => return None,
+        };
+        match whole_blob.get() {
+            Some(Ok(artifact)) => Some(artifact.as_ref()),
+            Some(Err(_)) | None => None,
+        }
+    }
+
     /// Consume this carrier into a shared whole-blob representation.
     ///
     /// This is the owned counterpart to [`Self::whole_blob_bytes`]. It avoids
@@ -1731,6 +1754,25 @@ pub trait CoreExecutorPreDequeueHandle: Send + Sync {
     ) -> Result<CorePreDequeueOutcome, CoreExecutorError>;
 }
 
+/// Endpoint that records a typed system notice (with the user requests it
+/// accounts for, see [`crate::types::SystemNoticeRecord`]) in the session's
+/// durable transcript without a turn (no model call).
+///
+/// The runtime invokes it at the same position as
+/// [`CoreExecutorPreDequeueHandle`]: the turn-finalization boundary is held,
+/// the session actor is provably idle, and the next admitted input has not
+/// been dequeued yet, so the notice is part of the transcript the next real
+/// turn sees. Implementations MUST NOT reacquire the boundary, and must be
+/// idempotent: appending a notice already in the transcript is a no-op.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait CoreExecutorTranscriptNoticeHandle: Send + Sync {
+    async fn append_system_notice_under_turn_finalization_boundary(
+        &self,
+        record: crate::types::SystemNoticeRecord,
+    ) -> Result<(), CoreExecutorError>;
+}
+
 /// The interface core exposes for the runtime layer to apply run primitives.
 ///
 /// The runtime layer creates an implementation that wraps an `Agent` and
@@ -1807,6 +1849,12 @@ pub trait CoreExecutor: Send + Sync {
     /// committed for it to miss. Runtime bindings alone do not supply durable
     /// handoff realization.
     fn pre_dequeue_handle(&self) -> Option<Arc<dyn CoreExecutorPreDequeueHandle>> {
+        None
+    }
+
+    /// Optional endpoint recording typed system notices in the durable
+    /// transcript without a turn (see [`CoreExecutorTranscriptNoticeHandle`]).
+    fn transcript_notice_handle(&self) -> Option<Arc<dyn CoreExecutorTranscriptNoticeHandle>> {
         None
     }
 

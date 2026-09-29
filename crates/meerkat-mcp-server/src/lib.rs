@@ -4356,6 +4356,12 @@ async fn handle_meerkat_resume(
         }
     }
 
+    // Resume is an attach: resolve a crash-window provisional tail first.
+    state
+        .service
+        .prepare_cold_attach(&session_id)
+        .await
+        .map_err(|e| ToolCallError::internal(format!("Failed to prepare session: {e}")))?;
     let session = state
         .service
         .load_authoritative_session(&session_id)

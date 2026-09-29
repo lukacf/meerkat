@@ -40,6 +40,7 @@ pub use meerkat_atif as atif;
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::spawn;
     pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
@@ -318,6 +319,8 @@ mod factory;
 #[cfg(not(target_arch = "wasm32"))]
 mod host_auth;
 mod model_fallback;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod process_custody;
 #[cfg(not(target_arch = "wasm32"))]
 pub use factory::ExperimentalLiveTargetPreparation;
 pub use factory::{

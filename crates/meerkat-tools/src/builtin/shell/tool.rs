@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::process::Command;
+
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -113,6 +113,19 @@ impl ShellTool {
         self
     }
 
+    fn foreground_process_group(&self, child: &tokio::process::Child) -> OwnedProcessGroup {
+        #[cfg(all(test, unix))]
+        if let Some(config) = self.foreground_process_group_test_config.as_ref() {
+            return OwnedProcessGroup::with_control(
+                child,
+                Arc::clone(&config.control),
+                config.term_grace,
+                config.kill_settle_timeout,
+            );
+        }
+        OwnedProcessGroup::new(child)
+    }
+
     async fn retain_foreground_containment_retry(
         &self,
         mut child: tokio::process::Child,
@@ -207,11 +220,29 @@ impl ShellTool {
     }
 
     /// Execute a command synchronously and return the result
+    #[cfg_attr(not(test), allow(dead_code))]
     async fn execute_command(
         &self,
         command: &str,
         working_dir: Option<&Path>,
         timeout_secs: u64,
+    ) -> Result<ShellOutput, ShellError> {
+        self.execute_command_for_call(command, working_dir, timeout_secs, None, None)
+            .await
+    }
+
+    /// Execute a command synchronously for one provider tool call.
+    ///
+    /// When durable process custody is bound, the process is spawned behind a
+    /// spawn gate that is released only after its identity is durably
+    /// recorded, and the record is settled only after containment is proven.
+    async fn execute_command_for_call(
+        &self,
+        command: &str,
+        working_dir: Option<&Path>,
+        timeout_secs: u64,
+        tool_call_id: Option<&str>,
+        run_id: Option<&meerkat_core::RunId>,
     ) -> Result<ShellOutput, ShellError> {
         // Enforce concurrency limit via job manager
         let _guard = self.job_manager.acquire_sync_slot().await?;
@@ -219,10 +250,6 @@ impl ShellTool {
         let shell_path = self.resolved_shell_path().await?;
 
         let start = Instant::now();
-
-        // Build the command
-        let mut cmd = Command::new(&shell_path);
-        cmd.arg("-c").arg(command);
 
         // Set working directory and capture it as placement metadata. The path
         // is mechanical context only; it is not operation identity.
@@ -235,41 +262,48 @@ impl ShellTool {
             .config
             .execution_placement_for_working_dir_async(&effective_dir)
             .await?;
-        cmd.current_dir(&effective_dir);
-        cmd.env("PWD", &effective_dir);
 
-        // Inject per-agent environment variables
-        cmd.envs(&self.config.env_vars);
-
-        // Capture stdout/stderr
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        // Ensure cancellation contains the direct child even on platforms
-        // without Unix process-group signalling.
-        cmd.kill_on_drop(true);
-
-        // Create new process group on Unix for proper cleanup of child processes.
-        // This ensures that when we kill the process, all its children are also killed.
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        // Spawn the process with timeout
+        // Spawn in a fresh process group under durable custody when bound:
+        // the command runs only after its leader is recorded, and the group
+        // guard exists before it may run.
         let timeout_duration = Duration::from_secs(timeout_secs);
-        let mut child = cmd.spawn().map_err(ShellError::Io)?;
-        #[cfg(all(test, unix))]
-        let mut process_group =
-            if let Some(config) = self.foreground_process_group_test_config.as_ref() {
-                OwnedProcessGroup::with_control(
-                    &child,
-                    Arc::clone(&config.control),
-                    config.term_grace,
-                    config.kill_settle_timeout,
-                )
-            } else {
-                OwnedProcessGroup::new(&child)
-            };
-        #[cfg(not(all(test, unix)))]
-        let mut process_group = OwnedProcessGroup::new(&child);
+        let spawned = super::custody_spawn::spawn_in_custody(
+            &self.job_manager.custody_binding(),
+            super::custody_spawn::SpawnIdentity {
+                spawner: super::ToolProcessSpawner::ShellCall,
+                tool_call_id,
+                run_id,
+            },
+            shell_path.as_os_str(),
+            &[
+                std::ffi::OsString::from("-c"),
+                std::ffi::OsString::from(command),
+            ],
+            |cmd| {
+                cmd.current_dir(&effective_dir);
+                cmd.env("PWD", &effective_dir);
+                // Inject per-agent environment variables
+                cmd.envs(&self.config.env_vars);
+                // Capture stdout/stderr
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
+                // Ensure cancellation contains the direct child even on
+                // platforms without Unix process-group signalling.
+                cmd.kill_on_drop(true);
+                // New process group on Unix so every child of the command is
+                // contained with it.
+                #[cfg(unix)]
+                cmd.process_group(0);
+            },
+            |child| self.foreground_process_group(child),
+        )
+        .await
+        .map_err(ShellError::Io)?;
+        let super::custody_spawn::SpawnedInCustody {
+            mut child,
+            mut process_group,
+            hold: custody,
+        } = spawned;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -314,6 +348,14 @@ impl ShellTool {
         };
 
         let containment_error = containment_result.err();
+        // Settle durable custody only on proven containment. Otherwise the
+        // record stays until the group is proven exited, or for a later
+        // incarnation to recover.
+        if containment_error.is_none() {
+            custody.settle().await;
+        } else {
+            custody.retain();
+        }
         if containment_error.is_some() {
             // Returning an error must not drop the only ownership proof for a
             // still-live process group. Move the armed guard and child handle
@@ -355,10 +397,11 @@ impl ShellTool {
         })
     }
 
-    async fn call_with_tool_call_id(
+    pub(super) async fn call_with_tool_call_id(
         &self,
         args: Value,
         tool_call_id: Option<&str>,
+        run_id: Option<&meerkat_core::RunId>,
     ) -> Result<ToolOutput, BuiltinToolError> {
         let input: ShellInput = serde_json::from_value(args)
             .map_err(|error| BuiltinToolError::invalid_args(error.to_string()))?;
@@ -396,11 +439,12 @@ impl ShellTool {
             let job_id = match tool_call_id {
                 Some(tool_call_id) => {
                     self.job_manager
-                        .spawn_job_for_call(
+                        .spawn_job_for_call_in_run(
                             &input.command,
                             working_dir.as_deref(),
                             timeout_secs,
                             tool_call_id,
+                            run_id,
                         )
                         .await
                 }
@@ -422,7 +466,13 @@ impl ShellTool {
         }
 
         let output = self
-            .execute_command(&input.command, working_dir.as_deref(), timeout_secs)
+            .execute_command_for_call(
+                &input.command,
+                working_dir.as_deref(),
+                timeout_secs,
+                tool_call_id,
+                run_id,
+            )
             .await
             .map_err(|error| {
                 warn!(%error, "Command execution failed");
@@ -608,16 +658,17 @@ impl BuiltinTool for ShellTool {
 
     #[instrument(skip(self, args), fields(tool = "shell"))]
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        self.call_with_tool_call_id(args, None).await
+        self.call_with_tool_call_id(args, None, None).await
     }
 
     async fn call_with_context(
         &self,
         call: ToolCallView<'_>,
         args: Value,
-        _context: &meerkat_core::ToolDispatchContext,
+        context: &meerkat_core::ToolDispatchContext,
     ) -> Result<ToolOutput, BuiltinToolError> {
-        self.call_with_tool_call_id(args, Some(call.id)).await
+        self.call_with_tool_call_id(args, Some(call.id), context.run_id())
+            .await
     }
 
     fn async_ops_for_output(&self, output: &ToolOutput) -> Vec<meerkat_core::ops::AsyncOpRef> {

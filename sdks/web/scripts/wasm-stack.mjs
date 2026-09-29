@@ -44,7 +44,7 @@ const OPCODE_I32_CONST = 0x41;
 const OPCODE_END = 0x0b;
 const NAME_SUBSECTION_GLOBAL = 7;
 
-class Reader {
+export class Reader {
   constructor(bytes, offset = 0, end = bytes.length) {
     this.bytes = bytes;
     this.offset = offset;
@@ -132,7 +132,7 @@ class Reader {
   }
 }
 
-function sections(bytes) {
+export function sections(bytes) {
   const magic = [0x00, 0x61, 0x73, 0x6d];
   if (bytes.length < 8 || magic.some((byte, index) => bytes[index] !== byte)) {
     throw new Error("wasm: not a wasm module (bad magic)");

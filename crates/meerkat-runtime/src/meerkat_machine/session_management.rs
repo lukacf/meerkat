@@ -458,6 +458,12 @@ impl meerkat_core::lifecycle::CoreExecutor for MachineManagedPostStopExecutor {
         self.inner.pre_dequeue_handle()
     }
 
+    fn transcript_notice_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle>> {
+        self.inner.transcript_notice_handle()
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -2121,6 +2127,7 @@ impl MeerkatMachine {
             runtime_stop_cleanup_coordinator: None,
             reload_required_discard_coordinator: None,
             pending_revival_lifecycle_persist: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            interrupted_tool_notices: Arc::default(),
             pending_unregister_finalization: None,
             unregister_teardown_observations: Arc::new(
                 UnregisterTeardownMechanicalObservations::new(),
@@ -2305,6 +2312,7 @@ impl MeerkatMachine {
             runtime_stop_cleanup_coordinator: None,
             reload_required_discard_coordinator: None,
             pending_revival_lifecycle_persist: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            interrupted_tool_notices: Arc::default(),
             pending_unregister_finalization: None,
             unregister_teardown_observations: Arc::new(
                 UnregisterTeardownMechanicalObservations::new(),
@@ -2524,6 +2532,7 @@ impl MeerkatMachine {
             runtime_stop_cleanup_coordinator: None,
             reload_required_discard_coordinator: None,
             pending_revival_lifecycle_persist: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            interrupted_tool_notices: Arc::default(),
             pending_unregister_finalization: None,
             unregister_teardown_observations: recovered_teardown_observations,
             publication_handle: None,
@@ -4300,6 +4309,7 @@ impl MeerkatMachine {
                         pending_revival_lifecycle_persist: Arc::new(
                             std::sync::atomic::AtomicBool::new(false),
                         ),
+                        interrupted_tool_notices: Arc::default(),
                         pending_unregister_finalization: None,
                         unregister_teardown_observations: recovered_teardown_observations,
                         publication_handle: None,
@@ -4812,16 +4822,28 @@ impl MeerkatMachine {
             )));
         }
 
-        Ok(EnsureRuntimeExecutorAttachment::Pending(
-            PendingRuntimeExecutorAttachment::new(
-                Arc::clone(self),
-                witness,
-                pending_guard,
-                cleanup_spawner,
-                should_wake,
-                persist_lifecycle_on_commit,
-            ),
-        ))
+        let mut pending = PendingRuntimeExecutorAttachment::new(
+            Arc::clone(self),
+            witness,
+            pending_guard,
+            cleanup_spawner,
+            should_wake,
+            persist_lifecycle_on_commit,
+        );
+        // Every pending attachment of a session settles the session's
+        // interrupted-run evidence before it can serve, whichever surface
+        // attaches (prepared materialization, RPC on-demand attach, schedule
+        // hosts, detached owners): recovered inputs of a run whose tool
+        // process host custody proved had started are settled, not replayed.
+        // The evidence comes from the canonical session bindings (installed by
+        // an agent build) or, before any build, from the host's evidence
+        // source, which first proves the session's earlier-incarnation tool
+        // processes stopped. A failure drops the pending attachment, which
+        // rolls it back.
+        if let Some(evidence) = self.session_interrupted_tool_evidence(&session_id).await? {
+            pending.settle_interrupted_tool_evidence(evidence).await?;
+        }
+        Ok(EnsureRuntimeExecutorAttachment::Pending(pending))
     }
 
     /// Retire a candidate that exited before its serving gate opened.

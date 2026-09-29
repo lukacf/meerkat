@@ -1035,6 +1035,55 @@ pub(crate) fn durable_fork_unsupported() -> SessionError {
     )
 }
 
+/// A member's agent event subscription, with the exact live actor
+/// incarnation its stream belongs to when the session service knows it.
+///
+/// A known actor's stream ends when that actor ends, and its witness is
+/// revoked before the actor is removed or replaced, so a host can hold a
+/// successor's stream back until a revoked predecessor's stream drained.
+#[non_exhaustive]
+pub struct AgentEventSubscription {
+    /// The member's events.
+    pub stream: EventStream,
+    /// The actor incarnation `stream` belongs to. `None` when the service
+    /// cannot name it (for example a placed member's pump-tap stream).
+    pub actor: Option<meerkat_session::LiveSessionActorWitness>,
+    /// Sequence space of the stream's envelope sequences, to be carried in
+    /// a later [`meerkat_core::comms::SessionEventCursor::After`]. `None`
+    /// when the service cannot name one (a live-only service).
+    pub epoch: Option<meerkat_core::comms::SessionEventEpoch>,
+}
+
+impl AgentEventSubscription {
+    /// A subscription whose actor incarnation is unknown.
+    pub fn without_actor(
+        epoch: Option<meerkat_core::comms::SessionEventEpoch>,
+        stream: EventStream,
+    ) -> Self {
+        Self {
+            stream,
+            actor: None,
+            epoch,
+        }
+    }
+}
+
+impl From<meerkat_session::LiveActorEventSubscription> for AgentEventSubscription {
+    fn from(subscription: meerkat_session::LiveActorEventSubscription) -> Self {
+        Self {
+            stream: subscription.stream,
+            actor: Some(subscription.actor),
+            epoch: Some(subscription.epoch),
+        }
+    }
+}
+
+impl From<meerkat_core::comms::SessionEventSubscription> for AgentEventSubscription {
+    fn from(subscription: meerkat_core::comms::SessionEventSubscription) -> Self {
+        Self::without_actor(subscription.epoch, subscription.stream)
+    }
+}
+
 /// Extension trait for session services used by the mob runtime.
 ///
 /// Builds on `SessionServiceCommsExt` from core so mob orchestration can use
@@ -1044,6 +1093,21 @@ pub(crate) fn durable_fork_unsupported() -> SessionError {
 pub trait MobSessionService:
     SessionServiceCommsExt + SessionServiceControlExt + SessionServiceHistoryExt
 {
+    /// Record a typed system notice in the live session's durable transcript
+    /// without a turn (no model call). The caller holds the runtime
+    /// turn-finalization boundary and the actor is idle. Services without
+    /// durable sessions keep the default, and the runtime keeps the notice
+    /// owed for a later materialization.
+    async fn append_system_notice_under_runtime_turn_boundary(
+        &self,
+        _session_id: &SessionId,
+        _record: meerkat_core::types::SystemNoticeRecord,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "typed system-notice append is not supported by this session service".to_string(),
+        ))
+    }
+
     /// Commit one provider-final client-delegation transcript through the
     /// canonical session actor, SessionDocument authority, and runtime-backed
     /// persistent projection.
@@ -1213,6 +1277,30 @@ pub trait MobSessionService:
         session_id: &SessionId,
     ) -> Result<EventStream, StreamError> {
         <Self as SessionService>::subscribe_session_events(self, session_id).await
+    }
+
+    /// Subscribe to a member session's events starting at a typed cursor,
+    /// together with the exact live actor incarnation the stream belongs to
+    /// when the service knows it.
+    ///
+    /// Decorators must forward this. The default names no actor witness: a
+    /// live cursor keeps [`Self::subscribe_session_events`], and a replaying
+    /// cursor delegates to `SessionService::subscribe_session_events_from`,
+    /// whose own default refuses it as `ReplayUnsupported`.
+    async fn subscribe_agent_session_events_from(
+        &self,
+        session_id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<AgentEventSubscription, StreamError> {
+        if cursor == meerkat_core::comms::SessionEventCursor::Live {
+            return Ok(AgentEventSubscription::without_actor(
+                None,
+                MobSessionService::subscribe_session_events(self, session_id).await?,
+            ));
+        }
+        <Self as SessionService>::subscribe_session_events_from(self, session_id, cursor)
+            .await
+            .map(AgentEventSubscription::from)
     }
 
     /// Whether this service satisfies the persistent-session contract required
@@ -2418,6 +2506,18 @@ where
             .await
     }
 
+    async fn subscribe_agent_session_events_from(
+        &self,
+        session_id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<AgentEventSubscription, StreamError> {
+        meerkat_session::EphemeralSessionService::<B>::subscribe_live_actor_session_events_from(
+            self, session_id, cursor,
+        )
+        .await
+        .map(AgentEventSubscription::from)
+    }
+
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
         meerkat_session::EphemeralSessionService::<B>::discard_live_session(self, session_id).await
     }
@@ -2533,6 +2633,18 @@ impl<B> MobSessionService for meerkat_session::PersistentSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    async fn append_system_notice_under_runtime_turn_boundary(
+        &self,
+        session_id: &SessionId,
+        record: meerkat_core::types::SystemNoticeRecord,
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::append_system_notice_under_runtime_turn_boundary(
+            self, session_id, record,
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn publish_boundary_appends_discarded_for_actor(
         &self,
         actor_witness: &meerkat_session::LiveSessionActorWitness,
@@ -3368,6 +3480,18 @@ where
     ) -> Result<EventStream, StreamError> {
         meerkat_session::PersistentSessionService::<B>::subscribe_session_events(self, session_id)
             .await
+    }
+
+    async fn subscribe_agent_session_events_from(
+        &self,
+        session_id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<AgentEventSubscription, StreamError> {
+        meerkat_session::PersistentSessionService::<B>::subscribe_live_actor_session_events_from(
+            self, session_id, cursor,
+        )
+        .await
+        .map(AgentEventSubscription::from)
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {

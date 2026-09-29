@@ -51,6 +51,7 @@ pub use workgraph_flow::{
 #[cfg(target_arch = "wasm32")]
 mod tokio {
     pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::spawn;
     pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
@@ -3218,6 +3219,21 @@ impl MobMcpState {
         handle.subscribe_agent_events(identity).await
     }
 
+    /// Subscribe to agent-level events for a specific member, starting at a
+    /// typed cursor; see [`meerkat_mob::MobHandle::subscribe_agent_events_from`].
+    ///
+    /// (b) gate at subscription admission only (ADJ-P5-17).
+    pub async fn subscribe_agent_events_from(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_mob::AgentEventSubscription, MobError> {
+        let handle = self.handle_for(mob_id).await?;
+        self.require_console_scope(&handle, ControlScope::SubscribeEvents)?;
+        handle.subscribe_agent_events_from(identity, cursor).await
+    }
+
     /// Find the implicit delegation mob for the given bridge session, if one exists.
     ///
     /// Scans the in-memory mob registry for a mob whose generated MobMachine
@@ -3716,6 +3732,21 @@ impl MobMcpState {
         self.handle_for(mob_id)
             .await?
             .hard_cancel_member(self.console_principal.clone(), identity, reason)
+            .await
+    }
+
+    /// Run-fenced Stop of one exact member run, as the console principal.
+    /// A stale run id is the typed `NotCurrent` receipt.
+    pub async fn mob_stop_member_run(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+        run_id: meerkat_core::lifecycle::RunId,
+        reason: String,
+    ) -> Result<meerkat_contracts::WireRunStopReceipt, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .stop_member_run(self.console_principal.clone(), identity, run_id, reason)
             .await
     }
 

@@ -36,13 +36,16 @@ TERMS=(
   "/sessions/{session_id}/inputs/{input_id}"
 )
 
+# A missing path is an error, not a skip: after the crates/ layout move this
+# list silently stopped scanning the three crates because they were listed
+# without the crates/ prefix.
 SCAN_PATHS=(
   "docs"
   "sdks"
   "artifacts"
-  "meerkat-contracts"
-  "meerkat-rest"
-  "meerkat-rpc"
+  "crates/meerkat-contracts"
+  "crates/meerkat-rest"
+  "crates/meerkat-rpc"
   "tools/sdk-codegen"
 )
 
@@ -50,7 +53,8 @@ matches=()
 for term in "${TERMS[@]}"; do
   for scan_path in "${SCAN_PATHS[@]}"; do
     if [ ! -e "$ROOT_DIR/$scan_path" ]; then
-      continue
+      echo "session-control public-name scan path does not exist: $scan_path" >&2
+      exit 2
     fi
     while IFS= read -r line; do
       [[ -z "$line" ]] && continue
@@ -69,6 +73,7 @@ for term in "${TERMS[@]}"; do
         --glob '!.rct/**' \
         --glob '!docs/dogma-*.md' \
         --glob '!docs/wave-*-prep/**' \
+        --glob '!docs/internal/archive/**' \
         "$ROOT_DIR/$scan_path" || true
     )
   done

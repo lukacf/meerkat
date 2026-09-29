@@ -12,6 +12,7 @@
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::spawn;
     pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
@@ -37,10 +38,10 @@ pub mod persistent;
 pub mod projector;
 
 pub use ephemeral::{
-    EphemeralSessionService, LiveBridgePreparedSessionOperation, LiveBridgeSessionOperationRequest,
-    LiveBridgeSessionOperationTerminalReceiver, LiveSessionActorRegistry, LiveSessionActorWitness,
-    LiveSessionActorWitnessSlot, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
-    SessionSnapshot,
+    EphemeralSessionService, LiveActorEventSubscription, LiveBridgePreparedSessionOperation,
+    LiveBridgeSessionOperationRequest, LiveBridgeSessionOperationTerminalReceiver,
+    LiveSessionActorRegistry, LiveSessionActorWitness, LiveSessionActorWitnessSlot,
+    RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder, SessionSnapshot,
 };
 pub use live_durable_source::LiveDurableSourceObservation;
 pub use live_transcript_authority::LiveAssistantPlaybackObservationResult;
@@ -64,11 +65,11 @@ pub use compactor::DefaultCompactor;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistent::{
     CommittedBoundaryRecovery, CommittedBoundaryResumePreparationReceipt,
-    DurableSessionForkWithProvenance, LiveContextCommittedBoundary,
-    LiveSessionActorTurnBoundaryLease, MachineServiceTurnCommitProtocol,
-    MachineSessionArchiveProtocol, PersistentSessionService, PreparedActorSessionSeed,
-    PreparedCommittedBoundaryResume, PreparedCommittedBoundaryResumeMaterialization,
-    PreparedCommittedBoundaryResumeUnavailable,
+    DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES, DurableSessionForkWithProvenance,
+    LiveContextCommittedBoundary, LiveSessionActorTurnBoundaryLease,
+    MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
+    PreparedActorSessionSeed, PreparedCommittedBoundaryResume,
+    PreparedCommittedBoundaryResumeMaterialization, PreparedCommittedBoundaryResumeUnavailable,
 };
 
 // Skill registration (inventory + meerkat-skills not available on wasm32)

@@ -82,6 +82,40 @@ const GPT56_RESPONSES_PARAMS: OpenAiResponsesParamCapabilities = OpenAiResponses
         OpenAiPromptCacheMode::Implicit,
         OpenAiPromptCacheMode::Explicit,
     ],
+    default_prompt_cache_mode: Some(OpenAiPromptCacheMode::Explicit),
+    prompt_cache_ttls: &[OpenAiPromptCacheTtl::ThirtyMinutes],
+    supports_in_memory_prompt_cache_retention: false,
+};
+
+/// GPT-6 prompt-cache controls. The reasoning-mode, reasoning-context and
+/// text-verbosity ladders are GPT-5.6-only controls and stay empty here; only
+/// the prompt-cache regime is shared.
+///
+/// Sources:
+///   - https://developers.openai.com/api/docs/guides/prompt-caching
+///     ("GPT-5.6 and later": implicit breakpoints at the end of the latest
+///     eligible message, explicit breakpoints supported, `30m` TTL only; "You
+///     can add explicit breakpoints without turning off the implicit
+///     breakpoint")
+///   - https://developers.openai.com/api/docs/guides/latest-model
+///     (gpt-6-astra is the latest model; migrating replaces
+///     `prompt_cache_retention` with `prompt_cache_options.ttl` = `"30m"`)
+///   - https://developers.openai.com/api/docs/models/gpt-6-astra
+///     (prompt caching supported, priced cache writes)
+const GPT6_RESPONSES_PARAMS: OpenAiResponsesParamCapabilities = OpenAiResponsesParamCapabilities {
+    reasoning_modes: &[],
+    reasoning_contexts: &[],
+    text_verbosity_levels: &[],
+    prompt_cache_modes: &[
+        OpenAiPromptCacheMode::Implicit,
+        OpenAiPromptCacheMode::Explicit,
+    ],
+    // Implicit by default: explicit mode marks every input, which would
+    // re-bill each live session's transcript once when adopted and relies on
+    // unspecified behaviour when more than four marked prefixes are
+    // uncached. Implicit mode plus the single turn anchor keeps fork_off
+    // children cacheable (#1235). Explicit stays available as an opt-in.
+    default_prompt_cache_mode: Some(OpenAiPromptCacheMode::Implicit),
     prompt_cache_ttls: &[OpenAiPromptCacheTtl::ThirtyMinutes],
     supports_in_memory_prompt_cache_retention: false,
 };
@@ -119,7 +153,8 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // Source: https://developers.openai.com/api/docs/models/gpt-6-astra
     // Text/image input and text output through ordinary Responses function
     // calling. The output allowance includes reasoning tokens. GPT-5.6-only
-    // controls and non-OpenAI backend support are not implied by this row.
+    // reasoning controls and non-OpenAI backend support are not implied by
+    // this row; the GPT-5.6-and-later prompt-cache regime is.
     ModelCapabilities {
         id: "gpt-6-astra",
         provider: Provider::OpenAI,
@@ -148,7 +183,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         thinking: ThinkingSupport::None,
         supports_reasoning: true,
         effort_levels: GPT6_ASTRA_EFFORT,
-        openai_responses_params: None,
+        openai_responses_params: Some(GPT6_RESPONSES_PARAMS),
         supports_web_search: true,
         supports_mid_conversation_system_messages: true,
         supports_inference_geo: false,
@@ -193,7 +228,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         thinking: ThinkingSupport::None,
         supports_reasoning: true,
         effort_levels: GPT6_SOL_LUNA_EFFORT,
-        openai_responses_params: None,
+        openai_responses_params: Some(GPT6_RESPONSES_PARAMS),
         supports_web_search: true,
         supports_mid_conversation_system_messages: true,
         supports_inference_geo: false,
@@ -238,7 +273,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         thinking: ThinkingSupport::None,
         supports_reasoning: true,
         effort_levels: GPT6_SOL_LUNA_EFFORT,
-        openai_responses_params: None,
+        openai_responses_params: Some(GPT6_RESPONSES_PARAMS),
         supports_web_search: true,
         supports_mid_conversation_system_messages: true,
         supports_inference_geo: false,

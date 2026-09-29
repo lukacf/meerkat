@@ -981,6 +981,44 @@ describe("Typed Events", () => {
     }
   });
 
+  it("should parse no_skill_engine with every requested key", () => {
+    const sourceUuid = "00000000-0000-4b11-8111-000000000001";
+    const event = parseEvent({
+      type: "skill_resolution_failed",
+      skill_key: { source_uuid: sourceUuid, skill_name: "email-extractor" },
+      reason: {
+        reason_type: "no_skill_engine",
+        requested: [
+          { source_uuid: sourceUuid, skill_name: "email-extractor" },
+          { source_uuid: sourceUuid, skill_name: "summarizer" },
+        ],
+      },
+    });
+
+    assert.equal(event.type, "skill_resolution_failed");
+    if (event.type === "skill_resolution_failed") {
+      assert.deepEqual(event.reason, {
+        reasonType: "no_skill_engine",
+        requested: [
+          { sourceUuid, skillName: "email-extractor" },
+          { sourceUuid, skillName: "summarizer" },
+        ],
+      });
+    }
+  });
+
+  it("should not fabricate no_skill_engine from malformed requested keys", () => {
+    const event = parseEvent({
+      type: "skill_resolution_failed",
+      reason: { reason_type: "no_skill_engine", requested: [{ skill_name: "x" }] },
+    });
+
+    assert.equal(event.type, "skill_resolution_failed");
+    if (event.type === "skill_resolution_failed") {
+      assert.equal(event.reason, undefined);
+    }
+  });
+
   it("should parse legacy skill_resolution_failed payloads", () => {
     const event = parseEvent({
       type: "skill_resolution_failed",

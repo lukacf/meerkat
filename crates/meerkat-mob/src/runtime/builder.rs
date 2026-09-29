@@ -1182,6 +1182,84 @@ pub(super) fn register_seeded_member_peer(
     )
 }
 
+/// Typed reason for a restored member whose comms endpoint cannot be
+/// published. Both resume paths (cold boot and explicit Resume) record it the
+/// same way, so a host reads one reason naming the defect and the repair.
+pub(super) fn member_endpoint_broken_reason(
+    agent_identity: &AgentIdentity,
+    detail: &str,
+) -> String {
+    format!(
+        "restored member '{agent_identity}' cannot publish its comms endpoint: {detail}; respawn the member to mint a new endpoint"
+    )
+}
+
+/// Detail for a live endpoint that disagrees with the member's durable
+/// generation endpoint (a lost identity store, a changed advertise address).
+pub(super) fn member_endpoint_mismatch_detail(
+    live: &crate::machines::mob_machine::MemberPeerEndpoint,
+    durable: &crate::machines::mob_machine::MemberPeerEndpoint,
+) -> String {
+    format!(
+        "live endpoint (peer '{}' at '{}') disagrees with its durable generation endpoint (peer '{}' at '{}')",
+        live.peer_id.0, live.address.0, durable.peer_id.0, durable.address.0
+    )
+}
+
+/// Why an observed member endpoint cannot be published against the member's
+/// durable generation endpoint, or `None` when they agree. A missing durable
+/// endpoint is itself a defect (`missing` names it): nothing durable vouches
+/// for the observed endpoint.
+pub(super) fn member_endpoint_defect(
+    durable: Option<&crate::machines::mob_machine::MemberPeerEndpoint>,
+    observed: &crate::machines::mob_machine::MemberPeerEndpoint,
+    missing: &str,
+) -> Option<String> {
+    match durable {
+        Some(durable) if durable == observed => None,
+        Some(durable) => Some(member_endpoint_mismatch_detail(observed, durable)),
+        None => Some(missing.to_string()),
+    }
+}
+
+/// Cold-boot twin of explicit Resume's per-member endpoint isolation: record
+/// only this member Broken (typed MobMachine restore failure plus the handle
+/// diagnostic), clear its projection, and let the rest of the mob boot.
+async fn record_seeded_member_endpoint_broken(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    roster: &mut Roster,
+    restore_diagnostics: &RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>,
+    entry: &RosterEntry,
+    detail: &str,
+) -> Result<(), MobError> {
+    let reason = member_endpoint_broken_reason(&entry.agent_identity, detail);
+    apply_seeded_mob_signal(
+        authority,
+        crate::machines::mob_machine::MobMachineSignal::RecoverMemberRestoreFailure {
+            agent_identity: crate::machines::mob_machine::AgentIdentity::from_domain(
+                &entry.agent_identity,
+            ),
+            reason: reason.clone(),
+        },
+        "resume_seeded_member_endpoint_broken",
+    )?;
+    let _ = roster.set_comms_identity(&entry.agent_identity, None, None);
+    tracing::error!(
+        agent_identity = %entry.agent_identity,
+        reason = %reason,
+        "restored member endpoint is unusable; marked member broken"
+    );
+    restore_diagnostics.write().await.insert(
+        entry.agent_identity.clone(),
+        super::handle::RestoreFailureDiagnostic {
+            bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
+            reason,
+            hold: None,
+        },
+    );
+    Ok(())
+}
+
 fn recovered_session_bindings_without_endpoint(
     events: &[crate::event::MobEvent],
 ) -> HashMap<AgentIdentity, (AgentRuntimeId, SessionId)> {
@@ -1520,7 +1598,7 @@ impl SeededMobTopologyFreshness
     }
 }
 
-fn apply_seeded_mob_signal(
+pub(super) fn apply_seeded_mob_signal(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     signal: crate::machines::mob_machine::MobMachineSignal,
     context: &'static str,
@@ -1951,6 +2029,7 @@ pub(super) async fn reconcile_resume_topology(
     runtime_metadata: &Arc<dyn crate::store::MobRuntimeMetadataStore>,
     dsl_authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     topology_epoch: &Arc<std::sync::atomic::AtomicU64>,
+    restore_diagnostics: &RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>,
 ) -> Result<(), MobError> {
     use super::actor::resume_topology;
 
@@ -1965,6 +2044,7 @@ pub(super) async fn reconcile_resume_topology(
     // these effects run. An unsettled effect is reported to the caller instead
     // of being handed to an owner that does not exist.
     let mut custody = resume_topology::ResumeTopologyEffectCustodyLedger::default();
+    let mut restore_failures = Vec::new();
     let mut router = resume_topology::DirectResumeTopologyAuthority::new(
         resume_topology::ResumeTopologyAuthorityContext {
             mob_id: &definition.id,
@@ -1972,9 +2052,14 @@ pub(super) async fn reconcile_resume_topology(
             roster,
             topology_epoch,
             custody: &mut custody,
+            restore_failures: &mut restore_failures,
         },
     );
-    match resume_topology::reconcile_resume_topology_workflow(&io, &mut router).await {
+    let outcome = resume_topology::reconcile_resume_topology_workflow(&io, &mut router).await;
+    if !restore_failures.is_empty() {
+        restore_diagnostics.write().await.extend(restore_failures);
+    }
+    match outcome {
         resume_topology::ResumeTopologyOutcome::Settled(result) => result,
         resume_topology::ResumeTopologyOutcome::Unsettled(effect) => {
             Err(MobError::ExternalMemberCleanupUncertain {
@@ -2701,6 +2786,25 @@ fn record_recovered_route_install_obligations(
 ) {
     use crate::machines::mob_machine as mob_dsl;
 
+    let external: Vec<mob_dsl::ExternalRouteObligation> =
+        super::derive_external_install_obligations(authority.state(), None)
+            .into_iter()
+            .collect();
+    for obligation in external {
+        if let Err(error) = mob_dsl::MobMachineMutator::apply(
+            authority,
+            mob_dsl::MobMachineInput::RecordExternalRouteInstall {
+                obligation: obligation.clone(),
+            },
+        ) {
+            tracing::debug!(
+                mob_id = %mob_id,
+                host = %obligation.host.as_str(),
+                %error,
+                "recovery external route-install re-derive skipped by machine admission"
+            );
+        }
+    }
     let derived: Vec<mob_dsl::RouteInstallObligation> =
         super::derive_install_obligations(authority.state(), None)
             .into_iter()
@@ -9239,23 +9343,20 @@ impl MobBuilder {
                 continue;
             }
             if let Some(comms_a) = provisioner.comms_runtime(&entry.member_ref).await {
-                let peer_id_a = comms_a.peer_id().ok_or_else(|| {
-                    MobError::WiringError(format!(
-                        "resume requires peer id for wired member '{}'",
-                        entry.agent_identity
-                    ))
-                })?;
-                let key_a = comms_a.public_key().ok_or_else(|| {
-                    MobError::WiringError(format!(
-                        "resume requires public key for wired member '{}'",
-                        entry.agent_identity
-                    ))
-                })?;
-                let _ = roster.set_comms_identity(
-                    &entry.agent_identity,
-                    Some(peer_id_a),
-                    Some(key_a.clone()),
-                );
+                // Per-member isolation (#1262): an unusable or changed live
+                // endpoint breaks only this member, never the whole boot.
+                let (Some(peer_id_a), Some(key_a)) = (comms_a.peer_id(), comms_a.public_key())
+                else {
+                    record_seeded_member_endpoint_broken(
+                        dsl_authority,
+                        roster,
+                        &tool_handle.restore_diagnostics,
+                        entry,
+                        "its live comms runtime exposes no peer id or public key",
+                    )
+                    .await?;
+                    continue;
+                };
                 let name_a = super::actor::render_member_comms_name(
                     definition.id.as_str(),
                     entry.role.as_str(),
@@ -9277,6 +9378,31 @@ impl MobBuilder {
                                         && recovered_session_id == bridge_session_id
                                 })
                     });
+                if !recovered_binding_without_endpoint {
+                    let candidate = crate::machines::mob_machine::MemberPeerEndpoint::from(&spec);
+                    if let Some(durable) = dsl_authority
+                        .state()
+                        .member_peer_endpoints
+                        .get(&dsl_identity)
+                        .filter(|durable| *durable != &candidate)
+                        .cloned()
+                    {
+                        record_seeded_member_endpoint_broken(
+                            dsl_authority,
+                            roster,
+                            &tool_handle.restore_diagnostics,
+                            entry,
+                            &member_endpoint_mismatch_detail(&candidate, &durable),
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+                let _ = roster.set_comms_identity(
+                    &entry.agent_identity,
+                    Some(peer_id_a),
+                    Some(key_a.clone()),
+                );
                 if recovered_binding_without_endpoint {
                     let bridge_session_id =
                         entry.member_ref.bridge_session_id().ok_or_else(|| {
@@ -9352,6 +9478,7 @@ impl MobBuilder {
             &runtime_metadata,
             dsl_authority,
             topology_epoch,
+            &tool_handle.restore_diagnostics,
         )
         .await?;
         if notify_orchestrator_on_resume && let Some(orchestrator) = &definition.orchestrator {
@@ -14332,5 +14459,58 @@ mod tests {
         )
         .expect("revoked remote terminal proof should clear the runtime checkpoint");
         assert!(authority.state().remote_runtime_retired_ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod member_endpoint_defect_tests {
+    use super::member_endpoint_defect;
+    use crate::machines::mob_machine as mob_dsl;
+
+    fn endpoint(seed: u8, address: &str) -> mob_dsl::MemberPeerEndpoint {
+        let signing_key = [seed; 32];
+        mob_dsl::MemberPeerEndpoint {
+            name: mob_dsl::PeerName("mob/worker/member".to_string()),
+            peer_id: mob_dsl::PeerId(
+                meerkat_core::comms::PeerId::from_ed25519_pubkey(&signing_key).to_string(),
+            ),
+            address: mob_dsl::PeerAddress(address.to_string()),
+            signing_key: mob_dsl::PeerSigningKey(signing_key),
+        }
+    }
+
+    #[test]
+    fn matching_endpoint_has_no_defect() {
+        let durable = endpoint(3, "tcp://host.test:4200");
+        assert_eq!(
+            member_endpoint_defect(Some(&durable), &durable.clone(), "missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_new_key_is_a_mismatch_naming_both_peers() {
+        let durable = endpoint(3, "tcp://host.test:4200");
+        let revived = endpoint(4, "tcp://host.test:4200");
+        let defect = member_endpoint_defect(Some(&durable), &revived, "missing")
+            .expect("a revived runtime under a new key is a defect");
+        assert!(defect.contains("disagrees with its durable generation endpoint"));
+        assert!(defect.contains(&durable.peer_id.0) && defect.contains(&revived.peer_id.0));
+    }
+
+    #[test]
+    fn a_changed_address_is_a_mismatch() {
+        let durable = endpoint(3, "tcp://host.test:4200");
+        let moved = endpoint(3, "tcp://other.test:4200");
+        assert!(member_endpoint_defect(Some(&durable), &moved, "missing").is_some());
+    }
+
+    #[test]
+    fn a_missing_durable_endpoint_is_a_defect() {
+        let revived = endpoint(3, "tcp://host.test:4200");
+        assert_eq!(
+            member_endpoint_defect(None, &revived, "no durable endpoint"),
+            Some("no durable endpoint".to_string())
+        );
     }
 }

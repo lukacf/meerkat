@@ -36,6 +36,7 @@
 //! - `mob_member_status(mob_id, agent_identity)` → JSON member snapshot
 //! - `mob_respawn(mob_id, agent_identity, initial_message?)` → JSON result envelope
 //! - `mob_force_cancel(mob_id, agent_identity)`
+//! - `mob_stop_member_run(mob_id, agent_identity, run_id, reason)` → JSON run-stop receipt
 //! - `mob_spawn_helper(mob_id, request_json)` → JSON helper result
 //! - `mob_fork_helper(mob_id, request_json)` → JSON helper result
 //! - `mob_run_flow(mob_id, flow_id, params_json)` → run_id
@@ -51,6 +52,7 @@
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::spawn;
     pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
@@ -1918,6 +1920,35 @@ pub async fn interrupt_session(handle: u32) -> Result<(), JsValue> {
         .map_err(err_ephemeral_runtime)
 }
 
+/// Run-fenced Stop: stop the exact `run_id` of this session and terminalize
+/// every contributor bound to it. Resolves to the JSON `WireRunStopReceipt`;
+/// a stale run id is the `not_current` receipt, never an error.
+#[wasm_bindgen]
+pub async fn stop_session_run(
+    handle: u32,
+    run_id: String,
+    reason: String,
+) -> Result<JsValue, JsValue> {
+    let (machine, session_id) = with_runtime_state(|state| {
+        let session = state
+            .sessions
+            .get(&handle)
+            .ok_or_else(|| err_invalid_session_handle(handle))?;
+        Ok((state.machine.clone(), session.session_id.clone()))
+    })?;
+    let run_id = meerkat::surface::parse_wire_run_id(&run_id)
+        .map_err(|error| err_str("invalid_params", error))?;
+    let receipt = machine
+        .stop_run(&session_id, &run_id, reason)
+        .await
+        .map_err(err_runtime)?;
+    let receipt = meerkat::surface::wire_run_stop_receipt(&receipt)
+        .map_err(|error| err_str("internal_error", error))?;
+    serde_json::to_string(&receipt)
+        .map(|json| JsValue::from_str(&json))
+        .map_err(|error| err_str("internal_error", error))
+}
+
 /// Install directional trust from one direct session to another local session.
 #[wasm_bindgen]
 pub async fn session_wire_peer(handle: u32, peer_handle: u32) -> Result<(), JsValue> {
@@ -2754,6 +2785,28 @@ pub async fn mob_force_cancel(mob_id: &str, agent_identity: &str) -> Result<(), 
     let id = MobId::from(mob_id);
     let mid = AgentIdentity::from(agent_identity);
     mob_state.mob_force_cancel(&id, mid).await.map_err(err_mob)
+}
+
+/// Run-fenced Stop of one exact mob member run. Resolves to the JSON
+/// `WireRunStopReceipt`; a stale run id is the `not_current` receipt.
+#[wasm_bindgen]
+pub async fn mob_stop_member_run(
+    mob_id: &str,
+    agent_identity: &str,
+    run_id: String,
+    reason: String,
+) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let mid = AgentIdentity::from(agent_identity);
+    let run_id = meerkat::surface::parse_wire_run_id(&run_id)
+        .map_err(|error| err_str("invalid_params", error))?;
+    let receipt = mob_state
+        .mob_stop_member_run(&id, mid, run_id, reason)
+        .await
+        .map_err(err_mob)?;
+    let json = serde_json::to_string(&receipt).map_err(|e| err_str("serialize", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 /// Spawn a short-lived helper and return its terminal result.

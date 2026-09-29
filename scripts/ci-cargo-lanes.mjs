@@ -402,6 +402,7 @@ function plan(args) {
     unmapped_rust_paths: [],
     generated_contract: false,
     machine_authority: false,
+    machine_posters: false,
     wasm: false,
     sdk_host: false,
     bazel_graph: false,
@@ -451,6 +452,7 @@ function plan(args) {
   if (changed !== null) {
     result.generated_contract = runClassifier("scripts/generated-contract-ratchet-changed", changed);
     result.machine_authority = runClassifier("scripts/machine-authority-changed", changed);
+    result.machine_posters = runClassifier("scripts/machine-posters-changed", changed);
     result.sdk_host = changed.some(
       (path) =>
         path.startsWith("sdks/python/") ||
@@ -474,6 +476,7 @@ function plan(args) {
   } else {
     result.generated_contract = true;
     result.machine_authority = true;
+    result.machine_posters = true;
     result.sdk_host = true;
     result.wasm = true;
     result.bazel_graph = true;
@@ -635,6 +638,7 @@ function githubOutput(result) {
   scalar("reason", result.reason.replaceAll("\n", " "));
   scalar("generated_contract", String(result.generated_contract));
   scalar("machine_authority", String(result.machine_authority));
+  scalar("machine_posters", String(result.machine_posters));
   scalar("wasm", String(result.wasm));
   scalar("sdk_host", String(result.sdk_host));
   scalar("bazel_graph", String(result.bazel_graph));

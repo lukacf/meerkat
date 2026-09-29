@@ -37,6 +37,11 @@ pub enum CompositeDispatcherError {
     Io(#[from] std::io::Error),
     #[error("Tool initialization failed for '{name}': {message}")]
     ToolInitFailed { name: String, message: String },
+    /// Earlier-incarnation shell tool processes of the session could not be
+    /// proven stopped; see the error for the operator action.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("shell process custody: {0}")]
+    ProcessCustody(#[from] crate::builtin::shell::ProcessCustodyError),
 }
 
 /// Convert a `ToolOutput::Json` success into typed tool-result content.
@@ -1153,6 +1158,21 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 owned.durable_shell_runtime.clone(),
             )
             .map_err(|_| OpsLifecycleBindError::Unsupported)?;
+
+            // The rebuilt shell job manager must keep the durable process
+            // custody the host bound to the original one; otherwise shell
+            // processes would run outside custody after the rebind.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let (Some(custody), Some(rebound_manager)) = (
+                owned
+                    .job_manager
+                    .as_ref()
+                    .and_then(|manager| manager.bound_process_custody()),
+                rebound.job_manager.as_ref(),
+            ) && rebound_manager.bind_process_custody(custody).is_err()
+            {
+                return Err(OpsLifecycleBindError::Unsupported);
+            }
 
             #[cfg(feature = "skills")]
             if let Some(skill_tools) = owned.skill_tools.take() {
@@ -2431,6 +2451,81 @@ mod tests {
             .unwrap()
             .into_dispatcher();
         assert_advertised_order(&*rebound, &canonical_order);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn shell_process_custody_survives_ops_lifecycle_rebind() {
+        use crate::builtin::shell::{
+            ProcessCustody, ProcessCustodyScope, SecurityMode, ShellConfig,
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+        let session_id = SessionId::new();
+        let shell = ShellConfig {
+            enabled: true,
+            shell: "sh".to_string(),
+            shell_path: Some(std::path::PathBuf::from("/bin/sh")),
+            project_root: temp_dir.path().to_path_buf(),
+            security_mode: SecurityMode::Unrestricted,
+            ..Default::default()
+        };
+        let config = BuiltinToolConfig {
+            policy: ToolPolicyLayer::new().enable_tool("shell"),
+            ..Default::default()
+        };
+        let dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &config,
+            Some(temp_dir.path().to_path_buf()),
+            Some(shell),
+            None,
+            Some(session_id.to_string()),
+        )
+        .unwrap();
+        let custody_root = temp_dir.path().join("custody");
+        let (custody, _) = ProcessCustody::recover_and_open(
+            &custody_root,
+            ProcessCustodyScope::session(&session_id),
+        )
+        .await
+        .unwrap();
+        dispatcher
+            .shell_job_manager()
+            .unwrap()
+            .bind_process_custody(custody)
+            .unwrap();
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, session_id.clone())
+            .unwrap()
+            .into_dispatcher();
+
+        let scope_dir = custody_root.join(session_id.to_string());
+        let listing = temp_dir.path().join("listing");
+        let args = serde_json::value::RawValue::from_string(
+            json!({
+                "command": format!("ls '{}' > '{}'", scope_dir.display(), listing.display())
+            })
+            .to_string(),
+        )
+        .unwrap();
+        rebound
+            .dispatch(ToolCallView {
+                id: "call-rebind",
+                name: "shell",
+                args: &args,
+            })
+            .await
+            .unwrap();
+
+        let recorded = std::fs::read_to_string(&listing).unwrap();
+        assert!(
+            recorded.contains(".json"),
+            "the rebound shell must still run in custody: {recorded:?}"
+        );
     }
 
     #[tokio::test]

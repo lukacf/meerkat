@@ -572,6 +572,35 @@ class SessionExternalEventParamsPeerResponseTerminal(TypedDict, total=False):
 
 SessionExternalEventParams = SessionExternalEventParamsGenericJson | SessionExternalEventParamsPeerResponseTerminal
 
+# Typed receipt of a run-fenced Stop.
+class WireRunStopReceiptStopped(TypedDict, total=False):
+    contributors: Required[list[WireRunStopContributor]]
+    outcome: Required[Literal['stopped']]
+    run_id: Required[str]
+
+class WireRunStopReceiptNotCurrent(TypedDict, total=False):
+    current_run_id: NotRequired[Optional[str]]
+    outcome: Required[Literal['not_current']]
+    run_id: Required[str]
+
+class WireRunStopReceiptNotStoppable(TypedDict, total=False):
+    outcome: Required[Literal['not_stoppable']]
+    run_id: Required[str]
+    state: Required[WireRuntimeState]
+
+WireRunStopReceipt = WireRunStopReceiptStopped | WireRunStopReceiptNotCurrent | WireRunStopReceiptNotStoppable
+
+# Completion class delivered to one contributor of a stopped run.
+#
+# A batch contributor of a cancelled run receives `cancelled`. An
+# unretained durable Steer join is terminalized through the runtime
+# termination carrier, so its completion is `runtime_terminated` while its
+# committed terminal is `cancelled`: read `terminal` for the lifecycle fact.
+WireRunStopCompletion = Literal['completed', 'completed_without_result', 'callback_pending', 'cancelled', 'abandoned', 'abandoned_with_error', 'completed_with_finalization_failure', 'runtime_terminated']
+
+# Typed wire projection of an input's terminal outcome.
+WireInputTerminalOutcome = Literal['completed', 'abandoned', 'superseded', 'coalesced', 'cancelled']
+
 # `auth/login/device_complete` success body.
 class WireDeviceCompleteResultPending(TypedDict, total=False):
     state: Required[Literal['pending']]
@@ -994,6 +1023,32 @@ class InstructionRevisionRef:
 class InterruptParams:
     """Parameters for `turn/interrupt`."""
     session_id: str
+
+
+@dataclass
+class StopRunParams:
+    """Parameters for `turn/stop_run`.
+
+`run_id` is the exact run to stop. Clients learn it from the
+`run_started` event (`identity.run_id`) or from an input's `last_run_id`."""
+    reason: str
+    run_id: str
+    session_id: str
+
+
+@dataclass
+class StopRunResult:
+    """Result for `turn/stop_run` and its REST route."""
+    receipt: WireRunStopReceipt
+    session_id: str
+
+
+@dataclass
+class WireRunStopContributor:
+    """One input that contributed to a stopped run."""
+    completion: WireRunStopCompletion
+    input_id: str
+    terminal: Optional[WireInputTerminalOutcome] = None
 
 
 @dataclass
@@ -2782,6 +2837,7 @@ class MobRouteInstallsResult:
     """Response payload for the route-install status projection."""
     complete: bool
     outstanding: list[WireRouteInstallObligation]
+    outstanding_external: Optional[list[WireExternalRouteInstallObligation]] = None
 
 
 @dataclass
@@ -2790,6 +2846,16 @@ class WireRouteInstallObligation:
     edge_a: str
     edge_b: str
     host: WireHostRef
+
+
+@dataclass
+class WireExternalRouteInstallObligation:
+    """One outstanding host route install for an external-peer edge whose local
+member is placed on `host`."""
+    host: WireHostRef
+    local: str
+    peer_id: str
+    peer_name: str
 
 
 @dataclass
@@ -2837,6 +2903,23 @@ class MobHardCancelResult:
 [`MobForceCancelResult`] reuse) so the hard/force distinction stays
 legible in SDK type names (DEC-P7A-2)."""
     cancelled: bool
+
+
+@dataclass
+class MobStopMemberRunParams:
+    """Parameters for `mob/stop_member_run`."""
+    agent_identity: str
+    mob_id: str
+    reason: str
+    run_id: str
+
+
+@dataclass
+class MobStopMemberRunResult:
+    """Result for `mob/stop_member_run` and its REST route."""
+    agent_identity: str
+    mob_id: str
+    receipt: WireRunStopReceipt
 
 
 @dataclass
@@ -5417,7 +5500,7 @@ fields with typed projections so the wire carries no untyped carriers."""
     policy: Optional[Literal['stage', 'queue', 'immediate']] = None
     reconstruction_source: Optional[Literal['live', 'event_store', 'snapshot', 'replay']] = None
     recovery_count: Optional[int] = None
-    terminal_outcome: Optional[Literal['completed', 'abandoned', 'superseded', 'coalesced', 'cancelled']] = None
+    terminal_outcome: Optional[WireInputTerminalOutcome] = None
 
 
 @dataclass
@@ -6503,7 +6586,10 @@ class WireAnthropicThinkingConfigEnabled(TypedDict, total=False):
     budget_tokens: Required[int]
     type: Required[Literal['enabled']]
 
-WireAnthropicThinkingConfig = WireAnthropicThinkingConfigAdaptive | WireAnthropicThinkingConfigEnabled
+class WireAnthropicThinkingConfigBetweenTools(TypedDict, total=False):
+    type: Required[Literal['between_tools']]
+
+WireAnthropicThinkingConfig = WireAnthropicThinkingConfigAdaptive | WireAnthropicThinkingConfigEnabled | WireAnthropicThinkingConfigBetweenTools
 
 # Mob RPC helper wire type for WireGeminiThinkingLevel.
 WireGeminiThinkingLevel = Literal['minimal', 'low', 'medium', 'high']
@@ -7062,6 +7148,24 @@ class ContentBlockSkillContext(TypedDict, total=False):
 
 ContentBlock = ContentBlockText | ContentBlockImageInline | ContentBlockImageBlob | ContentBlockVideoInline | ContentBlockVideoUri | ContentBlockStructured | ContentBlockSkillContext
 
+# What kind of input an interrupted run had in flight.
+InterruptedInputKind = Literal['prompt', 'peer', 'flow_step', 'external_event', 'continuation', 'operation', 'unknown']
+
+# What settling interrupted-run evidence did to the run the process belonged
+# to, as told to the model.
+class InterruptedToolRunDispositionInputsSettled(TypedDict, total=False):
+    inputs: Required[int]
+    kind: Required[Literal['inputs_settled']]
+    unrestored: NotRequired[list[InterruptedInputKind]]
+
+class InterruptedToolRunDispositionRunCompleted(TypedDict, total=False):
+    kind: Required[Literal['run_completed']]
+
+class InterruptedToolRunDispositionUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+InterruptedToolRunDisposition = InterruptedToolRunDispositionInputsSettled | InterruptedToolRunDispositionRunCompleted | InterruptedToolRunDispositionUnknown
+
 # Sender-declared content-taint classification for peer content.
 #
 # This is the typed vocabulary for the optional taint declaration a sender
@@ -7090,6 +7194,56 @@ SystemNoticeDirection = Literal['incoming', 'outgoing', 'internal']
 # over the wire, or derived from a 32-byte Ed25519 public key when a transport
 # still authenticates by raw signing key.
 PeerId = str
+
+# How recovery established that an earlier incarnation's tool process has
+# ceased.
+class ToolProcessCessationNeverStarted(TypedDict, total=False):
+    kind: Required[Literal['never_started']]
+
+class ToolProcessCessationAlreadyExited(TypedDict, total=False):
+    kind: Required[Literal['already_exited']]
+
+class ToolProcessCessationGroupReassigned(TypedDict, total=False):
+    kind: Required[Literal['group_reassigned']]
+
+class ToolProcessCessationKilledByRecovery(TypedDict, total=False):
+    kind: Required[Literal['killed_by_recovery']]
+    members: Required[int]
+
+class ToolProcessCessationPriorEnvironmentEnded(TypedDict, total=False):
+    kind: Required[Literal['prior_environment_ended']]
+
+class ToolProcessCessationExitedBeforeCommit(TypedDict, total=False):
+    kind: Required[Literal['exited_before_commit']]
+
+class ToolProcessCessationForeignIncarnationEnded(TypedDict, total=False):
+    kind: Required[Literal['foreign_incarnation_ended']]
+
+class ToolProcessCessationUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+ToolProcessCessation = ToolProcessCessationNeverStarted | ToolProcessCessationAlreadyExited | ToolProcessCessationGroupReassigned | ToolProcessCessationKilledByRecovery | ToolProcessCessationPriorEnvironmentEnded | ToolProcessCessationExitedBeforeCommit | ToolProcessCessationForeignIncarnationEnded | ToolProcessCessationUnknown
+
+# Which kind of owned process a custody entry guards.
+class ToolProcessSpawnerShellCall(TypedDict, total=False):
+    kind: Required[Literal['shell_call']]
+
+class ToolProcessSpawnerBackgroundJob(TypedDict, total=False):
+    job_id: Required[str]
+    kind: Required[Literal['background_job']]
+
+class ToolProcessSpawnerMonitor(TypedDict, total=False):
+    job_id: Required[str]
+    kind: Required[Literal['monitor']]
+
+class ToolProcessSpawnerCommandHook(TypedDict, total=False):
+    hook_id: Required[str]
+    kind: Required[Literal['command_hook']]
+
+class ToolProcessSpawnerUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+ToolProcessSpawner = ToolProcessSpawnerShellCall | ToolProcessSpawnerBackgroundJob | ToolProcessSpawnerMonitor | ToolProcessSpawnerCommandHook | ToolProcessSpawnerUnknown
 
 # Typed runtime-authored transcript metadata.
 #
@@ -7150,15 +7304,23 @@ class SystemNoticeBlockRuntimeNotice(TypedDict, total=False):
     payload: NotRequired[Any]
     type: Required[Literal['runtime_notice']]
 
+class SystemNoticeBlockToolProcessInterrupted(TypedDict, total=False):
+    cessation: Required[ToolProcessCessation]
+    disposition: Required[InterruptedToolRunDisposition]
+    run_id: Required[RunId]
+    spawner: Required[ToolProcessSpawner]
+    tool_call_id: NotRequired[Optional[str]]
+    type: Required[Literal['tool_process_interrupted']]
+
 class SystemNoticeBlockUnknown(TypedDict, total=False):
     payload: NotRequired[Any]
     summary: NotRequired[Optional[str]]
     type: Required[Literal['unknown']]
 
-SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockUnknown
+SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockToolProcessInterrupted | SystemNoticeBlockUnknown
 
 # Typed system notice content carried in the transcript.
-SystemNoticeKind = Literal['generic', 'comms', 'external_event', 'mcp_pending', 'mcp', 'background_job', 'tool_scope', 'tool_scope_warning'] | Literal['auth_reauth_required']
+SystemNoticeKind = Literal['generic', 'comms', 'external_event', 'mcp_pending', 'mcp', 'background_job', 'tool_scope', 'tool_scope_warning'] | Literal['auth_reauth_required'] | Literal['tool_process_recovery']
 
 # Stable host-chosen identity for one replaceable system-prompt slot.
 #
@@ -7547,6 +7709,16 @@ class BridgeCommandCancelTrackedMemberInput(TypedDict, total=False):
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
 
+class BridgeCommandStopMemberRun(TypedDict, total=False):
+    command: Required[Literal['stop_member_run']]
+    epoch: Required[int]
+    expected_member: Required[BridgeMemberIncarnation]
+    expected_run_id: Required[RunId]
+    operation_id: Required[OperationId]
+    protocol_version: Required[BridgeProtocolVersion]
+    reason: Required[str]
+    supervisor: Required[BridgePeerSpec]
+
 class BridgeCommandRetireMember(TypedDict, total=False):
     command: Required[Literal['retire_member']]
     epoch: Required[int]
@@ -7772,7 +7944,7 @@ class BridgeCommandRevokeForkedParticipant(TypedDict, total=False):
     source_member: Required[BridgeMemberIncarnation]
     supervisor: Required[BridgePeerSpec]
 
-BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant
 
 # Outcome of a delivery attempt.
 class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):
@@ -8002,6 +8174,12 @@ class BridgeReplyTrackedInputCancelled(TypedDict, total=False):
     outcome: Required[BridgeTrackedInputCancelOutcome]
     result: Required[Literal['tracked_input_cancelled']]
 
+class BridgeReplyMemberRunStopped(TypedDict, total=False):
+    expected_member: Required[BridgeMemberIncarnation]
+    operation_id: Required[OperationId]
+    receipt: Required[WireRunStopReceipt]
+    result: Required[Literal['member_run_stopped']]
+
 class BridgeReplyRetire(TypedDict, total=False):
     outcome: Required[dict[str, Any]]
     result: Required[Literal['retire']]
@@ -8122,7 +8300,7 @@ class BridgeReplyForkedParticipantRevoked(TypedDict, total=False):
     outcome: Required[dict[str, Any] | dict[str, Literal['pending_attached_release']] | dict[str, Literal['converged']]]
     result: Required[Literal['forked_participant_revoked']]
 
-BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked
+BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #

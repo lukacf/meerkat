@@ -16,6 +16,7 @@ pub(super) mod explicit_resume;
 pub(super) mod live_durable_source_loads;
 pub(super) mod member_effect_lane;
 pub(super) mod member_status_lane;
+mod placed_external_routes;
 pub(super) mod reload_revival;
 mod resume_post_commit;
 mod resume_rollback;
@@ -10337,6 +10338,7 @@ impl MobActor {
     /// them. Set semantics dedupe; machine guards own admission (guard
     /// rejects are debug-logged skips — ADJ-P4-1 re-derive posture).
     fn record_derived_route_install_obligations(&mut self, host_filter: Option<&mob_dsl::HostId>) {
+        self.record_derived_external_route_install_obligations(host_filter);
         let derived: BTreeSet<mob_dsl::RouteInstallObligation> =
             super::derive_install_obligations(self.dsl_authority.state(), host_filter);
         for obligation in derived {
@@ -10392,7 +10394,10 @@ impl MobActor {
                 );
             }
         }
-        Ok(())
+        // Placed-member external edges drain on every trigger that drains
+        // member routes (the one canonical drain every trigger converges on).
+        self.realize_pending_external_route_installs(host_filter)
+            .await
     }
 
     /// The explicit retry verb (ADJ-P4-9b): drain the PENDING obligation
@@ -10439,6 +10444,7 @@ impl MobActor {
         for edge in edges {
             self.fold_route_install_obligations_after_wire(&edge).await;
         }
+        self.drive_external_routes_for_identity(identity).await;
     }
 
     // -----------------------------------------------------------------------
@@ -11894,6 +11900,15 @@ impl MobActor {
         entry: &RosterEntry,
         context: &'static str,
     ) -> Result<Option<TrustedPeerDescriptor>, MobError> {
+        if super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity) {
+            // A placed member lives behind its host's transport, never at an
+            // `inproc://` address in this process. Its only endpoint authority
+            // is the durable host-acknowledged generation endpoint, which
+            // every caller consults (`machine_member_peer_spec_for`) BEFORE
+            // this roster fallback. Reaching here means that endpoint is
+            // absent, and the roster must not synthesize one (#1269).
+            return Ok(None);
+        }
         let Some(peer_id) = entry.peer_id else {
             return Ok(None);
         };
@@ -12588,14 +12603,15 @@ impl MobActor {
                     self.pending_routed_effects.remove(0);
 
                     if let Some(agent_identity) = closed.broken_member.as_ref() {
-                        self.restore_diagnostics.write().await.insert(
-                            agent_identity.clone(),
+                        self.record_member_restore_failure(
+                            agent_identity,
                             super::handle::RestoreFailureDiagnostic {
                                 bridge_session_id: Some(closed.session_id.clone()),
                                 reason: format!("{} [{}]", closed.reason, closed.refusal_code),
                                 hold: None,
                             },
-                        );
+                        )
+                        .await;
                     }
                     tracing::warn!(
                         mob_id = %self.definition.id,
@@ -13165,6 +13181,163 @@ impl MobActor {
         ))
     }
 
+    /// Record `agent_identity` Broken for public reads and clear its projected
+    /// comms identity. A Broken member publishes no endpoint, on every path
+    /// that records it: resume, cold boot, and runtime classification (#1262).
+    pub(super) async fn record_member_restore_failure(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        diagnostic: super::handle::RestoreFailureDiagnostic,
+    ) {
+        self.restore_diagnostics
+            .write()
+            .await
+            .insert(agent_identity.clone(), diagnostic);
+        let _ = self
+            .roster
+            .write()
+            .await
+            .set_comms_identity(agent_identity, None, None);
+    }
+
+    /// Clear a member's restore failure and republish its comms identity from
+    /// its current endpoint authority: the live local comms runtime for a
+    /// local member, the durable host-acknowledged endpoint for a placed one.
+    ///
+    /// While MobMachine still records the member Broken, its diagnostic (the
+    /// typed reason) is kept and nothing is published. A local member's live
+    /// endpoint must equal its durable generation endpoint (a lost identity
+    /// store makes a revival mint a new key, which peers do not trust); a
+    /// mismatch, an unusable live endpoint, or a missing durable endpoint
+    /// records only that member Broken with the respawn action.
+    pub(super) async fn clear_member_restore_failure(&mut self, agent_identity: &AgentIdentity) {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        if self
+            .dsl_authority
+            .state()
+            .member_restore_failures
+            .contains_key(&dsl_identity)
+        {
+            return;
+        }
+        self.restore_diagnostics
+            .write()
+            .await
+            .remove(agent_identity);
+        let Some(entry) = self.roster.read().await.get(agent_identity).cloned() else {
+            return;
+        };
+        let durable = self
+            .dsl_authority
+            .state()
+            .member_peer_endpoints
+            .get(&dsl_identity)
+            .cloned();
+        let observed: Result<(meerkat_core::comms::PeerId, String), String> =
+            if super::member_runtime_is_host_owned(self.dsl_authority.state(), agent_identity) {
+                match durable {
+                    Some(endpoint) => meerkat_core::comms::PeerId::parse(&endpoint.peer_id.0)
+                        .map(|peer_id| {
+                            (
+                                peer_id,
+                                meerkat_comms::PubKey::new(endpoint.signing_key.0)
+                                    .to_pubkey_string(),
+                            )
+                        })
+                        .map_err(|error| {
+                            format!(
+                                "its durable host-acknowledged endpoint has an invalid peer id: {error}"
+                            )
+                        }),
+                    None => Err("it has no durable host-acknowledged endpoint".to_string()),
+                }
+            } else {
+                let Some(comms) = self.provisioner_comms(&entry.member_ref).await else {
+                    return;
+                };
+                let Ok(name) = self.comms_name_for(&entry) else {
+                    return;
+                };
+                match super::provisioner::trusted_peer_spec_from_runtime(&name, comms.as_ref()) {
+                    Ok(Some(descriptor)) => {
+                        let live = mob_dsl::MemberPeerEndpoint::from(&descriptor);
+                        match super::builder::member_endpoint_defect(
+                            durable.as_ref(),
+                            &live,
+                            "it has no durable generation endpoint to verify its live endpoint against",
+                        ) {
+                            None => Ok((
+                                descriptor.peer_id,
+                                meerkat_comms::PubKey::new(descriptor.pubkey).to_pubkey_string(),
+                            )),
+                            Some(detail) => Err(detail),
+                        }
+                    }
+                    Ok(None) => {
+                        Err("its live comms runtime exposes no peer id or public key".to_string())
+                    }
+                    Err(error) => Err(format!(
+                        "its live comms runtime has no valid endpoint: {error}"
+                    )),
+                }
+            };
+        match observed {
+            Ok((peer_id, transport_public_key)) => {
+                let _ = self.roster.write().await.set_comms_identity(
+                    agent_identity,
+                    Some(peer_id),
+                    Some(transport_public_key),
+                );
+            }
+            Err(detail) => {
+                self.record_member_endpoint_broken(&entry, &detail, "republish_member_endpoint")
+                    .await;
+            }
+        }
+    }
+
+    /// Record one member Broken because its endpoint cannot be published:
+    /// the typed MobMachine restore failure (machine truth) plus the handle
+    /// diagnostic, with the projection cleared. Shares the resume paths'
+    /// reason (the defect and the respawn action).
+    pub(super) async fn record_member_endpoint_broken(
+        &mut self,
+        entry: &RosterEntry,
+        detail: &str,
+        context: &'static str,
+    ) {
+        let reason = super::builder::member_endpoint_broken_reason(&entry.agent_identity, detail);
+        if let Err(error) = self.apply_dsl_signal(
+            mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
+                reason: reason.clone(),
+            },
+            context,
+        ) {
+            tracing::error!(
+                mob_id = %self.definition.id,
+                agent_identity = %entry.agent_identity,
+                %error,
+                "MobMachine rejected the member endpoint restore failure"
+            );
+        }
+        tracing::error!(
+            mob_id = %self.definition.id,
+            agent_identity = %entry.agent_identity,
+            reason = %reason,
+            "member endpoint is unusable; marked member broken"
+        );
+        self.record_member_restore_failure(
+            &entry.agent_identity,
+            super::handle::RestoreFailureDiagnostic {
+                bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
+                reason,
+                hold: None,
+            },
+        )
+        .await;
+    }
+
     async fn record_missing_member_bridge_session(
         &mut self,
         agent_identity: &AgentIdentity,
@@ -13218,14 +13391,15 @@ impl MobActor {
             );
             return Some(fallback);
         }
-        self.restore_diagnostics.write().await.insert(
-            agent_identity.clone(),
+        self.record_member_restore_failure(
+            agent_identity,
             super::handle::RestoreFailureDiagnostic {
                 bridge_session_id: Some(bridge_session_id.clone()),
                 reason: reason.clone(),
                 hold: None,
             },
-        );
+        )
+        .await;
         tracing::error!(
             mob_id = %self.definition.id,
             agent_identity = %agent_identity,
@@ -13352,14 +13526,15 @@ impl MobActor {
 
         match verdict {
             mob_dsl::MemberRevivalVerdictKind::BrokenRecorded => {
-                self.restore_diagnostics.write().await.insert(
-                    agent_identity.clone(),
+                self.record_member_restore_failure(
+                    agent_identity,
                     super::handle::RestoreFailureDiagnostic {
                         bridge_session_id: Some(bridge_session_id.clone()),
                         reason: classify_reason.clone(),
                         hold: None,
                     },
-                );
+                )
+                .await;
                 tracing::error!(
                     mob_id = %self.definition.id,
                     agent_identity = %agent_identity,
@@ -13386,10 +13561,7 @@ impl MobActor {
                             },
                             "resolve_placed_member_revival_succeeded",
                         )?;
-                        self.restore_diagnostics
-                            .write()
-                            .await
-                            .remove(agent_identity);
+                        self.clear_member_restore_failure(agent_identity).await;
                         tracing::info!(
                             mob_id = %self.definition.id,
                             agent_identity = %agent_identity,
@@ -13412,14 +13584,15 @@ impl MobActor {
                             },
                             "resolve_placed_member_revival_failed",
                         )?;
-                        self.restore_diagnostics.write().await.insert(
-                            agent_identity.clone(),
+                        self.record_member_restore_failure(
+                            agent_identity,
                             super::handle::RestoreFailureDiagnostic {
                                 bridge_session_id: Some(bridge_session_id.clone()),
                                 reason: failure_reason.clone(),
                                 hold,
                             },
-                        );
+                        )
+                        .await;
                         tracing::error!(
                             mob_id = %self.definition.id,
                             agent_identity = %agent_identity,
@@ -13830,6 +14003,8 @@ impl MobActor {
             )));
         }
 
+        let binding_owner = owner_bridge_session_id.clone();
+        let binding_display_name = peer_name.clone();
         let receipt = self
             .provisioner
             .materialize_member(super::provisioner::MaterializeMemberRequest {
@@ -13845,25 +14020,40 @@ impl MobActor {
             })
             .await?;
 
-        // Ack echoes vs machine facts (typed mismatch, never absorbed): the
-        // recorded response must name the SAME session and digest.
-        let Some(ack) = receipt.receipt.materialized_ack.as_deref() else {
-            return Err(MobError::Internal(format!(
-                "placed revival ack for '{agent_identity}' carried no materialized ack facts"
-            )));
-        };
-        if ack.session_id.to_string() != binding.0 {
-            return Err(MobError::Internal(format!(
-                "placed revival ack for '{agent_identity}' names session '{}' but the machine \
-                 binding is '{}'",
-                ack.session_id, binding.0
-            )));
-        }
-        if ack.spec_digest_echo != record.spec_digest {
-            return Err(MobError::Internal(format!(
-                "placed revival ack digest echo for '{agent_identity}' diverged from the recorded \
-                 spec digest"
-            )));
+        // Every ack refusal (missing facts, session, digest, endpoint) takes
+        // ONE path: the ack bound its endpoint into the ops registry for the
+        // committed operation, so that exact binding is dropped before the
+        // revival fails and the member is recorded Broken. The committed
+        // operation itself survives with the (now Broken) member.
+        //
+        // The refused host runtime is deliberately LEFT IN PLACE, untrusted:
+        // the only release verb (`ReleaseMember`) is durable disposal, which
+        // would destroy the Broken member's session and history and pre-empt
+        // its retirement. It is harmless meanwhile: the member is recorded
+        // Broken, publishes no endpoint, delivery to it is refused
+        // (`MemberRestoreFailed`), and no peer ever installs trust for an
+        // unvouched key. Retire or respawn releases it through the normal
+        // path.
+        if let Some(refusal) =
+            self.revived_placed_ack_refusal(agent_identity, binding, &record, &receipt)
+        {
+            if let Err(error) = self
+                .provisioner
+                .clear_placed_member_binding_exact(
+                    &binding_owner,
+                    &record.provision_operation_id,
+                    &binding_display_name,
+                )
+                .await
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    %error,
+                    "failed to clear the registry binding of a refused revival ack"
+                );
+            }
+            return Err(refusal);
         }
 
         // The G2 ACK is authenticated by the exact bound request. Persist the
@@ -13884,6 +14074,53 @@ impl MobActor {
         // itself stands.
         self.drive_route_installs_for_identity(agent_identity).await;
         Ok(())
+    }
+
+    /// Why a placed revival's ack is refused, or `None` to adopt it. Ack
+    /// echoes are checked against machine facts (typed mismatch, never
+    /// absorbed): the same session and digest, and the member's durable
+    /// generation endpoint (peer id, address and transport key); a host that
+    /// re-materialized it under another identity is refused (#1269).
+    fn revived_placed_ack_refusal(
+        &self,
+        agent_identity: &AgentIdentity,
+        binding: &mob_dsl::SessionId,
+        record: &crate::store::MobPlacedSpawnCarrierRecord,
+        receipt: &super::provisioner::MaterializedSpawnReceipt,
+    ) -> Option<MobError> {
+        let Some(ack) = receipt.receipt.materialized_ack.as_deref() else {
+            return Some(MobError::Internal(format!(
+                "placed revival ack for '{agent_identity}' carried no materialized ack facts"
+            )));
+        };
+        if ack.session_id.to_string() != binding.0 {
+            return Some(MobError::Internal(format!(
+                "placed revival ack for '{agent_identity}' names session '{}' but the machine \
+                 binding is '{}'",
+                ack.session_id, binding.0
+            )));
+        }
+        if ack.spec_digest_echo != record.spec_digest {
+            return Some(MobError::Internal(format!(
+                "placed revival ack digest echo for '{agent_identity}' diverged from the recorded \
+                 spec digest"
+            )));
+        }
+        let revived = mob_dsl::MemberPeerEndpoint::from(&ack.member_peer);
+        super::builder::member_endpoint_defect(
+            self.dsl_authority
+                .state()
+                .member_peer_endpoints
+                .get(&mob_dsl::AgentIdentity::from_domain(agent_identity)),
+            &revived,
+            "it has no durable host-acknowledged endpoint to verify",
+        )
+        .map(|detail| {
+            MobError::WiringError(super::builder::member_endpoint_broken_reason(
+                agent_identity,
+                &detail,
+            ))
+        })
     }
 
     fn active_machine_member_ids_for_profile(
@@ -26531,6 +26768,15 @@ impl MobActor {
                     self.handle_hard_cancel_member(agent_identity, reason, reply_tx)
                         .await;
                 }
+                MobCommand::StopMemberRun {
+                    agent_identity,
+                    run_id,
+                    reason,
+                    reply_tx,
+                } => {
+                    self.handle_stop_member_run(agent_identity, run_id, reason, reply_tx)
+                        .await;
+                }
                 MobCommand::MemberHistory {
                     agent_identity,
                     from_index,
@@ -26669,14 +26915,21 @@ impl MobActor {
                 }
                 MobCommand::EnsureMemberEventTap {
                     agent_identity,
+                    cursor,
                     reply_tx,
                 } => {
                     // Atomic ensure+tap: a tap opened AFTER a separate
                     // ensure can miss the fresh pump's first pages.
                     let result = match self.member_pump_tap_material(&agent_identity).await {
-                        Ok(material) => {
-                            Ok(self.member_event_pumps.ensure_pump_with_tap(material).await)
-                        }
+                        Ok(material) => self
+                            .member_event_pumps
+                            .ensure_pump_with_tap_from(material, cursor)
+                            .await
+                            .map_err(|reason| MobError::AgentEventCursorRejected {
+                                agent_identity: agent_identity.clone(),
+                                cursor,
+                                reason,
+                            }),
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -33220,8 +33473,13 @@ impl MobActor {
                 session_origin,
                 agent_runtime_id,
                 is_replacing,
+                // The host-acknowledged member endpoint carries the member's
+                // own Ed25519 transport key: publish it exactly as a local
+                // member's live runtime key is published (#1269).
+                transport_public_key: Some(
+                    meerkat_comms::PubKey::new(member_peer_endpoint.pubkey).to_pubkey_string(),
+                ),
                 member_peer_endpoint: Some(member_peer_endpoint),
-                transport_public_key: None,
                 direct_member_fence: ctx.direct_member_fence.clone(),
             });
         }
@@ -33687,6 +33945,116 @@ impl MobActor {
             .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::FlowTerminalized))
     }
 
+    /// Run-fenced Stop of one exact member run. The Cancel-class
+    /// `ForceCancel` gate is only PROBED (never committed): a stale stop must
+    /// leave mob state untouched. A member with no live runtime has no
+    /// current run and replies `NotCurrent` without any dispatch. Placed
+    /// members are gated on the recorded host `hard_cancel_member` fact (the
+    /// same immediate-interrupt authority class) before any bridge dispatch;
+    /// the dispatch runs on a DETACHED task (ADJ-P4-12).
+    async fn handle_stop_member_run(
+        &mut self,
+        agent_identity: AgentIdentity,
+        run_id: meerkat_core::lifecycle::RunId,
+        reason: String,
+        reply_tx: oneshot::Sender<Result<meerkat_contracts::WireRunStopReceipt, MobError>>,
+    ) {
+        // Unknown identity is a typed `MemberNotFound` from machine truth,
+        // not a generic invalid transition from the admission preview.
+        let projection = self.machine_projection_for_identity(&agent_identity);
+        if projection.runtime_id.is_none() {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        }
+        if let Err(error) = self.ensure_placed_carrier_binding_active(&agent_identity, "run stop") {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
+        let prepared = match self.prepare_command_admission(
+            mob_dsl::MobMachineInput::ForceCancel {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&agent_identity),
+            },
+            MobState::Running,
+            "stop_member_run",
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = reply_tx.send(Err(error));
+                return;
+            }
+        };
+        // Only a member with no live runtime has no current run: that is the
+        // one case the machine answers `NotCurrent` here. A retiring member
+        // (ForceCancel's AlreadyRetiring arm) may still be draining a run, so
+        // it falls through and its runtime answers under the run fence.
+        if !Self::force_cancel_interrupt_authorized(&prepared) && !projection.live_runtime {
+            let _ = reply_tx.send(Ok(meerkat_contracts::WireRunStopReceipt::NotCurrent {
+                run_id: run_id.to_string(),
+                current_run_id: None,
+            }));
+            return;
+        }
+        drop(prepared);
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(&agent_identity).cloned()
+        };
+        let Some(entry) = entry else {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        };
+        let member_ref = entry.member_ref.clone();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+        let placement = self
+            .dsl_authority
+            .state()
+            .member_placement
+            .get(&dsl_identity)
+            .cloned();
+        let expected_member = match placement {
+            Some(host) => {
+                let advertised = self
+                    .dsl_authority
+                    .state()
+                    .host_hard_cancel_member
+                    .get(&host)
+                    .copied()
+                    .unwrap_or(false);
+                if !advertised {
+                    let _ = reply_tx.send(Err(MobError::BridgeCommandRejected {
+                        cause: super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                        reason: "host does not advertise hard_cancel_member".to_string(),
+                    }));
+                    return;
+                }
+                match self.placed_member_incarnation(&entry) {
+                    Ok(expected_member) => Some(expected_member),
+                    Err(error) => {
+                        let _ = reply_tx.send(Err(error));
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
+        let provisioner = self.provisioner.clone();
+        self.actor_io_tasks.spawn(async move {
+            let result = match expected_member.as_ref() {
+                Some(expected_member) => {
+                    provisioner
+                        .stop_placed_member_run(&member_ref, expected_member, &run_id, &reason)
+                        .await
+                }
+                None => {
+                    provisioner
+                        .stop_member_run(&member_ref, &run_id, &reason)
+                        .await
+                }
+            };
+            let _ = reply_tx.send(result);
+        });
+    }
+
     /// Phase 6 (DEC-P6E-8): the explicit HARD cancel verb — the immediate
     /// user-interrupt authority, distinct from [`Self::handle_force_cancel`]'s
     /// cooperative boundary cancel. Placement present ⇒ gate on the
@@ -33699,6 +34067,14 @@ impl MobActor {
         reason: String,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     ) {
+        if self
+            .machine_projection_for_identity(&agent_identity)
+            .runtime_id
+            .is_none()
+        {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        }
         if let Err(error) =
             self.ensure_placed_carrier_binding_active(&agent_identity, "hard cancel")
         {
@@ -41263,6 +41639,11 @@ impl MobActor {
         local: AgentIdentity,
         spec: TrustedPeerDescriptor,
     ) -> Result<(), MobError> {
+        if super::member_runtime_is_host_owned(self.dsl_authority.state(), &local) {
+            // A placed member's trust row lives on its host: same machine
+            // edge and durable projection, realized through the host lane.
+            return self.wire_placed_member_external_peer(local, spec).await;
+        }
         let preparation = self.prepare_external_peer_wire(local, spec).await?;
         self.realize_wiring_preparation_inline(preparation).await
     }
@@ -41283,8 +41664,8 @@ impl MobActor {
         )?;
         let local_identity = AgentIdentity::from(local.as_str());
         if super::member_runtime_is_host_owned(self.dsl_authority.state(), &local_identity) {
-            return Err(MobError::WiringError(format!(
-                "wire between placed member '{local}' and an external peer is unsupported"
+            return Err(MobError::Internal(format!(
+                "placed member '{local}' is wired to an external peer through its host lane, not the local wiring plan"
             )));
         }
         let external_identity = AgentIdentity::from(spec.name.as_str());
@@ -41394,9 +41775,11 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let local_identity = AgentIdentity::from(local.as_str());
         if super::member_runtime_is_host_owned(self.dsl_authority.state(), &local_identity) {
-            return Err(MobError::WiringError(format!(
-                "unwire between placed member '{local}' and an external peer is unsupported"
-            )));
+            // The machine-owned edge is the only authority for a placed
+            // member's external row; a stale descriptor names no host row.
+            return self
+                .unwire_placed_member_external_peer(local_identity, peer_name)
+                .await;
         }
         // The machine-owned external edge supplies the prior descriptor.
         // The roster mirror may lag and is display-only.
@@ -42737,16 +43120,18 @@ impl MobActor {
         if external_edges.is_empty() {
             return Ok(());
         }
-        if super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity) {
-            // Placed↔legacy-external wiring has no remote cleanup protocol.
-            // Fail closed rather than treating the host-resident session id
-            // as local or deleting topology while remote trust survives.
-            return Err(MobError::WiringError(format!(
-                "retire external-peer cleanup is unsupported for placed member '{}'",
-                entry.agent_identity
-            )));
-        }
-        let comms = self.provisioner_comms(&entry.member_ref).await;
+        // A retiring placed member's external rows live on its host and die
+        // with the exact ReleaseMember (its member-member rows likewise):
+        // there is no local comms runtime to clean, so the observed-absent
+        // machine cleanup applies.
+        let comms = if super::member_runtime_is_host_owned(
+            self.dsl_authority.state(),
+            &entry.agent_identity,
+        ) {
+            None
+        } else {
+            self.provisioner_comms(&entry.member_ref).await
+        };
         for edge in external_edges {
             let peer_name = meerkat_core::comms::PeerName::new(edge.endpoint.name.0.clone())
                 .map_err(|error| {
@@ -42780,6 +43165,7 @@ impl MobActor {
                     }
                 }
                 None => {
+                    self.rollback_superseded_external_installs(&edge)?;
                     self.apply_cleanup_retiring_external_peer_observed_absent(entry, &key, &edge)?;
                     tracing::debug!(
                         mob_id = %self.definition.id,
@@ -51024,10 +51410,18 @@ impl MobActor {
                 MobError::Internal("delivery correlation identity is not a UUID".to_string())
             })?;
             let correlation = meerkat_core::interaction::InteractionId(correlation);
-            if interaction_id.is_some_and(|existing| existing != correlation) {
-                return Err(MobError::Internal(
-                    "delivery correlation conflicts with supplied transcript identity".to_string(),
-                ));
+            let options_interaction_id = turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.transcript_identity.interaction_id);
+            if let Some(conflicting) = [interaction_id, options_interaction_id]
+                .into_iter()
+                .flatten()
+                .find(|supplied| *supplied != correlation)
+            {
+                return Err(MobError::DeliveryInteractionConflict {
+                    correlation_id: correlation.0.to_string(),
+                    interaction_id: conflicting.0.to_string(),
+                });
             }
             interaction_id = Some(correlation);
         }

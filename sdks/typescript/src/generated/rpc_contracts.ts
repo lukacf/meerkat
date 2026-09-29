@@ -188,6 +188,8 @@ import type {
   MobSpawnParams,
   MobSpawnResult,
   MobStatusResult,
+  MobStopMemberRunParams,
+  MobStopMemberRunResult,
   MobStreamCloseParams,
   MobStreamCloseResult,
   MobStreamOpenParams,
@@ -245,6 +247,8 @@ import type {
   SessionStreamOpenResult,
   SessionTranscriptRewriteResult,
   SkillListResponse,
+  StopRunParams,
+  StopRunResult,
   SystemPromptUpdateResult,
   ToolsRegisterParams,
   ToolsRegisterResult,
@@ -421,6 +425,10 @@ export interface RpcMethodContracts {
   "turn/interrupt": {
     params: InterruptParams;
     result: (InterruptResult) & Record<string, unknown>;
+  };
+  "turn/stop_run": {
+    params: StopRunParams;
+    result: (StopRunResult) & Record<string, unknown>;
   };
   "config/get": {
     params: Record<string, never>;
@@ -925,6 +933,10 @@ export interface RpcMethodContracts {
   "mob/hard_cancel_member": {
     params: MobHardCancelParams;
     result: (MobHardCancelResult) & Record<string, unknown>;
+  };
+  "mob/stop_member_run": {
+    params: MobStopMemberRunParams;
+    result: (MobStopMemberRunResult) & Record<string, unknown>;
   };
   "mob/member_live_open": {
     params: MobMemberLiveOpenParams;

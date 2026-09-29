@@ -1285,7 +1285,7 @@ fn provider_request_defaults_for(
         AnthropicProviderTag, GeminiProviderTag, OpaqueProviderBody, OpenAiPromptCacheOptions,
         OpenAiProviderTag, ProviderTag,
     };
-    use meerkat_core::model_profile::capabilities::{OpenAiPromptCacheMode, OpenAiPromptCacheTtl};
+    use meerkat_core::model_profile::capabilities::OpenAiPromptCacheTtl;
 
     let web_search_enabled = !matches!(web_search_override, ToolCategoryOverride::Disable)
         && model_profile.is_some_and(|profile| profile.supports_web_search);
@@ -1308,19 +1308,11 @@ fn provider_request_defaults_for(
                 None
             };
             let prompt_cache_options = cache_capabilities.and_then(|capabilities| {
-                let mode = if capabilities
-                    .prompt_cache_modes
-                    .contains(&OpenAiPromptCacheMode::Explicit)
-                {
-                    Some(OpenAiPromptCacheMode::Explicit)
-                } else if capabilities
-                    .prompt_cache_modes
-                    .contains(&OpenAiPromptCacheMode::Implicit)
-                {
-                    Some(OpenAiPromptCacheMode::Implicit)
-                } else {
-                    None
-                }?;
+                // The catalog row names its default mode (GPT-5.6 explicit,
+                // GPT-6 implicit). Implicit mode on a row that also accepts
+                // explicit breakpoints still authors the turn-boundary
+                // anchor in the OpenAI lowering (#1235).
+                let mode = capabilities.default_prompt_cache_mode()?;
                 Some(OpenAiPromptCacheOptions {
                     mode: Some(mode),
                     ttl: capabilities
@@ -1359,6 +1351,69 @@ fn provider_request_defaults_for(
             }))
         }
         _ => None,
+    }
+}
+
+/// Refuse a `prompt_cache_retention` the resolved OpenAI catalog row does not
+/// accept when the agent is built, instead of failing its first request.
+fn validate_openai_prompt_cache_retention(
+    provider: Provider,
+    model: &str,
+    provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+) -> Result<(), BuildAgentError> {
+    use meerkat_core::lifecycle::run_primitive::ProviderTag;
+    if provider != Provider::OpenAI {
+        return Ok(());
+    }
+    let Some(ProviderTag::OpenAi(tag)) =
+        provider_params.and_then(|params| params.provider_tag.as_ref())
+    else {
+        return Ok(());
+    };
+    let Some(retention) = tag
+        .prompt_cache_retention
+        .filter(|_| tag.prompt_cache_enabled != Some(false))
+    else {
+        return Ok(());
+    };
+    match meerkat_models::capabilities_for(Provider::OpenAI, model)
+        .and_then(|capabilities| capabilities.openai_responses_params)
+        .and_then(|params| params.prompt_cache_retention_rejection(model, retention))
+    {
+        Some(rejection) => Err(BuildAgentError::Config(rejection)),
+        None => Ok(()),
+    }
+}
+
+/// Refuse Anthropic request-shaping knobs the resolved catalog row rejects
+/// (a thinking type or budget the model does not accept, `top_k` without
+/// top-k support, `between_tools` above `high` effort) when the agent is
+/// built, instead of failing its first request. The generic
+/// `thinking_budget_tokens` is checked as the Anthropic lowering applies it.
+fn validate_anthropic_request_shaping(
+    provider: Provider,
+    model: &str,
+    provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+) -> Result<(), BuildAgentError> {
+    use meerkat_core::lifecycle::run_primitive::ProviderTag;
+    if provider != Provider::Anthropic {
+        return Ok(());
+    }
+    let Some(params) = provider_params else {
+        return Ok(());
+    };
+    let mut tag = match params.provider_tag.as_ref() {
+        Some(ProviderTag::Anthropic(tag)) => tag.clone(),
+        _ => Default::default(),
+    };
+    if let Some(budget) = params.thinking_budget_tokens {
+        tag.thinking_budget_tokens = Some(budget);
+    }
+    match meerkat_models::capabilities_for(Provider::Anthropic, model)
+        .and_then(|capabilities| capabilities.anthropic_provider_tag_rejection(&tag))
+    {
+        Some(rejection) => Err(BuildAgentError::Config(rejection)),
+        None => Ok(()),
     }
 }
 
@@ -3506,6 +3561,8 @@ impl AgentFactory {
     /// fails with `FactoryError::TokenStore` — never silently degraded to
     /// `InteractiveLoginRequired`.
     pub fn new(store_path: impl Into<PathBuf>) -> Self {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Self::install_process_group_observers();
         #[cfg(not(target_arch = "wasm32"))]
         let provider_auth_persistence = open_provider_auth_persistence(
             meerkat_providers::auth_store::TokenStoreBackend::default_auto(),
@@ -3685,8 +3742,16 @@ impl AgentFactory {
     }
 
     /// Set runtime root used for realm-scoped runtime artifacts.
+    ///
+    /// On Linux and macOS this also starts, once per root per process, a
+    /// background sweep that settles durable tool process custody left by
+    /// earlier host incarnations for every session under the root, including
+    /// sessions that are never resumed.
     pub fn runtime_root(mut self, path: impl Into<PathBuf>) -> Self {
-        self.runtime_root = Some(path.into());
+        let path = path.into();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        crate::process_custody::sweep_realm_once(&path);
+        self.runtime_root = Some(path);
         self
     }
 
@@ -5341,7 +5406,62 @@ impl AgentFactory {
             );
         }
 
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.bind_shell_process_custody(&composite, session_id.as_deref())
+            .await?;
+
         Ok(Arc::new(composite))
+    }
+
+    /// Register command-hook process groups as live with durable shell
+    /// process custody, so custody recovery never mistakes a running hook
+    /// group for an earlier incarnation's tool. Idempotent.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn install_process_group_observers() {
+        let _ = meerkat_hooks::set_command_hook_process_group_observer(
+            meerkat_tools::builtin::shell::track_owned_process_group,
+        );
+    }
+
+    /// Settle shell tool processes left running by an earlier host
+    /// incarnation for this session, then bind durable custody for this
+    /// incarnation's shell calls.
+    ///
+    /// Runs before the dispatcher (and therefore the agent) exists, so no new
+    /// work for the session is admitted until every earlier-incarnation shell
+    /// process group is proven stopped. Custody needs a realm runtime root;
+    /// without one the shell keeps its in-process containment only.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn bind_shell_process_custody(
+        &self,
+        composite: &CompositeDispatcher,
+        session_id: Option<&str>,
+    ) -> Result<(), CompositeDispatcherError> {
+        Self::install_process_group_observers();
+        let Some(job_manager) = composite.shell_job_manager() else {
+            return Ok(());
+        };
+        let (Some(runtime_root), Some(session_id)) = (
+            self.runtime_root.as_ref(),
+            session_id.and_then(|id| SessionId::parse(id).ok()),
+        ) else {
+            tracing::debug!(
+                has_runtime_root = self.runtime_root.is_some(),
+                "shell dispatcher built without durable process custody (needs a realm runtime root and a session id)"
+            );
+            return Ok(());
+        };
+        // The build already settled the scope (see `build_agent`); this
+        // returns that same open handle without recovering again.
+        let custody = crate::process_custody::open_session_custody(runtime_root, &session_id)
+            .await
+            .map_err(CompositeDispatcherError::ProcessCustody)?;
+        job_manager.bind_process_custody(custody).map_err(|_| {
+            CompositeDispatcherError::ToolInitFailed {
+                name: "shell".to_string(),
+                message: "shell process custody is already bound".to_string(),
+            }
+        })
     }
 
     /// Build a fully-configured, type-erased agent ready to run.
@@ -6058,6 +6178,32 @@ impl AgentFactory {
         let effective_shell = build_config.override_shell.resolve(self.enable_shell);
         let initial_tool_filter = build_config.initial_tool_filter.take();
         let _session_id = session.id().to_string();
+        // Settle the session's earlier-incarnation tool processes (shell
+        // calls, background jobs, monitors, command hooks) before the agent -
+        // and so any new work for the session - exists, whatever this build
+        // enables. The custody's interrupted-run evidence goes to the runtime
+        // through the session bindings so recovered inputs of interrupted
+        // runs are settled instead of replayed.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let session_process_custody = match self.runtime_root.as_ref() {
+            Some(root) => {
+                let custody = crate::process_custody::open_session_custody(root, session.id())
+                    .await
+                    .map_err(|error| {
+                        BuildAgentError::ToolDispatcher(CompositeDispatcherError::ProcessCustody(
+                            error,
+                        ))
+                    })?;
+                if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode {
+                    bindings
+                        .interrupted_tool_evidence()
+                        .install(Arc::clone(&custody)
+                            as Arc<dyn meerkat_core::tool_process::InterruptedToolEvidence>);
+                }
+                Some(custody)
+            }
+            None => None,
+        };
         #[cfg(not(target_arch = "wasm32"))]
         let durable_shell_runtime = if effective_shell {
             match (
@@ -6722,7 +6868,25 @@ impl AgentFactory {
                         config,
                     )
                     .await;
-                    create_default_hook_engine(layered_hooks)
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    {
+                        match session_process_custody.as_ref() {
+                            Some(custody) if !layered_hooks.entries.is_empty() => Some(Arc::new(
+                                meerkat_hooks::DefaultHookEngine::new(layered_hooks)
+                                    .with_command_process_custody(Arc::new(
+                                        crate::process_custody::HookProcessCustody::new(
+                                            Arc::clone(custody),
+                                        ),
+                                    )),
+                            )
+                                as Arc<dyn meerkat_core::HookEngine>),
+                            _ => create_default_hook_engine(layered_hooks),
+                        }
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    {
+                        create_default_hook_engine(layered_hooks)
+                    }
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -7211,6 +7375,16 @@ impl AgentFactory {
         ) {
             builder = builder.provider_tool_defaults(defaults);
         }
+        validate_openai_prompt_cache_retention(
+            provider,
+            &model,
+            build_config.provider_params.as_ref(),
+        )?;
+        validate_anthropic_request_shaping(
+            provider,
+            &model,
+            build_config.provider_params.as_ref(),
+        )?;
         if let Some(params) = build_config.provider_params.clone() {
             builder = builder.provider_params(params);
         }
@@ -9949,6 +10123,92 @@ mod tests {
             disabled.prompt_cache_enabled,
             Some(false),
             "explicit disable intent must win over default-on across resume and feature growth"
+        );
+    }
+
+    #[test]
+    fn gpt_6_cache_defaults_stay_implicit() {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiPromptCacheOptions, ProviderTag};
+        use meerkat_core::model_profile::capabilities::{
+            OpenAiPromptCacheMode, OpenAiPromptCacheTtl,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let session_id = meerkat_core::SessionId::parse("018f2f0d-7b1d-7a34-8c09-0a1b2c3d4e5f")
+            .expect("fixed session id");
+        for model in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+            let identity = SessionLlmIdentity {
+                model: model.to_string(),
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            };
+            let policy = factory
+                .request_policy_for_session_llm_identity(
+                    &Config::default(),
+                    &identity,
+                    ToolCategoryOverride::Disable,
+                    &session_id,
+                )
+                .expect("request policy");
+            let Some(ProviderTag::OpenAi(defaults)) = policy.provider_tool_defaults else {
+                panic!("{model} must receive OpenAI request defaults");
+            };
+            assert_eq!(
+                defaults.prompt_cache_options,
+                Some(OpenAiPromptCacheOptions {
+                    mode: Some(OpenAiPromptCacheMode::Implicit),
+                    ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
+                }),
+                "{model}: implicit mode stays the default; the lowering adds the turn anchor"
+            );
+            assert_eq!(defaults.prompt_cache_enabled, Some(true));
+        }
+    }
+
+    #[test]
+    fn in_memory_prompt_cache_retention_is_refused_at_build_for_gpt_6() {
+        use meerkat_core::lifecycle::run_primitive::{
+            OpenAiPromptCacheRetention, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+        let params = |retention| ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                prompt_cache_retention: Some(retention),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let Err(BuildAgentError::Config(message)) = validate_openai_prompt_cache_retention(
+            Provider::OpenAI,
+            "gpt-6-astra",
+            Some(&params(OpenAiPromptCacheRetention::InMemory)),
+        ) else {
+            panic!("in_memory retention must be refused at build");
+        };
+        assert!(message.contains("'in_memory'"), "{message}");
+        assert!(
+            message.contains("prompt_cache_options.ttl ('30m')"),
+            "{message}"
+        );
+        assert!(!message.contains("24h"), "{message}");
+        assert!(
+            validate_openai_prompt_cache_retention(
+                Provider::OpenAI,
+                "gpt-6-astra",
+                Some(&params(OpenAiPromptCacheRetention::TwentyFourHours)),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_openai_prompt_cache_retention(
+                Provider::OpenAI,
+                "gpt-5.5",
+                Some(&params(OpenAiPromptCacheRetention::InMemory)),
+            )
+            .is_ok(),
+            "rows without GPT-5.6-and-later cache capabilities keep accepting it"
         );
     }
 
@@ -16042,6 +16302,74 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions")).project_root(&explicit_root);
 
         assert_eq!(factory.shell_project_root(), explicit_root);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn build_shell_dispatcher_with_custody_record(
+        runtime_root: Option<&std::path::Path>,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("workspace");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let session_id = SessionId::new();
+        let custody_root = runtime_root
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| temp.path().join("realm"));
+        let scope_dir = custody_root
+            .join(meerkat_tools::builtin::shell::PROCESS_CUSTODY_DIR)
+            .join(session_id.to_string());
+        std::fs::create_dir_all(&scope_dir).unwrap();
+        // A record no recovery can interpret: custody must fail closed.
+        std::fs::write(
+            scope_dir.join(format!("{}.json", uuid::Uuid::new_v4())),
+            b"{not a custody record",
+        )
+        .unwrap();
+        let mut factory =
+            AgentFactory::new(temp.path().join("sessions")).project_root(&project_root);
+        if let Some(root) = runtime_root {
+            factory = factory.runtime_root(root);
+        }
+        let mut shell = ShellConfig::with_project_root(project_root.clone());
+        shell.enabled = true;
+        factory
+            .build_builtin_dispatcher(
+                Arc::new(meerkat_tools::builtin::MemoryTaskStore::new()),
+                BuiltinToolConfig::default(),
+                Some(project_root),
+                Some(shell),
+                None,
+                Some(session_id.to_string()),
+                None,
+            )
+            .await
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn shell_dispatcher_build_runs_process_custody_recovery_first() {
+        let realm = tempfile::tempdir().unwrap();
+        let error = build_shell_dispatcher_with_custody_record(Some(realm.path()))
+            .await
+            .err()
+            .expect("an unrecoverable prior custody record must block the build");
+        assert!(
+            matches!(
+                &error,
+                CompositeDispatcherError::ProcessCustody(
+                    meerkat_tools::builtin::shell::ProcessCustodyError::CorruptRecord { .. }
+                )
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn shell_dispatcher_without_runtime_root_keeps_in_process_containment() {
+        build_shell_dispatcher_with_custody_record(None)
+            .await
+            .expect("custody is bound only under a realm runtime root");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

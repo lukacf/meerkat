@@ -119,6 +119,9 @@ export type SkillResolutionFailureReason = {
   skill_name: string;
   source_uuid: string;
 } | {
+  reason_type: "no_skill_engine";
+  requested: SkillKey[];
+} | {
   message: string;
   reason_type: "unknown";
 };
@@ -150,6 +153,8 @@ export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" |
 
 export type WireHandlingMode = "queue" | "steer";
 
+export type WireInputTerminalOutcome = "completed" | "abandoned" | "superseded" | "coalesced" | "cancelled";
+
 export type WireResolvedModelCapabilities = {
   image_generation?: boolean;
   image_input?: boolean;
@@ -176,6 +181,30 @@ export type WireRunResult = {
   turns: number;
   usage: WireUsage;
 };
+
+export type WireRunStopCompletion = "completed" | "completed_without_result" | "callback_pending" | "cancelled" | "abandoned" | "abandoned_with_error" | "completed_with_finalization_failure" | "runtime_terminated";
+
+export type WireRunStopContributor = {
+  completion: WireRunStopCompletion;
+  input_id: string;
+  terminal?: WireInputTerminalOutcome | null;
+};
+
+export type WireRunStopReceipt = {
+  contributors: WireRunStopContributor[];
+  outcome: "stopped";
+  run_id: string;
+} | {
+  current_run_id?: string | null;
+  outcome: "not_current";
+  run_id: string;
+} | {
+  outcome: "not_stoppable";
+  run_id: string;
+  state: WireRuntimeState;
+};
+
+export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
 
 export type WireSessionInfo = {
   created_at: number;

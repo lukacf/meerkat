@@ -166,6 +166,7 @@ The `Session` methods are thin conveniences over canonical runtime calls:
 - `await session.history(...)`
 - `await session.archive()`
 - `await session.interrupt()`
+- `await session.stopRun(runId, reason)`
 - `await session.invokeSkill(...)`
 - `await session.subscribeEvents()`
 
@@ -669,7 +670,11 @@ interface SkillResolutionFailedEvent { type: "skill_resolution_failed"; skillKey
 `SkillResolutionFailureReason` is a typed union discriminated on `reasonType`
 (`not_found`, `capability_unavailable`, `load`, `parse`, `source_uuid_collision`,
 `source_uuid_mutation_without_lineage`, `missing_skill_remaps`,
-`remap_without_lineage`, `unknown_skill_alias`, `remap_cycle`, `unknown`).
+`remap_without_lineage`, `unknown_skill_alias`, `remap_cycle`,
+`no_skill_engine`, `unknown`). `no_skill_engine` carries
+`requested: readonly SkillKey[]`, the explicit selection that could not
+resolve because the agent was built without a skill engine. A `reasonType`
+this SDK does not know is returned as `unknown` with `rawReasonType` set.
 
 ### Comms events
 

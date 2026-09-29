@@ -325,6 +325,23 @@ pub enum MobError {
     #[error("mob member not found: {0}")]
     MemberNotFound(AgentIdentity),
 
+    /// The member's authorized session has no live actor in the session
+    /// service: it is not materialized yet, or its actor was already
+    /// discarded. Hosts can retry once the member materializes.
+    #[error("mob member '{agent_identity}' has no live session actor for session {session_id}")]
+    MemberSessionNotLive {
+        agent_identity: AgentIdentity,
+        session_id: meerkat_core::SessionId,
+    },
+
+    /// An agent event subscription's replay cursor was rejected.
+    #[error("agent event cursor {cursor:?} for mob member '{agent_identity}' rejected: {reason}")]
+    AgentEventCursorRejected {
+        agent_identity: AgentIdentity,
+        cursor: meerkat_core::comms::SessionEventCursor,
+        reason: meerkat_core::comms::SessionEventCursorRejection,
+    },
+
     /// A stable delivery key already owns different or unprovable input
     /// semantics. Reusing the key cannot reclassify old work as human input.
     #[error("work delivery conflicts with input {input_id} in session {session_id}")]
@@ -1182,6 +1199,17 @@ pub enum MobError {
         requested_role: ProfileName,
         reason: String,
     },
+
+    /// A delivery identity's correlation and a caller-supplied transcript
+    /// interaction id (on the `WorkSpec` or in the turn options) name
+    /// different interactions. The delivery is refused before admission.
+    #[error(
+        "delivery correlation '{correlation_id}' conflicts with supplied interaction id '{interaction_id}'"
+    )]
+    DeliveryInteractionConflict {
+        correlation_id: String,
+        interaction_id: String,
+    },
 }
 
 /// THE single owner of the operator-facing name-occupancy remedy text, shared
@@ -1660,6 +1688,7 @@ impl MobError {
             Self::MobNotFound(_)
             | Self::ProfileNotFound(_)
             | Self::MemberNotFound(_)
+            | Self::MemberSessionNotLive { .. }
             | Self::FlowNotFound(_)
             | Self::RunNotFound(_)
             | Self::WorkNotFound(_) => MobFailureClass::TargetMissing,

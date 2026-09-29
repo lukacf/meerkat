@@ -42,7 +42,9 @@ use crate::runtime::terminalization::{TerminalizationOutcome, TerminalizationTar
 use crate::tokio;
 use futures::FutureExt as _;
 use meerkat_core::agent::CommsRuntime;
-use meerkat_core::comms::{CommsCommand, PeerId, SendReceipt, TrustedPeerDescriptor};
+use meerkat_core::comms::{
+    CommsCommand, PeerId, SendReceipt, SessionEventCursor, StreamError, TrustedPeerDescriptor,
+};
 use meerkat_core::lifecycle::run_primitive::{
     KeepAliveDirective, ModelId, ProviderParamsOverride, RuntimeTurnMetadata, TurnInstruction,
     TurnMetadataOverride,
@@ -66,6 +68,30 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::store::MobMemberOperatorRequestKey;
+
+/// Type a member session subscription failure. `NotFound` means the member's
+/// authorized session has no live actor; a rejected cursor keeps its typed
+/// reason. Other stream failures remain internal.
+fn agent_event_subscription_error(
+    agent_identity: &AgentIdentity,
+    session_id: &SessionId,
+    error: StreamError,
+) -> MobError {
+    match error {
+        StreamError::NotFound(_) => MobError::MemberSessionNotLive {
+            agent_identity: agent_identity.clone(),
+            session_id: session_id.clone(),
+        },
+        StreamError::CursorRejected { cursor, reason } => MobError::AgentEventCursorRejected {
+            agent_identity: agent_identity.clone(),
+            cursor,
+            reason,
+        },
+        error => MobError::Internal(format!(
+            "failed to subscribe to agent events for '{agent_identity}': {error}"
+        )),
+    }
+}
 
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 /// Pause between wait polls of a member that is not yet terminal.
@@ -1537,6 +1563,46 @@ pub enum MobMemberStatus {
     Unknown,
 }
 
+/// Who owns a member's comms endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MobMemberEndpointOwner {
+    /// The member runs in this process; its local comms runtime owns the
+    /// endpoint.
+    Local,
+    /// The member is placed on a remote host; the host-acknowledged endpoint
+    /// is the only address it can be reached at.
+    Host,
+}
+
+/// Where a member's comms endpoint stands, as returned by
+/// [`MobHandle::member_endpoint_status`]. Ownership is observable even when
+/// no usable endpoint exists, so a placed member is never mistaken for a
+/// local one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MobMemberEndpointStatus {
+    /// A local member's registered endpoint.
+    Local(TrustedPeerDescriptor),
+    /// A placed member's host-acknowledged endpoint (real remote address).
+    Host(TrustedPeerDescriptor),
+    /// A local member with no usable endpoint (Broken, or none registered).
+    LocalUnavailable { reason: String },
+    /// A placed member with no usable endpoint (Broken, or none registered).
+    HostUnavailable { reason: String },
+}
+
+/// A member's canonical comms endpoint, as returned by
+/// [`MobHandle::member_peer_endpoint`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MobMemberPeerEndpoint {
+    /// Name, peer id, transport address and Ed25519 transport key.
+    pub descriptor: TrustedPeerDescriptor,
+    /// Who owns the endpoint.
+    pub owner: MobMemberEndpointOwner,
+}
+
 /// Identity-native owner reference for external-member observation and hooks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2020,7 +2086,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
     match error {
         MobError::MobNotFound(_)
         | MobError::MobDefinitionProjectionMismatch { .. }
-        | MobError::MobDefinitionAuthorityChanged { .. } => {
+        | MobError::MobDefinitionAuthorityChanged { .. }
+        | MobError::MemberSessionNotLive { .. }
+        | MobError::AgentEventCursorRejected { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
         MobError::ProfileNotFound(_) => {
@@ -2213,6 +2281,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         // without laundering them into a false spawn failure cause.
         MobError::PlacedInteractionIdAlreadyUsed { .. }
         | MobError::InvalidPlacedInteractionId { .. }
+        | MobError::DeliveryInteractionConflict { .. }
         | MobError::PlacedCompletionDeliveryRejected
         | MobError::PlacedCompletionHostNoEffect
         | MobError::PlacedCompletionHostCancelled
@@ -4693,6 +4762,28 @@ pub struct ForkChildRun {
     child: AgentIdentity,
     cleanup: MobHandle,
     abandon_guard: Option<ProvisionedChildRetireOnDrop>,
+    /// The runtime-owned supervisor task that owns the run. Dropping the
+    /// handle detaches it, so production never holds it; test builds keep it
+    /// to end the supervisor as a process exit does (see
+    /// [`Self::end_supervisor_as_process_exit_for_test`]).
+    #[cfg(any(test, feature = "test-support"))]
+    supervisor: tokio::task::JoinHandle<()>,
+}
+
+/// How [`ForkChildRun::end_supervisor_as_process_exit_for_test`] found the
+/// supervisor that owned a detached fork child's run.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkSupervisorExitForTest {
+    /// The supervisor was still waiting on the turn and ended there: it
+    /// neither reported an outcome nor retired the child.
+    EndedBeforeOutcome,
+    /// The supervisor had already settled the run (and done whatever that
+    /// outcome does to the child) before it could be ended.
+    AlreadySettled,
+    /// The supervisor task panicked before it could be ended.
+    Panicked,
 }
 
 impl std::fmt::Debug for ForkChildRun {
@@ -4730,6 +4821,31 @@ impl ForkChildRun {
             self.child.clone(),
         ));
         self
+    }
+
+    /// End the supervisor that owns this run the way a process exit ends it:
+    /// its task is aborted wherever it waits, so a turn that ends afterwards
+    /// is neither reported by it nor retires the child through it. The child,
+    /// its session and the runtime are untouched, exactly as a restart finds
+    /// them. Resolves once the supervisor task has ended, and reports whether
+    /// it ended before settling the run. Exposed only by test builds, for
+    /// restart tests that re-link a child in the same process.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn end_supervisor_as_process_exit_for_test(mut self) -> ForkSupervisorExitForTest {
+        if let Some(guard) = self.abandon_guard.take() {
+            guard.disarm();
+        }
+        self.supervisor.abort();
+        // A join error is either the abort (cancelled) or the task failing to
+        // run to completion, which is a panic. Only `is_cancelled` exists on
+        // both tokio and wasm32's tokio_with_wasm, so the panic is the
+        // non-cancelled case.
+        match (&mut self.supervisor).await {
+            Ok(()) => ForkSupervisorExitForTest::AlreadySettled,
+            Err(error) if error.is_cancelled() => ForkSupervisorExitForTest::EndedBeforeOutcome,
+            Err(_) => ForkSupervisorExitForTest::Panicked,
+        }
     }
 
     /// The handle reached its holder: from here dropping it only stops
@@ -6782,27 +6898,38 @@ impl MobHandle {
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
-            MobMachineCommand::SubscribeAgentEvents { agent_identity } => {
+            MobMachineCommand::SubscribeAgentEvents {
+                agent_identity,
+                cursor,
+            } => {
                 let effects = self
                     .apply_machine_input_effects(mob_dsl::MobMachineInput::SubscribeAgentEvents {
                         agent_identity: mob_dsl::AgentIdentity(agent_identity.to_string()),
                     })
                     .await?;
-                let stream = match Self::agent_event_subscription_authority_from_effects(
+                let subscription = match Self::agent_event_subscription_authority_from_effects(
                     effects,
                     &agent_identity,
                 )? {
                     AgentEventSubscriptionAuthority::Local(session_id) => {
-                        self.subscribe_authorized_agent_session_events(&agent_identity, &session_id)
-                            .await?
+                        self.subscribe_authorized_agent_session_events_from(
+                            &agent_identity,
+                            &session_id,
+                            cursor,
+                        )
+                        .await?
                     }
                     // The machine's THIRD outcome (phase 6): a placed member
-                    // subscribes through the member event pump's tap.
+                    // subscribes through the member event pump's tap. Its
+                    // host-resident actor has no local witness.
                     AgentEventSubscriptionAuthority::External => {
-                        self.external_member_event_stream(&agent_identity).await?
+                        self.external_member_event_subscription(&agent_identity, cursor)
+                            .await?
                     }
                 };
-                Ok(MobMachineCommandResult::EventStream(stream))
+                Ok(MobMachineCommandResult::AgentEventSubscription(
+                    subscription,
+                ))
             }
             MobMachineCommand::SubscribeAllAgentEvents => {
                 let machine_state = self.machine_state_watch_rx.borrow().clone();
@@ -7576,6 +7703,32 @@ impl MobHandle {
             .await?
     }
 
+    /// Run-fenced Stop of one exact member run: the member's runtime stops
+    /// `run_id` and terminalizes every contributor bound to it (including
+    /// durable Steer inputs that joined the run), and the reply is the typed
+    /// receipt. A stale run id is `NotCurrent`, never an error, and never
+    /// touches a newer run or queued input. `Cancel`-scoped at chokepoint
+    /// (a). Hosts learn a member's run id from its `run_started` event
+    /// (`identity.run_id`).
+    pub async fn stop_member_run(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+        run_id: meerkat_core::lifecycle::RunId,
+        reason: impl Into<String>,
+    ) -> Result<meerkat_contracts::WireRunStopReceipt, MobError> {
+        let reason = reason.into();
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(|reply_tx| super::state::MobCommand::StopMemberRun {
+                agent_identity: identity,
+                run_id,
+                reason,
+                reply_tx,
+            })
+            .await?
+    }
+
     /// Placement-switched member transcript read (phase 6, DEC-P6E-21):
     /// `ReadHistory`-scoped at chokepoint (a); local and remote pages share
     /// ONE wire projection. RPC/REST/MCP exposure is phase 7 (the DTOs
@@ -8337,9 +8490,20 @@ impl MobHandle {
     pub(super) async fn external_member_event_tap(
         &self,
         agent_identity: &AgentIdentity,
-    ) -> Result<tokio::sync::mpsc::Receiver<crate::event::AttributedEvent>, MobError> {
+    ) -> Result<tokio::sync::mpsc::Receiver<Arc<crate::event::AttributedEvent>>, MobError> {
+        self.external_member_event_tap_from(agent_identity, SessionEventCursor::Live)
+            .await
+            .map(|tap| tap.live)
+    }
+
+    pub(super) async fn external_member_event_tap_from(
+        &self,
+        agent_identity: &AgentIdentity,
+        cursor: SessionEventCursor,
+    ) -> Result<super::event_pump::MemberEventTap, MobError> {
         self.send_actor_command(|reply_tx| super::state::MobCommand::EnsureMemberEventTap {
             agent_identity: agent_identity.clone(),
+            cursor,
             reply_tx,
         })
         .await?
@@ -8353,15 +8517,41 @@ impl MobHandle {
         &self,
         agent_identity: &AgentIdentity,
     ) -> Result<EventStream, MobError> {
-        let tap = self.external_member_event_tap(agent_identity).await?;
-        Ok(Box::pin(futures::stream::unfold(
-            tap,
-            |mut tap| async move {
-                tap.recv()
-                    .await
-                    .map(|attributed| (attributed.envelope, tap))
-            },
-        )))
+        self.external_member_event_subscription(agent_identity, SessionEventCursor::Live)
+            .await
+            .map(|subscription| subscription.stream)
+    }
+
+    /// [`Self::external_member_event_stream`] starting at a typed cursor,
+    /// replayed from the member's bounded replay window. Replayed events are
+    /// copied as the stream is read, never under the pump manager's lock.
+    pub(super) async fn external_member_event_subscription(
+        &self,
+        agent_identity: &AgentIdentity,
+        cursor: SessionEventCursor,
+    ) -> Result<AgentEventSubscription, MobError> {
+        let super::event_pump::MemberEventTap {
+            epoch,
+            gap,
+            replay,
+            live,
+        } = self
+            .external_member_event_tap_from(agent_identity, cursor)
+            .await?;
+        let head = gap.map(|gap| gap.envelope).into_iter().chain(
+            replay
+                .into_iter()
+                .map(|event| Arc::unwrap_or_clone(event).envelope),
+        );
+        let live = futures::stream::unfold(live, |mut live| async move {
+            live.recv()
+                .await
+                .map(|attributed| (Arc::unwrap_or_clone(attributed).envelope, live))
+        });
+        Ok(AgentEventSubscription::without_actor(
+            epoch,
+            Box::pin(futures::StreamExt::chain(futures::stream::iter(head), live)),
+        ))
     }
 
     fn agent_event_subscription_authority_from_effects(
@@ -8799,6 +8989,97 @@ impl MobHandle {
         Self::project_get_member_result(result)
     }
 
+    /// The member's canonical comms endpoint: the exact generation endpoint
+    /// MobMachine holds for its current incarnation (display name, peer id,
+    /// transport address and Ed25519 transport key), with who owns it.
+    ///
+    /// For a placed member ([`MobMemberEndpointOwner::Host`]) this is the
+    /// host-acknowledged endpoint with its real remote address, which a
+    /// cross-process host can dial; the controlling process holds no local
+    /// comms runtime for it. For a local member
+    /// ([`MobMemberEndpointOwner::Local`]) the address is the one its runtime
+    /// advertised when the endpoint was registered (`inproc://` for an
+    /// in-process member); its live runtime remains the authority for where
+    /// it listens now.
+    ///
+    /// Returns `Ok(None)` when the member is absent, has no registered
+    /// endpoint, has a recorded endpoint that does not form a valid
+    /// descriptor, or is Broken (a Broken member publishes no endpoint,
+    /// exactly like its roster projection). A Retiring member still returns
+    /// its endpoint: retirement cleanup addresses exactly that endpoint until
+    /// the member is retired. Only a genuine query fault is `Err`. Use
+    /// [`Self::member_endpoint_status`] to learn who owns an unusable
+    /// endpoint and why.
+    pub async fn member_peer_endpoint(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<MobMemberPeerEndpoint>, MobError> {
+        Ok(match self.member_endpoint_status(identity).await? {
+            Some(MobMemberEndpointStatus::Local(descriptor)) => Some(MobMemberPeerEndpoint {
+                descriptor,
+                owner: MobMemberEndpointOwner::Local,
+            }),
+            Some(MobMemberEndpointStatus::Host(descriptor)) => Some(MobMemberPeerEndpoint {
+                descriptor,
+                owner: MobMemberEndpointOwner::Host,
+            }),
+            Some(
+                MobMemberEndpointStatus::LocalUnavailable { .. }
+                | MobMemberEndpointStatus::HostUnavailable { .. },
+            )
+            | None => None,
+        })
+    }
+
+    /// Where a member's comms endpoint stands, including WHO owns it when no
+    /// usable endpoint exists: a Broken or restore-failed placed member is
+    /// [`MobMemberEndpointStatus::HostUnavailable`], never mistaken for a
+    /// local member. `Ok(None)` only for an absent member.
+    pub async fn member_endpoint_status(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<MobMemberEndpointStatus>, MobError> {
+        let state = self.query_machine_state().await?;
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        if !state.identity_to_runtime.contains_key(&dsl_identity) {
+            return Ok(None);
+        }
+        let host_owned = super::member_runtime_is_host_owned(&state, identity);
+        let unavailable = |reason: String| {
+            if host_owned {
+                MobMemberEndpointStatus::HostUnavailable { reason }
+            } else {
+                MobMemberEndpointStatus::LocalUnavailable { reason }
+            }
+        };
+        if let Some(reason) = state.member_restore_failures.get(&dsl_identity) {
+            return Ok(Some(unavailable(format!("member is Broken: {reason}"))));
+        }
+        let Some(endpoint) = state.member_peer_endpoints.get(&dsl_identity) else {
+            return Ok(Some(unavailable(
+                "member has no registered comms endpoint".to_string(),
+            )));
+        };
+        let descriptor = match TrustedPeerDescriptor::unsigned_with_pubkey(
+            endpoint.name.0.clone(),
+            endpoint.peer_id.0.clone(),
+            endpoint.signing_key.0,
+            endpoint.address.0.clone(),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                return Ok(Some(unavailable(format!(
+                    "member has an invalid MobMachine peer endpoint: {error}"
+                ))));
+            }
+        };
+        Ok(Some(if host_owned {
+            MobMemberEndpointStatus::Host(descriptor)
+        } else {
+            MobMemberEndpointStatus::Local(descriptor)
+        }))
+    }
+
     /// Read the total stored observation for one identity intent row.
     pub async fn identity_intent(
         &self,
@@ -9112,20 +9393,51 @@ impl MobHandle {
     ///
     /// Looks up the member's backing bridge session from the roster, then
     /// subscribes to the session-level event stream via [`MobSessionService`].
+    /// Delivers only events published after the subscription attaches; use
+    /// [`Self::subscribe_agent_events_from`] to replay retained events.
     ///
     /// Returns `MobError::MemberNotFound` if the member is not in the
-    /// roster or has no backing bridge session.
+    /// roster or has no backing bridge session, and
+    /// `MobError::MemberSessionNotLive` if its session has no live actor.
     pub async fn subscribe_agent_events(
         &self,
         identity: &AgentIdentity,
     ) -> Result<EventStream, MobError> {
+        self.subscribe_agent_events_from(identity, SessionEventCursor::Live)
+            .await
+            .map(|subscription| subscription.stream)
+    }
+
+    /// Subscribe to agent-level events for a specific member, starting at a
+    /// typed cursor.
+    ///
+    /// [`SessionEventCursor::Earliest`] replays the member's current actor
+    /// incarnation from its first retained event, so a host that attaches
+    /// after a newly materialized or restored member already began its first
+    /// run still observes that run's `RunStarted`/`TurnStarted`.
+    /// [`SessionEventCursor::After`] resumes after a sequence the host
+    /// already observed; envelope sequences continue across the member's
+    /// actor incarnations. Replay and live delivery never overlap or leave a
+    /// gap; a position older than the retained window starts with a typed
+    /// `StreamTruncated(StreamLagged)` marker. A rejected cursor surfaces as
+    /// `MobError::AgentEventCursorRejected`.
+    ///
+    /// The subscription names the exact actor incarnation of a local member
+    /// (`None` for a placed member), so a host can let a revoked
+    /// predecessor's stream drain before a successor's.
+    pub async fn subscribe_agent_events_from(
+        &self,
+        identity: &AgentIdentity,
+        cursor: SessionEventCursor,
+    ) -> Result<AgentEventSubscription, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::SubscribeAgentEvents {
                 agent_identity: identity.clone(),
+                cursor,
             })
             .await?
         {
-            MobMachineCommandResult::EventStream(stream) => Ok(stream),
+            MobMachineCommandResult::AgentEventSubscription(subscription) => Ok(subscription),
             _ => Err(MobError::Internal(
                 "unexpected command result variant".into(),
             )),
@@ -11021,9 +11333,30 @@ impl MobHandle {
                 host: meerkat_contracts::wire::WireHostRef(obligation.host.as_str().to_string()),
             });
         }
+        let mut outstanding_external =
+            Vec::with_capacity(state.pending_external_route_installs.len());
+        for obligation in &state.pending_external_route_installs {
+            if obligation.kind != crate::machines::mob_machine::RouteObligationKind::Install {
+                return Err(MobError::Internal(format!(
+                    "MobMachine invariant violation: pending external route ledger contains non-Install obligation for host '{}'",
+                    obligation.host.as_str()
+                )));
+            }
+            outstanding_external.push(
+                meerkat_contracts::wire::WireExternalRouteInstallObligation {
+                    local: obligation.edge.local.0.clone(),
+                    peer_id: obligation.edge.endpoint.peer_id.0.clone(),
+                    peer_name: obligation.edge.endpoint.name.0.clone(),
+                    host: meerkat_contracts::wire::WireHostRef(
+                        obligation.host.as_str().to_string(),
+                    ),
+                },
+            );
+        }
         Ok(meerkat_contracts::wire::MobRouteInstallsResult {
-            complete: outstanding.is_empty(),
+            complete: outstanding.is_empty() && outstanding_external.is_empty(),
             outstanding,
+            outstanding_external,
         })
     }
 
@@ -11993,11 +12326,51 @@ impl MobHandle {
         delivery_identity: crate::store::MobDeliveryIdentity,
         deadline: Instant,
     ) -> Result<WorkDeliveryReceipt, MobError> {
+        self.submit_host_human_input_with_options_bounded(
+            runtime_id,
+            fence_token,
+            spec,
+            handling_mode,
+            MemberTurnOptions::default(),
+            delivery_identity,
+            deadline,
+        )
+        .await
+    }
+
+    /// [`Self::submit_host_human_input_bounded`] with host-owned
+    /// [`MemberTurnOptions`] for the exact target turn.
+    ///
+    /// The options ride the same fenced host-human admission as the content:
+    /// selected [`MemberTurnOptions::skill_references`] resolve natively on
+    /// the target member (typed `SkillsResolved` / `SkillResolutionFailed`
+    /// and durable `SkillContext`), never as host-rendered prompt text. The
+    /// options are part of the runtime's exact replay identity, so a retry
+    /// with the SAME delivery identity and the same options deduplicates to
+    /// the original admission, and a retry that changes them is refused as
+    /// an idempotency conflict. The skill selection is order-sensitive: a
+    /// replay must repeat the same keys in the same order. An empty
+    /// selection is normalized to no selection. An interaction id in the
+    /// options that differs from the delivery correlation is refused with
+    /// [`MobError::DeliveryInteractionConflict`].
+    #[cfg(feature = "runtime-adapter")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn submit_host_human_input_with_options_bounded(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+        options: MemberTurnOptions,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        deadline: Instant,
+    ) -> Result<WorkDeliveryReceipt, MobError> {
         let cmd = self.host_human_input_command(
             runtime_id,
             fence_token,
             spec,
             handling_mode,
+            options,
             delivery_identity,
         )?;
         self.submit_work_command_bounded(cmd, deadline).await
@@ -12018,6 +12391,33 @@ impl MobHandle {
         delivery_identity: crate::store::MobDeliveryIdentity,
         deadline: Instant,
     ) -> Result<WorkTurnHandle, MobError> {
+        self.start_host_human_input_with_options_bounded(
+            runtime_id,
+            fence_token,
+            spec,
+            handling_mode,
+            MemberTurnOptions::default(),
+            delivery_identity,
+            deadline,
+        )
+        .await
+    }
+
+    /// Completion-bearing counterpart to
+    /// [`Self::submit_host_human_input_with_options_bounded`]; see
+    /// [`Self::start_host_human_input_bounded`] for the completion contract.
+    #[cfg(feature = "runtime-adapter")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_host_human_input_with_options_bounded(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+        options: MemberTurnOptions,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        deadline: Instant,
+    ) -> Result<WorkTurnHandle, MobError> {
         let session_id = {
             let state = self.machine_state_watch_rx.borrow();
             Self::machine_bridge_session_id_for_identity(&runtime_id.identity, &state)
@@ -12027,6 +12427,7 @@ impl MobHandle {
             fence_token,
             spec,
             handling_mode,
+            options,
             delivery_identity,
         )?;
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
@@ -12093,14 +12494,24 @@ impl MobHandle {
         fence_token: FenceToken,
         spec: WorkSpec,
         handling_mode: HandlingMode,
+        mut options: MemberTurnOptions,
         delivery_identity: crate::store::MobDeliveryIdentity,
     ) -> Result<Box<crate::mob_machine::SubmitWorkCommand>, MobError> {
         delivery_identity.validate()?;
+        // An empty selection is no selection: normalize it so it keeps the
+        // metadata-less replay identity instead of minting a distinct one.
+        if options.skill_references.as_ref().is_some_and(Vec::is_empty) {
+            options.skill_references = None;
+        }
         let work_ref = WorkRef::for_delivery(
             &self.definition.id,
             &runtime_id.identity,
             &delivery_identity.idempotency_key,
         );
+        // Absent options keep the metadata-less command shape, so existing
+        // host-human deliveries keep their exact replay identity.
+        let turn_metadata = (options != MemberTurnOptions::default())
+            .then(|| options.into_runtime_metadata(handling_mode));
         Ok(Box::new(crate::mob_machine::SubmitWorkCommand {
             runtime_id,
             fence_token,
@@ -12108,7 +12519,7 @@ impl MobHandle {
             spec,
             handling_mode,
             external_delivery_identity: Some(delivery_identity),
-            turn_metadata: None,
+            turn_metadata,
             event_tx: None,
             completion_tx: None,
             bounded_result_spec: None,
@@ -13426,9 +13837,10 @@ impl MobHandle {
             // identity is not provable here and the persistent owner installs
             // no provider-authored breakpoint proof on this mob child. That
             // only withholds accounting evidence: the child's first request
-            // repeats the source prefix byte for byte and hits the provider
-            // cache whenever the source's entry is still alive. See
-            // `ForkCacheInheritance`.
+            // repeats the source prefix byte for byte, and reads the entry
+            // the source's running turn keeps at its previous run's output
+            // (`meerkat_core::prior_run_cache_anchor`) while that entry is
+            // alive. See `ForkCacheInheritance`.
             cache_identity: None,
             source_admission,
         };
@@ -14001,7 +14413,7 @@ impl MobHandle {
         let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
         let supervisor = self.clone();
         let child = fork.agent_identity.clone();
-        tokio::spawn(async move {
+        let supervisor_task = tokio::spawn(async move {
             let wait = turn.wait_bounded(result_spec);
             let outcome = match max_run {
                 None => match wait.await {
@@ -14039,8 +14451,14 @@ impl MobHandle {
             child: fork.agent_identity.clone(),
             cleanup: self.fork_child_cleanup_authority(),
             abandon_guard: None,
+            #[cfg(any(test, feature = "test-support"))]
+            supervisor: supervisor_task,
         }
         .retire_child_if_abandoned();
+        // Production detaches the supervisor: it runs to its outcome whether
+        // or not anyone holds the run.
+        #[cfg(not(any(test, feature = "test-support")))]
+        drop(supervisor_task);
         Ok((fork, run))
     }
 
@@ -15681,16 +16099,28 @@ impl MobHandle {
         agent_identity: &AgentIdentity,
         session_id: &SessionId,
     ) -> Result<EventStream, MobError> {
-        crate::runtime::session_service::MobSessionService::subscribe_session_events(
-            self.session_service.as_ref(),
+        self.subscribe_authorized_agent_session_events_from(
+            agent_identity,
             session_id,
+            SessionEventCursor::Live,
         )
         .await
-        .map_err(|error| {
-            MobError::Internal(format!(
-                "failed to subscribe to agent events for '{agent_identity}': {error}"
-            ))
-        })
+        .map(|subscription| subscription.stream)
+    }
+
+    pub(super) async fn subscribe_authorized_agent_session_events_from(
+        &self,
+        agent_identity: &AgentIdentity,
+        session_id: &SessionId,
+        cursor: SessionEventCursor,
+    ) -> Result<AgentEventSubscription, MobError> {
+        crate::runtime::session_service::MobSessionService::subscribe_agent_session_events_from(
+            self.session_service.as_ref(),
+            session_id,
+            cursor,
+        )
+        .await
+        .map_err(|error| agent_event_subscription_error(agent_identity, session_id, error))
     }
 
     pub(super) async fn authorized_mob_event_router_members(

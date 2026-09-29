@@ -93,6 +93,93 @@ enum SystemMessageMode {
     ExtractToInstructions,
 }
 
+/// Which lowered input items carry an explicit `prompt_cache_breakpoint`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponsesCacheBreakpoints {
+    /// OpenAI places breakpoints (implicit mode or the provider default).
+    None,
+    /// Explicit mode: every eligible input item, append-monotone, so the
+    /// last input before the previous run's output always carries one.
+    EveryInput,
+    /// Implicit mode on a model that also accepts explicit breakpoints: one
+    /// marker on the last input at or before the previous run's output
+    /// ([`meerkat_core::prior_run_cache_anchor`]), when there is one. The
+    /// implicit breakpoint writes only at the end of each request, so without
+    /// this marker a run that starts on a cold cache leaves no entry a
+    /// `fork_off` child cut at the previous turn end can read.
+    ///
+    /// Every input that can become the anchor is lowered as content parts
+    /// even when unmarked, so marking it later adds only the marker and
+    /// leaves the item's content bytes as the earlier requests sent them.
+    ///
+    /// Assumption: OpenAI keys cache entries on the prompt content and treats
+    /// `prompt_cache_breakpoint` as placement metadata, not prefix content.
+    /// The prompt-caching guide (developers.openai.com/api/docs/guides/
+    /// prompt-caching) describes implicit breakpoints moving to "the end of
+    /// the latest eligible message" on every request and explicit ones being
+    /// added "without turning off the implicit breakpoint", which only
+    /// works if markers are not hashed. If OpenAI did hash them, the anchor
+    /// item would change bytes as the anchor moves, and each run boundary
+    /// would re-bill from the previous anchor onward.
+    ///
+    /// This mode never authors cache-breakpoint evidence
+    /// ([`LlmClient::authored_cache_breakpoints`] only lowers explicit mode),
+    /// so it does not enter the per-request evidence path.
+    ImplicitWithTurnAnchor { anchor_message: Option<usize> },
+}
+
+impl ResponsesCacheBreakpoints {
+    fn authors(self, message_index: usize) -> bool {
+        match self {
+            Self::None => false,
+            Self::EveryInput => true,
+            Self::ImplicitWithTurnAnchor { anchor_message } => {
+                anchor_message == Some(message_index)
+            }
+        }
+    }
+
+    /// Whether unmarked inputs that could carry a breakpoint are lowered as
+    /// content parts rather than bare strings.
+    fn lowers_inputs_as_parts(self) -> bool {
+        matches!(self, Self::ImplicitWithTurnAnchor { .. })
+    }
+
+    /// The breakpoint placement `request` asks for.
+    fn for_request(request: &LlmRequest) -> Self {
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode;
+        let Some(tag) = openai_tag(request).filter(|tag| tag.prompt_cache_enabled != Some(false))
+        else {
+            return Self::None;
+        };
+        match tag.prompt_cache_options.and_then(|options| options.mode) {
+            Some(OpenAiPromptCacheMode::Explicit) => Self::EveryInput,
+            Some(OpenAiPromptCacheMode::Implicit)
+                if crate::request_support::supports_prompt_cache_mode(
+                    &request.model,
+                    OpenAiPromptCacheMode::Explicit,
+                ) == Some(true) =>
+            {
+                Self::ImplicitWithTurnAnchor {
+                    anchor_message: Self::turn_anchor_input(&request.messages),
+                }
+            }
+            _ => Self::None,
+        }
+    }
+
+    /// The last input message at or before the previous run's output.
+    fn turn_anchor_input(messages: &[Message]) -> Option<usize> {
+        let anchor = meerkat_core::prior_run_cache_anchor(messages)?;
+        messages.get(..=anchor)?.iter().rposition(|message| {
+            matches!(
+                message,
+                Message::User(_) | Message::SystemNotice(_) | Message::ToolResults { .. }
+            )
+        })
+    }
+}
+
 // ChatGPT's Responses wire exposes one top-level instruction string. The
 // provider request builder therefore accepts at most one leading System row;
 // distinct canonical messages are never delimiter-joined into an ambiguous
@@ -721,27 +808,19 @@ impl OpenAiClient {
     /// not a supported host API.
     #[doc(hidden)]
     pub fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
-        let author_explicit_breakpoints = openai_tag(request).is_some_and(|tag| {
-            tag.prompt_cache_enabled != Some(false)
-                && tag.prompt_cache_options.is_some_and(|options| {
-                    options.mode
-                        == Some(
-                            meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode::Explicit,
-                        )
-                })
-        });
+        let cache_breakpoints = ResponsesCacheBreakpoints::for_request(request);
         let (input, instructions, _) = if self.is_chatgpt_backend_wire() {
             Self::validate_chatgpt_system_messages(&request.messages)?;
             Self::convert_to_responses_input_with_system_mode(
                 &request.messages,
                 SystemMessageMode::ExtractToInstructions,
-                author_explicit_breakpoints,
+                cache_breakpoints,
             )?
         } else {
             Self::convert_to_responses_input_with_system_mode(
                 &request.messages,
                 SystemMessageMode::IncludeInInput,
-                author_explicit_breakpoints,
+                cache_breakpoints,
             )?
         };
         let reasoning_enabled = Self::request_supports_reasoning_payload(request);
@@ -831,18 +910,13 @@ impl OpenAiClient {
                 }
             }
             if tag.prompt_cache_enabled != Some(false) {
-                if let Some(retention) = tag.prompt_cache_retention
-                    && crate::request_support::supports_prompt_cache_retention(
+                if let Some(message) = tag.prompt_cache_retention.and_then(|retention| {
+                    crate::request_support::prompt_cache_retention_rejection(
                         &request.model,
                         retention,
-                    ) == Some(false)
-                {
-                    return Err(LlmError::InvalidRequest {
-                        message: format!(
-                            "OpenAI model '{}' supports only '24h' prompt_cache_retention",
-                            request.model
-                        ),
-                    });
+                    )
+                }) {
+                    return Err(LlmError::InvalidRequest { message });
                 }
                 if let Some(options) = tag.prompt_cache_options {
                     if let Some(mode) = options.mode
@@ -1213,7 +1287,7 @@ impl OpenAiClient {
         Self::convert_to_responses_input_with_system_mode(
             messages,
             SystemMessageMode::IncludeInInput,
-            false,
+            ResponsesCacheBreakpoints::None,
         )
         .map(|(input, _, _)| input)
     }
@@ -1238,6 +1312,18 @@ impl OpenAiClient {
                 "type": "input_text",
                 "text": block.text_projection()
             }),
+        }
+    }
+
+    /// Lower a non-empty bare-string input as one `input_text` part, the
+    /// form a breakpoint marker is authored on.
+    fn lower_responses_content_as_parts(content: &mut Value) {
+        if let Some(text) = content
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+        {
+            *content = serde_json::json!([{"type": "input_text", "text": text}]);
         }
     }
 
@@ -1361,7 +1447,7 @@ impl OpenAiClient {
     fn convert_to_responses_input_with_system_mode(
         messages: &[Message],
         system_mode: SystemMessageMode,
-        author_explicit_breakpoints: bool,
+        cache_breakpoints: ResponsesCacheBreakpoints,
     ) -> Result<
         (
             Vec<Value>,
@@ -1388,7 +1474,7 @@ impl OpenAiClient {
                             "content": s.content
                         }));
                         let lowered_item_count = items.len();
-                        if author_explicit_breakpoints
+                        if cache_breakpoints.authors(message_index)
                             && message_index + 1 == leading_system_count
                             && let Some(item) = items.last_mut()
                             && Self::author_responses_content_breakpoint(&mut item["content"])
@@ -1417,8 +1503,13 @@ impl OpenAiClient {
                         "role": "user",
                         "content": Self::system_notice_responses_content(notice)
                     }));
+                    if cache_breakpoints.lowers_inputs_as_parts()
+                        && let Some(item) = items.last_mut()
+                    {
+                        Self::lower_responses_content_as_parts(&mut item["content"]);
+                    }
                     let lowered_item_count = items.len();
-                    if author_explicit_breakpoints
+                    if cache_breakpoints.authors(message_index)
                         && let Some(item) = items.last_mut()
                         && Self::author_responses_content_breakpoint(&mut item["content"])
                     {
@@ -1449,8 +1540,13 @@ impl OpenAiClient {
                             "content": u.text_content()
                         }));
                     }
+                    if cache_breakpoints.lowers_inputs_as_parts()
+                        && let Some(item) = items.last_mut()
+                    {
+                        Self::lower_responses_content_as_parts(&mut item["content"]);
+                    }
                     let lowered_item_count = items.len();
-                    if author_explicit_breakpoints
+                    if cache_breakpoints.authors(message_index)
                         && let Some(item) = items.last_mut()
                         && Self::author_responses_content_breakpoint(&mut item["content"])
                     {
@@ -1533,7 +1629,12 @@ impl OpenAiClient {
                         }));
                     }
                     let lowered_item_count = items.len();
-                    if author_explicit_breakpoints {
+                    if cache_breakpoints.lowers_inputs_as_parts() {
+                        for item in &mut items[first_result_item..] {
+                            Self::lower_responses_content_as_parts(&mut item["output"]);
+                        }
+                    }
+                    if cache_breakpoints.authors(message_index) {
                         for item in items[first_result_item..].iter_mut().rev() {
                             if Self::author_responses_content_breakpoint(&mut item["output"]) {
                                 authored_boundaries.push((
@@ -2313,7 +2414,7 @@ impl LlmClient for OpenAiClient {
         let (_, _, boundaries) = Self::convert_to_responses_input_with_system_mode(
             &request.messages,
             system_mode,
-            true,
+            ResponsesCacheBreakpoints::EveryInput,
         )?;
         let ttl = if tag
             .prompt_cache_options

@@ -511,6 +511,33 @@ impl MemoryStoreState {
         Ok(())
     }
 
+    /// The head-row checks shared by `materialize_head` and
+    /// `verify_current_head`: the stored head exists, its stored CAS token
+    /// still equals the recomputed one (`Corrupted` otherwise), and it is
+    /// `expected` (`TranscriptRevisionConflict` otherwise).
+    fn current_head_matching(
+        &self,
+        expected: &SessionHead,
+    ) -> Result<&SessionHead, SessionStoreError> {
+        let (current, stored_token) = self
+            .heads
+            .get(&expected.id)
+            .ok_or_else(|| SessionStoreError::NotFound(expected.id.clone()))?;
+        let current_token = session_head_cas_token(current)?;
+        if &current_token != stored_token {
+            return Err(SessionStoreError::Corrupted(expected.id.clone()));
+        }
+        let expected_token = session_head_cas_token(expected)?;
+        if expected_token != current_token {
+            return Err(SessionStoreError::TranscriptRevisionConflict {
+                id: expected.id.clone(),
+                expected: expected_token,
+                actual: current_token,
+            });
+        }
+        Ok(current)
+    }
+
     fn materialize_slim(&self, head: &SessionHead) -> Result<Session, SessionStoreError> {
         let messages = self.strand_messages(&head.id, &head.strand, 0..head.message_count)?;
         head.clone().into_session(messages)
@@ -1051,27 +1078,18 @@ impl IncrementalSessionStore for MemoryStore {
         Ok(Some(head))
     }
 
+    async fn verify_current_head(&self, expected: &SessionHead) -> Result<(), SessionStoreError> {
+        let state = self.state.read().await;
+        state.current_head_matching(expected)?;
+        Ok(())
+    }
+
     async fn materialize_head(
         &self,
         expected: &SessionHead,
     ) -> Result<meerkat_core::VerifiedSessionHeadMaterialization, SessionStoreError> {
         let state = self.state.read().await;
-        let (current, stored_token) = state
-            .heads
-            .get(&expected.id)
-            .ok_or_else(|| SessionStoreError::NotFound(expected.id.clone()))?;
-        let current_token = session_head_cas_token(current)?;
-        if &current_token != stored_token {
-            return Err(SessionStoreError::Corrupted(expected.id.clone()));
-        }
-        let expected_token = session_head_cas_token(expected)?;
-        if expected_token != current_token {
-            return Err(SessionStoreError::TranscriptRevisionConflict {
-                id: expected.id.clone(),
-                expected: expected_token,
-                actual: current_token,
-            });
-        }
+        let current = state.current_head_matching(expected)?;
         if current.metadata_identity().is_some() || current.realtime_event_prefix.is_some() {
             return Err(SessionStoreError::InvalidTranscriptRewrite {
                 id: expected.id.clone(),
@@ -1265,6 +1283,74 @@ mod tests {
                 .messages(),
             session.messages()
         );
+    }
+
+    #[tokio::test]
+    async fn verify_current_head_keeps_the_materialize_head_row_checks() {
+        let store = Arc::new(MemoryStore::new());
+        let inc = Arc::clone(&store)
+            .as_incremental()
+            .expect("memory store must expose the incremental capability");
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("one".to_string())));
+        let root = TranscriptStrandId::root();
+        inc.append_messages(session.id(), &root, 0, session.messages())
+            .await
+            .unwrap();
+        let head = SessionHead::from_session(&session, root.clone(), 0).unwrap();
+        inc.save_head(&head, SessionHeadCas::Create).await.unwrap();
+        inc.verify_current_head(&head)
+            .await
+            .expect("the current head verifies");
+
+        // A blob-only session has no stored head row: `load_head` would
+        // synthesize one, but the current-head proof, like
+        // `materialize_head`, finds none.
+        let mut blob_session = Session::new();
+        blob_session.push(Message::User(UserMessage::text("blob".to_string())));
+        store.save(&blob_session).await.unwrap();
+        let synthesized = inc.load_head(blob_session.id()).await.unwrap().unwrap();
+        assert!(matches!(
+            inc.verify_current_head(&synthesized).await,
+            Err(SessionStoreError::NotFound(id)) if id == *blob_session.id()
+        ));
+
+        let stored_token = {
+            let mut state = store.state.write().await;
+            let entry = state.heads.get_mut(session.id()).unwrap();
+            std::mem::replace(&mut entry.1, "not-the-recomputed-token".to_string())
+        };
+        assert!(matches!(
+            inc.verify_current_head(&head).await,
+            Err(SessionStoreError::Corrupted(id)) if id == *session.id()
+        ));
+        store
+            .state
+            .write()
+            .await
+            .heads
+            .get_mut(session.id())
+            .unwrap()
+            .1 = stored_token;
+
+        session.push(Message::User(UserMessage::text("two".to_string())));
+        inc.append_messages(session.id(), &root, 1, &session.messages()[1..])
+            .await
+            .unwrap();
+        let successor = SessionHead::from_session(&session, root, 0).unwrap();
+        inc.save_head(
+            &successor,
+            SessionHeadCas::IfToken(session_head_cas_token(&head).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            inc.verify_current_head(&head).await,
+            Err(SessionStoreError::TranscriptRevisionConflict { .. })
+        ));
+        inc.verify_current_head(&successor)
+            .await
+            .expect("the successor is the current head");
     }
 
     #[tokio::test]

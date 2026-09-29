@@ -136,20 +136,26 @@ impl MeerkatMachine {
                 .as_ref()
                 == Some(expected_run_id)
         };
-        let result = if run_is_current {
-            match callback_result {
-                Ok(true) => Ok(true),
-                Ok(false) => Err(RuntimeDriverError::InterruptDispatchOutcomeUnknown {
-                    run_id: expected_run_id.clone(),
-                    reason: "executor reported the exact run non-current while machine authority still binds it"
-                        .to_string(),
-                }),
-                Err(error) => Err(error),
-            }
-        } else {
-            Ok(false)
+        let result = match (run_is_current, callback_result) {
+            // The executor fences the callback to the exact run, and the
+            // attachment, handle and dispatch slot still match. So a delivered
+            // interrupt stays delivered even when the run has already reached
+            // its terminal (typically because of this interrupt) before this
+            // reconcile reacquired the gate.
+            (_, Ok(true)) => Ok(true),
+            (true, Ok(false)) => Err(RuntimeDriverError::InterruptDispatchOutcomeUnknown {
+                run_id: expected_run_id.clone(),
+                reason: "executor reported the exact run non-current while machine authority still binds it"
+                    .to_string(),
+            }),
+            (true, Err(error)) => Err(error),
+            (false, Ok(false) | Err(_)) => Ok(false),
         };
-        if matches!(result, Ok(true)) {
+        // Only a delivered interrupt whose run is still bound keeps its slot
+        // for same-run retries to join. Once the run has left machine
+        // authority no retry can join it (the compare answers `false`), so the
+        // slot is released like a failed dispatch.
+        if run_is_current && matches!(result, Ok(true)) {
             result_tx.send_replace(Some(result.clone()));
         } else {
             let mut sessions = self.sessions.write().await;
@@ -246,13 +252,46 @@ impl MeerkatMachine {
         expected_run_id: &meerkat_core::RunId,
         reason: impl Into<String>,
     ) -> Result<crate::run_stop::RunStopReceipt, RuntimeDriverError> {
+        self.stop_run_inner(session_id, expected_run_id, None, reason.into())
+            .await
+    }
+
+    /// [`Self::stop_run`] additionally pinned to one exact host-member
+    /// residency, for the supervisor bridge's `StopMemberRun` receiver. The
+    /// residency comparison and the stop commit share the session mutation
+    /// gate.
+    pub async fn stop_run_for_member_incarnation(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &meerkat_core::RunId,
+        expected_member: &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        reason: impl Into<String>,
+    ) -> Result<crate::run_stop::RunStopReceipt, RuntimeDriverError> {
+        self.stop_run_inner(
+            session_id,
+            expected_run_id,
+            Some(expected_member),
+            reason.into(),
+        )
+        .await
+    }
+
+    async fn stop_run_inner(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &meerkat_core::RunId,
+        expected_member: Option<
+            &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        >,
+        reason: String,
+    ) -> Result<crate::run_stop::RunStopReceipt, RuntimeDriverError> {
         let mut capture = RunStopCapture::default();
         let dispatched = self
             .dispatch_user_interrupt_with_stop(
                 session_id,
                 Some(expected_run_id),
-                None,
-                reason.into(),
+                expected_member,
+                reason,
                 Some(&mut capture),
             )
             .await;

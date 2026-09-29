@@ -62,7 +62,12 @@ test-support = []
 # this a package-scoped `-p meerkat-runtime` lane compiles those files away to
 # nothing and reports success over zero tests. Storage evidence must not depend
 # on which sibling crates happen to share the build graph.
-meerkat-runtime = { path = ".", features = ["test-support", "sqlite-store"] }
+#
+# `live` is listed for the same reason: the live-context mirror and live
+# execution authority are compiled only with `live`, and their unit tests
+# must run in a package-scoped lane too, not only when a sibling crate
+# (meerkat-rpc, meerkat-session/live) happens to enable it.
+meerkat-runtime = { path = ".", features = ["test-support", "sqlite-store", "live"] }
 meerkat-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

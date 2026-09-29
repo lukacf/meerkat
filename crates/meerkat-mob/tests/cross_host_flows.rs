@@ -1938,3 +1938,277 @@ async fn hard_cancel_member_ends_stalled_remote_turn() {
     gate.release();
     fixture.shutdown().await;
 }
+
+// ==========================================================================
+// T-F11a - run-fenced Stop of a live LOCAL member run by its run_started id
+// ==========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_member_run_stops_live_local_run_by_its_run_started_id() {
+    use futures::StreamExt as _;
+
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let gate = StallGate::new();
+    let controlling = support::create_controlling_mob_with_local_llm_client(
+        "xhf-t11a",
+        scripted_member_client_stalling(gate.clone()),
+    )
+    .await;
+    controlling
+        .handle
+        .spawn_spec(
+            meerkat_mob::SpawnMemberSpec::new("worker", "a11a")
+                .with_backend(meerkat_mob::MobBackendKind::Session),
+        )
+        .await
+        .expect("spawn local worker a11a");
+
+    let mut events = controlling
+        .handle
+        .subscribe_agent_events(&identity("a11a"))
+        .await
+        .expect("subscribe to the local member's events");
+    controlling
+        .handle
+        .member(&identity("a11a"))
+        .await
+        .expect("member handle for a11a")
+        .send("stall forever", meerkat_core::HandlingMode::Queue)
+        .await
+        .expect("stalled local turn is admitted");
+    let started_run_id = tokio::time::timeout(RUN_WAIT, async {
+        while let Some(envelope) = events.next().await {
+            if let meerkat_core::AgentEvent::RunStarted { identity, .. } = envelope.payload
+                && let Some(run_id) = identity.run_id
+            {
+                return run_id;
+            }
+        }
+        panic!("local member event stream ended before run_started");
+    })
+    .await
+    .expect("run_started with a run id arrives from the local member");
+    gate.wait_until_entered().await;
+
+    let stale = meerkat_core::lifecycle::RunId::new();
+    let stale_receipt = controlling
+        .handle
+        .stop_member_run(
+            meerkat_mob::MobControlPrincipal::Owner,
+            identity("a11a"),
+            stale.clone(),
+            "stale selection",
+        )
+        .await
+        .expect("stale local stop is a typed receipt");
+    assert_eq!(
+        stale_receipt,
+        meerkat_contracts::WireRunStopReceipt::NotCurrent {
+            run_id: stale.to_string(),
+            current_run_id: Some(started_run_id.to_string()),
+        },
+        "a stale local stop is not_current and leaves the live run alone"
+    );
+
+    let receipt = controlling
+        .handle
+        .stop_member_run(
+            meerkat_mob::MobControlPrincipal::Owner,
+            identity("a11a"),
+            started_run_id.clone(),
+            "stop from the owner",
+        )
+        .await
+        .expect("local stop is a typed receipt");
+    let meerkat_contracts::WireRunStopReceipt::Stopped {
+        run_id,
+        contributors,
+    } = receipt
+    else {
+        panic!("expected a stopped receipt for the live local run, got {receipt:?}");
+    };
+    assert_eq!(run_id, started_run_id.to_string());
+    assert!(
+        !contributors.is_empty(),
+        "the stalled turn input contributed to the stopped run"
+    );
+    assert!(
+        contributors.iter().all(|contributor| contributor.completion
+            == meerkat_contracts::WireRunStopCompletion::Cancelled),
+        "every contributor of the stopped run is cancelled: {contributors:?}"
+    );
+
+    let again = controlling
+        .handle
+        .stop_member_run(
+            meerkat_mob::MobControlPrincipal::Owner,
+            identity("a11a"),
+            started_run_id.clone(),
+            "stop again",
+        )
+        .await
+        .expect("repeated local stop is a typed receipt");
+    assert!(
+        matches!(
+            again,
+            meerkat_contracts::WireRunStopReceipt::NotCurrent { ref run_id, .. }
+                if run_id == &started_run_id.to_string()
+        ),
+        "{again:?}"
+    );
+
+    gate.release();
+}
+
+// ==========================================================================
+// T-F11b - run-fenced Stop of a live placed-member run by its run_started id
+// ==========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_member_run_stops_live_placed_run_by_its_run_started_id() {
+    use futures::StreamExt as _;
+
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let gate = StallGate::new();
+    let mut opts = HostFixtureOptions::named("xhf-t11b-host-b").with_member_build();
+    opts.member_llm_client = Some(scripted_member_client_stalling(gate.clone()));
+    let fixture = spawn_host_daemon_fixture(opts)
+        .await
+        .expect("spawn member-build host fixture");
+    let controlling = support::create_controlling_mob("xhf-t11b").await;
+    let report = controlling.bind_fixture(&fixture).await;
+
+    controlling
+        .spawn_placed("worker", "b11b", &report.host_id)
+        .await
+        .expect("b11b materializes on host B");
+
+    // The client reads the run id exactly as a surface client does: from the
+    // member's `run_started` event.
+    let mut events = controlling
+        .handle
+        .subscribe_agent_events(&identity("b11b"))
+        .await
+        .expect("subscribe to the placed member's events");
+    let member = controlling
+        .handle
+        .member(&identity("b11b"))
+        .await
+        .expect("member handle for b11b");
+    member
+        .send("stall forever", meerkat_core::HandlingMode::Queue)
+        .await
+        .expect("stalled member turn is admitted");
+    let started_run_id = tokio::time::timeout(RUN_WAIT, async {
+        while let Some(envelope) = events.next().await {
+            if let meerkat_core::AgentEvent::RunStarted { identity, .. } = envelope.payload
+                && let Some(run_id) = identity.run_id
+            {
+                return run_id;
+            }
+        }
+        panic!("placed member event stream ended before run_started");
+    })
+    .await
+    .expect("run_started with a run id arrives from the placed member");
+    gate.wait_until_entered().await;
+
+    // A stale run id is `not_current` and names the live run; nothing stops.
+    let stale = meerkat_core::lifecycle::RunId::new();
+    let stale_receipt = controlling
+        .handle
+        .stop_member_run(
+            meerkat_mob::MobControlPrincipal::Owner,
+            identity("b11b"),
+            stale.clone(),
+            "stale selection",
+        )
+        .await
+        .expect("stale placed stop is a typed receipt");
+    assert_eq!(
+        stale_receipt,
+        meerkat_contracts::WireRunStopReceipt::NotCurrent {
+            run_id: stale.to_string(),
+            current_run_id: Some(started_run_id.to_string()),
+        },
+        "a stale placed stop is not_current and leaves the live run alone"
+    );
+
+    // Stopping the run_started id stops exactly that run: its contributor is
+    // cancelled and the receipt waits for the committed terminal.
+    let receipt = controlling
+        .handle
+        .stop_member_run(
+            meerkat_mob::MobControlPrincipal::Owner,
+            identity("b11b"),
+            started_run_id.clone(),
+            "stop from the controller",
+        )
+        .await
+        .expect("placed stop is a typed receipt");
+    let meerkat_contracts::WireRunStopReceipt::Stopped {
+        run_id,
+        contributors,
+    } = receipt
+    else {
+        panic!("expected a stopped receipt for the live placed run, got {receipt:?}");
+    };
+    assert_eq!(run_id, started_run_id.to_string());
+    assert!(
+        !contributors.is_empty(),
+        "the stalled turn input contributed to the stopped run"
+    );
+    assert!(
+        contributors.iter().all(|contributor| contributor.completion
+            == meerkat_contracts::WireRunStopCompletion::Cancelled),
+        "every contributor of the stopped run is cancelled: {contributors:?}"
+    );
+
+    // The stop is terminal truth on the member host.
+    let mob_id = controlling.mob_id.to_string();
+    let member_session_text = fixture
+        .host_binding_record(&mob_id)
+        .await
+        .materialized
+        .get("b11b")
+        .expect("b11b materialized row")
+        .session_id
+        .clone();
+    let member_session = meerkat_core::SessionId::parse(&member_session_text)
+        .expect("materialized session id parses");
+    let member_adapter = fixture
+        .member_runtime_adapter
+        .clone()
+        .expect("member-build fixture exposes the runtime adapter");
+    let after_stop = member_adapter
+        .meerkat_machine_archive_snapshot(&member_session)
+        .await
+        .expect("member runtime snapshot exists after the stop receipt");
+    assert_eq!(
+        after_stop.control.current_run_id, None,
+        "the stop receipt must not precede the run's terminal"
+    );
+
+    // Stopping the same run again is `not_current`: the run already ended.
+    let again = controlling
+        .handle
+        .stop_member_run(
+            meerkat_mob::MobControlPrincipal::Owner,
+            identity("b11b"),
+            started_run_id.clone(),
+            "stop again",
+        )
+        .await
+        .expect("repeated placed stop is a typed receipt");
+    assert!(
+        matches!(
+            again,
+            meerkat_contracts::WireRunStopReceipt::NotCurrent { ref run_id, .. }
+                if run_id == &started_run_id.to_string()
+        ),
+        "{again:?}"
+    );
+
+    gate.release();
+    fixture.shutdown().await;
+}

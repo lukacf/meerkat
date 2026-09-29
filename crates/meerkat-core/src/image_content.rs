@@ -748,6 +748,7 @@ fn system_notice_block_has_inline_media(block: &crate::types::SystemNoticeBlock)
         | crate::types::SystemNoticeBlock::BackgroundJob { .. }
         | crate::types::SystemNoticeBlock::Auth { .. }
         | crate::types::SystemNoticeBlock::RuntimeNotice { .. }
+        | crate::types::SystemNoticeBlock::ToolProcessInterrupted { .. }
         | crate::types::SystemNoticeBlock::Unknown { .. } => false,
     }
 }

@@ -1,6 +1,7 @@
 import { EventSubscription } from './events.js';
-import { MeerkatError, serializePromptContentInput } from './session.js';
-import { isKnownEvent } from './types.js';
+import { MeerkatError, parseRunStopReceipt, serializePromptContentInput } from './session.js';
+import type { WireRunStopReceipt } from './generated/session.js';
+import { foldUnknownSkillResolutionReason, isKnownEvent } from './types.js';
 import type { ProviderTokenAccounting } from './generated/events.js';
 import { MOB_SPAWN_MANY_FAILURE_CAUSES } from './generated/mob.js';
 import type {
@@ -80,6 +81,12 @@ interface MobWasmBindings {
   mob_member_status: (mobId: string, agentIdentity: string) => Promise<string>;
   mob_respawn: (mobId: string, agentIdentity: string, initialMessage?: string) => Promise<string>;
   mob_force_cancel: (mobId: string, agentIdentity: string) => Promise<void>;
+  mob_stop_member_run: (
+    mobId: string,
+    agentIdentity: string,
+    runId: string,
+    reason: string,
+  ) => Promise<string>;
   mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
@@ -608,10 +615,11 @@ function parseEventPayload(raw: unknown, context: string): EventEnvelope['payloa
   // of blindly casting an arbitrary record. An unknown discriminant is a
   // malformed/forward-incompatible wire shape — mirroring session.ts and the
   // TS SDK's parseCoreEvent policy.
-  if (!isKnownEvent(payload as { type: string })) {
+  const event = foldUnknownSkillResolutionReason(payload as { type: string });
+  if (!isKnownEvent(event)) {
     throw new Error(`${context}: unknown event type "${type}"`);
   }
-  return payload as EventEnvelope['payload'];
+  return event as EventEnvelope['payload'];
 }
 
 function parseEventEnvelope(raw: unknown, context: string): EventEnvelope {
@@ -1536,6 +1544,24 @@ export class Mob {
   /** Force-cancel an active member turn. */
   async forceCancel(agentIdentity: string): Promise<void> {
     await this.bindings.mob_force_cancel(this.mobId, agentIdentity);
+  }
+
+  /**
+   * Stop one exact run of a member (run-fenced Stop) and terminalize its
+   * contributors. A stale `runId` resolves to a `not_current` receipt.
+   */
+  async stopMemberRun(
+    agentIdentity: string,
+    runId: string,
+    reason: string,
+  ): Promise<WireRunStopReceipt> {
+    let json: string;
+    try {
+      json = await this.bindings.mob_stop_member_run(this.mobId, agentIdentity, runId, reason);
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
+    return parseRunStopReceipt(JSON.parse(json));
   }
 
   /** Read the current execution snapshot for a member. */

@@ -6,14 +6,17 @@
 //! fence primitives, so this crate is not a blanket no-I/O layer.
 
 // All WASM Tokio users share these host adapters. Time and cooperative yields
-// own cancellable JavaScript resources here; spawning retains the upstream scheduler.
-// Native code continues to resolve the real Tokio crate.
+// own cancellable JavaScript resources here; spawning retains the upstream
+// scheduler but boxes every future it hands it (`wasm_task`). Native code
+// continues to resolve the real Tokio crate.
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use crate::time_compat::wasm as time;
+    pub use task::spawn;
     pub use tokio_with_wasm::alias::*;
 
     pub mod task {
+        pub use crate::wasm_task::{JoinSet, spawn};
         pub use tokio_with_wasm::alias::task::*;
 
         /// Cooperatively yields through an owned, cancellable host timer.
@@ -74,6 +77,7 @@ pub use generated::session_document;
 pub mod pending_continuation;
 pub mod placement;
 pub mod prompt;
+pub mod prompt_cache_anchor;
 pub mod provider;
 pub mod provider_evidence;
 pub mod provider_matrix;
@@ -106,12 +110,15 @@ pub mod tool_catalog;
 pub mod tool_consequence_policy;
 pub mod tool_execution;
 pub mod tool_execution_policy;
+pub mod tool_process;
 pub mod tool_scope;
 pub mod transcript_replay;
 pub mod turn_boundary;
 pub mod turn_execution_authority;
 pub mod turn_terminal;
 pub mod types;
+#[cfg(target_arch = "wasm32")]
+mod wasm_task;
 pub mod web_search;
 
 // Re-export main types at crate root
@@ -158,7 +165,9 @@ pub use budget::{
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
     PeerDirectorySource, PeerName, PeerRoute, SUPERVISOR_BRIDGE_INTENT, SendAndStreamError,
-    SendError, SendReceipt, SendTaintOverride, SenderContentTaint, StreamError, StreamScope,
+    SendError, SendReceipt, SendTaintOverride, SenderContentTaint, SessionEventCursor,
+    SessionEventCursorRejection, SessionEventEpoch, SessionEventReplayLimits,
+    SessionEventSubscription, StreamError, StreamScope, encoded_envelope_len,
 };
 pub use compact::{
     COMPACTION_SUMMARY_PREFIX, CompactionConfig, CompactionContext, CompactionCurator,
@@ -197,9 +206,10 @@ pub use context_budget::{
 };
 pub use digest_observability::{
     DIGEST_SITE_LABELS, digest_site_bytes, global_session_content_digest_bytes,
-    global_session_encode_bytes, record_session_encode_bytes, rewrite_record_body_decodes,
-    rewrite_record_body_decodes_on_this_thread, session_content_digest_bytes,
-    session_content_digest_computations,
+    global_session_encode_bytes, global_transcript_graph_validations,
+    global_whole_blob_decode_bytes, global_whole_blob_decodes, record_session_encode_bytes,
+    rewrite_record_body_decodes, rewrite_record_body_decodes_on_this_thread,
+    session_content_digest_bytes, session_content_digest_computations,
 };
 pub use error::{AgentError, ToolError};
 pub use event::{
@@ -279,11 +289,11 @@ pub use lifecycle::{
     CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor, CoreExecutorBoundaryHandle,
     CoreExecutorError, CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle,
     CoreExecutorPreDequeueHandle, CoreExecutorPublicationHandle, CoreExecutorTeardownReason,
-    CoreExecutorTurnFinalizationBoundaryHandle, CoreExecutorTurnFinalizationGuard,
-    CoreInteractionTerminalPublicationReceipt, CorePreDequeueOutcome, CoreRenderable,
-    DurableTurnBoundaryAppends, DurableTurnBoundaryAppendsError, InputId, RunApplyBoundary,
-    RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput,
-    TurnBoundaryDelivery,
+    CoreExecutorTranscriptNoticeHandle, CoreExecutorTurnFinalizationBoundaryHandle,
+    CoreExecutorTurnFinalizationGuard, CoreInteractionTerminalPublicationReceipt,
+    CorePreDequeueOutcome, CoreRenderable, DurableTurnBoundaryAppends,
+    DurableTurnBoundaryAppendsError, InputId, RunApplyBoundary, RunBoundaryReceipt,
+    RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput, TurnBoundaryDelivery,
 };
 pub use live_execution::{
     AmbiguousDeliveryNoRetryEvidence, CanonicalContextRevision, CanonicalTranscriptPrefixDigest,
@@ -343,6 +353,7 @@ pub use persistence_contract::{
 };
 pub use placement::{ExecutionPlacement, ExecutionPlacementIdentity, PlacementError};
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
+pub use prompt_cache_anchor::prior_run_cache_anchor;
 pub use provider::Provider;
 pub use provider_evidence::{
     AuthoredCacheBreakpoint, AuthoredCacheBreakpointRetention, CacheBreakpointBoundary,
@@ -550,10 +561,10 @@ pub use types::{
     MemoryIndexExclusion, MemoryIndexableContent, Message, OutputSchema, ProviderMeta, RunInput,
     RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolKind, SessionId, StopReason,
     SystemMessage, SystemMessageIdentity, SystemNoticeBlock, SystemNoticeDirection,
-    SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer, SystemPromptKey, SystemPromptVersion,
-    SystemPromptVersionIdentity, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity,
-    ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
-    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnUsage,
+    SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer, SystemNoticeRecord, SystemPromptKey,
+    SystemPromptVersion, SystemPromptVersionIdentity, ToolCall, ToolCallIter, ToolCallView,
+    ToolDef, ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId,
+    ToolSourceKind, TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnUsage,
     TurnUsageAccountingMissing, Usage, UserMessage, VideoData,
     assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
     has_video, is_supported_video_media_type, materialize_latest_system_prompt_versions,

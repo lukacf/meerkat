@@ -22,6 +22,7 @@ mod realtime;
 mod rest;
 mod result;
 mod rpc_surface;
+pub mod run_stop;
 pub mod runtime;
 mod schedule;
 mod session;
@@ -73,6 +74,10 @@ pub use rpc_surface::{
     ScheduleToolCallParams, ScheduleToolsResult, ServerCapabilities, ServerInfo,
     SessionInputStateParams, SessionInputStateResult, SessionInputStateSelector,
     ToolsRegisterParams, ToolsRegisterResult,
+};
+pub use run_stop::{
+    MobStopMemberRunParams, MobStopMemberRunResult, StopRunParams, StopRunRequest, StopRunResult,
+    WireRunStopCompletion, WireRunStopContributor, WireRunStopReceipt,
 };
 
 pub use artifact::{
@@ -174,8 +179,9 @@ pub use mob::{
     SupervisorRotationReportWire, SupervisorRotationRetryAuthority, SupervisorRotationRetryScope,
     WireAgentRuntimeId, WireAppendSystemContextStatus, WireCallbackToolSetDeclaration,
     WireControlScope, WireDesiredExecution, WireDesiredIdentityEdge, WireDesiredLocalCallbackTool,
-    WireDesiredSessionAuthorityPolicy, WireDesiredSessionTarget, WireForkContext, WireGrantRecord,
-    WireHandlingMode, WireHistoryRow, WireHostBindPhase, WireHostCapabilityFlags, WireHostRef,
+    WireDesiredSessionAuthorityPolicy, WireDesiredSessionTarget,
+    WireExternalRouteInstallObligation, WireForkContext, WireGrantRecord, WireHandlingMode,
+    WireHistoryRow, WireHostBindPhase, WireHostCapabilityFlags, WireHostRef,
     WireIdentityAdoptionOutcome, WireIdentityAdoptionPrecondition,
     WireIdentityConvergenceCondition, WireIdentityConvergenceMode,
     WireIdentityConvergenceResolutionOutcome, WireIdentityConvergenceStatus,

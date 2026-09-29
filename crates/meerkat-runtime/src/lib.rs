@@ -34,6 +34,7 @@
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use meerkat_core::time_compat::wasm as time;
+    pub use meerkat_core::tokio::spawn;
     pub use meerkat_core::tokio::task;
     pub use tokio_with_wasm::alias::*;
 }
@@ -99,6 +100,7 @@ pub mod protocol_supervisor_trust_revoke;
 pub mod recovery;
 pub(crate) mod run_progress;
 pub mod run_stop;
+pub mod run_stop_wire;
 pub mod runtime_event;
 pub(crate) mod runtime_loop;
 pub mod runtime_state;
@@ -1078,10 +1080,10 @@ pub use service_ext::{SessionServiceRuntimeExt, persistent_runtime_pre_dequeue_h
 pub use store::SqliteRuntimeStore;
 pub use store::{
     CommittedRecoveryBoundary, CommittedWholeBlobMetadata, CommittedWholeBlobProvisionalTail,
-    CommittedWholeBlobSnapshot, FencedPreparedRuntimeSessionCommitOutcome,
-    HeadCanonicalProvisionalTailAuthority, HeadCanonicalRuntimeAuthorityActivation,
-    HeadCanonicalStoreAuthority, InMemoryRuntimeStore, InputStateRow,
-    PreparedDurableTailRecoverySource, PreparedHeadCanonicalProvisionalPromotion,
+    CommittedWholeBlobSnapshot, CommittingWholeBlobSession,
+    FencedPreparedRuntimeSessionCommitOutcome, HeadCanonicalProvisionalTailAuthority,
+    HeadCanonicalRuntimeAuthorityActivation, HeadCanonicalStoreAuthority, InMemoryRuntimeStore,
+    InputStateRow, PreparedDurableTailRecoverySource, PreparedHeadCanonicalProvisionalPromotion,
     PreparedHeadCanonicalProvisionalTail, PreparedRecoveryEvidence,
     PreparedRecoveryReceiptDigestEnrichment, PreparedRecoveryReceiptSource,
     PreparedRuntimeSessionCommit, PreparedRuntimeSessionCommitKind,
@@ -1091,7 +1093,8 @@ pub use store::{
     RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
     RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
     RuntimeStoreWriteFenceOutcome, SerializedSessionSnapshot, VerifiedCommittedWholeBlobPayload,
-    WholeBlobProvisionalTailAuthority, WholeBlobStoreAuthority,
+    WholeBlobCommittedTranscriptFacts, WholeBlobProvisionalTailAuthority, WholeBlobStoreAuthority,
+    reuse_or_load_committed_whole_blob_snapshot,
 };
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlane,

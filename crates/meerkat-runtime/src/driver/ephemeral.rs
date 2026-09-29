@@ -1022,6 +1022,9 @@ impl EphemeralRuntimeDriver {
                         InputAbandonReason::MaxAttemptsExhausted { attempts }
                     }
                     mm_dsl::InputAbandonReason::NeverExecuted => InputAbandonReason::NeverExecuted,
+                    mm_dsl::InputAbandonReason::ToolProcessInterrupted => {
+                        InputAbandonReason::ToolProcessInterrupted
+                    }
                 };
                 Some(InputTerminalOutcome::Abandoned { reason })
             }

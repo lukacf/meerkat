@@ -100,6 +100,14 @@ fn anthropic_thinking_schema(mode: ThinkingSupport) -> Option<Value> {
                 "type": { "type": "string", "enum": ["adaptive"] }
             }
         })),
+        ThinkingSupport::AnthropicAdaptiveOrBetweenTools => Some(json!({
+            "description": "Extended thinking configuration. Format: {\"type\": \"adaptive\"} or {\"type\": \"between_tools\"} (no up-front thinking; `high` effort or below).",
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+                "type": { "type": "string", "enum": ["adaptive", "between_tools"] }
+            }
+        })),
         ThinkingSupport::AnthropicAdaptiveAndEnabled => Some(json!({
             "description": "Extended thinking configuration. Format: {\"type\": \"adaptive\"} or {\"type\": \"enabled\", \"budget_tokens\": N}.",
             "oneOf": [

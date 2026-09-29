@@ -3813,6 +3813,39 @@ def test_parse_skill_resolution_failed_with_typed_reason():
     )
 
 
+def test_parse_skill_resolution_failed_no_skill_engine_keeps_requested_keys():
+    source_uuid = "00000000-0000-4b11-8111-000000000001"
+    raw = {
+        "type": "skill_resolution_failed",
+        "skill_key": {"source_uuid": source_uuid, "skill_name": "email-extractor"},
+        "reason": {
+            "reason_type": "no_skill_engine",
+            "requested": [
+                {"source_uuid": source_uuid, "skill_name": "email-extractor"},
+                {"source_uuid": source_uuid, "skill_name": "summarizer"},
+            ],
+        },
+    }
+    event = parse_event(raw)
+    assert isinstance(event, SkillResolutionFailed)
+    assert isinstance(event.reason, SkillResolutionFailureReason)
+    assert event.reason.reason_type == "no_skill_engine"
+    assert event.reason.requested == [
+        SkillKey(source_uuid=source_uuid, skill_name="email-extractor"),
+        SkillKey(source_uuid=source_uuid, skill_name="summarizer"),
+    ]
+
+
+def test_parse_skill_resolution_failed_no_skill_engine_rejects_malformed_keys():
+    raw = {
+        "type": "skill_resolution_failed",
+        "reason": {"reason_type": "no_skill_engine", "requested": [{"skill_name": "x"}]},
+    }
+    event = parse_event(raw)
+    assert isinstance(event, SkillResolutionFailed)
+    assert event.reason is None
+
+
 def test_parse_legacy_skill_resolution_failed_payload():
     raw = {
         "type": "skill_resolution_failed",

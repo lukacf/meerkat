@@ -29,7 +29,7 @@ pub use core_executor::{
     CoreBoundaryStageError, CoreBoundaryStageOutput, CoreControlFailureCause,
     CoreControlFailureCauseKind, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
     CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle, CoreExecutorPreDequeueHandle,
-    CoreExecutorPublicationHandle, CoreExecutorTeardownReason,
+    CoreExecutorPublicationHandle, CoreExecutorTeardownReason, CoreExecutorTranscriptNoticeHandle,
     CoreExecutorTurnFinalizationBoundaryHandle, CoreExecutorTurnFinalizationGuard,
     CoreInteractionTerminalPublicationReceipt, CorePreDequeueOutcome,
 };

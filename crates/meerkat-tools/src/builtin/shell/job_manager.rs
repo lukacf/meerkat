@@ -30,7 +30,7 @@ use meerkat_jobs::{
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
@@ -207,6 +207,11 @@ pub struct JobManager {
     projections: Arc<Mutex<HashMap<JobId, JobProjection>>>,
     active_attempts: Arc<Mutex<HashMap<JobId, ActiveAttempt>>>,
     canonical_job_ops: Arc<std::sync::Mutex<HashMap<JobId, OperationId>>>,
+    /// Durable, incarnation-bound custody for foreground shell processes.
+    /// Bound by the host only after earlier-incarnation custody for the same
+    /// scope has been settled.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    process_custody: std::sync::OnceLock<Arc<super::custody::ProcessCustody>>,
 }
 
 impl std::fmt::Debug for JobManager {
@@ -237,6 +242,41 @@ impl JobManager {
             projections: Arc::new(Mutex::new(HashMap::new())),
             active_attempts: Arc::new(Mutex::new(HashMap::new())),
             canonical_job_ops: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            process_custody: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Bind durable process custody for foreground shell calls.
+    ///
+    /// A [`super::ProcessCustody`] exists only after
+    /// [`super::ProcessCustody::recover_and_open`] settled every earlier
+    /// incarnation's record for its scope, so binding it is the admission
+    /// fence for this job manager's shell processes. Returns the rejected
+    /// handle when custody is already bound.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn bind_process_custody(
+        &self,
+        custody: Arc<super::custody::ProcessCustody>,
+    ) -> Result<(), Arc<super::custody::ProcessCustody>> {
+        self.process_custody.set(custody)
+    }
+
+    /// The bound process custody, if any.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn bound_process_custody(&self) -> Option<Arc<super::custody::ProcessCustody>> {
+        self.process_custody.get().cloned()
+    }
+
+    /// Durable custody for this manager's spawns (unbound when absent).
+    pub(super) fn custody_binding(&self) -> super::custody_spawn::CustodyBinding {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            super::custody_spawn::CustodyBinding::new(self.process_custody.get().cloned())
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            super::custody_spawn::CustodyBinding::default()
         }
     }
 
@@ -550,11 +590,26 @@ impl JobManager {
         timeout_secs: u64,
         tool_call_id: &str,
     ) -> Result<JobId, ShellError> {
+        self.spawn_job_for_call_in_run(command, working_dir, timeout_secs, tool_call_id, None)
+            .await
+    }
+
+    /// Like [`Self::spawn_job_for_call`], recording the run the call belongs
+    /// to in the job's process custody.
+    pub(crate) async fn spawn_job_for_call_in_run(
+        &self,
+        command: &str,
+        working_dir: Option<&Path>,
+        timeout_secs: u64,
+        tool_call_id: &str,
+        run_id: Option<&meerkat_core::RunId>,
+    ) -> Result<JobId, ShellError> {
         self.spawn_runner_for_call(
             command,
             working_dir,
             timeout_secs,
             tool_call_id,
+            run_id,
             None,
             RestartClass::NonResumable,
         )
@@ -567,6 +622,29 @@ impl JobManager {
         working_dir: Option<&Path>,
         timeout_secs: u64,
         tool_call_id: &str,
+        options: MonitorStartOptions,
+    ) -> Result<JobId, ShellError> {
+        self.spawn_monitor_for_call_in_run(
+            command,
+            working_dir,
+            timeout_secs,
+            tool_call_id,
+            None,
+            options,
+        )
+        .await
+    }
+
+    /// Like [`Self::spawn_monitor_for_call`], recording the run the call
+    /// belongs to in the monitor's process custody, so interrupted-run
+    /// evidence covers monitors like any other tool process.
+    pub(crate) async fn spawn_monitor_for_call_in_run(
+        &self,
+        command: &str,
+        working_dir: Option<&Path>,
+        timeout_secs: u64,
+        tool_call_id: &str,
+        run_id: Option<&meerkat_core::RunId>,
         options: MonitorStartOptions,
     ) -> Result<JobId, ShellError> {
         if options.restart_class == RestartClass::Adoptable {
@@ -589,6 +667,7 @@ impl JobManager {
             working_dir,
             timeout_secs,
             tool_call_id,
+            run_id,
             Some(MonitorRunnerSpecification {
                 protocol: options.protocol,
                 limits: options.limits,
@@ -599,12 +678,14 @@ impl JobManager {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_runner_for_call(
         &self,
         command: &str,
         working_dir: Option<&Path>,
         timeout_secs: u64,
         tool_call_id: &str,
+        run_id: Option<&meerkat_core::RunId>,
         monitor: Option<MonitorRunnerSpecification>,
         restart_class: RestartClass,
     ) -> Result<JobId, ShellError> {
@@ -786,27 +867,53 @@ impl JobManager {
             }
         };
 
-        let mut command_builder = Command::new(&shell_path);
-        command_builder.arg("-c").arg(command);
-        command_builder.current_dir(&resolved_dir);
-        command_builder.env("PWD", &resolved_dir);
-        command_builder.envs(&self.config.env_vars);
-        if monitor.is_some() {
-            command_builder.env(
-                "MEERKAT_MONITOR_SUBMISSION_KEY",
-                format!("{runner_label}:{}:{stable_call}", durable.origin_session_id),
-            );
-            if let Some(checkpoint) = &claim.resume_checkpoint {
-                command_builder.env("MEERKAT_MONITOR_CHECKPOINT", checkpoint.as_str());
+        let submission_key = format!("{runner_label}:{}:{stable_call}", durable.origin_session_id);
+        let spawner = if monitor.is_some() {
+            super::ToolProcessSpawner::Monitor {
+                job_id: public_job_id.to_string(),
             }
-        }
-        command_builder.stdout(Stdio::piped());
-        command_builder.stderr(Stdio::piped());
-        command_builder.kill_on_drop(true);
-        #[cfg(unix)]
-        command_builder.process_group(0);
-        let child = match command_builder.spawn() {
-            Ok(child) => child,
+        } else {
+            super::ToolProcessSpawner::BackgroundJob {
+                job_id: public_job_id.to_string(),
+            }
+        };
+        let spawned = super::custody_spawn::spawn_in_custody(
+            &self.custody_binding(),
+            super::custody_spawn::SpawnIdentity {
+                spawner,
+                tool_call_id: Some(tool_call_id),
+                run_id,
+            },
+            shell_path.as_os_str(),
+            &[
+                std::ffi::OsString::from("-c"),
+                std::ffi::OsString::from(command),
+            ],
+            |command_builder| {
+                command_builder.current_dir(&resolved_dir);
+                command_builder.env("PWD", &resolved_dir);
+                command_builder.envs(&self.config.env_vars);
+                if monitor.is_some() {
+                    command_builder.env("MEERKAT_MONITOR_SUBMISSION_KEY", &submission_key);
+                    if let Some(checkpoint) = &claim.resume_checkpoint {
+                        command_builder.env("MEERKAT_MONITOR_CHECKPOINT", checkpoint.as_str());
+                    }
+                }
+                command_builder.stdout(Stdio::piped());
+                command_builder.stderr(Stdio::piped());
+                command_builder.kill_on_drop(true);
+                #[cfg(unix)]
+                command_builder.process_group(0);
+            },
+            OwnedProcessGroup::new,
+        )
+        .await;
+        let super::custody_spawn::SpawnedInCustody {
+            child,
+            process_group,
+            hold: custody,
+        } = match spawned {
+            Ok(spawned) => spawned,
             Err(error) => {
                 terminal_fail(&service, &receipt.job_id, write, "shell_spawn_failed").await;
                 match durable
@@ -847,7 +954,6 @@ impl JobManager {
                 return Err(ShellError::Io(error));
             }
         };
-        let process_group = OwnedProcessGroup::new(&child);
         let view = BackgroundJob {
             id: public_job_id.clone(),
             command: command.to_string(),
@@ -880,6 +986,7 @@ impl JobManager {
             redactions,
             resume_progress_cursor: 0,
             output_caps: OutputCaps::from_max_output_chars(self.config.max_output_chars),
+            custody,
         };
         let task = match monitor {
             Some(monitor) => spawn_monitor_attempt_task(attempt, monitor),
@@ -935,26 +1042,47 @@ impl JobManager {
             .map_err(shell_job_error)?;
         let write = AttemptWriteAuthority::from(&claim);
         let operation_id = self.register_operation(&public_job_id)?;
-        let mut command_builder = Command::new(&shell_path);
-        command_builder.arg("-c").arg(&runner_spec.command);
-        command_builder.current_dir(&resolved_dir);
-        command_builder.env("PWD", &resolved_dir);
-        command_builder.envs(&self.config.env_vars);
         let redactions = configured_redactions(&self.config);
-        command_builder.env(
-            "MEERKAT_MONITOR_SUBMISSION_KEY",
-            stored.spec.submission_key.as_str(),
-        );
-        if let Some(checkpoint) = &claim.resume_checkpoint {
-            command_builder.env("MEERKAT_MONITOR_CHECKPOINT", checkpoint.as_str());
-        }
-        command_builder.stdout(Stdio::piped());
-        command_builder.stderr(Stdio::piped());
-        command_builder.kill_on_drop(true);
-        #[cfg(unix)]
-        command_builder.process_group(0);
-        let child = match command_builder.spawn() {
-            Ok(child) => child,
+        let spawned = super::custody_spawn::spawn_in_custody(
+            &self.custody_binding(),
+            super::custody_spawn::SpawnIdentity {
+                spawner: super::ToolProcessSpawner::Monitor {
+                    job_id: public_job_id.to_string(),
+                },
+                tool_call_id: None,
+                run_id: None,
+            },
+            shell_path.as_os_str(),
+            &[
+                std::ffi::OsString::from("-c"),
+                std::ffi::OsString::from(&runner_spec.command),
+            ],
+            |command_builder| {
+                command_builder.current_dir(&resolved_dir);
+                command_builder.env("PWD", &resolved_dir);
+                command_builder.envs(&self.config.env_vars);
+                command_builder.env(
+                    "MEERKAT_MONITOR_SUBMISSION_KEY",
+                    stored.spec.submission_key.as_str(),
+                );
+                if let Some(checkpoint) = &claim.resume_checkpoint {
+                    command_builder.env("MEERKAT_MONITOR_CHECKPOINT", checkpoint.as_str());
+                }
+                command_builder.stdout(Stdio::piped());
+                command_builder.stderr(Stdio::piped());
+                command_builder.kill_on_drop(true);
+                #[cfg(unix)]
+                command_builder.process_group(0);
+            },
+            OwnedProcessGroup::new,
+        )
+        .await;
+        let super::custody_spawn::SpawnedInCustody {
+            child,
+            process_group,
+            hold: custody,
+        } = match spawned {
+            Ok(spawned) => spawned,
             Err(error) => {
                 terminal_fail(
                     &service,
@@ -966,7 +1094,6 @@ impl JobManager {
                 return Err(ShellError::Io(error));
             }
         };
-        let process_group = OwnedProcessGroup::new(&child);
         let started_at_unix = unix_time_secs();
         self.projections.lock().await.insert(
             public_job_id.clone(),
@@ -1004,6 +1131,7 @@ impl JobManager {
                 redactions,
                 resume_progress_cursor,
                 output_caps: OutputCaps::from_max_output_chars(self.config.max_output_chars),
+                custody,
             },
             monitor,
         );
@@ -1285,6 +1413,9 @@ struct AttemptTask {
     resume_progress_cursor: u64,
     /// Caps on the stdout and stderr an ordinary shell attempt retains.
     output_caps: OutputCaps,
+    /// Durable custody of the attempt's process group; settled once
+    /// containment is proven.
+    custody: super::custody_spawn::CustodyHold,
 }
 
 enum MonitorStreamItem {
@@ -1314,6 +1445,7 @@ fn spawn_monitor_attempt_task(
             redactions,
             resume_progress_cursor,
             output_caps: _,
+            custody,
         } = task;
         let started = Instant::now();
         let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::channel(64);
@@ -1676,7 +1808,12 @@ fn spawn_monitor_attempt_task(
         let mut containment_failures = 0usize;
         loop {
             match process_group.terminate(&mut child).await {
-                Ok(()) => break,
+                Ok(()) => {
+                    // Containment proven: the custody record has nothing
+                    // left to guard.
+                    custody.settle().await;
+                    break;
+                }
                 Err(error) => {
                     containment_failures = containment_failures.saturating_add(1);
                     warn!(
@@ -2212,6 +2349,7 @@ fn spawn_attempt_task(task: AttemptTask) -> JoinHandle<()> {
             redactions,
             resume_progress_cursor: _,
             output_caps,
+            custody,
         } = task;
         let started = Instant::now();
         let stdout = child.stdout.take();
@@ -2296,7 +2434,12 @@ fn spawn_attempt_task(task: AttemptTask) -> JoinHandle<()> {
         let mut containment_failures = 0usize;
         loop {
             match process_group.terminate(&mut child).await {
-                Ok(()) => break,
+                Ok(()) => {
+                    // Containment proven: the custody record has nothing
+                    // left to guard.
+                    custody.settle().await;
+                    break;
+                }
                 Err(error) => {
                     containment_failures = containment_failures.saturating_add(1);
                     warn!(
@@ -3601,6 +3744,140 @@ mod durable_tests {
             .expect("read stored job")
             .expect("stored job");
         assert_eq!(stored.machine_state.retry_due_at_ms, Some(retry_due_at_ms));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn background_job_runs_in_durable_custody_until_contained() {
+        use crate::builtin::shell::{ProcessCustody, ProcessCustodyScope};
+
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, _job_store, config) = durable_fixture(&temp, session_id.clone());
+        let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let manager = JobManager::new(config)
+            .bind_canonical_async_ops(session_id.clone(), registry)
+            .with_durable_job_runtime(runtime);
+        let custody_root = temp.path().join("custody");
+        let (custody, _) = ProcessCustody::recover_and_open(
+            &custody_root,
+            ProcessCustodyScope::session(&session_id),
+        )
+        .await
+        .expect("open custody");
+        manager.bind_process_custody(custody).expect("bind custody");
+        let scope_dir = custody_root.join(session_id.to_string());
+        let listing = temp.path().join("listing");
+        let command = format!("ls '{}' > '{}'", scope_dir.display(), listing.display());
+
+        let job_id = manager
+            .spawn_job_for_call(&command, None, 5, "tool-call-custody")
+            .await
+            .expect("spawn");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = manager
+                    .get_status(&job_id)
+                    .await
+                    .expect("status")
+                    .expect("job");
+                if matches!(status.status, JobStatus::Completed { .. }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completion");
+
+        let recorded = std::fs::read_to_string(&listing).expect("listing");
+        assert!(
+            recorded.contains(".json"),
+            "the job ran with a custody record: {recorded:?}"
+        );
+        let settled = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let records = std::fs::read_dir(&scope_dir)
+                    .map(|entries| {
+                        entries
+                            .filter_map(Result::ok)
+                            .filter(|entry| {
+                                entry.path().extension().and_then(|e| e.to_str()) == Some("json")
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                if records == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(settled.is_ok(), "the record is settled after containment");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn monitor_submitted_in_a_run_records_the_run_in_custody() {
+        use crate::builtin::shell::{ProcessCustody, ProcessCustodyScope};
+
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, _job_store, config) = durable_fixture(&temp, session_id.clone());
+        let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let manager = JobManager::new(config)
+            .bind_canonical_async_ops(session_id.clone(), registry)
+            .with_durable_job_runtime(runtime);
+        let custody_root = temp.path().join("custody");
+        let (custody, _) = ProcessCustody::recover_and_open(
+            &custody_root,
+            ProcessCustodyScope::session(&session_id),
+        )
+        .await
+        .expect("open custody");
+        manager.bind_process_custody(custody).expect("bind custody");
+        let scope_dir = custody_root.join(session_id.to_string());
+        let snapshot = temp.path().join("records");
+        let command = format!(
+            "cat '{}'/*.json > '{}.tmp' && mv '{}.tmp' '{}'",
+            scope_dir.display(),
+            snapshot.display(),
+            snapshot.display(),
+            snapshot.display()
+        );
+        let run_id = meerkat_core::RunId::new();
+
+        manager
+            .spawn_monitor_for_call_in_run(
+                &command,
+                None,
+                5,
+                "tool-call-monitor",
+                Some(&run_id),
+                MonitorStartOptions::default(),
+            )
+            .await
+            .expect("spawn monitor");
+        let recorded = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(recorded) = std::fs::read_to_string(&snapshot) {
+                    break recorded;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("monitor ran");
+
+        assert!(
+            recorded.contains(&run_id.to_string()),
+            "the monitor's custody record names its run: {recorded}"
+        );
+        assert!(
+            recorded.contains("\"monitor\""),
+            "spawner is a monitor: {recorded}"
+        );
     }
 
     #[tokio::test]

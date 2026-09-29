@@ -136,6 +136,7 @@ pub(crate) enum MobMachineCommand {
     },
     SubscribeAgentEvents {
         agent_identity: AgentIdentity,
+        cursor: meerkat_core::comms::SessionEventCursor,
     },
     SubscribeAllAgentEvents,
     SubscribeMobEvents {
@@ -267,7 +268,7 @@ pub(crate) enum MobMachineCommandResult {
     ResolveIdentityConvergenceBlock(crate::identity::ResolveIdentityConvergenceBlockResult),
     #[allow(dead_code)]
     Bool(bool),
-    EventStream(meerkat_core::EventStream),
+    AgentEventSubscription(crate::runtime::AgentEventSubscription),
     AllAgentEventStreams(Vec<(AgentIdentity, meerkat_core::EventStream)>),
     MobEventRouter(crate::runtime::MobEventRouterHandle),
     MobEvents(Vec<crate::event::MobEvent>),

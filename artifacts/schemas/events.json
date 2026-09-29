@@ -579,6 +579,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1871,6 +1884,102 @@
             "const": "terminal_delivery_failed",
             "description": "A terminal event could not be delivered to the interaction stream.",
             "type": "string"
+          }
+        ]
+      },
+      "InterruptedInputKind": {
+        "description": "What kind of input an interrupted run had in flight.",
+        "oneOf": [
+          {
+            "const": "prompt",
+            "description": "A user or operator prompt.",
+            "type": "string"
+          },
+          {
+            "const": "peer",
+            "description": "A peer (comms) message.",
+            "type": "string"
+          },
+          {
+            "const": "flow_step",
+            "description": "A mob flow step.",
+            "type": "string"
+          },
+          {
+            "const": "external_event",
+            "description": "An external event.",
+            "type": "string"
+          },
+          {
+            "const": "continuation",
+            "description": "Runtime continuation work.",
+            "type": "string"
+          },
+          {
+            "const": "operation",
+            "description": "A non-content operation.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "A kind recorded by a newer version.",
+            "type": "string"
+          }
+        ]
+      },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run. User requests among them are restored to the\ntranscript right before the notice; `unrestored` names the kinds of\nthe others (for example peer messages or flow steps), in order.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              },
+              "unrestored": {
+                "items": {
+                  "$ref": "#/$defs/InterruptedInputKind"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -3527,6 +3636,26 @@
             "type": "object"
           },
           {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "message": {
                 "type": "string"
@@ -4001,6 +4130,43 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "spawner",
+              "cessation",
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -4049,6 +4215,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -4318,6 +4489,203 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "kind": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "kind": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "kind": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "kind": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
+            "properties": {
+              "kind": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in another pid namespace of this boot (a\ncontainer since restarted) and its host has exited, as proven by the\nkernel releasing its incarnation lock; its tools ended with that\ncontainer. Nothing was signalled.",
+            "properties": {
+              "kind": {
+                "const": "foreign_incarnation_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,
@@ -8088,6 +8456,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -9380,6 +9761,102 @@
             "const": "terminal_delivery_failed",
             "description": "A terminal event could not be delivered to the interaction stream.",
             "type": "string"
+          }
+        ]
+      },
+      "InterruptedInputKind": {
+        "description": "What kind of input an interrupted run had in flight.",
+        "oneOf": [
+          {
+            "const": "prompt",
+            "description": "A user or operator prompt.",
+            "type": "string"
+          },
+          {
+            "const": "peer",
+            "description": "A peer (comms) message.",
+            "type": "string"
+          },
+          {
+            "const": "flow_step",
+            "description": "A mob flow step.",
+            "type": "string"
+          },
+          {
+            "const": "external_event",
+            "description": "An external event.",
+            "type": "string"
+          },
+          {
+            "const": "continuation",
+            "description": "Runtime continuation work.",
+            "type": "string"
+          },
+          {
+            "const": "operation",
+            "description": "A non-content operation.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "A kind recorded by a newer version.",
+            "type": "string"
+          }
+        ]
+      },
+      "InterruptedToolRunDisposition": {
+        "description": "What settling interrupted-run evidence did to the run the process belonged\nto, as told to the model.",
+        "oneOf": [
+          {
+            "description": "The run was still in flight. Its `inputs` (the request plus every\ninput absorbed into the run while it ran) were settled as interrupted\nand not re-run. User requests among them are restored to the\ntranscript right before the notice; `unrestored` names the kinds of\nthe others (for example peer messages or flow steps), in order.",
+            "properties": {
+              "inputs": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "inputs_settled",
+                "type": "string"
+              },
+              "unrestored": {
+                "items": {
+                  "$ref": "#/$defs/InterruptedInputKind"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "inputs"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run had already completed; only the process outlived it. Nothing\nwas re-run or settled.",
+            "properties": {
+              "kind": {
+                "const": "run_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A disposition recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -11036,6 +11513,26 @@
             "type": "object"
           },
           {
+            "description": "The turn carried an explicit, nonempty skill selection but the agent\nwas built without a skill engine, so the selection cannot resolve.\nThe turn fails before any provider call instead of silently running\nas an ordinary turn without the selected skills.",
+            "properties": {
+              "reason_type": {
+                "const": "no_skill_engine",
+                "type": "string"
+              },
+              "requested": {
+                "items": {
+                  "$ref": "#/$defs/SkillKey"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "reason_type",
+              "requested"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "message": {
                 "type": "string"
@@ -11553,6 +12050,43 @@
             "type": "object"
           },
           {
+            "description": "A tool process of an earlier run was settled by the host's\nprocess-custody recovery after the host stopped abruptly. When the run\nwas still in flight its inputs were settled as interrupted and not\nreplayed; the tool's effects may be partial or complete.",
+            "properties": {
+              "cessation": {
+                "$ref": "#/$defs/ToolProcessCessation"
+              },
+              "disposition": {
+                "$ref": "#/$defs/InterruptedToolRunDisposition"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run the process belonged to; with the other fields, the\nnotice's typed identity."
+              },
+              "spawner": {
+                "$ref": "#/$defs/ToolProcessSpawner"
+              },
+              "tool_call_id": {
+                "description": "Provider tool-call id of the interrupted call, when known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool_process_interrupted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "spawner",
+              "cessation",
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "payload": true,
               "summary": {
@@ -11601,6 +12135,11 @@
           {
             "const": "auth_reauth_required",
             "description": "Auth lease transitioned to `reauth_required` — the active\n`auth_binding` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          },
+          {
+            "const": "tool_process_recovery",
+            "description": "A tool process from an interrupted run was settled by the host's\nprocess-custody recovery; the run's input was not replayed.",
             "type": "string"
           }
         ]
@@ -11870,6 +12409,203 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "ToolProcessCessation": {
+        "description": "How recovery established that an earlier incarnation's tool process has\nceased.",
+        "oneOf": [
+          {
+            "description": "The host died before releasing the spawn gate, so the command never\nstarted.",
+            "properties": {
+              "kind": {
+                "const": "never_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded group had no member left when recovery inspected it: the\ntool had already finished or been killed. Its result was not\ndelivered.",
+            "properties": {
+              "kind": {
+                "const": "already_exited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The recorded leader pid or group id now names a different process or\ngroup, so the recorded group is gone. Nothing was signalled.",
+            "properties": {
+              "kind": {
+                "const": "group_reassigned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Recovery SIGKILLed the group and observed every member exit.",
+            "properties": {
+              "kind": {
+                "const": "killed_by_recovery",
+                "type": "string"
+              },
+              "members": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "members"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in a boot that has since ended; every\nprocess of it has ended. Nothing was signalled.",
+            "properties": {
+              "kind": {
+                "const": "prior_environment_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The tool's process group exited and its owner proved every member\ngone, but the host stopped before the run that started it committed,\nso the run's result (including the tool's) was not committed.",
+            "properties": {
+              "kind": {
+                "const": "exited_before_commit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The earlier incarnation ran in another pid namespace of this boot (a\ncontainer since restarted) and its host has exited, as proven by the\nkernel releasing its incarnation lock; its tools ended with that\ncontainer. Nothing was signalled.",
+            "properties": {
+              "kind": {
+                "const": "foreign_incarnation_ended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A cessation recorded by a newer version that this version does not\nrecognize. The process has ceased; how is unknown here.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolProcessSpawner": {
+        "description": "Which kind of owned process a custody entry guards.",
+        "oneOf": [
+          {
+            "description": "A foreground `shell` tool call.",
+            "properties": {
+              "kind": {
+                "const": "shell_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background (detached) shell job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "background_job",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A monitor job attempt.",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "monitor",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "job_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A command hook invocation.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "command_hook",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "hook_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A spawner recorded by a newer version that this version does not\nrecognize.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,

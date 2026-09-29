@@ -20,6 +20,8 @@ import type {
   DeferredCatalogDelta,
   ExternalToolDeltaPhase,
   GeminiImageMetadata,
+  InterruptedInputKind,
+  InterruptedToolRunDisposition,
   LiveChannelId,
   LiveContextObservationId,
   MeerkatSchema,
@@ -52,6 +54,8 @@ import type {
   ToolConfigChangeStatus,
   ToolConfigChangedPayload,
   ToolName,
+  ToolProcessCessation,
+  ToolProcessSpawner,
   TranscriptEditRewriteRange,
   TranscriptRewriteReason,
   TranscriptRewriteSelection,
@@ -717,6 +721,8 @@ export type AnthropicThinkingConfig = {
 } | {
   budget_tokens: number;
   type: "enabled";
+} | {
+  type: "between_tools";
 };
 
 /**
@@ -991,6 +997,9 @@ export type SkillResolutionFailureReason = {
   reason_type: "remap_cycle";
   skill_name: string;
   source_uuid: string;
+} | {
+  reason_type: "no_skill_engine";
+  requested: SkillKey[];
 } | {
   message: string;
   reason_type: "unknown";

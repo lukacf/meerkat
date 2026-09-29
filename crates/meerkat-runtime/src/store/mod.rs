@@ -1358,6 +1358,141 @@ impl CommittedWholeBlobSnapshot {
     }
 }
 
+/// The typed WholeBlob session a [`PreparedRuntimeSessionCommit`] commits,
+/// retained across the commit so a host can project the committed state
+/// without reading and decoding it back.
+///
+/// Obtain it with [`PreparedRuntimeSessionCommit::committing_whole_blob_session`]
+/// before handing the request to the store. It shares the request's
+/// single-assignment artifact cell, so once the store has encoded the
+/// document every clone observes the exact bytes and row digest the store
+/// committed. It is not authority by itself: only
+/// [`Self::bind_committed`] turns it into a [`CommittedWholeBlobSnapshot`],
+/// and only [`reuse_or_load_committed_whole_blob_snapshot`] decides whether
+/// that snapshot is still current.
+#[derive(Debug, Clone)]
+pub struct CommittingWholeBlobSession {
+    carrier: BoundSessionCommit,
+    session: Arc<meerkat_core::Session>,
+}
+
+impl CommittingWholeBlobSession {
+    /// Session the boundary commits.
+    #[must_use]
+    pub fn session_id(&self) -> &meerkat_core::types::SessionId {
+        self.session.id()
+    }
+
+    /// Bind this session to the result the store returned for its boundary.
+    ///
+    /// Returns the committed snapshot only when all of these hold, and
+    /// `None` otherwise (the caller then takes the authoritative read):
+    ///
+    /// - the result carries WholeBlob authority for this session;
+    /// - the store has already materialized this carrier's document (the
+    ///   shared artifact cell is filled);
+    /// - that document's row digest is exactly the digest the store authority
+    ///   binds.
+    ///
+    /// Digest equality means the committed bytes are this session's encoding,
+    /// so the snapshot is the committed document without a decode or a
+    /// rewrite-graph validation. This never encodes, decodes, or hashes.
+    #[must_use]
+    pub fn bind_committed(
+        &self,
+        result: &PreparedRuntimeSessionCommitResult,
+    ) -> Option<CommittedWholeBlobSnapshot> {
+        let authority = result.authority()?.whole_blob()?;
+        if authority.session_id() != self.session.id() {
+            return None;
+        }
+        let artifact = self.carrier.materialized_whole_blob_artifact()?;
+        if artifact.row_sha256_token() != authority.blob_sha256() {
+            return None;
+        }
+        Some(CommittedWholeBlobSnapshot {
+            session: Arc::clone(&self.session),
+            bytes: artifact.bytes_arc(),
+            authority: authority.clone(),
+        })
+    }
+}
+
+/// Bounded transcript facts of one exact committed WholeBlob document: its
+/// transcript revision (the content digest) and live message count.
+///
+/// These are the WholeBlob counterpart of the head revision and message count
+/// a HeadCanonical authority carries. They are a pure function of the
+/// document bytes, so a store may serve them for any authority whose row
+/// digest equals the digest they were recorded for (see
+/// [`RuntimeSessionAuthorityOps::recorded_whole_blob_transcript_facts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WholeBlobCommittedTranscriptFacts {
+    transcript_revision: String,
+    message_count: u64,
+}
+
+impl WholeBlobCommittedTranscriptFacts {
+    // The constructors' only users record facts in the SQLite store.
+    #[cfg(feature = "sqlite-store")]
+    pub(crate) fn new(transcript_revision: String, message_count: u64) -> Self {
+        Self {
+            transcript_revision,
+            message_count,
+        }
+    }
+
+    /// Facts of the document `session` encodes to. The digest comes from the
+    /// session's retained midstate, so a live session pays only its delta.
+    #[cfg(feature = "sqlite-store")]
+    pub(crate) fn from_session(session: &meerkat_core::Session) -> Option<Self> {
+        let transcript_revision = session.transcript_content_digest().ok()?;
+        let message_count = u64::try_from(session.messages().len()).ok()?;
+        Some(Self::new(transcript_revision, message_count))
+    }
+
+    /// Transcript content digest of the committed document.
+    #[must_use]
+    pub fn transcript_revision(&self) -> &str {
+        &self.transcript_revision
+    }
+
+    /// Live message count of the committed document.
+    #[must_use]
+    pub const fn message_count(&self) -> u64 {
+        self.message_count
+    }
+}
+
+/// Reuse a snapshot bound at commit time while it is still the committed
+/// state, or read the committed state authoritatively.
+///
+/// This is the guard for projecting a committed WholeBlob boundary without
+/// re-reading it. `prepared` (normally from
+/// [`CommittingWholeBlobSession::bind_committed`]) is returned only when a
+/// fresh body-free [`RuntimeStore::load_whole_blob_store_authority`]
+/// observation equals its authority exactly (same session, store revision
+/// and row digest), which also means no newer commit has advanced the head.
+/// Any other observation, or no prepared snapshot, falls back to
+/// [`RuntimeStore::load_committed_whole_blob_snapshot`] and its full
+/// verification.
+pub async fn reuse_or_load_committed_whole_blob_snapshot<S>(
+    store: &S,
+    runtime_id: &LogicalRuntimeId,
+    prepared: Option<CommittedWholeBlobSnapshot>,
+) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError>
+where
+    S: RuntimeStore + ?Sized,
+{
+    if let Some(prepared) = prepared {
+        let fresh = store.load_whole_blob_store_authority(runtime_id).await?;
+        if fresh.as_ref() == Some(prepared.authority()) {
+            return Ok(Some(prepared));
+        }
+    }
+    store.load_committed_whole_blob_snapshot(runtime_id).await
+}
+
 /// Metadata-only observation of one committed WholeBlob row.
 ///
 /// Built from the exact committed bytes and the store-issued identity they
@@ -4875,6 +5010,23 @@ impl PreparedRuntimeSessionCommit {
         }
     }
 
+    /// The typed WholeBlob session this boundary commits, retained for
+    /// [`CommittingWholeBlobSession::bind_committed`].
+    ///
+    /// `None` for boundaries that carry no typed WholeBlob document:
+    /// receipt-only boundaries, head-canonical deltas, untyped compatibility
+    /// bytes, and provisional promotions (whose document the store wrote
+    /// earlier). Those projections must read the committed state.
+    #[must_use]
+    pub fn committing_whole_blob_session(&self) -> Option<CommittingWholeBlobSession> {
+        let carrier = self.session()?;
+        let session = carrier.session_arc_cloned()?;
+        Some(CommittingWholeBlobSession {
+            carrier: carrier.clone(),
+            session,
+        })
+    }
+
     /// Boundary receipt, absent only for snapshot-only commits.
     #[must_use]
     pub fn receipt(&self) -> Option<&RunBoundaryReceipt> {
@@ -7858,6 +8010,23 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
 
     fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost;
 
+    /// Bounded transcript facts of the committed WholeBlob document that
+    /// `authority` identifies, when this store already knows them without
+    /// reading the body.
+    ///
+    /// A store may answer only for facts it recorded from a typed session
+    /// whose encoding has exactly `authority`'s row digest (for example at
+    /// commit time). The answer is then exact for that authority, and `None`
+    /// means unknown: the caller reads the committed body. The default knows
+    /// nothing.
+    fn recorded_whole_blob_transcript_facts(
+        &self,
+        authority: &WholeBlobStoreAuthority,
+    ) -> Option<WholeBlobCommittedTranscriptFacts> {
+        let _ = authority;
+        None
+    }
+
     /// Consume one exact store-verified physical activation proof and align
     /// the matching runtime HeadCanonical authority atomically.
     async fn activate_head_canonical_runtime_authority(
@@ -7922,11 +8091,19 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
     /// Load the committed WholeBlob body bytes and their store authority
     /// WITHOUT decoding them into a `Session`.
     ///
-    /// This is the recovery seam for a committed document the current-envelope
-    /// decoder refuses; ordinary readers must keep using
+    /// Two kinds of caller use this seam:
+    /// - recovery of a committed document the current-envelope decoder
+    ///   refuses;
+    /// - callers that only hand the exact committed bytes back to this store,
+    ///   such as the startup compaction checkpoint refresh. Such a caller must
+    ///   verify the bytes' row sha256 against the returned authority's
+    ///   `blob_sha256`, and the store validates them again when they are
+    ///   re-committed.
+    ///
+    /// Readers that need a `Session` must keep using
     /// [`Self::load_committed_whole_blob_snapshot`], whose decode is the
     /// authority check. Stores that cannot serve raw bytes report
-    /// `Unsupported`.
+    /// `Unsupported`, and callers fall back to a decoding read.
     async fn load_committed_whole_blob_bytes(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -10879,5 +11056,155 @@ mod committed_whole_blob_metadata_tests {
             CommittedWholeBlobMetadata::from_committed_bytes(&bytes, foreign_session),
             Err(RuntimeStoreError::SessionPersistenceAuthorityConflict { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod committing_whole_blob_session_tests {
+    use super::*;
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+
+    fn session_with_user(content: &str) -> meerkat_core::Session {
+        let mut session = meerkat_core::Session::new();
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text(content.to_string()),
+        ));
+        session
+    }
+
+    fn request(session: &Arc<meerkat_core::Session>) -> PreparedRuntimeSessionCommit {
+        PreparedRuntimeSessionCommit::snapshot_only(
+            BoundSessionCommit::sealed(Arc::clone(session)).unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn committing_session_binds_to_its_own_commit_without_a_decode() {
+        let store = InMemoryRuntimeStore::new();
+        let session = Arc::new(session_with_user("first"));
+        let runtime_id = LogicalRuntimeId::for_session(session.id());
+        let request = request(&session);
+        let committing = request
+            .committing_whole_blob_session()
+            .expect("a sealed typed WholeBlob boundary carries its session");
+        assert_eq!(committing.session_id(), session.id());
+
+        let result = RuntimeStore::commit_prepared_session_boundary(&store, &runtime_id, request)
+            .await
+            .unwrap();
+        let decodes_before = meerkat_core::global_whole_blob_decodes();
+        let bound = committing
+            .bind_committed(&result)
+            .expect("the store committed exactly this carrier's bytes");
+        let authority = RuntimeStore::load_whole_blob_store_authority(&store, &runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bound.authority(), &authority);
+        assert!(Arc::ptr_eq(&bound.session_arc(), &session));
+
+        let reused =
+            reuse_or_load_committed_whole_blob_snapshot(&store, &runtime_id, Some(bound.clone()))
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(
+            Arc::ptr_eq(&reused.session_arc(), &session),
+            "an unchanged head reuses the committing session"
+        );
+        assert_eq!(
+            meerkat_core::global_whole_blob_decodes(),
+            decodes_before,
+            "binding and reusing the committing session decode nothing"
+        );
+
+        // A newer commit advances the head: the stale binding must not be
+        // served, and the guard falls back to the authoritative read.
+        let mut successor = (*session).clone();
+        successor.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("second".to_string()),
+        ));
+        let successor = Arc::new(successor);
+        RuntimeStore::commit_prepared_session_boundary(
+            &store,
+            &runtime_id,
+            self::request(&successor),
+        )
+        .await
+        .unwrap();
+        let current = reuse_or_load_committed_whole_blob_snapshot(&store, &runtime_id, Some(bound))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&current.session_arc(), &session));
+        assert_eq!(current.session().messages().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn committing_session_refuses_a_result_it_did_not_produce() {
+        let store = InMemoryRuntimeStore::new();
+        let session = Arc::new(session_with_user("mine"));
+        let runtime_id = LogicalRuntimeId::for_session(session.id());
+        let request = request(&session);
+        let committing = request.committing_whole_blob_session().unwrap();
+
+        let other = Arc::new(session_with_user("other"));
+        let other_runtime = LogicalRuntimeId::for_session(other.id());
+        let other_result = RuntimeStore::commit_prepared_session_boundary(
+            &store,
+            &other_runtime,
+            self::request(&other),
+        )
+        .await
+        .unwrap();
+        assert!(
+            committing.bind_committed(&other_result).is_none(),
+            "another session's authority never binds"
+        );
+
+        let result = RuntimeStore::commit_prepared_session_boundary(&store, &runtime_id, request)
+            .await
+            .unwrap();
+        assert!(committing.bind_committed(&result).is_some());
+
+        // Byte-identical carrier the store never consumed: nothing was
+        // materialized, and binding does not encode to find out.
+        let unconsumed = self::request(&session)
+            .committing_whole_blob_session()
+            .unwrap();
+        assert!(
+            unconsumed.bind_committed(&result).is_none(),
+            "binding never materializes a carrier the store did not consume"
+        );
+
+        // Same session, different bytes: the digest guard refuses.
+        let divergent = Arc::new({
+            let mut divergent = (*session).clone();
+            divergent.push(meerkat_core::types::Message::User(
+                meerkat_core::types::UserMessage::text("divergent".to_string()),
+            ));
+            divergent
+        });
+        let divergent_request = self::request(&divergent);
+        let divergent_committing = divergent_request.committing_whole_blob_session().unwrap();
+        let _ = divergent_request
+            .session()
+            .unwrap()
+            .whole_blob_artifact()
+            .unwrap();
+        assert!(
+            divergent_committing.bind_committed(&result).is_none(),
+            "a carrier whose bytes differ from the committed row never binds"
+        );
+
+        assert!(
+            PreparedRuntimeSessionCommit::snapshot_only(BoundSessionCommit::untyped(
+                serde_json::to_vec(session.as_ref()).unwrap()
+            ))
+            .committing_whole_blob_session()
+            .is_none(),
+            "untyped compatibility bytes carry no typed session"
+        );
     }
 }

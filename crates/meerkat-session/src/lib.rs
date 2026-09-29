@@ -65,11 +65,11 @@ pub use compactor::DefaultCompactor;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistent::{
     CommittedBoundaryRecovery, CommittedBoundaryResumePreparationReceipt,
-    DurableSessionForkWithProvenance, LiveContextCommittedBoundary,
-    LiveSessionActorTurnBoundaryLease, MachineServiceTurnCommitProtocol,
-    MachineSessionArchiveProtocol, PersistentSessionService, PreparedActorSessionSeed,
-    PreparedCommittedBoundaryResume, PreparedCommittedBoundaryResumeMaterialization,
-    PreparedCommittedBoundaryResumeUnavailable,
+    DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES, DurableSessionForkWithProvenance,
+    LiveContextCommittedBoundary, LiveSessionActorTurnBoundaryLease,
+    MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
+    PreparedActorSessionSeed, PreparedCommittedBoundaryResume,
+    PreparedCommittedBoundaryResumeMaterialization, PreparedCommittedBoundaryResumeUnavailable,
 };
 
 // Skill registration (inventory + meerkat-skills not available on wasm32)

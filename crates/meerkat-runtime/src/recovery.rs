@@ -129,7 +129,12 @@ struct PreparedRecoveryCandidate {
 
 enum RecoveryCandidatePreparation {
     Prepared(PreparedRecoveryCandidate),
-    AlreadyAligned(Arc<Session>),
+    AlreadyAligned {
+        recovered: Arc<Session>,
+        /// The exact verified committed WholeBlob snapshot `recovered` was
+        /// decoded from; `None` for HeadCanonical sources.
+        committed_whole_blob: Option<crate::store::CommittedWholeBlobSnapshot>,
+    },
     IncompleteHeadCanonicalIntent {
         provisional: crate::store::HeadCanonicalProvisionalTailAuthority,
     },
@@ -574,9 +579,10 @@ fn prepare_head_canonical_recovery_candidate(
                 "equal runtime and physical heads carry contradictory store authority".to_string(),
             ));
         }
-        return Ok(RecoveryCandidatePreparation::AlreadyAligned(Arc::clone(
-            source.physical_session(),
-        )));
+        return Ok(RecoveryCandidatePreparation::AlreadyAligned {
+            recovered: Arc::clone(source.physical_session()),
+            committed_whole_blob: None,
+        });
     }
     let provisional = source.provisional_authority().ok_or_else(|| {
         DurableTailRecoveryError::InvalidEvidence(
@@ -762,6 +768,7 @@ fn prepare_whole_blob_recovery_candidate(
     committed: CommittedWholeBlobSnapshot,
     provisional: Option<CommittedWholeBlobProvisionalTail>,
 ) -> Result<RecoveryCandidatePreparation, DurableTailRecoveryError> {
+    let committed_snapshot = committed.clone();
     let (committed_session, _committed_bytes, committed_authority) = committed.into_parts();
     if committed_session.id() != committed_authority.session_id() {
         return Err(DurableTailRecoveryError::InvalidEvidence(
@@ -769,9 +776,10 @@ fn prepare_whole_blob_recovery_candidate(
         ));
     }
     let Some(provisional) = provisional else {
-        return Ok(RecoveryCandidatePreparation::AlreadyAligned(
-            committed_session,
-        ));
+        return Ok(RecoveryCandidatePreparation::AlreadyAligned {
+            recovered: committed_session,
+            committed_whole_blob: Some(committed_snapshot),
+        });
     };
     let provisional_authority = provisional.authority();
     if provisional_authority.session_id() != committed_authority.session_id()
@@ -1576,13 +1584,49 @@ pub async fn recover_durable_tail(
     store: &dyn RuntimeStore,
     session_id: &SessionId,
 ) -> Result<DurableTailRecoveryOutcome, DurableTailRecoveryError> {
+    recover_durable_tail_capturing(store, session_id, &mut None).await
+}
+
+/// [`recover_durable_tail`], additionally returning the exact committed
+/// WholeBlob snapshot an `AlreadyAligned` outcome's body was decoded from.
+///
+/// The snapshot is the store's own verified read (its bytes hash to the
+/// store-issued authority it carries). A session owner can therefore adopt
+/// it as the committed body for that exact authority instead of reading and
+/// decoding the same document again. `None` for every other outcome and for
+/// HeadCanonical sources.
+pub async fn recover_durable_tail_retaining_committed_whole_blob(
+    store: &dyn RuntimeStore,
+    session_id: &SessionId,
+) -> Result<
+    (
+        DurableTailRecoveryOutcome,
+        Option<crate::store::CommittedWholeBlobSnapshot>,
+    ),
+    DurableTailRecoveryError,
+> {
+    let mut committed_whole_blob = None;
+    let outcome =
+        recover_durable_tail_capturing(store, session_id, &mut committed_whole_blob).await?;
+    Ok((outcome, committed_whole_blob))
+}
+
+async fn recover_durable_tail_capturing(
+    store: &dyn RuntimeStore,
+    session_id: &SessionId,
+    aligned_committed_whole_blob: &mut Option<crate::store::CommittedWholeBlobSnapshot>,
+) -> Result<DurableTailRecoveryOutcome, DurableTailRecoveryError> {
     let runtime_id = LogicalRuntimeId::for_session(session_id);
     let mut preparation = load_recovery_preparation(store, &runtime_id, session_id).await?;
     let mut rolled_back_incomplete_intent = false;
     let candidate = loop {
         match preparation {
             RecoveryCandidatePreparation::Prepared(candidate) => break candidate,
-            RecoveryCandidatePreparation::AlreadyAligned(recovered) => {
+            RecoveryCandidatePreparation::AlreadyAligned {
+                recovered,
+                committed_whole_blob,
+            } => {
+                *aligned_committed_whole_blob = committed_whole_blob;
                 tracing::info!(
                     %session_id,
                     "durable-tail recovery source is already exactly aligned"

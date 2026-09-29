@@ -47031,6 +47031,11 @@ async fn empty_compaction_outbox_skips_the_identity_checkpoint_cycle_after_commi
          it just committed"
     );
     assert_eq!(
+        inner.committed_whole_blob_bytes_loads(),
+        0,
+        "nor load its committed bytes raw"
+    );
+    assert_eq!(
         store.session_snapshot_commits(),
         0,
         "a persisted turn with an empty outbox must not recommit the \
@@ -47058,8 +47063,44 @@ async fn empty_compaction_outbox_skips_the_identity_checkpoint_cycle_after_commi
         "PRESERVED OBLIGATION 2 (recovery): the reloaded snapshot is \
          re-projected onto the SessionStore compatibility row"
     );
-    assert_eq!(store.session_snapshot_loads(), 1);
+    // The in-memory store is WholeBlob, so the recovery reload is served as
+    // the committed bytes verified against their store authority digest
+    // (RuntimeSessionAuthorityOps::load_committed_whole_blob_bytes) rather
+    // than a decoding load_session_snapshot; the reloaded bytes are pinned
+    // above and the identity recommit below still runs exactly once.
+    assert_eq!(
+        store.session_snapshot_loads(),
+        0,
+        "a WholeBlob recovery reload does not decode the snapshot through \
+         load_session_snapshot just to hand the bytes back"
+    );
+    assert_eq!(
+        inner.committed_whole_blob_bytes_loads(),
+        1,
+        "the recovery form reloads the committed bytes exactly once"
+    );
     assert_eq!(store.session_snapshot_commits(), 1);
+
+    // A store that cannot serve raw committed bytes falls back to the
+    // decoding load, and the heal still reloads and recommits exactly once.
+    inner.report_committed_whole_blob_bytes_unsupported();
+    let checkpoint = crate::runtime_loop::reconcile_loaded_compaction_projection_outbox(
+        &driver,
+        &mut executor,
+        Vec::new(),
+        crate::runtime_loop::EmptyOutboxCheckpoint::RefreshFromStore,
+    )
+    .await
+    .expect("recovery-form reconciliation falls back to the decoding load");
+    assert_eq!(
+        checkpoint.as_deref(),
+        Some(&seeded),
+        "the fallback returns the same authoritative snapshot"
+    );
+    assert_eq!(executor.checkpoint_calls, 2);
+    assert_eq!(store.session_snapshot_loads(), 1);
+    assert_eq!(inner.committed_whole_blob_bytes_loads(), 1);
+    assert_eq!(store.session_snapshot_commits(), 2);
 }
 
 // ---------------------------------------------------------------------------

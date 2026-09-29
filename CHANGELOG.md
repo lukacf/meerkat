@@ -281,6 +281,41 @@ them.
   compaction, and `inference_geo`. It is the recommended Sonnet
   model; the Anthropic default stays `claude-opus-5-5`.
 
+- `PreparedRuntimeSessionCommit::committing_whole_blob_session()` returns a
+  `CommittingWholeBlobSession`. This is the typed WholeBlob session the
+  boundary commits, kept across the commit so that a host projecting
+  committed state does not have to read and decode it back (#1273).
+  - `CommittingWholeBlobSession::bind_committed(&result)` returns the
+    committed `CommittedWholeBlobSnapshot` only when three things hold. The
+    result carries WholeBlob authority for that session. The store has
+    already materialized this carrier's document. The document's row digest
+    equals the digest the authority binds. It never encodes, decodes or
+    hashes.
+  - `reuse_or_load_committed_whole_blob_snapshot` reuses that snapshot only
+    while a fresh body-free `load_whole_blob_store_authority` equals its
+    authority exactly. Otherwise it falls back to the authoritative
+    `load_committed_whole_blob_snapshot`.
+  - `BoundSessionCommit::materialized_whole_blob_artifact()` peeks at an
+    already-materialized artifact without encoding.
+
+  All of these are additive.
+- `RuntimeSessionAuthorityOps::recorded_whole_blob_transcript_facts(&authority)`
+  is a provided method whose default is `None` (#1273). It returns a
+  `WholeBlobCommittedTranscriptFacts` (the transcript revision and message
+  count) for the committed WholeBlob document an exact authority
+  identifies, without reading its body. `SqliteRuntimeStore` records these
+  facts whenever it writes a document: prepared boundaries, snapshot CAS,
+  snapshot commits, and provisional tails. They are keyed by the row sha256,
+  and the store answers only for an authority with that exact digest.
+- `meerkat_runtime::recovery::recover_durable_tail_retaining_committed_whole_blob`
+  runs the same store-owned durable-tail recovery as `recover_durable_tail`
+  (#1273). For a WholeBlob `AlreadyAligned` outcome it also returns the
+  verified `CommittedWholeBlobSnapshot` the outcome was decoded from, so a
+  caller can reuse it instead of decoding the document again.
+- `PersistentSessionService::with_whole_blob_body_cache_bytes(bytes)` and
+  `meerkat_session::DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES` (64 MiB) bound the
+  verified WholeBlob bodies the service retains during a resume, measured in
+  committed document bytes (#1273). Zero disables retention.
 - `IncrementalSessionStore::verify_current_head` (provided method): a
   body-free proof that a head is still the store's current physical head,
   with `materialize_head`'s head-row checks (`NotFound`,
@@ -561,6 +596,72 @@ them.
   (lukacf/meerkat-mobkit#488). Stored strand names are read back from rows,
   never recomputed, so strands already written under revision names stay
   readable, and a rewrite refused this way succeeds on its next replay.
+- WholeBlob cold resume decodes each committed document once instead of
+  about eight times (#1273). The one decode is the store-owned recovery,
+  and every later consumer reuses its verified body. Every WholeBlob decode
+  re-parses the document and re-runs its rewrite-graph validation and
+  semantic replay, so the cost used to grow with rewrite generations times
+  transcript size, once per consumer.
+  - Resume preparation adopts the store-owned recovery's verified committed
+    snapshot under the same observation bracket as HeadCanonical.
+  - `PersistentSessionService` keeps that verified body, keyed by the exact
+    store authority. A read reuses it only when a fresh body-free
+    `load_whole_blob_store_authority` equals that authority; any other
+    authority takes the authoritative read.
+    - Only store decodes are cached, never a caller's in-memory session.
+    - An entry is dropped as soon as the service commits, acknowledges, or
+      observes a newer authority for that session: actor turn boundaries,
+      promotions, checkpoints, synchronization, and apply-path checks. In
+      practice that is the create-time save that follows actor
+      materialization, so nothing outlives the resume window.
+    - Eviction under the budget is least-recently-served first.
+    - Retention is bounded by committed document bytes (see Added).
+  - The compaction checkpoint verifies the caller's bytes against the
+    authority digest instead of decoding the stored body. The startup
+    compaction refresh loads the committed bytes raw and verifies them
+    against the authority digest, falling back to a decoding load on stores
+    that cannot serve raw bytes. The digests run on the blocking pool.
+  - `SqliteRuntimeStore` reaffirms a byte-identical WholeBlob re-commit
+    without decoding it. This is the startup refresh.
+    - When a typed control-plane commit (or a full re-commit) writes a
+      document, the store runs the boundary snapshot save guard on it. If
+      the guard passes, the store records the guard verdict, the validated
+      compaction intents, and the catalog projection, keyed by the exact
+      row sha256. No session or body is retained.
+    - A later commit of the same bytes, while they are still the current
+      authority's body, runs the outbox check against those intents, the
+      body check, the catalog upsert under the current runtime state, and
+      the quarantine clear. These are the steps the identical-digest upsert
+      ran after the decode.
+    - It also decodes other incoming snapshots once instead of twice.
+  - `persist_full_session` takes its checkpoint digest from the retained
+    midstate.
+
+  Every store-authority check still runs. With 60 and 120 rewrite
+  generations, resume went from 24 decodes and 16 graph validations to 3
+  and 2 (one per session), and digest bytes went from 8.70x to 1.89x of the
+  committed documents. At 120 generations resume time went from 7.41 s to
+  1.75 s. The first turn after resume went from 5 decodes to 0, and from
+  2.29 s to 0.50 s at 120 generations. The verified-body cache retains 0
+  bytes after resume. `whole_blob_resume_cost_slow` pins the bounds.
+  Hidden `global_whole_blob_decodes` and
+  `global_transcript_graph_validations` counters expose the cost.
+
+- The WholeBlob `live_session_authority` passes on every turn's apply path
+  no longer export the live session or decode the committed document
+  (#1273). These are the workgraph-overlay read and
+  `discard_stale_live_session_if_needed`. As on HeadCanonical, they classify
+  from bounded facts. The inputs are the actor's transcript authority and
+  the committed revision and message count, which come from the store's
+  recorded facts or the service's verified body for exactly the fresh
+  authority. They are the same inputs as the full-body comparison, so the
+  verdict is unchanged. Only a DurableAuthoritative verdict loads the body.
+  With 60 and 120 rewrite generations, two steady-state turns per member
+  went from 4 decodes and 4 graph validations to 0, and digest bytes went
+  from 3.78x to 1.82x of the committed documents. At 120 generations the
+  time went from 2.48 s to 0.92 s. `whole_blob_resume_cost_slow` bounds the
+  steady-state turns at zero decodes.
+
 - Cold resume verifies each committed session head once instead of five
   times (#1258). HeadCanonical resume preparation now brackets the
   store-owned durable-tail recovery with resume observations and adopts the

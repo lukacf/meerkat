@@ -482,6 +482,12 @@ pub struct InMemoryRuntimeStore {
     machine_lifecycle_load_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
     #[cfg(test)]
     machine_lifecycle_load_calls: Arc<AtomicUsize>,
+    /// Raw committed WholeBlob byte loads, and whether they report
+    /// `Unsupported` (the fallback path of callers that cannot get raw bytes).
+    #[cfg(test)]
+    committed_whole_blob_bytes_loads: Arc<AtomicUsize>,
+    #[cfg(test)]
+    committed_whole_blob_bytes_unsupported: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     machine_lifecycle_load_panics_remaining: Arc<AtomicUsize>,
     #[cfg(test)]
@@ -539,6 +545,12 @@ impl InMemoryRuntimeStore {
             machine_lifecycle_load_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             machine_lifecycle_load_calls: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            committed_whole_blob_bytes_loads: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            committed_whole_blob_bytes_unsupported: Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
             #[cfg(test)]
             machine_lifecycle_load_panics_remaining: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
@@ -612,6 +624,18 @@ impl InMemoryRuntimeStore {
             .machine_lifecycle_load_before
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, release));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn committed_whole_blob_bytes_loads(&self) -> usize {
+        self.committed_whole_blob_bytes_loads
+            .load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn report_committed_whole_blob_bytes_unsupported(&self) {
+        self.committed_whole_blob_bytes_unsupported
+            .store(true, Ordering::Release);
     }
 
     #[cfg(test)]
@@ -2033,6 +2057,19 @@ impl super::RuntimeSessionAuthorityOps for InMemoryRuntimeStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<(Arc<Vec<u8>>, WholeBlobStoreAuthority)>, RuntimeStoreError> {
+        #[cfg(test)]
+        {
+            if self
+                .committed_whole_blob_bytes_unsupported
+                .load(Ordering::Acquire)
+            {
+                return Err(RuntimeStoreError::Unsupported(
+                    "test store reports raw committed WholeBlob bytes as unsupported".to_string(),
+                ));
+            }
+            self.committed_whole_blob_bytes_loads
+                .fetch_add(1, Ordering::AcqRel);
+        }
         let inner = self.inner.lock().await;
         let Some(bytes) = inner.sessions.get(&runtime_id.0) else {
             return Ok(None);

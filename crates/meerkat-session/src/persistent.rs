@@ -14532,6 +14532,94 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.load_authoritative_session_base(id).await
     }
 
+    /// Resolve a crash-window HeadCanonical provisional tail before a host
+    /// starts or attaches a session that has no live actor.
+    ///
+    /// A host that died after a run's end-of-run checkpoint applied its
+    /// HeadCanonical provisional tail, but before the run's boundary
+    /// committed, leaves the physical head ahead of the RuntimeStore
+    /// authority. Every committed read then fails closed with the typed
+    /// `TranscriptRevisionConflict`, including the prechecks a host runs
+    /// before it builds an actor. Durable-tail recovery is the only owner of
+    /// that tail. Hosts call this at the start of a turn, attach or resume,
+    /// before any committed read, so the tail is promoted (or proven absent)
+    /// first.
+    ///
+    /// It runs the store-owned, machine-authorized recovery that resume
+    /// preparation runs, and only when all of these hold:
+    /// - the profile is HeadCanonical (a WholeBlob provisional tail never
+    ///   moves the committed document);
+    /// - no live actor owns the session in this service;
+    /// - the store records a provisional tail for the session (a successful
+    ///   run's promotion consumes it, so its presence without a live actor
+    ///   means the run ended without its boundary).
+    ///
+    /// Multi-process model: the live-actor check sees only this process. A
+    /// realm is owned by one serving host at a time, and a second host that
+    /// starts or attaches a session another host is running is already an
+    /// ownership conflict. That is why this runs only on start and attach
+    /// paths, never on plain reads (`load_authoritative_session`, history,
+    /// status), which keep returning the typed conflict for a session
+    /// another process may still be committing.
+    ///
+    /// Never fails the caller's attach on its own account: a tail it cannot
+    /// observe or resolve (held, refused, or an error) is logged, and the
+    /// caller's committed read then surfaces the original conflict.
+    pub async fn prepare_cold_attach(&self, id: &SessionId) -> Result<(), SessionError> {
+        if self.runtime_store.session_persistence_profile()
+            != RuntimeSessionPersistenceProfile::HeadCanonicalV1
+        {
+            return Ok(());
+        }
+        if self.inner.has_live_session(id).await? {
+            return Ok(());
+        }
+        match self
+            .runtime_store
+            .load_head_canonical_provisional_tail(&Self::runtime_id_for_session(id))
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %id,
+                    %error,
+                    "could not observe the provisional tail before a cold attach"
+                );
+                return Ok(());
+            }
+        }
+        match self
+            .recover_committed_boundary_retaining_aligned_body(id)
+            .await
+        {
+            Ok((
+                CommittedBoundaryRecovery::Recovered { .. }
+                | CommittedBoundaryRecovery::AlreadyCommitted,
+                _,
+            )) => {}
+            Ok((CommittedBoundaryRecovery::Unprovable { reason }, _)) => {
+                tracing::warn!(
+                    session_id = %id,
+                    reason,
+                    "durable-tail recovery could not resolve the provisional tail before a cold attach"
+                );
+            }
+            // An actor went live between the check and the recovery gate; its
+            // turn owns the tail now.
+            Err(SessionError::Busy { .. }) => {}
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %id,
+                    %error,
+                    "durable-tail recovery failed before a cold attach"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Observe the exact committed RuntimeStore body without reconciling the
     /// EventStore rewrite audit.
     ///

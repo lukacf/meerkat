@@ -769,6 +769,32 @@ them.
   as `MobError::Internal(String)` (#1236). Cursor replay, cross-incarnation
   sequences and the typed `MemberSessionNotLive` close all three.
 
+- A session whose host died after a run's end-of-run checkpoint wrote its
+  HeadCanonical provisional tail, but before the run's boundary committed,
+  now resumes on every cold attach path (#1285). Before, the next RPC lazy
+  resume failed `turn/start` with "rewrite rejected: previous transcript
+  revision ... did not match commit parent", with or without tool-process
+  custody.
+  - Cause: the physical head was ahead of the RuntimeStore authority, and
+    every host's cold precheck (`load_authoritative_session`) failed closed
+    on that mismatch. Durable-tail recovery, the only owner of the tail,
+    runs later, in actor resume preparation.
+  - Fix: the new `PersistentSessionService::prepare_cold_attach(id)` runs
+    the same store-owned, machine-authorized durable-tail recovery that
+    resume preparation runs. It acts only when the profile is HeadCanonical,
+    a provisional tail is recorded, and no live actor owns the session. Hosts
+    call it only on start and attach paths, before their prechecks: RPC
+    `turn/start`, external events, resume, rotation and
+    `ensure_runtime_executor`; MCP `meerkat_resume`; and the REST
+    persisted-only executor preparation. The interrupted run is then
+    committed exactly once, so a tool-process custody record has nothing
+    left to settle.
+  - Plain reads (`load_authoritative_session`, history, status) never
+    recover. They keep returning the typed conflict, because another process
+    may still be committing that run. Held or refused recovery, or a
+    recovery error, is logged and leaves the caller's read to surface the
+    original conflict.
+
 - `make wasm-check` failed on the release branch: the `test-support` fork
   supervisor hook called `JoinError::is_panic`, which wasm32's
   `tokio_with_wasm` does not have (it now classifies a non-cancelled join

@@ -2631,6 +2631,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RollbackRouteInstallDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecordExternalRouteInstallInstall`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeExternalRouteRemovalBeforeUnwire`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveExternalRouteInstallRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveExternalRouteInstallStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveExternalRouteInstallCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveExternalRouteInstallDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackExternalRouteInstallRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackExternalRouteInstallStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackExternalRouteInstallCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RollbackExternalRouteInstallDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecoverRemoteTurnDispatchSequenceAdvance`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4367,6 +4397,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RouteInstallRequested`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ExternalRouteInstallRequested`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `MemberOperatorAdmitted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4526,6 +4559,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `pending_route_ledger_is_install_only`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `pending_external_route_ledger_is_install_only`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `remote_turn_custody_requires_exact_current_placement`

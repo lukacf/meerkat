@@ -4059,6 +4059,15 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::type_path_struct(
+                "ExternalRouteObligation",
+                "crate::catalog::dsl::mob_machine::ExternalRouteObligation",
+                vec![
+                    TypePathStructField::named("edge", "ExternalPeerEdge"),
+                    TypePathStructField::named("host", "HostId"),
+                    TypePathStructField::named("kind", "RouteObligationKind"),
+                ],
+            ),
+            NamedTypeBinding::type_path_struct(
                 "RemoteTurnObligation",
                 "crate::catalog::dsl::mob_machine::RemoteTurnObligation",
                 vec![

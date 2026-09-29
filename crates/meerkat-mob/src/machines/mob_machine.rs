@@ -1775,6 +1775,26 @@ impl Default for RouteInstallObligation {
     }
 }
 
+/// Host-scoped route operation for an external-peer edge whose local member
+/// is placed on `host`. Only Install values may be outstanding; Remove values
+/// are carried only across the synchronous pre-unwire handoff.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExternalRouteObligation {
+    pub edge: ExternalPeerEdge,
+    pub host: HostId,
+    pub kind: RouteObligationKind,
+}
+
+impl Default for ExternalRouteObligation {
+    fn default() -> Self {
+        Self {
+            edge: ExternalPeerEdge::default(),
+            host: HostId::default(),
+            kind: RouteObligationKind::default(),
+        }
+    }
+}
+
 /// Outstanding remote turn-directive outcome obligation (§18 O2).
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,

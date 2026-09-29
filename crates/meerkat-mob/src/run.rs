@@ -564,6 +564,10 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::AuthorizeRouteRemovalBeforeUnwire { .. }
             | mob_dsl::MobMachineInput::ResolveRouteInstall { .. }
             | mob_dsl::MobMachineInput::RollbackRouteInstall { .. }
+            | mob_dsl::MobMachineInput::RecordExternalRouteInstall { .. }
+            | mob_dsl::MobMachineInput::AuthorizeExternalRouteRemovalBeforeUnwire { .. }
+            | mob_dsl::MobMachineInput::ResolveExternalRouteInstall { .. }
+            | mob_dsl::MobMachineInput::RollbackExternalRouteInstall { .. }
             | mob_dsl::MobMachineInput::RecordRemoteTurnObligation { .. }
             | mob_dsl::MobMachineInput::AbortRemoteTurnObligation { .. }
             | mob_dsl::MobMachineInput::CommitRemoteTurnOutcome { .. }
@@ -1835,6 +1839,10 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::AuthorizeRouteRemovalBeforeUnwire { .. }
             | mob_dsl::MobMachineInput::ResolveRouteInstall { .. }
             | mob_dsl::MobMachineInput::RollbackRouteInstall { .. }
+            | mob_dsl::MobMachineInput::RecordExternalRouteInstall { .. }
+            | mob_dsl::MobMachineInput::AuthorizeExternalRouteRemovalBeforeUnwire { .. }
+            | mob_dsl::MobMachineInput::ResolveExternalRouteInstall { .. }
+            | mob_dsl::MobMachineInput::RollbackExternalRouteInstall { .. }
             | mob_dsl::MobMachineInput::RecordRemoteTurnObligation { .. }
             | mob_dsl::MobMachineInput::AbortRemoteTurnObligation { .. }
             | mob_dsl::MobMachineInput::CommitRemoteTurnOutcome { .. }

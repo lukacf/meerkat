@@ -9521,83 +9521,46 @@ ORDER BY runtime_id";
         })
     }
 
-    /// Most sessions [`VerifiedWholeBlobSessions`] keeps. Entries only
-    /// replace a decode of byte-identical input, so eviction costs a decode,
-    /// never correctness.
-    const VERIFIED_WHOLE_BLOB_SESSION_CAPACITY: usize = 64;
-
-    /// Typed WholeBlob sessions this store has already verified or encoded,
-    /// keyed by runtime and by the exact `row-sha256` digest of their bytes.
-    ///
-    /// A WholeBlob decode re-parses the document and re-runs its rewrite-graph
-    /// validation and semantic replay. When a caller hands this store bytes
-    /// whose digest equals an entry's digest, those bytes are exactly the
-    /// document the entry was decoded from (or encodes to), so the entry is
-    /// reused instead of decoding them again. Every guard that inspects the
-    /// typed session still runs on it; only the redundant decode is skipped.
-    /// A digest mismatch, or no entry, decodes as before.
-    #[derive(Debug, Default)]
-    struct VerifiedWholeBlobSessions {
-        entries: std::sync::Mutex<
-            indexmap::IndexMap<LogicalRuntimeId, (String, Arc<meerkat_core::Session>)>,
-        >,
-    }
-
-    impl VerifiedWholeBlobSessions {
-        fn matching(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            blob_sha256: &str,
-        ) -> Option<Arc<meerkat_core::Session>> {
-            let entries = self
-                .entries
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            entries
-                .get(runtime_id)
-                .filter(|(digest, session)| {
-                    digest == blob_sha256
-                        && &LogicalRuntimeId::for_session(session.id()) == runtime_id
-                })
-                .map(|(_, session)| Arc::clone(session))
-        }
-
-        fn remember(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            blob_sha256: &str,
-            session: Arc<meerkat_core::Session>,
-        ) {
-            let mut entries = self
-                .entries
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            entries.shift_remove(runtime_id);
-            entries.insert(runtime_id.clone(), (blob_sha256.to_string(), session));
-            while entries.len() > VERIFIED_WHOLE_BLOB_SESSION_CAPACITY {
-                entries.shift_remove_index(0);
-            }
-        }
-    }
-
     /// Most runtimes [`RecordedWholeBlobTranscriptFacts`] keeps. Entries are a
     /// digest string and a count, so the bound is generous.
     const RECORDED_WHOLE_BLOB_FACTS_CAPACITY: usize = 1024;
 
-    /// Bounded transcript facts of WholeBlob documents this store wrote,
-    /// keyed by runtime and by the exact row digest of the document.
+    /// Evidence that lets a byte-identical re-commit of one exact WholeBlob
+    /// document skip its decode.
     ///
-    /// Facts are a pure function of the document bytes, so an entry can never
-    /// be stale: it is served only for an authority whose row digest equals the
-    /// recorded one, and any other authority reads the body.
+    /// Recorded only after this store ran the boundary snapshot save guard
+    /// (with no legacy predecessor row, exactly as the re-commit would) on a
+    /// typed session whose encoding has exactly the recorded row digest, and
+    /// it passed. The guard is a function of the serialized document, so its
+    /// verdict holds for every copy of those bytes. The validated compaction
+    /// intents and the catalog projection are kept so that the checks which
+    /// depend on current store state (the outbox rows and the runtime state)
+    /// still run on every re-commit.
+    #[derive(Debug)]
+    struct WholeBlobReaffirmEvidence {
+        compaction_projection_intents: Vec<meerkat_core::CompactionProjectionIntent>,
+        catalog_template: crate::store::RuntimeSessionCatalogEntry,
+    }
+
+    /// One recorded document: its row digest, bounded transcript facts, and
+    /// (when recorded) its reaffirm evidence.
+    #[derive(Debug, Clone)]
+    struct RecordedWholeBlobDocument {
+        blob_sha256: String,
+        facts: crate::store::WholeBlobCommittedTranscriptFacts,
+        reaffirm: Option<Arc<WholeBlobReaffirmEvidence>>,
+    }
+
+    /// Bounded facts about the WholeBlob documents this store wrote, keyed by
+    /// runtime and by the exact row digest of the document. No `Session` or
+    /// document body is retained.
+    ///
+    /// Everything recorded is a pure function of the document bytes, so an
+    /// entry can never be stale: it is served only for an exact row digest,
+    /// and any other digest takes the full path.
     #[derive(Debug, Default)]
     struct RecordedWholeBlobTranscriptFacts {
-        entries: std::sync::Mutex<
-            indexmap::IndexMap<
-                LogicalRuntimeId,
-                (String, crate::store::WholeBlobCommittedTranscriptFacts),
-            >,
-        >,
+        entries: std::sync::Mutex<indexmap::IndexMap<LogicalRuntimeId, RecordedWholeBlobDocument>>,
     }
 
     impl RecordedWholeBlobTranscriptFacts {
@@ -9606,13 +9569,28 @@ ORDER BY runtime_id";
             runtime_id: &LogicalRuntimeId,
             blob_sha256: &str,
             facts: crate::store::WholeBlobCommittedTranscriptFacts,
+            reaffirm: Option<WholeBlobReaffirmEvidence>,
         ) {
             let mut entries = self
                 .entries
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Evidence already recorded for these exact bytes stays valid.
+            let reaffirm = reaffirm.map(Arc::new).or_else(|| {
+                entries
+                    .get(runtime_id)
+                    .filter(|entry| entry.blob_sha256 == blob_sha256)
+                    .and_then(|entry| entry.reaffirm.clone())
+            });
             entries.shift_remove(runtime_id);
-            entries.insert(runtime_id.clone(), (blob_sha256.to_string(), facts));
+            entries.insert(
+                runtime_id.clone(),
+                RecordedWholeBlobDocument {
+                    blob_sha256: blob_sha256.to_string(),
+                    facts,
+                    reaffirm,
+                },
+            );
             while entries.len() > RECORDED_WHOLE_BLOB_FACTS_CAPACITY {
                 entries.shift_remove_index(0);
             }
@@ -9627,18 +9605,49 @@ ORDER BY runtime_id";
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&runtime_id)
-                .filter(|(digest, _)| digest == authority.blob_sha256())
-                .map(|(_, facts)| facts.clone())
+                .filter(|entry| entry.blob_sha256 == authority.blob_sha256())
+                .map(|entry| entry.facts.clone())
         }
+
+        fn reaffirm_evidence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            blob_sha256: &str,
+        ) -> Option<Arc<WholeBlobReaffirmEvidence>> {
+            self.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(runtime_id)
+                .filter(|entry| entry.blob_sha256 == blob_sha256)
+                .and_then(|entry| entry.reaffirm.clone())
+        }
+    }
+
+    /// Reaffirm evidence for `session`, when the boundary snapshot save guard
+    /// accepts it with no predecessor. Never fails: a session the guard
+    /// refuses simply gets no evidence, and its re-commit takes the full
+    /// decode path, which refuses it there exactly as before.
+    fn whole_blob_reaffirm_evidence(
+        session: &meerkat_core::Session,
+        compaction_projection_intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Option<WholeBlobReaffirmEvidence> {
+        meerkat_core::session_store::run_boundary_snapshot_save_guard(session, None).ok()?;
+        let catalog_template = crate::store::RuntimeSessionCatalogEntry::from_session(
+            session,
+            RuntimeSessionPersistenceProfile::WholeBlobV1,
+            None,
+        )
+        .ok()?;
+        Some(WholeBlobReaffirmEvidence {
+            compaction_projection_intents: compaction_projection_intents.to_vec(),
+            catalog_template,
+        })
     }
 
     /// SQLite-backed runtime store sharing the same sqlite file as `SqliteSessionStore`.
     pub struct SqliteRuntimeStore {
         path: PathBuf,
         session_persistence_profile: RuntimeSessionPersistenceProfile,
-        /// Typed sessions this store verified, keyed by the exact WholeBlob
-        /// row digest they were verified or encoded from.
-        verified_whole_blob_sessions: Arc<VerifiedWholeBlobSessions>,
         /// Transcript facts of the WholeBlob documents this store wrote.
         whole_blob_transcript_facts: Arc<RecordedWholeBlobTranscriptFacts>,
         #[cfg(test)]
@@ -9744,7 +9753,6 @@ ORDER BY runtime_id";
             Ok(Self {
                 path,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::WholeBlobV1,
-                verified_whole_blob_sessions: Arc::default(),
                 whole_blob_transcript_facts: Arc::default(),
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
@@ -9847,7 +9855,6 @@ ORDER BY runtime_id";
             Ok(Self {
                 path,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::HeadCanonicalV1,
-                verified_whole_blob_sessions: Arc::default(),
                 whole_blob_transcript_facts: Arc::default(),
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
@@ -9913,31 +9920,87 @@ ORDER BY runtime_id";
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            let verified_sessions = Arc::clone(&self.verified_whole_blob_sessions);
             let recorded_facts = Arc::clone(&self.whole_blob_transcript_facts);
             #[cfg(test)]
             let snapshot_byte_probe_bytes = std::sync::Arc::clone(&self.snapshot_byte_probe_bytes);
             tokio::task::spawn_blocking(move || {
-                // Bytes whose digest matches a session this store already
-                // verified are exactly that document: reuse it rather than
-                // decoding and re-validating its rewrite graph. The startup
-                // compaction refresh re-commits the committed bytes verbatim,
-                // so this is the common case there.
                 use sha2::Digest as _;
                 let incoming_sha256 = format!(
                     "row-sha256:{:x}",
                     sha2::Sha256::digest(session_delta.session_snapshot.as_ref())
                 );
-                let incoming: Arc<meerkat_core::Session> =
-                    match verified_sessions.matching(&runtime_id, &incoming_sha256) {
-                        Some(session) => session,
-                        None => Arc::new(
-                            meerkat_core::Session::from_persisted_bytes(
-                                &session_delta.session_snapshot,
+                // Reaffirm: the startup compaction refresh re-commits the
+                // committed bytes verbatim. When this store recorded reaffirm
+                // evidence for exactly these bytes, they are the current
+                // authority's body, and there is no legacy predecessor row, the
+                // full path below would decode them, pass the save guard the
+                // evidence already recorded, and take the identical-digest
+                // upsert. This branch runs that upsert's steps directly: the
+                // outbox check against the recorded intents, the body check,
+                // the catalog projection under the current runtime state, and
+                // the quarantine clear. It skips only the decode and the graph
+                // re-validation. Anything else takes the full path.
+                if let Some(evidence) =
+                    recorded_facts.reaffirm_evidence(&runtime_id, &incoming_sha256)
+                {
+                    let mut conn = open_runtime_connection(&path)?;
+                    let tx = begin_runtime_transaction(&mut conn)?;
+                    refuse_whole_blob_write_under_head_authority(
+                        &tx,
+                        &runtime_id,
+                        "whole-BLOB session snapshot reaffirm",
+                    )?;
+                    let authority_matches = load_whole_blob_store_authority(&tx, &runtime_id)?
+                        .is_some_and(|current| {
+                            current.blob_sha256() == incoming_sha256
+                                && current.session_id() == evidence.catalog_template.session_id()
+                        });
+                    let legacy_predecessor = tx
+                        .query_row(
+                            "SELECT 1 FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                            params![runtime_id_text(&runtime_id)],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()
+                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
+                        .is_some();
+                    if authority_matches && !legacy_predecessor {
+                        ensure_compaction_intents_already_outboxed_list(
+                            &tx,
+                            &runtime_id,
+                            &evidence.compaction_projection_intents,
+                        )?;
+                        let body_exists = tx
+                            .query_row(
+                                "SELECT 1 FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
+                                params![&incoming_sha256],
+                                |_row| Ok(()),
                             )
-                            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?,
-                        ),
-                    };
+                            .optional()
+                            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                            .is_some();
+                        if !body_exists {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "WholeBlob authority references a missing body",
+                            ));
+                        }
+                        let mut catalog_entry = evidence.catalog_template.clone();
+                        catalog_entry.set_runtime_state(
+                            load_runtime_session_catalog_entry_in_txn(&tx, &runtime_id)?
+                                .and_then(|entry| entry.runtime_state()),
+                        );
+                        upsert_runtime_session_catalog_entry_in_txn(&tx, &runtime_id, &catalog_entry)?;
+                        clear_runtime_projection_quarantine(&tx, &runtime_id)?;
+                        tx.commit()
+                            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                        return Ok(());
+                    }
+                    drop(tx);
+                }
+                let incoming =
+                    meerkat_core::Session::from_persisted_bytes(&session_delta.session_snapshot)
+                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
                 refuse_whole_blob_write_under_head_authority(
@@ -9997,9 +10060,8 @@ ORDER BY runtime_id";
                     if let Some(facts) =
                         crate::store::WholeBlobCommittedTranscriptFacts::from_session(&incoming)
                     {
-                        recorded_facts.record(&runtime_id, &incoming_sha256, facts);
+                        recorded_facts.record(&runtime_id, &incoming_sha256, facts, None);
                     }
-                    verified_sessions.remember(&runtime_id, &incoming_sha256, incoming);
                     return Ok(());
                 }
                 let previous = tx
@@ -10028,9 +10090,28 @@ ORDER BY runtime_id";
                 if let Some(facts) =
                     crate::store::WholeBlobCommittedTranscriptFacts::from_session(&incoming)
                 {
-                    recorded_facts.record(&runtime_id, &incoming_sha256, facts);
+                    // The save guard above ran with no predecessor on this
+                    // exact decode, so its verdict is reaffirm evidence.
+                    let evidence = if previous.is_none() {
+                        crate::store::validated_compaction_projection_intents(&incoming)
+                            .ok()
+                            .and_then(|intents| {
+                                crate::store::RuntimeSessionCatalogEntry::from_session(
+                                    &incoming,
+                                    RuntimeSessionPersistenceProfile::WholeBlobV1,
+                                    None,
+                                )
+                                .ok()
+                                .map(|catalog_template| WholeBlobReaffirmEvidence {
+                                    compaction_projection_intents: intents,
+                                    catalog_template,
+                                })
+                            })
+                    } else {
+                        None
+                    };
+                    recorded_facts.record(&runtime_id, &incoming_sha256, facts, evidence);
                 }
-                verified_sessions.remember(&runtime_id, &incoming_sha256, incoming);
                 Ok(())
             })
             .await
@@ -10087,25 +10168,26 @@ ORDER BY runtime_id";
                 ));
             }
 
-            // Only receipt-less control-plane snapshots (create, direct
-            // persistence) are remembered, as a clone: the caller may still
-            // own the Arc it sealed. A per-turn boundary is not remembered,
-            // because a retained clone shares the live transcript vector and
-            // would make the actor's next append copy it on every turn.
-            let remembered =
-                prepared_session
-                    .as_ref()
-                    .filter(|_| receipt.is_none())
-                    .map(|prepared| {
-                        (
-                            Arc::new(prepared.session().clone()),
-                            prepared.blob_sha256().to_string(),
-                        )
-                    });
             let remembered_runtime_id = runtime_id.clone();
+            // Facts for every written document; reaffirm evidence only for
+            // receipt-less control-plane snapshots (create, direct
+            // persistence), whose bytes the startup compaction refresh
+            // re-commits. A per-turn boundary skips the coherence evaluation.
             let recorded_facts = prepared_session.as_ref().and_then(|prepared| {
                 crate::store::WholeBlobCommittedTranscriptFacts::from_session(prepared.session())
-                    .map(|facts| (prepared.blob_sha256().to_string(), facts))
+                    .map(|facts| {
+                        let evidence = receipt.is_none().then(|| {
+                            whole_blob_reaffirm_evidence(
+                                prepared.session(),
+                                &compaction_projection_intents,
+                            )
+                        });
+                        (
+                            prepared.blob_sha256().to_string(),
+                            facts,
+                            evidence.flatten(),
+                        )
+                    })
             });
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
@@ -10173,7 +10255,7 @@ ORDER BY runtime_id";
             })
             .await
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))??;
-            if let (Some(authority), Some((blob_sha256, facts))) =
+            if let (Some(authority), Some((blob_sha256, facts, evidence))) =
                 (authority.as_ref(), recorded_facts)
                 && authority.blob_sha256() == blob_sha256
             {
@@ -10181,16 +10263,7 @@ ORDER BY runtime_id";
                     &remembered_runtime_id,
                     &blob_sha256,
                     facts,
-                );
-            }
-            if let (Some(authority), Some((session, blob_sha256))) =
-                (authority.as_ref(), remembered)
-                && authority.blob_sha256() == blob_sha256
-            {
-                self.verified_whole_blob_sessions.remember(
-                    &remembered_runtime_id,
-                    &blob_sha256,
-                    session,
+                    evidence,
                 );
             }
             Ok(authority)
@@ -12609,7 +12682,6 @@ ORDER BY runtime_id";
             )?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            let verified_sessions = Arc::clone(&self.verified_whole_blob_sessions);
             tokio::task::spawn_blocking(move || {
                 let observed = {
                     let mut conn = open_runtime_connection(&path)?;
@@ -12643,19 +12715,11 @@ ORDER BY runtime_id";
                 // The pair comes from one snapshot. Decode and hash its owned
                 // bytes after releasing SQLite, not under a writer reservation
                 // or a read snapshot that pins WAL reclamation.
-                let snapshot = observed
+                observed
                     .map(|(bytes, authority)| {
                         CommittedWholeBlobSnapshot::new(Arc::new(bytes), authority)
                     })
-                    .transpose()?;
-                if let Some(snapshot) = snapshot.as_ref() {
-                    verified_sessions.remember(
-                        &runtime_id,
-                        snapshot.authority().blob_sha256(),
-                        snapshot.session_arc(),
-                    );
-                }
-                Ok(snapshot)
+                    .transpose()
             })
             .await
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
@@ -12682,11 +12746,7 @@ ORDER BY runtime_id";
             }
             let compaction_projection_intents =
                 crate::store::validated_compaction_projection_intents(candidate_session.as_ref())?;
-            // A clone, never the caller's Arc: the caller may still own it.
-            let remembered = (
-                Arc::new(candidate_session.as_ref().clone()),
-                candidate_blob_sha256.clone(),
-            );
+            let recorded_sha256 = candidate_blob_sha256.clone();
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let cas_runtime_id = runtime_id.clone();
@@ -12742,16 +12802,14 @@ ORDER BY runtime_id";
             .await
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))??;
             if let WholeBlobSnapshotCasOutcome::Committed(authority) = &outcome
-                && authority.blob_sha256() == remembered.1
+                && authority.blob_sha256() == recorded_sha256
+                && let Some(facts) = recorded_facts
             {
-                if let Some(facts) = recorded_facts {
-                    self.whole_blob_transcript_facts
-                        .record(&cas_runtime_id, &remembered.1, facts);
-                }
-                self.verified_whole_blob_sessions.remember(
+                self.whole_blob_transcript_facts.record(
                     &cas_runtime_id,
-                    &remembered.1,
-                    remembered.0,
+                    &recorded_sha256,
+                    facts,
+                    None,
                 );
             }
             Ok(outcome)
@@ -12797,6 +12855,7 @@ ORDER BY runtime_id";
                     conversation_digest.clone(),
                     message_count,
                 ),
+                None,
             );
             let catalog_json = serde_json::to_vec(&catalog_entry)
                 .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
@@ -19984,42 +20043,68 @@ ORDER BY runtime_id";
         }
 
         #[tokio::test]
-        async fn byte_identical_recommit_reuses_the_verified_session_instead_of_decoding() {
+        async fn byte_identical_refresh_recommit_reaffirms_without_decoding() {
             let (_dir, store) = temp_store();
             let mut session = Session::new();
             let runtime_id = LogicalRuntimeId::for_session(session.id());
             session.push(Message::User(UserMessage::text("first turn".to_string())));
-            let committed = serde_json::to_vec(&session).unwrap();
-            let commit = |bytes: Vec<u8>| {
-                store.commit_session_snapshot(
-                    &runtime_id,
-                    SerializedSessionSnapshot {
-                        session_snapshot: bytes.into(),
-                    },
-                )
-            };
-            commit(committed.clone()).await.unwrap();
+            // A receipt-less typed control-plane commit (the create-time save)
+            // records reaffirm evidence for the exact bytes it wrote.
+            RuntimeStore::commit_prepared_session_boundary(
+                &store,
+                &runtime_id,
+                crate::store::PreparedRuntimeSessionCommit::snapshot_only(
+                    meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(
+                        session.clone(),
+                    ))
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            let (committed, _authority) = store
+                .session_authority_ops()
+                .load_committed_whole_blob_bytes(&runtime_id)
+                .await
+                .unwrap()
+                .expect("committed WholeBlob bytes");
 
             // The startup compaction refresh shape: the committed bytes,
-            // loaded verbatim and re-committed.
+            // loaded raw and re-committed verbatim.
             let decodes = meerkat_core::global_whole_blob_decodes();
-            commit(committed.clone()).await.unwrap();
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: committed.as_ref().clone().into(),
+                    },
+                )
+                .await
+                .unwrap();
             assert_eq!(
                 meerkat_core::global_whole_blob_decodes(),
                 decodes,
-                "bytes whose digest matches a session this store verified are not decoded again"
+                "a byte-identical re-commit of evidenced bytes is reaffirmed without a decode"
             );
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(Arc::new(committed.clone()))
+                Some(Arc::clone(&committed))
             );
 
             // Different bytes always take the full decode.
             session.push(Message::User(UserMessage::text("second turn".to_string())));
             let grown = serde_json::to_vec(&session).unwrap();
             let decodes = meerkat_core::global_whole_blob_decodes();
-            commit(grown.clone()).await.unwrap();
-            assert_eq!(meerkat_core::global_whole_blob_decodes(), decodes + 1);
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: grown.clone().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(meerkat_core::global_whole_blob_decodes() > decodes);
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
                 Some(Arc::new(grown))

@@ -86,6 +86,30 @@ impl PreparedUnstageableQueuedResolution {
     }
 }
 
+/// Row sha256 token of exact WholeBlob bytes, hashed on the blocking pool
+/// rather than on an async worker (inline on wasm32, which has no blocking
+/// pool).
+async fn whole_blob_row_sha256_off_worker(
+    bytes: Arc<Vec<u8>>,
+) -> Result<String, RuntimeDriverError> {
+    fn token(bytes: &[u8]) -> String {
+        use sha2::Digest as _;
+        format!("row-sha256:{:x}", sha2::Sha256::digest(bytes))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::tokio::task::spawn_blocking(move || token(bytes.as_slice()))
+            .await
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!("WholeBlob row digest task failed: {error}"))
+            })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Ok(token(bytes.as_slice()))
+    }
+}
+
 impl PersistentRuntimeDriver {
     fn prepare_provisional_promotion(
         &self,
@@ -1064,9 +1088,7 @@ impl PersistentRuntimeDriver {
             {
                 Ok(None) => return Ok(None),
                 Ok(Some((bytes, authority))) => {
-                    use sha2::Digest as _;
-                    let observed =
-                        format!("row-sha256:{:x}", sha2::Sha256::digest(bytes.as_slice()));
+                    let observed = whole_blob_row_sha256_off_worker(Arc::clone(&bytes)).await?;
                     if observed != authority.blob_sha256() {
                         return Err(RuntimeDriverError::Internal(format!(
                             "authoritative compaction checkpoint bytes for {} do not match their \

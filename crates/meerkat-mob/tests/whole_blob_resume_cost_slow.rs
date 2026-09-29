@@ -17,6 +17,13 @@
 //! bytes, rewrite-graph validations and content-digest bytes for the resume
 //! window and the first-turn window.
 //!
+//! It then drives two steady-state turns per member (whose committed heads
+//! were written by per-turn runtime boundaries the session service never
+//! saw) and checks that the service's verified-body cache retains nothing
+//! past the resume window.
+//!
+//! Multi-second, hence the `_slow` binary name (Bazel `slow` tag).
+//!
 //! Scale: MEERKAT_WHOLE_BLOB_GENERATIONS, MEERKAT_WHOLE_BLOB_GENERATION_MESSAGES.
 
 #![cfg(not(target_arch = "wasm32"))]
@@ -52,6 +59,11 @@ const NO_COMPACTION_THRESHOLD: u64 = 50_000_000;
 /// holds a verified session for. Measured before the reuse: 8 decodes and 8
 /// rewrite-graph validations per rewritten member (60 and 120 generations
 /// alike).
+///
+/// Exact fit on purpose: decode and graph-validation counts are deterministic
+/// functions of the code path (no timing, no retries on this fixture), so any
+/// headroom would let one redundant consumer back in unnoticed. The digest
+/// multiples below are byte ratios and carry headroom.
 const MAX_RESUME_DECODES_PER_SESSION: u64 = 1;
 
 /// Digest bytes at resume relative to the committed documents: one decode's
@@ -469,6 +481,10 @@ async fn whole_blob_cold_resume_with_deep_rewrite_history() {
         resume_clock.elapsed()
     );
     resume.report("resume", member_count, document_bytes);
+    let retained_after_resume = service_2.whole_blob_body_cache_retained_bytes();
+    eprintln!(
+        "[whole-blob resume] verified-body cache after resume: {retained_after_resume} bytes"
+    );
 
     let first_start = CostMark::now();
     let first_clock = Instant::now();
@@ -486,6 +502,10 @@ async fn whole_blob_cold_resume_with_deep_rewrite_history() {
         first_clock.elapsed()
     );
     first.report("first-turn", member_count, document_bytes);
+    let retained_after_first = service_2.whole_blob_body_cache_retained_bytes();
+    eprintln!(
+        "[whole-blob resume] verified-body cache after first turns: {retained_after_first} bytes"
+    );
 
     // Steady state: by now every committed head was written by a per-turn
     // runtime boundary the session service never saw, so any consumer that
@@ -508,6 +528,10 @@ async fn whole_blob_cold_resume_with_deep_rewrite_history() {
         steady_clock.elapsed()
     );
     steady.report("steady-turns", member_count, document_bytes);
+    let retained_after_steady = service_2.whole_blob_body_cache_retained_bytes();
+    eprintln!(
+        "[whole-blob resume] verified-body cache after steady turns: {retained_after_steady} bytes"
+    );
 
     handle_2.shutdown().await.expect("final shutdown");
 
@@ -539,6 +563,18 @@ async fn whole_blob_cold_resume_with_deep_rewrite_history() {
     assert_eq!(
         first.graph_validations, 0,
         "the first turn after a resume must not re-validate an unchanged rewrite graph"
+    );
+    // Retention is scoped to the resume window: once every actor has
+    // materialized and the create-time save advanced each authority, no
+    // verified body may outlive it and duplicate a live transcript.
+    assert_eq!(
+        (
+            retained_after_resume,
+            retained_after_first,
+            retained_after_steady
+        ),
+        (0, 0, 0),
+        "the verified WholeBlob body cache must not retain bodies past the resume window"
     );
     assert_eq!(
         steady.decodes, 0,

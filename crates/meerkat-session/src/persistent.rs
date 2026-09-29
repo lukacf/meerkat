@@ -1058,16 +1058,23 @@ struct HeadCanonicalProvisionalIntent<'a> {
     successor_head_token: &'a str,
 }
 
-/// Sessions whose verified committed WholeBlob body one persistent service
-/// retains at a time (a mob's members plus headroom).
-const WHOLE_BLOB_BODY_CACHE_CAPACITY: usize = 64;
+/// Default budget, in committed document bytes, for the verified WholeBlob
+/// bodies one persistent service retains between their decode and their
+/// last consumer. See
+/// [`PersistentSessionService::with_whole_blob_body_cache_bytes`].
+pub const DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
-/// One committed WholeBlob body as the store verified it: the decoded
-/// session and the exact store-issued authority its bytes hashed to.
+/// One committed WholeBlob body exactly as the store decoded and verified it:
+/// the decoded session, the store-issued authority its bytes hashed to, and
+/// the serialized length the byte budget accounts.
+///
+/// Only store decodes are cached, never a caller's in-memory session, so a
+/// cached body is by construction what a fresh decode of those bytes yields.
 #[derive(Clone)]
 struct VerifiedWholeBlobBody {
     authority: WholeBlobStoreAuthority,
     session: Arc<Session>,
+    serialized_bytes: usize,
 }
 
 impl VerifiedWholeBlobBody {
@@ -1075,6 +1082,7 @@ impl VerifiedWholeBlobBody {
         Self {
             authority: snapshot.authority().clone(),
             session: snapshot.session_arc(),
+            serialized_bytes: snapshot.bytes().len(),
         }
     }
 }
@@ -1084,6 +1092,28 @@ impl VerifiedWholeBlobBody {
 fn whole_blob_row_sha256_token(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     format!("row-sha256:{:x}", sha2::Sha256::digest(bytes))
+}
+
+/// [`whole_blob_row_sha256_token`] of a multi-megabyte document, hashed on
+/// the blocking pool rather than on an async worker (inline on wasm32, which
+/// has no blocking pool).
+async fn whole_blob_row_sha256_token_off_worker(
+    bytes: Arc<Vec<u8>>,
+) -> Result<String, SessionError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tokio::task::spawn_blocking(move || whole_blob_row_sha256_token(bytes.as_slice()))
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "WholeBlob row digest task failed: {error}"
+                )))
+            })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Ok(whole_blob_row_sha256_token(bytes.as_slice()))
+    }
 }
 
 /// Boundary-persistence plan derived from the previous runtime snapshot row.
@@ -2444,12 +2474,20 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// cached body is served only after a fresh body-free authority read
     /// equals the authority it was verified against (the store revision
     /// advances on every commit and the digest binds the exact bytes), so it
-    /// is the same verified document; any other authority takes the
-    /// authoritative read and replaces the entry. Bounded to
-    /// [`WHOLE_BLOB_BODY_CACHE_CAPACITY`] sessions, oldest insertion evicted
-    /// first, so a service that reads many archived sessions does not retain
-    /// all of their transcripts.
+    /// is the same verified document.
+    ///
+    /// Retention is scoped to where reuse happens, between the resume
+    /// recovery's decode and live actor materialization:
+    /// - an entry is dropped once an actor materializes from it (the actor
+    ///   then owns the only copy);
+    /// - it is dropped or replaced as soon as this service observes or
+    ///   commits a newer authority;
+    /// - the total is bounded by [`Self::whole_blob_body_budget_bytes`] in
+    ///   committed document bytes, oldest first, and a body larger than the
+    ///   budget is not retained at all.
     whole_blob_bodies: std::sync::Mutex<indexmap::IndexMap<SessionId, VerifiedWholeBlobBody>>,
+    /// Byte budget for [`Self::whole_blob_bodies`]; zero disables retention.
+    whole_blob_body_budget_bytes: usize,
     /// Mechanical cancellation carrier for rejected runtime-run cleanup.
     ///
     /// A successful compaction abort must be remembered before the cleanup
@@ -4585,18 +4623,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// taken once here, so every clone handed out serves it from the retained
     /// midstate instead of hashing the transcript again.
     fn remember_whole_blob_body(&self, session_id: &SessionId, body: VerifiedWholeBlobBody) {
-        // A transcript that cannot be digested simply stays unseeded; the
-        // consumer that needs the digest surfaces the typed error itself.
-        let _ = body.session.transcript_content_digest();
+        let budget = self.whole_blob_body_budget_bytes;
         let mut bodies = self
             .whole_blob_bodies
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         bodies.shift_remove(session_id);
-        bodies.insert(session_id.clone(), body);
-        while bodies.len() > WHOLE_BLOB_BODY_CACHE_CAPACITY {
-            bodies.shift_remove_index(0);
+        if body.serialized_bytes > budget {
+            return;
         }
+        // A transcript that cannot be digested simply stays unseeded; the
+        // consumer that needs the digest surfaces the typed error itself.
+        let _ = body.session.transcript_content_digest();
+        let mut retained: usize = bodies.values().map(|cached| cached.serialized_bytes).sum();
+        while retained + body.serialized_bytes > budget {
+            let Some((_, evicted)) = bodies.shift_remove_index(0) else {
+                break;
+            };
+            retained = retained.saturating_sub(evicted.serialized_bytes);
+        }
+        bodies.insert(session_id.clone(), body);
     }
 
     fn forget_whole_blob_body(&self, session_id: &SessionId) {
@@ -4646,12 +4692,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 facts.message_count(),
             )));
         }
-        let Some(cached) = self
-            .cached_whole_blob_body(session_id)
-            .filter(|cached| cached.authority == current)
-        else {
+        let Some(cached) = self.cached_whole_blob_body(session_id) else {
             return Ok(None);
         };
+        if cached.authority != current {
+            // The committed document moved on; the retained body can never be
+            // served again.
+            self.forget_whole_blob_body(session_id);
+            return Ok(None);
+        }
         let (Ok(revision), Ok(message_count)) = (
             cached.session.transcript_content_digest(),
             u64::try_from(cached.session.messages().len()),
@@ -8215,6 +8264,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             live_checkpointers: Mutex::new(HashMap::new()),
             recovery_gates: Mutex::new(HashMap::new()),
             whole_blob_bodies: std::sync::Mutex::new(indexmap::IndexMap::new()),
+            whole_blob_body_budget_bytes: DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES,
             rejected_run_compaction_aborted: std::sync::Mutex::new(HashSet::new()),
             turn_finalization_gates: Mutex::new(HashMap::new()),
             live_projection_released_channels: std::sync::Mutex::new(HashMap::new()),
@@ -8236,6 +8286,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// JSONL files. The spawned projection tasks exit when their session event
     /// streams close, and create-time events without a correlated session id are
     /// discarded when the create-time stream closes.
+    /// Bound, in committed WholeBlob document bytes, the verified bodies
+    /// this service retains between a resume's decode and live actor
+    /// materialization (default [`DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES`]).
+    ///
+    /// Decoded sessions typically take a small multiple of their serialized
+    /// size in memory. Zero disables retention: every consumer then decodes
+    /// the committed document itself.
+    #[must_use]
+    pub fn with_whole_blob_body_cache_bytes(mut self, bytes: usize) -> Self {
+        self.whole_blob_body_budget_bytes = bytes;
+        self
+    }
+
+    /// Committed document bytes currently retained by the verified WholeBlob
+    /// body cache. Observability for memory regression tests.
+    #[doc(hidden)]
+    pub fn whole_blob_body_cache_retained_bytes(&self) -> usize {
+        self.whole_blob_bodies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(|body| body.serialized_bytes)
+            .sum()
+    }
+
     pub fn with_event_projection(
         mut self,
         event_store: Arc<dyn EventStore>,
@@ -9560,19 +9635,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "runtime session control snapshot returned different WholeBlob authority for session {session_id}"
             ))));
         }
-        // The store committed exactly the bytes encoded from `session` (the
-        // authority's digest equals theirs), so `session` is the verified body
-        // for that authority; later body reads of this committed document
-        // reuse it instead of decoding it back. The cache keeps its own clone
-        // (the transcript buffer is shared copy-on-write): the typed control
-        // snapshot itself must not be retained past this commit.
-        self.remember_whole_blob_body(
-            &session_id,
-            VerifiedWholeBlobBody {
-                authority: authority.clone(),
-                session: Arc::new(session.as_ref().clone()),
-            },
-        );
+        // This commit advanced the authority, so any retained body is for an
+        // older document. The in-memory session is not cached in its place:
+        // only store decodes are, so a cached body is always exactly what a
+        // decode yields.
+        self.forget_whole_blob_body(&session_id);
         let committed_authority = meerkat_core::CommittedSessionBoundaryAuthority::WholeBlob {
             session_id: session_id.clone(),
             committed_store_revision: authority.store_revision(),
@@ -10159,7 +10226,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "committed runtime checkpoint bytes for session {id} do not match RuntimeStore authority"
             ))));
         };
-        if durable_authority.blob_sha256() != whole_blob_row_sha256_token(&session_snapshot) {
+        if durable_authority.blob_sha256()
+            != whole_blob_row_sha256_token_off_worker(Arc::clone(&session_snapshot)).await?
+        {
             return Err(SessionError::Agent(AgentError::InternalError(format!(
                 "committed runtime checkpoint bytes for session {id} do not match RuntimeStore authority"
             ))));
@@ -11916,6 +11985,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         .ok_or_else(|| SessionError::NotFound {
                             id: resume_session_id.clone(),
                         })?;
+                    // The actor now materializes from this body and shares its
+                    // transcript buffer. The entry stays only for the create-time
+                    // save's rewrite planning read that follows; that save
+                    // advances the authority and drops it before any append.
                     req.build
                         .get_or_insert_with(Default::default)
                         .resume_session = Some(exact_session);
@@ -25918,6 +25991,83 @@ mod tests {
         );
     }
 
+    /// Review finding C: the pairing guarantee also holds on a cache hit. A
+    /// commit that races in after the verified body was cached changes the
+    /// authority, so the next export never pairs the stale cached body with
+    /// either token; it takes the authoritative read of the new document.
+    #[tokio::test]
+    #[cfg(feature = "live")]
+    async fn live_context_boundary_cache_hit_never_pairs_a_raced_commit() {
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let committed = service
+            .save_normalized_session(live_context_summary_source())
+            .await
+            .unwrap();
+        let id = committed.id().clone();
+        let runtime_id = LogicalRuntimeId::for_session(&id);
+
+        // An authoritative read fills the verified-body cache.
+        let (boundary, token) = service
+            .export_live_context_committed_boundary_nonblocking(&id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(boundary.session().unwrap()).unwrap(),
+            serde_json::to_value(&committed).unwrap()
+        );
+        let first_authority = runtime_store
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(token, first_authority.blob_sha256());
+        assert!(
+            service.cached_whole_blob_body(&id).is_some(),
+            "the export cached the verified body"
+        );
+
+        // A commit races in behind the cached body.
+        let mut successor = committed.clone();
+        successor.push(user_message("committed behind the cached body"));
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SerializedSessionSnapshot {
+                    session_snapshot: serde_json::to_vec(&successor).unwrap().into(),
+                },
+            )
+            .await
+            .unwrap();
+        let successor_authority = runtime_store
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(successor_authority, first_authority);
+
+        let (boundary, token) = service
+            .export_live_context_committed_boundary_nonblocking(&id)
+            .await
+            .unwrap();
+        assert_eq!(
+            token,
+            successor_authority.blob_sha256(),
+            "the token names the document that is committed now"
+        );
+        assert_eq!(
+            serde_json::to_value(boundary.session().unwrap()).unwrap(),
+            serde_json::to_value(&successor).unwrap(),
+            "and the boundary is that same document, never the stale cached body"
+        );
+    }
+
     #[tokio::test]
     #[cfg(feature = "live")]
     async fn live_context_summary_snapshot_and_boundary_keep_pairing_when_store_advances() {
@@ -25951,11 +26101,9 @@ mod tests {
                 session_snapshot: serde_json::to_vec(&successor).unwrap().into(),
             },
         );
-        // The save above cached the verified body, and a cache hit pairs the
-        // body with the one authority observation it was checked against, so
-        // it never reads the body the interloper races. Drop the cached body
-        // so the export takes the authoritative read this test pins.
-        service.forget_whole_blob_body(&id);
+        // A save caches nothing, so this export takes the authoritative read
+        // the interloper races.
+        assert!(service.cached_whole_blob_body(&id).is_none());
         let (boundary, token) = service
             .export_live_context_committed_boundary_nonblocking(&id)
             .await
@@ -38627,6 +38775,137 @@ mod tests {
             2,
             "a changed authority must serve the newly committed document"
         );
+    }
+
+    fn whole_blob_cache_test_service(
+        runtime_store: &Arc<InMemoryRuntimeStore>,
+    ) -> PersistentSessionService<DummyBuilder> {
+        PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::clone(runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        )
+    }
+
+    async fn commit_whole_blob_for_cache_test(
+        runtime_store: &Arc<InMemoryRuntimeStore>,
+        session: &Session,
+    ) {
+        let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::for_session(session.id());
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                meerkat_runtime::store::SerializedSessionSnapshot {
+                    session_snapshot: Arc::new(session.to_persisted_bytes().expect("encode")),
+                },
+            )
+            .await
+            .expect("commit snapshot");
+    }
+
+    /// Review finding B: only store decodes are cached. A save never caches
+    /// the caller's in-memory session (its derived state is not what a decode
+    /// yields), and a cached body is exactly a fresh decode of the committed
+    /// bytes.
+    #[tokio::test]
+    async fn whole_blob_body_cache_holds_only_store_decodes() {
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = whole_blob_cache_test_service(&runtime_store);
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("first")));
+        let saved = service.save_normalized_session(session).await.unwrap();
+        let id = saved.id().clone();
+        assert!(
+            service.cached_whole_blob_body(&id).is_none(),
+            "a save must not cache its in-memory session"
+        );
+
+        service
+            .load_committed_whole_blob_session(&id, "cache test")
+            .await
+            .unwrap()
+            .expect("committed body");
+        let cached = service
+            .cached_whole_blob_body(&id)
+            .expect("an authoritative read caches its decode");
+        let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&id);
+        let fresh = runtime_store
+            .load_committed_whole_blob_snapshot(&runtime_id)
+            .await
+            .unwrap()
+            .expect("committed snapshot");
+        assert_eq!(&cached.authority, fresh.authority());
+        assert_eq!(cached.serialized_bytes, fresh.bytes().len());
+        assert_eq!(
+            serde_json::to_value(cached.session.as_ref()).unwrap(),
+            serde_json::to_value(fresh.session()).unwrap(),
+            "the cached body is indistinguishable from a fresh decode"
+        );
+        assert_eq!(
+            cached.session.to_persisted_bytes().unwrap(),
+            fresh.bytes().to_vec(),
+            "and re-encodes to exactly the committed bytes"
+        );
+        assert_eq!(
+            cached.session.transcript_content_digest().unwrap(),
+            fresh.session().transcript_content_digest().unwrap()
+        );
+
+        // A commit this service performs advances the authority and drops the
+        // entry rather than leaving a body that can never be served again.
+        let mut next = cached.session.as_ref().clone();
+        next.push(Message::User(UserMessage::text("second")));
+        service.save_normalized_session(next).await.unwrap();
+        assert!(service.cached_whole_blob_body(&id).is_none());
+        assert_eq!(service.whole_blob_body_cache_retained_bytes(), 0);
+    }
+
+    /// Review finding A: retention is bounded by committed document bytes,
+    /// oldest first, and a body larger than the whole budget is not retained.
+    #[tokio::test]
+    async fn whole_blob_body_cache_is_bounded_by_bytes() {
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let sessions: Vec<Session> = (0..3)
+            .map(|index| {
+                let mut session = Session::new();
+                session.push(Message::User(UserMessage::text(format!(
+                    "session {index} {}",
+                    "x".repeat(4096)
+                ))));
+                session
+            })
+            .collect();
+        for session in &sessions {
+            commit_whole_blob_for_cache_test(&runtime_store, session).await;
+        }
+        let one_body = sessions[0].to_persisted_bytes().unwrap().len();
+
+        // Room for two bodies: the third read evicts the oldest.
+        let service = whole_blob_cache_test_service(&runtime_store)
+            .with_whole_blob_body_cache_bytes(one_body * 2 + one_body / 2);
+        for session in &sessions {
+            service
+                .load_committed_whole_blob_session(session.id(), "cache test")
+                .await
+                .unwrap()
+                .expect("committed body");
+        }
+        assert!(service.cached_whole_blob_body(sessions[0].id()).is_none());
+        assert!(service.cached_whole_blob_body(sessions[1].id()).is_some());
+        assert!(service.cached_whole_blob_body(sessions[2].id()).is_some());
+        assert!(service.whole_blob_body_cache_retained_bytes() <= one_body * 2 + one_body / 2);
+
+        // A budget smaller than one body retains nothing.
+        let service = whole_blob_cache_test_service(&runtime_store)
+            .with_whole_blob_body_cache_bytes(one_body / 2);
+        service
+            .load_committed_whole_blob_session(sessions[0].id(), "cache test")
+            .await
+            .unwrap()
+            .expect("committed body");
+        assert_eq!(service.whole_blob_body_cache_retained_bytes(), 0);
     }
 
     /// The operator seam preserves ordinary missing-session reporting before

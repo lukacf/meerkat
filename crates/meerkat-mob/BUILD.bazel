@@ -4034,7 +4034,7 @@ rust_test(
 )
 
 rust_test(
-    name = "whole_blob_resume_cost_test",
+    name = "whole_blob_resume_cost_slow_test",
     aliases = aliases(
         package_name = "crates/meerkat-mob",
         normal = True,
@@ -4042,8 +4042,8 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
-    crate_name = "whole_blob_resume_cost",
-    crate_root = "tests/whole_blob_resume_cost.rs",
+    crate_name = "whole_blob_resume_cost_slow",
+    crate_root = "tests/whole_blob_resume_cost_slow.rs",
     crate_features = [
         "integration-real-tests",
         "openai-live",
@@ -4065,19 +4065,18 @@ rust_test(
         "src/runtime/state.rs",
     ],
     srcs = [
-        "tests/whole_blob_resume_cost.rs",
+        "tests/whole_blob_resume_cost_slow.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.48",
-        "CARGO_BIN_NAME": "whole_blob_resume_cost",
+        "CARGO_BIN_NAME": "whole_blob_resume_cost_slow",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
-        "fast",
+        "slow",
     ],
-    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -4155,6 +4154,5 @@ test_suite(
         ":scope_matrix_test",
         ":shadow_state_absent_test",
         ":turn_boundary_fork_forwarding_test",
-        ":whole_blob_resume_cost_test",
     ],
 )

@@ -8091,11 +8091,19 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
     /// Load the committed WholeBlob body bytes and their store authority
     /// WITHOUT decoding them into a `Session`.
     ///
-    /// This is the recovery seam for a committed document the current-envelope
-    /// decoder refuses; ordinary readers must keep using
+    /// Two kinds of caller use this seam:
+    /// - recovery of a committed document the current-envelope decoder
+    ///   refuses;
+    /// - callers that only hand the exact committed bytes back to this store,
+    ///   such as the startup compaction checkpoint refresh. Such a caller must
+    ///   verify the bytes' row sha256 against the returned authority's
+    ///   `blob_sha256`, and the store validates them again when they are
+    ///   re-committed.
+    ///
+    /// Readers that need a `Session` must keep using
     /// [`Self::load_committed_whole_blob_snapshot`], whose decode is the
     /// authority check. Stores that cannot serve raw bytes report
-    /// `Unsupported`.
+    /// `Unsupported`, and callers fall back to a decoding read.
     async fn load_committed_whole_blob_bytes(
         &self,
         runtime_id: &LogicalRuntimeId,

@@ -624,6 +624,29 @@ impl JobManager {
         tool_call_id: &str,
         options: MonitorStartOptions,
     ) -> Result<JobId, ShellError> {
+        self.spawn_monitor_for_call_in_run(
+            command,
+            working_dir,
+            timeout_secs,
+            tool_call_id,
+            None,
+            options,
+        )
+        .await
+    }
+
+    /// Like [`Self::spawn_monitor_for_call`], recording the run the call
+    /// belongs to in the monitor's process custody, so interrupted-run
+    /// evidence covers monitors like any other tool process.
+    pub(crate) async fn spawn_monitor_for_call_in_run(
+        &self,
+        command: &str,
+        working_dir: Option<&Path>,
+        timeout_secs: u64,
+        tool_call_id: &str,
+        run_id: Option<&meerkat_core::RunId>,
+        options: MonitorStartOptions,
+    ) -> Result<JobId, ShellError> {
         if options.restart_class == RestartClass::Adoptable {
             return Err(shell_io(
                 "agent-authored script monitors cannot claim adoptable restart semantics",
@@ -644,7 +667,7 @@ impl JobManager {
             working_dir,
             timeout_secs,
             tool_call_id,
-            None,
+            run_id,
             Some(MonitorRunnerSpecification {
                 protocol: options.protocol,
                 limits: options.limits,
@@ -3792,6 +3815,69 @@ mod durable_tests {
         })
         .await;
         assert!(settled.is_ok(), "the record is settled after containment");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn monitor_submitted_in_a_run_records_the_run_in_custody() {
+        use crate::builtin::shell::{ProcessCustody, ProcessCustodyScope};
+
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, _job_store, config) = durable_fixture(&temp, session_id.clone());
+        let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let manager = JobManager::new(config)
+            .bind_canonical_async_ops(session_id.clone(), registry)
+            .with_durable_job_runtime(runtime);
+        let custody_root = temp.path().join("custody");
+        let (custody, _) = ProcessCustody::recover_and_open(
+            &custody_root,
+            ProcessCustodyScope::session(&session_id),
+        )
+        .await
+        .expect("open custody");
+        manager.bind_process_custody(custody).expect("bind custody");
+        let scope_dir = custody_root.join(session_id.to_string());
+        let snapshot = temp.path().join("records");
+        let command = format!(
+            "cat '{}'/*.json > '{}.tmp' && mv '{}.tmp' '{}'",
+            scope_dir.display(),
+            snapshot.display(),
+            snapshot.display(),
+            snapshot.display()
+        );
+        let run_id = meerkat_core::RunId::new();
+
+        manager
+            .spawn_monitor_for_call_in_run(
+                &command,
+                None,
+                5,
+                "tool-call-monitor",
+                Some(&run_id),
+                MonitorStartOptions::default(),
+            )
+            .await
+            .expect("spawn monitor");
+        let recorded = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(recorded) = std::fs::read_to_string(&snapshot) {
+                    break recorded;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("monitor ran");
+
+        assert!(
+            recorded.contains(&run_id.to_string()),
+            "the monitor's custody record names its run: {recorded}"
+        );
+        assert!(
+            recorded.contains("\"monitor\""),
+            "spawner is a monitor: {recorded}"
+        );
     }
 
     #[tokio::test]

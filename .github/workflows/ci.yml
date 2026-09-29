@@ -120,8 +120,8 @@ env:
   # not to police a single lane; every lane's own timeout-minutes does that.
   # Sizing (last 64 pull-request runs, 2026-09): lane terminal p50 847 s,
   # p90 1194 s, max 1244 s. The tail is the example-web lane, which starts
-  # after classification (about 60 s) and then runs up to 1182 s, 984 s of
-  # it the wasm release build, under its own 20-minute timeout. A 1200 s
+  # after classification (about 60 s) and then runs up to 1199 s cold, 1038 s
+  # of it the wasm release build, under its own 25-minute timeout. A 1200 s
   # budget was therefore tighter than that lane's own timeout allows and
   # failed runs in which every lane passed. 1500 s is about 20% above the
   # observed maximum. It stays deliberately below the longest pull-request
@@ -857,7 +857,18 @@ jobs:
     # Independent of the Rust lanes, so it stays off the critical path.
     if: ${{ github.event_name == 'push' || needs.changes.outputs.example_web == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Sized from measurement (2026-09-29). Warm (sccache 100% hits, e.g. job
+    # 109577859270): 4.5 min, 2 min of it the wasm build. Cold, a pull request
+    # that changes meerkat-core, so all 27 workspace crates of the wasm graph
+    # miss sccache and rebuild at opt-level "s" while dependencies still hit
+    # (86.8% hits): jobs 109538182678 1097 s, 109573573790 1125 s,
+    # 109561685236 1146 s, 109576652284 1199 s (its build step 1038 s; every
+    # step passed but the old 20-minute timeout cancelled it). This is the
+    # cost of compiling the crates, not a cache that misses. 25 minutes is
+    # about 25% above the slowest cold run, so a legitimate cold run is never
+    # cancelled here; the run-level CI_MAX_SECONDS (1500 s, timed from the
+    # run start, which is about 60 s before this lane starts) still caps it.
+    timeout-minutes: 25
     env:
       RUSTC_WRAPPER: sccache
       # The suites need a working runtime, not a size-optimized one: skip

@@ -33,6 +33,7 @@ mod tests {
     #[test]
     fn supports_temperature_uses_catalog_rows() {
         assert!(!supports_temperature("claude-opus-4-8"));
+        assert!(!supports_temperature("claude-sonnet-5-5"));
         assert!(supports_temperature("claude-sonnet-4-6"));
     }
 
@@ -47,6 +48,9 @@ mod tests {
         assert!(supports_mid_conversation_system_messages("claude-fable-5"));
         assert!(supports_mid_conversation_system_messages("claude-opus-5"));
         assert!(supports_mid_conversation_system_messages("claude-opus-4-8"));
+        assert!(supports_mid_conversation_system_messages(
+            "claude-sonnet-5-5"
+        ));
         assert!(!supports_mid_conversation_system_messages(
             "claude-haiku-4-5-20251001"
         ));

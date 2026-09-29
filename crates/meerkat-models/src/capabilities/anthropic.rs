@@ -32,7 +32,8 @@ const BETA_INTERLEAVED_THINKING: BetaHeader = BetaHeader {
 };
 
 /// Headers advertised for models with adaptive thinking + compaction
-/// (Fable 5.1, Opus 5, Fable 5, Opus 4.8, Opus 4.7, Sonnet 4.6).
+/// (Fable 5.1, Opus 5.5, Opus 5, Fable 5, Opus 4.8, Opus 4.7, Sonnet 5.5,
+/// Sonnet 4.6).
 const ADAPTIVE_COMPACTION_BETAS: &[BetaHeader] = &[
     BETA_COMPACTION,
     BETA_STRUCTURED_OUTPUT,
@@ -44,7 +45,7 @@ const ADAPTIVE_COMPACTION_BETAS: &[BetaHeader] = &[
 const LEGACY_THINKING_BETAS: &[BetaHeader] = &[BETA_STRUCTURED_OUTPUT, BETA_INTERLEAVED_THINKING];
 
 /// Batch API extended-output beta (300k cap). Applies to Opus 4.8 / 4.7 /
-/// Sonnet 4.6 per the official Models overview.
+/// Sonnet 5.5 / Sonnet 4.6 per the official Models overview.
 const BETA_OUTPUT_300K: BetaValue<u32> = BetaValue {
     header: "anthropic-beta: output-300k-2026-03-24",
     value: 300_000,
@@ -52,8 +53,9 @@ const BETA_OUTPUT_300K: BetaValue<u32> = BetaValue {
 
 // ── Effort tiers ──────────────────────────────────────────────────────────
 
-/// Effort tiers accepted by the Claude 5 family (Fable 5.1, Opus 5, Fable 5)
-/// and Opus 4.8/4.7; `xhigh` sits between `high` and `max`.
+/// Effort tiers accepted by the Claude 5 family (Fable 5.1, Opus 5.5, Opus 5,
+/// Fable 5, Sonnet 5.5) and Opus 4.8/4.7; `xhigh` sits between `high` and
+/// `max`.
 const CLAUDE_5_OPUS_48_47_EFFORT: &[EffortLevel] = &[
     EffortLevel::Low,
     EffortLevel::Medium,
@@ -445,6 +447,73 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_thinking_budget_legacy: false,
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
+    },
+    // Claude Sonnet 5.5
+    //
+    // Sources:
+    //   - Model page (API ID claude-sonnet-5-5, dateless pinned snapshot;
+    //     released September 28, 2026; 1M context; 128k max output; 300k on
+    //     the Batch API with output-300k-2026-03-24; text and image input;
+    //     adaptive thinking on by default; default effort `high`; non-default
+    //     temperature/top_p/top_k return 400):
+    //     https://platform.claude.com/docs/en/models/sonnet-5-5/overview
+    //   - What's new (`{type: "disabled"}` returns 400, the lowest setting is
+    //     `between_tools`; `budget_tokens` returns 400; `between_tools` is
+    //     refused at `xhigh`/`max`, so the ladder is low..max; mid-conversation
+    //     system messages supported; forced `tool_choice` returns 400):
+    //     https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5
+    //   - Pricing ($2 / $10 per MTok, 5m cache write $2.50, 1h $4, cache read
+    //     $0.20; `inference_geo` applies to Claude 4.6 and later models):
+    //     https://platform.claude.com/docs/en/about-claude/pricing
+    //   - Compaction (threshold compaction lists Claude Sonnet 5.5 alongside
+    //     Fable 5.1 and Opus 5.5):
+    //     https://platform.claude.com/docs/en/build-with-claude/compaction
+    //
+    // Meerkat never emits `{type: "disabled"}`, so adaptive-only thinking is
+    // the honest catalog shape. ASSUMED from the claude-opus-5-5 row:
+    //   - image_tool_results (vision and tool use are documented; image tool
+    //     results are not called out separately)
+    //   - supports_structured_output (the forced-tool-use migration points at
+    //     structured outputs; the feature page is not re-verified here)
+    // Meerkat-owned operational default: Sonnet-tier 120s call timeout.
+    ModelCapabilities {
+        id: "claude-sonnet-5-5",
+        provider: Provider::Anthropic,
+        display_name: "Claude Sonnet 5.5",
+        tier: ModelTier::Recommended,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "claude-sonnet-5",
+        context_window: Some(1_000_000),
+        max_input_tokens: None,
+        max_output_tokens: Some(128_000),
+        context_window_beta: None,
+        max_output_tokens_beta: Some(BETA_OUTPUT_300K),
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::AnthropicAdaptiveOnly,
+        supports_reasoning: false,
+        effort_levels: CLAUDE_5_OPUS_48_47_EFFORT,
+        openai_responses_params: None,
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: true,
+        supports_inference_geo: true,
+        supports_compaction: true,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        call_timeout_secs: Some(120),
     },
     // Claude Sonnet 4.6
     //

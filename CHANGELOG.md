@@ -249,6 +249,14 @@ them.
 
 ### Added
 
+- Model catalog: Claude Sonnet 5.5 (`claude-sonnet-5-5`, released
+  September 28, 2026): 1M context, 128K output (300K on the Batch API with
+  the `output-300k-2026-03-24` beta), text and image input, adaptive-only
+  thinking (Anthropic refuses `disabled` and `budget_tokens`), low..max effort
+  with a `high` default, no sampling parameters, mid-conversation system
+  messages, compaction, and `inference_geo`. It is the recommended Sonnet
+  model; the Anthropic default stays `claude-opus-5-5`.
+
 - `IncrementalSessionStore::verify_current_head` (provided method): a
   body-free proof that a head is still the store's current physical head,
   with `materialize_head`'s head-row checks (`NotFound`,

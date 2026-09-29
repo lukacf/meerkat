@@ -162,6 +162,73 @@ test('isKnownEvent fails closed for unknown skill resolution statuses', () => {
   );
 });
 
+const NO_ENGINE_KEY = {
+  source_uuid: '00000000-0000-4b11-8111-000000000001',
+  skill_name: 'email-extractor',
+};
+
+test('isKnownEvent accepts the typed no_skill_engine reason with every requested key', () => {
+  assert.equal(
+    isKnownEvent({
+      type: 'skill_resolution_failed',
+      skill_key: NO_ENGINE_KEY,
+      reason: { reason_type: 'no_skill_engine', requested: [NO_ENGINE_KEY] },
+    }),
+    true,
+  );
+  assert.equal(
+    isKnownEvent({
+      type: 'skill_resolution_failed',
+      reason: { reason_type: 'no_skill_engine', requested: [{ skill_name: 'x' }] },
+    }),
+    false,
+  );
+  assert.equal(
+    isKnownEvent({
+      type: 'skill_resolution_failed',
+      reason: { reason_type: 'no_skill_engine' },
+    }),
+    false,
+  );
+});
+
+test('Session polling keeps a no_skill_engine failure and the rest of its batch', () => {
+  const failure = {
+    type: 'skill_resolution_failed',
+    skill_key: NO_ENGINE_KEY,
+    reason: { reason_type: 'no_skill_engine', requested: [NO_ENGINE_KEY] },
+  };
+  const terminal = { type: 'text_complete', text: 'after the failure' };
+  const session = makeDirectSession(() => JSON.stringify([failure, terminal]));
+  assert.deepEqual(session.pollEvents(), [failure, terminal]);
+});
+
+test('Session and mob polling fold a future skill resolution reason to unknown', async () => {
+  const future = {
+    type: 'skill_resolution_failed',
+    reason: { reason_type: 'future_reason', message: 'future details', extra: 1 },
+  };
+  const terminal = { type: 'text_complete', text: 'still delivered' };
+  const session = makeDirectSession(() => JSON.stringify([future, terminal]));
+  assert.deepEqual(session.pollEvents(), [
+    {
+      type: 'skill_resolution_failed',
+      reason: { reason_type: 'unknown', message: 'future details' },
+    },
+    terminal,
+  ]);
+
+  const envelope = canonicalEnvelope();
+  envelope.payload = future;
+  const mob = makeSubscriptionMob(() => JSON.stringify([envelope]));
+  const subscription = await mob.subscribeMemberEvents('worker-1');
+  const [item] = subscription.poll();
+  assert.deepEqual(item.payload, {
+    type: 'skill_resolution_failed',
+    reason: { reason_type: 'unknown', message: 'future details' },
+  });
+});
+
 test('Mob.spawn strips legacy generation and projects typed wasm spawn rows', async () => {
   let captured;
   const mob = new Mob('mob-web-unit', {

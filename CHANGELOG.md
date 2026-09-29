@@ -66,7 +66,18 @@ them.
   per-turn skill selection on an agent built without a skill engine now
   fails the turn with `AgentError::SkillResolutionFailed` and the native
   `AgentEvent::SkillResolutionFailed` before any provider call, instead of
-  silently running as an ordinary turn (#1263).
+  silently running as an ordinary turn (#1263). This includes scheduled
+  jobs: a job whose persisted action carries `skill_refs` on a realm with
+  skills disabled now fails on every firing instead of running without the
+  skills. The hand-written TypeScript, Python and Web SDK event parsers
+  decode the new reason with its `requested` keys, and the Web SDK now folds
+  any `reason_type` it does not know to `unknown` (as the Rust, TypeScript
+  and Python decoders do) instead of rejecting the event and its poll batch.
+- `meerkat_mob::MobError` gains the variant `DeliveryInteractionConflict {
+  correlation_id, interaction_id }` (appended last); exhaustive matches must
+  handle it. A submission whose delivery correlation and supplied
+  transcript interaction id (on the `WorkSpec` or in `MemberTurnOptions`)
+  disagree now returns it instead of `MobError::Internal` (#1264).
 - `meerkat_mob::MemberReloadDisposition` gains the variant `Reattached`
   (appended last, so existing discriminants do not move); exhaustive matches
   must handle it. `MobHandle::reload_member_registration` returns it when a
@@ -168,7 +179,9 @@ them.
   `SkillContext`), and the options join the runtime's exact replay
   identity: a retry with the same delivery identity and options returns
   the original admission, and a changed selection is
-  `MobError::WorkInputIdempotencyConflict`. The existing
+  `MobError::WorkInputIdempotencyConflict`. The selection is
+  order-sensitive (a replay must repeat the same keys in the same order),
+  and an empty selection is normalized to no selection. The existing
   `submit_host_human_input_bounded` / `start_host_human_input_bounded`
   delegate with default options and keep their replay identity (#1264).
 - `meerkat_runtime::RuntimeSessionAttachmentState` (`Unregistered`,

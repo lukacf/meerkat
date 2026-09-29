@@ -1804,3 +1804,47 @@ async fn host_human_selected_skills_resolve_natively_and_replay_exactly() {
     assert_eq!(fixture.client.requests().len(), requests_before + 1);
     fixture.finish().await;
 }
+
+/// An empty skill selection is no selection (it keeps the metadata-less
+/// replay identity), and an options interaction id that differs from the
+/// delivery correlation is a typed refusal before admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_human_options_normalize_empty_selection_and_refuse_foreign_interaction() {
+    let fixture = Fixture::new().await;
+    let spec = WorkSpec::new(HUMAN, WorkOrigin::External);
+    let empty = delivery("empty-selection");
+    let first = fixture
+        .submit_with_options(
+            spec.clone(),
+            MemberTurnOptions::new().with_skill_references(Vec::new()),
+            empty.clone(),
+        )
+        .await
+        .expect("empty selection admitted");
+    let replay = fixture
+        .submit(spec.clone(), HandlingMode::Queue, empty)
+        .await
+        .expect("an empty selection replays as no selection");
+    assert_eq!(replay.work_ref, first.work_ref);
+
+    let inputs = fixture.input_count().await;
+    let foreign = delivery("foreign-interaction");
+    let error = fixture
+        .submit_with_options(
+            spec,
+            MemberTurnOptions::new().with_interaction_id(InteractionId(Uuid::new_v4())),
+            foreign.clone(),
+        )
+        .await
+        .expect_err("a foreign interaction id is not the delivery's interaction");
+    assert!(
+        matches!(
+            &error,
+            MobError::DeliveryInteractionConflict { correlation_id, .. }
+                if *correlation_id == foreign.correlation_id
+        ),
+        "typed conflict, got {error:?}"
+    );
+    assert_eq!(fixture.input_count().await, inputs);
+    fixture.finish().await;
+}

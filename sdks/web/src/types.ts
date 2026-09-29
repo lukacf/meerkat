@@ -574,6 +574,49 @@ function hasStringFields(value: Record<string, unknown>, fields: readonly string
   return fields.every((field) => typeof value[field] === 'string');
 }
 
+const KNOWN_SKILL_RESOLUTION_REASON_TYPES: readonly string[] = [
+  'not_found',
+  'capability_unavailable',
+  'load',
+  'parse',
+  'unknown',
+  'source_uuid_collision',
+  'source_uuid_mutation_without_lineage',
+  'missing_skill_remaps',
+  'remap_without_lineage',
+  'unknown_skill_alias',
+  'remap_cycle',
+  'no_skill_engine',
+];
+
+/**
+ * Fold a `skill_resolution_failed` reason whose `reason_type` this SDK does
+ * not know into the typed `unknown` reason, exactly as the Rust decoder does.
+ * A newer runtime adding a reason must not make the whole event (and the
+ * poll batch carrying it) unparseable. Every other event is returned as is;
+ * malformed known reasons still fail validation in `isKnownEvent`.
+ */
+export function foldUnknownSkillResolutionReason<T extends { type: string }>(event: T): T {
+  if (event.type !== 'skill_resolution_failed') {
+    return event;
+  }
+  const reason = (event as Record<string, unknown>).reason;
+  if (
+    !isRecord(reason) ||
+    typeof reason.reason_type !== 'string' ||
+    KNOWN_SKILL_RESOLUTION_REASON_TYPES.includes(reason.reason_type)
+  ) {
+    return event;
+  }
+  return {
+    ...event,
+    reason: {
+      reason_type: 'unknown',
+      message: typeof reason.message === 'string' ? reason.message : '',
+    },
+  };
+}
+
 function isSkillResolutionFailureReason(value: unknown): boolean {
   if (!isRecord(value) || typeof value.reason_type !== 'string') {
     return false;
@@ -604,6 +647,8 @@ function isSkillResolutionFailureReason(value: unknown): boolean {
       return typeof value.alias === 'string';
     case 'remap_cycle':
       return hasStringFields(value, ['source_uuid', 'skill_name']);
+    case 'no_skill_engine':
+      return Array.isArray(value.requested) && value.requested.every(isWireSkillKey);
     default:
       return false;
   }

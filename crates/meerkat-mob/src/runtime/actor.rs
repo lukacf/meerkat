@@ -51024,10 +51024,18 @@ impl MobActor {
                 MobError::Internal("delivery correlation identity is not a UUID".to_string())
             })?;
             let correlation = meerkat_core::interaction::InteractionId(correlation);
-            if interaction_id.is_some_and(|existing| existing != correlation) {
-                return Err(MobError::Internal(
-                    "delivery correlation conflicts with supplied transcript identity".to_string(),
-                ));
+            let options_interaction_id = turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.transcript_identity.interaction_id);
+            if let Some(conflicting) = [interaction_id, options_interaction_id]
+                .into_iter()
+                .flatten()
+                .find(|supplied| *supplied != correlation)
+            {
+                return Err(MobError::DeliveryInteractionConflict {
+                    correlation_id: correlation.0.to_string(),
+                    interaction_id: conflicting.0.to_string(),
+                });
             }
             interaction_id = Some(correlation);
         }

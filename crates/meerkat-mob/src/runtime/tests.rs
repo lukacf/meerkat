@@ -76296,6 +76296,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::MemberRoleMigrationRejected { .. } => {
             "member_role_migration_rejected".to_string()
         }
+        MobError::DeliveryInteractionConflict { .. } => {
+            "delivery_interaction_conflict".to_string()
+        }
         MobError::IdentityConvergenceAdmissionClosed { .. } => {
             "identity_convergence_admission_closed".to_string()
         }

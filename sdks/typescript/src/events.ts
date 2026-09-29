@@ -551,6 +551,7 @@ export type SkillResolutionFailureReason =
     }
   | { readonly reasonType: "unknown_skill_alias"; readonly alias: string }
   | { readonly reasonType: "remap_cycle"; readonly sourceUuid: string; readonly skillName: string }
+  | { readonly reasonType: "no_skill_engine"; readonly requested: readonly SkillKey[] }
   | { readonly reasonType: "unknown"; readonly message: string; readonly rawReasonType?: string };
 
 export interface SkillResolutionFailedEvent {
@@ -1351,6 +1352,20 @@ function parseSkillResolutionFailureReason(
         sourceUuid: String(value.source_uuid ?? value.sourceUuid ?? ""),
         skillName: String(value.skill_name ?? value.skillName ?? ""),
       };
+    case "no_skill_engine": {
+      if (!Array.isArray(value.requested)) {
+        return undefined;
+      }
+      const requested: SkillKey[] = [];
+      for (const entry of value.requested) {
+        const key = parseSkillKey(entry);
+        if (!key) {
+          return undefined;
+        }
+        requested.push(key);
+      }
+      return { reasonType, requested };
+    }
     case "unknown":
       return { reasonType, message: String(value.message ?? "") };
     default:

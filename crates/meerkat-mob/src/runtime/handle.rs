@@ -2213,6 +2213,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         // without laundering them into a false spawn failure cause.
         MobError::PlacedInteractionIdAlreadyUsed { .. }
         | MobError::InvalidPlacedInteractionId { .. }
+        | MobError::DeliveryInteractionConflict { .. }
         | MobError::PlacedCompletionDeliveryRejected
         | MobError::PlacedCompletionHostNoEffect
         | MobError::PlacedCompletionHostCancelled
@@ -12015,7 +12016,11 @@ impl MobHandle {
     /// options are part of the runtime's exact replay identity, so a retry
     /// with the SAME delivery identity and the same options deduplicates to
     /// the original admission, and a retry that changes them is refused as
-    /// an idempotency conflict.
+    /// an idempotency conflict. The skill selection is order-sensitive: a
+    /// replay must repeat the same keys in the same order. An empty
+    /// selection is normalized to no selection. An interaction id in the
+    /// options that differs from the delivery correlation is refused with
+    /// [`MobError::DeliveryInteractionConflict`].
     #[cfg(feature = "runtime-adapter")]
     #[allow(clippy::too_many_arguments)]
     pub async fn submit_host_human_input_with_options_bounded(
@@ -12157,10 +12162,15 @@ impl MobHandle {
         fence_token: FenceToken,
         spec: WorkSpec,
         handling_mode: HandlingMode,
-        options: MemberTurnOptions,
+        mut options: MemberTurnOptions,
         delivery_identity: crate::store::MobDeliveryIdentity,
     ) -> Result<Box<crate::mob_machine::SubmitWorkCommand>, MobError> {
         delivery_identity.validate()?;
+        // An empty selection is no selection: normalize it so it keeps the
+        // metadata-less replay identity instead of minting a distinct one.
+        if options.skill_references.as_ref().is_some_and(Vec::is_empty) {
+            options.skill_references = None;
+        }
         let work_ref = WorkRef::for_delivery(
             &self.definition.id,
             &runtime_id.identity,

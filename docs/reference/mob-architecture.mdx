@@ -122,7 +122,10 @@ member, with typed `SkillsResolved` / `SkillResolutionFailed` events and a
 durable `SkillContext`. The options are part of the runtime's exact replay
 identity, so a retry with the same delivery identity and options returns the
 original admission and a changed selection is
-`MobError::WorkInputIdempotencyConflict`.
+`MobError::WorkInputIdempotencyConflict`. The selection is order-sensitive:
+a replay must repeat the same keys in the same order. An empty selection is
+treated as no selection. An interaction id that differs from the delivery
+correlation is refused with `MobError::DeliveryInteractionConflict`.
 
 This is a Rust-only designation, not a serializable `WorkSpec` role or an
 agent-tool flag. The host must authenticate the human before opting in.

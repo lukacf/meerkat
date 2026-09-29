@@ -2214,6 +2214,32 @@ fn head_row_in_txn(
     Ok(Some((head, cas_token)))
 }
 
+/// The head-row checks shared by `materialize_head` and `verify_current_head`:
+/// the stored head row exists, its persisted CAS token still equals the token
+/// recomputed from the stored head (`Corrupted` otherwise), and that token is
+/// `expected`'s (`TranscriptRevisionConflict` otherwise). Reads only the
+/// compact head row.
+fn current_head_row_matching_in_txn(
+    tx: &Transaction<'_>,
+    expected: &SessionHead,
+) -> Result<SessionHead, SessionStoreError> {
+    let (current, stored_token) = head_row_in_txn(tx, &expected.id)?
+        .ok_or_else(|| SessionStoreError::NotFound(expected.id.clone()))?;
+    let current_token = session_head_cas_token(&current)?;
+    if current_token != stored_token {
+        return Err(SessionStoreError::Corrupted(expected.id.clone()));
+    }
+    let expected_token = session_head_cas_token(expected)?;
+    if expected_token != current_token {
+        return Err(SessionStoreError::TranscriptRevisionConflict {
+            id: expected.id.clone(),
+            expected: expected_token,
+            actual: current_token,
+        });
+    }
+    Ok(current)
+}
+
 #[derive(Clone, Copy)]
 enum HeadMetadataProjectionOwner {
     PhysicalHead,
@@ -8900,26 +8926,22 @@ impl IncrementalSessionStore for SqliteSessionStore {
         .await
     }
 
+    async fn verify_current_head(&self, expected: &SessionHead) -> Result<(), SessionStoreError> {
+        let expected = expected.clone();
+        self.in_read_txn(move |tx| {
+            current_head_row_matching_in_txn(tx, &expected)?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn materialize_head(
         &self,
         expected: &SessionHead,
     ) -> Result<meerkat_core::VerifiedSessionHeadMaterialization, SessionStoreError> {
         let expected = expected.clone();
         self.in_read_txn(move |tx| {
-            let (current, stored_token) = head_row_in_txn(tx, &expected.id)?
-                .ok_or_else(|| SessionStoreError::NotFound(expected.id.clone()))?;
-            let current_token = session_head_cas_token(&current)?;
-            if current_token != stored_token {
-                return Err(SessionStoreError::Corrupted(expected.id));
-            }
-            let expected_token = session_head_cas_token(&expected)?;
-            if expected_token != current_token {
-                return Err(SessionStoreError::TranscriptRevisionConflict {
-                    id: expected.id,
-                    expected: expected_token,
-                    actual: current_token,
-                });
-            }
+            let current = current_head_row_matching_in_txn(tx, &expected)?;
             verify_physical_head_canonical_in_txn(tx, &current)
         })
         .await
@@ -9689,6 +9711,92 @@ mod tests {
             .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &exact_retry))
             .await
             .expect("canonical empty root must be exactly retryable");
+    }
+
+    /// The body-free current-head proof keeps every head-row check
+    /// `materialize_head` runs: a moved head is a revision conflict, a
+    /// missing head is `NotFound`, and a stored CAS token that no longer
+    /// matches the token recomputed from the stored head is `Corrupted`
+    /// (which `load_head`, dropping the stored token, cannot see).
+    #[tokio::test]
+    async fn verify_current_head_keeps_the_materialize_head_row_checks() {
+        let (_dir, store) = temp_store();
+        let (mut session, root) =
+            prepared_root_with_metadata("application", serde_json::json!({"value": 1}));
+        let persisted = root.clone();
+        let _ = store
+            .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &persisted))
+            .await
+            .unwrap();
+        root.acknowledge_session(&mut session, root.successor_head_token())
+            .unwrap();
+        let current = incremental(&store)
+            .load_head(session.id())
+            .await
+            .unwrap()
+            .unwrap();
+        incremental(&store)
+            .verify_current_head(&current)
+            .await
+            .expect("the current head verifies");
+
+        let mut absent = current.clone();
+        absent.id = SessionId::new();
+        assert!(matches!(
+            incremental(&store).verify_current_head(&absent).await,
+            Err(SessionStoreError::NotFound(id)) if id == absent.id
+        ));
+
+        let conn = open_connection(store.path()).unwrap();
+        conn.execute(
+            "UPDATE session_heads SET cas_token = 'not-the-recomputed-token' WHERE session_id = ?1",
+            params![session.id().to_string()],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(
+            incremental(&store)
+                .load_head(session.id())
+                .await
+                .unwrap()
+                .is_some(),
+            "instrument honesty: load_head does not see the stored token"
+        );
+        assert!(matches!(
+            incremental(&store).verify_current_head(&current).await,
+            Err(SessionStoreError::Corrupted(id)) if id == *session.id()
+        ));
+        assert!(matches!(
+            incremental(&store).materialize_head(&current).await,
+            Err(SessionStoreError::Corrupted(id)) if id == *session.id()
+        ));
+        let conn = open_connection(store.path()).unwrap();
+        conn.execute(
+            "UPDATE session_heads SET cas_token = ?2 WHERE session_id = ?1",
+            params![
+                session.id().to_string(),
+                session_head_cas_token(&current).unwrap()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        session.push(user("ordinary delta"));
+        let successor =
+            PreparedHeadCanonicalMutation::prepare(&session, Some(current.clone())).unwrap();
+        let persisted = successor.clone();
+        let _ = store
+            .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &persisted))
+            .await
+            .unwrap();
+        assert!(matches!(
+            incremental(&store).verify_current_head(&current).await,
+            Err(SessionStoreError::TranscriptRevisionConflict { .. })
+        ));
+        incremental(&store)
+            .verify_current_head(successor.successor_head())
+            .await
+            .expect("the successor is the current head");
     }
 
     #[tokio::test]

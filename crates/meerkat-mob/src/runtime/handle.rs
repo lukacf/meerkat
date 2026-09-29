@@ -4717,6 +4717,28 @@ pub struct ForkChildRun {
     child: AgentIdentity,
     cleanup: MobHandle,
     abandon_guard: Option<ProvisionedChildRetireOnDrop>,
+    /// The runtime-owned supervisor task that owns the run. Dropping the
+    /// handle detaches it, so production never holds it; test builds keep it
+    /// to end the supervisor as a process exit does (see
+    /// [`Self::end_supervisor_as_process_exit_for_test`]).
+    #[cfg(any(test, feature = "test-support"))]
+    supervisor: tokio::task::JoinHandle<()>,
+}
+
+/// How [`ForkChildRun::end_supervisor_as_process_exit_for_test`] found the
+/// supervisor that owned a detached fork child's run.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkSupervisorExitForTest {
+    /// The supervisor was still waiting on the turn and ended there: it
+    /// neither reported an outcome nor retired the child.
+    EndedBeforeOutcome,
+    /// The supervisor had already settled the run (and done whatever that
+    /// outcome does to the child) before it could be ended.
+    AlreadySettled,
+    /// The supervisor task panicked before it could be ended.
+    Panicked,
 }
 
 impl std::fmt::Debug for ForkChildRun {
@@ -4754,6 +4776,27 @@ impl ForkChildRun {
             self.child.clone(),
         ));
         self
+    }
+
+    /// End the supervisor that owns this run the way a process exit ends it:
+    /// its task is aborted wherever it waits, so a turn that ends afterwards
+    /// is neither reported by it nor retires the child through it. The child,
+    /// its session and the runtime are untouched, exactly as a restart finds
+    /// them. Resolves once the supervisor task has ended, and reports whether
+    /// it ended before settling the run. Exposed only by test builds, for
+    /// restart tests that re-link a child in the same process.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn end_supervisor_as_process_exit_for_test(mut self) -> ForkSupervisorExitForTest {
+        if let Some(guard) = self.abandon_guard.take() {
+            guard.disarm();
+        }
+        self.supervisor.abort();
+        match (&mut self.supervisor).await {
+            Ok(()) => ForkSupervisorExitForTest::AlreadySettled,
+            Err(error) if error.is_panic() => ForkSupervisorExitForTest::Panicked,
+            Err(_) => ForkSupervisorExitForTest::EndedBeforeOutcome,
+        }
     }
 
     /// The handle reached its holder: from here dropping it only stops
@@ -14153,7 +14196,7 @@ impl MobHandle {
         let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
         let supervisor = self.clone();
         let child = fork.agent_identity.clone();
-        tokio::spawn(async move {
+        let supervisor_task = tokio::spawn(async move {
             let wait = turn.wait_bounded(result_spec);
             let outcome = match max_run {
                 None => match wait.await {
@@ -14191,8 +14234,14 @@ impl MobHandle {
             child: fork.agent_identity.clone(),
             cleanup: self.fork_child_cleanup_authority(),
             abandon_guard: None,
+            #[cfg(any(test, feature = "test-support"))]
+            supervisor: supervisor_task,
         }
         .retire_child_if_abandoned();
+        // Production detaches the supervisor: it runs to its outcome whether
+        // or not anyone holds the run.
+        #[cfg(not(any(test, feature = "test-support")))]
+        drop(supervisor_task);
         Ok((fork, run))
     }
 

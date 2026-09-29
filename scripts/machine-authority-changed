@@ -104,7 +104,7 @@ machine_authority_path() {
     crates/xtask/Cargo.toml|crates/xtask/BUILD.bazel|crates/xtask/src/lib.rs|crates/xtask/src/main.rs|crates/xtask/src/machines*.rs|crates/xtask/src/protocol_codegen.rs|crates/xtask/src/audit_generated_headers.rs|crates/xtask/src/public_contracts.rs|crates/xtask/src/runtime_authority_bypass.rs)
       return 0
       ;;
-    crates/xtask/src/rmat_policy.rs|crates/xtask/src/seam_inventory.rs|crates/xtask/src/ownership_ledger.rs|crates/xtask/src/rmat_audit.rs|xtask/rmat-baseline.toml|xtask/ownership-baseline.toml|docs/internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md)
+    crates/xtask/src/rmat_policy.rs|crates/xtask/src/seam_inventory.rs|crates/xtask/src/ownership_ledger.rs|crates/xtask/src/rmat_audit.rs|crates/xtask/rmat-baseline.toml|crates/xtask/ownership-baseline.toml|docs/internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md)
       return 0
       ;;
     crates/xtask/tests/machine_verify_all_tlc_test.sh|crates/xtask/tests/machines_contracts.rs|crates/xtask/tests/protocol_codegen_drift.rs|crates/xtask/tests/runtime_authority_bypass.rs)

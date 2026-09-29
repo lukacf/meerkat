@@ -1171,6 +1171,14 @@ pub struct CommittedBoundaryResumePreparationReceipt {
     /// another whole-transcript decode, row-prefix hash and content digest.
     /// `None` for WholeBlob, whose actor seed also needs the snapshot
     /// authority and keeps its exact committed read.
+    ///
+    /// This is a `Session` clone of the body `Materializable` returns, and it
+    /// does not double transcript memory: `Session` keeps its messages, its
+    /// realtime projection and its parsed history graph behind `Arc`s, so the
+    /// clone shares those allocations and copies only metadata-sized state.
+    /// Actor creation moves this body into the actor and drops the caller's
+    /// copy from the request, so no second reference survives to force a
+    /// copy-on-write of the transcript at the actor's first append.
     committed_body: Option<Box<Session>>,
 }
 
@@ -11488,8 +11496,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// head row. A re-materialization of the committed head would fail with
     /// the same typed conflict if the physical head had moved, so a caller
     /// that reuses the prepared body runs this compact head comparison in
-    /// its place. WholeBlob authority is the committed snapshot itself and
-    /// needs no separate physical comparison.
+    /// its place. It is the store's body-free
+    /// [`IncrementalSessionStore::verify_current_head`], which keeps every
+    /// head-row check `materialize_head` runs, including the stored CAS token
+    /// against the one recomputed from the stored head (`Corrupted`), without
+    /// resolving the transcript. WholeBlob authority is the committed
+    /// snapshot itself and needs no separate physical comparison.
     async fn verify_prepared_physical_head_current(
         &self,
         id: &SessionId,
@@ -11506,27 +11518,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "cannot compare the HeadCanonical physical head of session {id} without incremental store capability"
             )))
         })?;
-        let physical = incremental
-            .load_head(id)
-            .await
-            .map_err(|error| SessionError::Store(Box::new(error)))?
-            .ok_or_else(|| {
-                SessionError::Store(Box::new(SessionStoreError::NotFound(id.clone())))
-            })?;
-        let expected = session_head_cas_token(authority.boundary_head())
-            .map_err(|error| SessionError::Store(Box::new(error)))?;
-        let actual = session_head_cas_token(&physical)
-            .map_err(|error| SessionError::Store(Box::new(error)))?;
-        if actual != expected {
-            return Err(SessionError::Store(Box::new(
-                SessionStoreError::TranscriptRevisionConflict {
-                    id: id.clone(),
-                    expected,
-                    actual,
-                },
-            )));
+        let boundary_head = authority.boundary_head();
+        if &boundary_head.id != id {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "resume authority for session {id} names the boundary head of session {}",
+                boundary_head.id
+            ))));
         }
-        Ok(())
+        incremental
+            .verify_current_head(boundary_head)
+            .await
+            .map_err(|error| SessionError::Store(Box::new(error)))
     }
 
     /// Archive re-check for a resumed actor, taken under its recovery gate.
@@ -11823,16 +11825,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 }
             }
         }
-        let (resume_session_id, resume_session) = {
+        // The resume body stays only in the request: a second `Session`
+        // handle alive across actor creation would share the transcript's
+        // copy-on-write storage and force a whole-transcript copy at the
+        // actor's first append.
+        let resume_session_id = {
             let build = req.build.get_or_insert_with(Default::default);
-            let resume_session_id = build
-                .resume_session
-                .as_ref()
-                .map(|session| session.id().clone());
-            let resume_session = build.resume_session.clone();
             build.checkpointer = Some(checkpointer.clone());
             build.blob_store_override = Some(Arc::clone(&self.blob_store));
-            (resume_session_id, resume_session)
+            build
+                .resume_session
+                .as_ref()
+                .map(|session| session.id().clone())
         };
         let runtime_binding_session_id =
             req.build
@@ -11870,7 +11874,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             }
             _ => {}
         }
-        if let Some(session) = resume_session.as_ref()
+        if let Some(session) = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
             && self
                 .session_archived_by_authority(session.id(), session)
                 .await?
@@ -39075,6 +39082,19 @@ mod tests {
             Some(session.messages()),
             "the receipt carries the exact bracketed HeadCanonical body"
         );
+        // The receipt's body shares the returned body's copy-on-write
+        // transcript storage: carrying it does not hold a second transcript
+        // per prepared member.
+        assert!(
+            preparation
+                .committed_body
+                .as_deref()
+                .is_some_and(|body| std::ptr::eq(
+                    body.messages().as_ptr(),
+                    session.messages().as_ptr()
+                )),
+            "the receipt body must share the transcript allocation, not copy it"
+        );
         service
             .verify_prepared_physical_head_current(&session_id, &observation)
             .await
@@ -39125,6 +39145,357 @@ mod tests {
         assert!(
             is_conflict(&archive_check),
             "the gated archive re-check must refuse: {archive_check:?}"
+        );
+    }
+
+    /// Delegating HeadCanonical session store that records, for every
+    /// body-free current-head proof, whether the session's recovery gate was
+    /// held at that instant. Actor creation proves a reused prepared body at
+    /// two sites: the seed site before the create path takes any gate, and the
+    /// archive re-check under the recovery gate. The gate state tells the two
+    /// apart. Every operation is forwarded unchanged.
+    struct RecoveryGateObservingStore {
+        inner: Arc<meerkat_store::SqliteSessionStore>,
+        recovery_gate: std::sync::OnceLock<Arc<Mutex<()>>>,
+        verifications: std::sync::Mutex<Vec<Option<bool>>>,
+    }
+
+    impl RecoveryGateObservingStore {
+        fn new(inner: Arc<meerkat_store::SqliteSessionStore>) -> Self {
+            Self {
+                inner,
+                recovery_gate: std::sync::OnceLock::new(),
+                verifications: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Gate-held flags of the current-head proofs since the last call.
+        fn take_verifications(&self) -> Vec<Option<bool>> {
+            std::mem::take(
+                &mut *self
+                    .verifications
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        }
+    }
+
+    #[async_trait]
+    impl SessionStore for RecoveryGateObservingStore {
+        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+            self.inner.save(session).await
+        }
+
+        async fn save_transcript_rewrite(
+            &self,
+            session: &Session,
+            commit: &meerkat_core::TranscriptRewriteCommit,
+        ) -> Result<(), SessionStoreError> {
+            self.inner.save_transcript_rewrite(session, commit).await
+        }
+
+        async fn save_authoritative_projection(
+            &self,
+            session: &Session,
+        ) -> Result<(), SessionStoreError> {
+            self.inner.save_authoritative_projection(session).await
+        }
+
+        async fn save_authoritative_projection_if_current_revision(
+            &self,
+            session: &Session,
+            expected_current_revision: Option<String>,
+        ) -> Result<(), SessionStoreError> {
+            self.inner
+                .save_authoritative_projection_if_current_revision(
+                    session,
+                    expected_current_revision,
+                )
+                .await
+        }
+
+        async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
+            self.inner.load(id).await
+        }
+
+        async fn list(
+            &self,
+            filter: SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
+            self.inner.list(filter).await
+        }
+
+        async fn load_meta(
+            &self,
+            id: &SessionId,
+        ) -> Result<Option<meerkat_core::SessionMeta>, SessionStoreError> {
+            self.inner.load_meta(id).await
+        }
+
+        async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+            self.inner.delete(id).await
+        }
+
+        async fn delete_if_current_revision(
+            &self,
+            id: &SessionId,
+            expected_current_revision: &str,
+        ) -> Result<bool, SessionStoreError> {
+            self.inner
+                .delete_if_current_revision(id, expected_current_revision)
+                .await
+        }
+
+        fn as_incremental(self: Arc<Self>) -> Option<Arc<dyn IncrementalSessionStore>> {
+            Some(self)
+        }
+    }
+
+    #[async_trait]
+    impl IncrementalSessionStore for RecoveryGateObservingStore {
+        async fn activate_head_canonical_store(
+            &self,
+        ) -> Result<meerkat_core::session_store::HeadCanonicalStoreActivation, SessionStoreError>
+        {
+            self.inner.activate_head_canonical_store().await
+        }
+
+        async fn cross_head_canonical_authority(
+            &self,
+            id: &SessionId,
+        ) -> Result<meerkat_core::session_store::HeadCanonicalAuthorityCrossing, SessionStoreError>
+        {
+            self.inner.cross_head_canonical_authority(id).await
+        }
+
+        async fn append_messages(
+            &self,
+            id: &SessionId,
+            strand: &TranscriptStrandId,
+            base_seq: u64,
+            messages: &[Message],
+        ) -> Result<(), SessionStoreError> {
+            self.inner
+                .append_messages(id, strand, base_seq, messages)
+                .await
+        }
+
+        async fn commit_rewrite(
+            &self,
+            id: &SessionId,
+            record: &meerkat_core::TranscriptRewriteRecord,
+            expected: SessionHeadCas,
+        ) -> Result<SessionHead, SessionStoreError> {
+            self.inner.commit_rewrite(id, record, expected).await
+        }
+
+        async fn save_head(
+            &self,
+            head: &SessionHead,
+            expected: SessionHeadCas,
+        ) -> Result<(), SessionStoreError> {
+            self.inner.save_head(head, expected).await
+        }
+
+        async fn load_head(
+            &self,
+            id: &SessionId,
+        ) -> Result<Option<SessionHead>, SessionStoreError> {
+            self.inner.load_head(id).await
+        }
+
+        async fn apply_prepared_head_canonical_mutation(
+            &self,
+            mutation: &meerkat_core::session_store::PreparedHeadCanonicalMutation,
+        ) -> Result<String, SessionStoreError> {
+            self.inner
+                .apply_prepared_head_canonical_mutation(mutation)
+                .await
+        }
+
+        async fn apply_prepared_head_canonical_rewrite_mutation(
+            &self,
+            mutation: &meerkat_core::session_store::PreparedHeadCanonicalRewriteMutation,
+        ) -> Result<String, SessionStoreError> {
+            self.inner
+                .apply_prepared_head_canonical_rewrite_mutation(mutation)
+                .await
+        }
+
+        async fn verify_current_head(
+            &self,
+            expected: &SessionHead,
+        ) -> Result<(), SessionStoreError> {
+            // `try_lock` reads the gate's state at this instant; it never
+            // waits, and a free gate is released again at once.
+            let recovery_gate_held = self
+                .recovery_gate
+                .get()
+                .map(|gate| gate.try_lock().is_err());
+            self.verifications
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(recovery_gate_held);
+            self.inner.verify_current_head(expected).await
+        }
+
+        async fn materialize_head(
+            &self,
+            expected: &SessionHead,
+        ) -> Result<meerkat_core::VerifiedSessionHeadMaterialization, SessionStoreError> {
+            self.inner.materialize_head(expected).await
+        }
+
+        async fn load_messages(
+            &self,
+            id: &SessionId,
+            strand: &TranscriptStrandId,
+            range: std::ops::Range<u64>,
+        ) -> Result<Vec<Message>, SessionStoreError> {
+            self.inner.load_messages(id, strand, range).await
+        }
+
+        async fn load_rewrites(
+            &self,
+            id: &SessionId,
+        ) -> Result<Vec<meerkat_core::TranscriptRewriteRecord>, SessionStoreError> {
+            self.inner.load_rewrites(id).await
+        }
+
+        async fn load_canonical_head(
+            &self,
+            id: &SessionId,
+        ) -> Result<Option<SessionHead>, SessionStoreError> {
+            self.inner.load_canonical_head(id).await
+        }
+
+        async fn load_rewrite_commits(
+            &self,
+            id: &SessionId,
+        ) -> Result<Vec<meerkat_core::TranscriptRewriteCommit>, SessionStoreError> {
+            self.inner.load_rewrite_commits(id).await
+        }
+    }
+
+    /// End to end through actor creation: a resume-preparation receipt
+    /// consumed by `create_session` after the physical head advanced past the
+    /// prepared boundary must be refused at the seed site, before the create
+    /// path takes the recovery gate, with the typed conflict a
+    /// re-materialization reports, and must leave no live actor. The later
+    /// gated archive re-check runs the same proof, so only the gate state at
+    /// the refusing proof shows the seed site did its job: without the
+    /// seed-site proof the refusal would come from under the gate.
+    #[tokio::test]
+    async fn create_session_refuses_a_prepared_receipt_whose_physical_head_moved() {
+        let storage_dir = tempfile::tempdir_in(".").expect("prepared resume test directory");
+        let database_path = storage_dir.path().join("runtime.sqlite3");
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(
+            meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path)
+                .expect("head-canonical runtime store"),
+        );
+        let observing_store = Arc::new(RecoveryGateObservingStore::new(Arc::new(
+            meerkat_store::SqliteSessionStore::open(&database_path)
+                .expect("co-located head-canonical session store"),
+        )));
+        let session_store: Arc<dyn SessionStore> = observing_store.clone();
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            session_store,
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+        committed_content_turn(&service, runtime_store.as_ref(), &session_id, "first turn").await;
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live actor before a cold resume");
+
+        let PreparedCommittedBoundaryResume::Materializable {
+            session,
+            observation,
+            preparation,
+            ..
+        } = service
+            .prepare_committed_boundary_resume(&session_id)
+            .await
+            .expect("prepare the committed boundary resume")
+        else {
+            panic!("a committed session is materializable");
+        };
+
+        // Advance only the physical head: RuntimeStore authority, and so the
+        // resume observation the receipt carries, stay at the boundary.
+        let incremental: Arc<dyn IncrementalSessionStore> = Arc::clone(&observing_store)
+            .as_incremental()
+            .expect("the observing store is incremental");
+        let physical = incremental
+            .load_head(&session_id)
+            .await
+            .expect("load physical head")
+            .expect("physical head present");
+        let mut advanced = (*session).clone();
+        advanced.push(Message::User(UserMessage::text(
+            "written past the boundary",
+        )));
+        let mutation = meerkat_core::session_store::PreparedHeadCanonicalMutation::prepare(
+            &advanced,
+            Some(physical),
+        )
+        .expect("prepare a physical-only successor");
+        incremental
+            .apply_prepared_head_canonical_mutation(&mutation)
+            .await
+            .expect("advance the physical head");
+        assert_eq!(
+            runtime_store
+                .load_session_resume_observation(&LogicalRuntimeId::for_session(&session_id))
+                .await
+                .expect("re-observe resume authority"),
+            observation,
+            "instrument honesty: the resume observation does not see the physical head"
+        );
+
+        let recovery_gate = service.recovery_gate_for_session(&session_id).await;
+        assert!(
+            observing_store.recovery_gate.set(recovery_gate).is_ok(),
+            "the recovery gate is installed once"
+        );
+        let _ = observing_store.take_verifications();
+        let created = service
+            .create_session_with_admission(
+                resume_request(*session),
+                PersistentCreateAdmission {
+                    reserved_create_admission: None,
+                    actor_seed_authority: ActorSessionSeedAuthority::DurableCommitted,
+                    archived_resume_authorization: ArchivedResumeAuthorization::RejectArchived,
+                    turn_boundary_already_held: false,
+                    resume_preparation: Some(preparation),
+                    actor_witness_slot: None,
+                },
+            )
+            .await;
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(&created),
+            "actor creation must refuse a prepared body behind the physical head: {created:?}"
+        );
+        assert_eq!(
+            observing_store.take_verifications(),
+            vec![Some(false)],
+            "exactly one current-head proof ran, at the seed site outside the recovery gate"
+        );
+        assert!(
+            service
+                .inner
+                .live_session_actor_witness(&session_id)
+                .await
+                .is_none(),
+            "a refused resume leaves no live actor"
         );
     }
 

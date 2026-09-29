@@ -191,6 +191,15 @@ for (const path of [
   assert.deepEqual(plan.shards, []);
 }
 
+// Poster-only: the poster gate runs, but the change is not machine
+// authority, so it cannot start the machine-authority lanes (TLC).
+{
+  const plan = planFor(["docs/internal/machine-posters/mob_machine.html", "scripts/machine-posters/generate-machine-posters.mjs"]);
+  assert.equal(plan.rust_changed, false);
+  assert.equal(plan.machine_authority, false);
+  assert.equal(plan.machine_posters, true);
+}
+
 // A generated machine kernel is both machine authority and a Rust source
 // owned by meerkat-machine-kernels.
 {
@@ -291,6 +300,7 @@ for (const path of [
     "reason",
     "generated_contract",
     "machine_authority",
+    "machine_posters",
     "wasm",
     "sdk_host",
     "bazel_graph",

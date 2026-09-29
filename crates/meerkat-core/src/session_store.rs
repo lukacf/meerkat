@@ -5201,6 +5201,37 @@ pub trait IncrementalSessionStore: SessionStore {
 
     async fn load_head(&self, id: &SessionId) -> Result<Option<SessionHead>, SessionStoreError>;
 
+    /// Body-free proof that `expected` is still the store's current physical
+    /// head.
+    ///
+    /// This runs the head-row checks of [`Self::materialize_head`] without
+    /// resolving any transcript, metadata, or component sidecar: a missing
+    /// head is `NotFound`, and a current head whose exact
+    /// [`session_head_cas_token`] differs from `expected`'s is
+    /// `TranscriptRevisionConflict`. A backend that persists the head's CAS
+    /// token next to the head row must also prove that stored token still
+    /// equals the one recomputed from the stored head, and report a mismatch
+    /// as `Corrupted`, exactly as its `materialize_head` does.
+    ///
+    /// The default compares recomputed tokens over [`Self::load_head`]; a
+    /// backend with a stored token overrides it to keep the corruption check.
+    async fn verify_current_head(&self, expected: &SessionHead) -> Result<(), SessionStoreError> {
+        let current = self
+            .load_head(&expected.id)
+            .await?
+            .ok_or_else(|| SessionStoreError::NotFound(expected.id.clone()))?;
+        let expected_token = session_head_cas_token(expected)?;
+        let current_token = session_head_cas_token(&current)?;
+        if current_token != expected_token {
+            return Err(SessionStoreError::TranscriptRevisionConflict {
+                id: expected.id.clone(),
+                expected: expected_token,
+                actual: current_token,
+            });
+        }
+        Ok(())
+    }
+
     /// Atomically install one sealed HeadCanonical create/append mutation.
     ///
     /// Implementations must revalidate the exact predecessor CAS, reconcile

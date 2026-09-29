@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn variants_from_a_newer_version_decode_as_unknown_inside_the_block() {
+    fn variants_from_a_newer_version_decode_as_unknown_inside_the_block() -> Result<(), String> {
         let value = serde_json::json!({
             "type": "tool_process_interrupted",
             "run_id": RunId::new(),
@@ -446,11 +446,12 @@ mod tests {
             ..
         } = block
         else {
-            panic!("expected the typed block, got {block:?}");
+            return Err(format!("expected the typed block, got {block:?}"));
         };
         assert_eq!(spawner, ToolProcessSpawner::Unknown);
         assert_eq!(cessation, ToolProcessCessation::Unknown);
         assert_eq!(disposition, InterruptedToolRunDisposition::Unknown);
         assert!(cessation.may_have_run());
+        Ok(())
     }
 }

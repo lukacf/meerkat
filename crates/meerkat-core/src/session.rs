@@ -8590,7 +8590,7 @@ mod tests {
             requests: vec![crate::types::UserMessage::text("create the effect file")],
             notice: SystemNoticeMessage::tool_process_interrupted(vec![
                 SystemNoticeBlock::ToolProcessInterrupted {
-                    run_id: run_id.clone(),
+                    run_id,
                     tool_call_id: Some("call-1".to_owned()),
                     spawner: ToolProcessSpawner::ShellCall,
                     cessation: ToolProcessCessation::KilledByRecovery { members: 1 },

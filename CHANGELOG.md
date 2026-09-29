@@ -763,6 +763,12 @@ them.
   session-control scan excludes the historical `docs/internal/archive`, and
   `docs/api/rpc.mdx` points `turn/stop_run` readers to `session/input_status`
   instead of the retired `session/input_state`.
+- `MeerkatMachine::hard_cancel_run_if_current` no longer reports `false` for
+  an interrupt it delivered. When the interrupted run reached its terminal
+  before the dispatch reconciled (the interrupt usually ends it quickly), the
+  delivered exact-run interrupt was reported as if the run had already
+  ended. It now returns `true`, and releases the dispatch slot because no
+  retry can join a run that is no longer bound. A late retry is still `false`.
 - A host subscribing to a member's events could miss the first events of a
   newly materialized or restored actor: the session broadcast had no replay
   and each actor's sequence restarted at zero, and `NotFound` reached hosts

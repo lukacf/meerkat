@@ -356,6 +356,19 @@ fn require_standalone_archive_verdict(
     }
 }
 
+/// Synthetic typed gap marker. It carries sequence zero because it is not a
+/// canonical session event.
+fn stream_lagged_marker(session_id: SessionId, dropped: u64) -> EventEnvelope<AgentEvent> {
+    EventEnvelope::new_session(
+        session_id,
+        0,
+        None,
+        AgentEvent::StreamTruncated {
+            reason: meerkat_core::event::StreamTruncationReason::StreamLagged { dropped },
+        },
+    )
+}
+
 fn lag_aware_session_event_stream(
     session_id: SessionId,
     rx: tokio::sync::broadcast::Receiver<Arc<EventEnvelope<AgentEvent>>>,
@@ -366,16 +379,7 @@ fn lag_aware_session_event_stream(
             match rx.recv().await {
                 Ok(event) => Some((Arc::unwrap_or_clone(event), (rx, stream_session_id))),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                    let marker = EventEnvelope::new_session(
-                        stream_session_id.clone(),
-                        0,
-                        None,
-                        AgentEvent::StreamTruncated {
-                            reason: meerkat_core::event::StreamTruncationReason::StreamLagged {
-                                dropped,
-                            },
-                        },
-                    );
+                    let marker = stream_lagged_marker(stream_session_id.clone(), dropped);
                     Some((marker, (rx, stream_session_id)))
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
@@ -484,16 +488,189 @@ impl Drop for QueuedLosslessEvent {
 pub(crate) type LosslessEventProjectionStream =
     std::pin::Pin<Box<dyn futures::Stream<Item = QueuedLosslessEvent> + Send>>;
 
-fn publish_session_event_to_broadcasts(
-    session_event_tx: &tokio::sync::broadcast::Sender<Arc<EventEnvelope<AgentEvent>>>,
-    raw_session_event_tx: &tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
-    envelope: Arc<EventEnvelope<AgentEvent>>,
-) {
-    let raw_envelope =
-        (raw_session_event_tx.receiver_count() > 0).then(|| envelope.as_ref().clone());
-    let _ = session_event_tx.send(envelope);
-    if let Some(raw_envelope) = raw_envelope {
-        let _ = raw_session_event_tx.send(raw_envelope);
+/// A session event subscription bound to the exact live actor incarnation
+/// it attached to.
+pub struct LiveActorEventSubscription {
+    /// The actor incarnation whose events `stream` carries.
+    pub actor: LiveSessionActorWitness,
+    /// That incarnation's events; ends when the actor ends.
+    pub stream: meerkat_core::comms::EventStream,
+}
+
+/// Envelopes one actor incarnation retains for cursor replay
+/// ([`meerkat_core::comms::SessionEventCursor`]). Replay beyond this window is
+/// reported as a typed `StreamTruncated(StreamLagged)` marker.
+const EVENT_REPLAY_CAPACITY: usize = 1_024;
+
+/// Session-scoped envelope sequence high-water shared by every actor
+/// incarnation of one session inside one service, so a successor actor
+/// continues its predecessor's sequence instead of restarting at zero.
+type SessionEventSequence = Arc<std::sync::atomic::AtomicU64>;
+
+/// Bounded replay window of one actor incarnation.
+struct SessionEventReplayWindow {
+    retained: std::collections::VecDeque<Arc<EventEnvelope<AgentEvent>>>,
+    /// Sequence of the newest envelope no longer retained: the newest evicted
+    /// envelope, or the incarnation's starting sequence before any eviction.
+    floor_seq: u64,
+    /// Envelopes of this incarnation evicted from the window.
+    evicted: u64,
+}
+
+/// Live publication and bounded replay for one actor incarnation's events.
+///
+/// Publication appends to the replay window and fans out to the live
+/// broadcasts under one lock, and replaying subscriptions capture the window
+/// and their live receiver under the same lock, so replay and live delivery
+/// never overlap or leave a gap between them.
+struct SessionEventJournal {
+    session_id: SessionId,
+    session_event_tx: tokio::sync::broadcast::Sender<Arc<EventEnvelope<AgentEvent>>>,
+    /// Owned-event broadcast reserved for the public synchronous raw receiver.
+    /// Normal streams use the shared-envelope lane above, so large payloads
+    /// are cloned only while a raw receiver is actually attached.
+    raw_session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+    replay: std::sync::Mutex<SessionEventReplayWindow>,
+    replay_capacity: usize,
+    sequence: SessionEventSequence,
+    /// Sequence this incarnation starts after.
+    start_seq: u64,
+}
+
+impl SessionEventJournal {
+    fn new(session_id: SessionId, sequence: SessionEventSequence) -> Self {
+        Self::with_capacities(
+            session_id,
+            sequence,
+            EVENT_CHANNEL_CAPACITY,
+            EVENT_REPLAY_CAPACITY,
+        )
+    }
+
+    fn with_capacities(
+        session_id: SessionId,
+        sequence: SessionEventSequence,
+        live_capacity: usize,
+        replay_capacity: usize,
+    ) -> Self {
+        let (session_event_tx, session_event_rx) = tokio::sync::broadcast::channel(live_capacity);
+        drop(session_event_rx);
+        let (raw_session_event_tx, raw_session_event_rx) =
+            tokio::sync::broadcast::channel(live_capacity);
+        drop(raw_session_event_rx);
+        let start_seq = sequence.load(Ordering::Acquire);
+        Self {
+            session_id,
+            session_event_tx,
+            raw_session_event_tx,
+            replay: std::sync::Mutex::new(SessionEventReplayWindow {
+                retained: std::collections::VecDeque::new(),
+                floor_seq: start_seq,
+                evicted: 0,
+            }),
+            replay_capacity: replay_capacity.max(1),
+            sequence,
+            start_seq,
+        }
+    }
+
+    /// Sequence the incarnation's actor starts stamping after.
+    fn start_seq(&self) -> u64 {
+        self.start_seq
+    }
+
+    fn lock_replay(&self) -> std::sync::MutexGuard<'_, SessionEventReplayWindow> {
+        self.replay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn publish(&self, envelope: Arc<EventEnvelope<AgentEvent>>) {
+        let mut replay = self.lock_replay();
+        self.sequence.fetch_max(envelope.seq, Ordering::AcqRel);
+        replay.retained.push_back(Arc::clone(&envelope));
+        while replay.retained.len() > self.replay_capacity {
+            if let Some(evicted) = replay.retained.pop_front() {
+                replay.floor_seq = replay.floor_seq.max(evicted.seq);
+                replay.evicted = replay.evicted.saturating_add(1);
+            }
+        }
+        let raw_envelope =
+            (self.raw_session_event_tx.receiver_count() > 0).then(|| envelope.as_ref().clone());
+        let _ = self.session_event_tx.send(envelope);
+        if let Some(raw_envelope) = raw_envelope {
+            let _ = self.raw_session_event_tx.send(raw_envelope);
+        }
+    }
+
+    fn subscribe_raw(&self) -> tokio::sync::broadcast::Receiver<EventEnvelope<AgentEvent>> {
+        self.raw_session_event_tx.subscribe()
+    }
+
+    fn subscribe(
+        &self,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        use meerkat_core::comms::SessionEventCursor;
+        let replay = self.lock_replay();
+        let (dropped, replayed) = match cursor {
+            SessionEventCursor::Live => (0, Vec::new()),
+            SessionEventCursor::Earliest => (
+                replay.evicted,
+                replay.retained.iter().cloned().collect::<Vec<_>>(),
+            ),
+            SessionEventCursor::After(after) => {
+                let tail = replay
+                    .retained
+                    .back()
+                    .map_or(replay.floor_seq, |newest| newest.seq);
+                if after > tail {
+                    return Err(meerkat_core::comms::StreamError::CursorRejected {
+                        cursor,
+                        reason: meerkat_core::comms::SessionEventCursorRejection::AheadOfTail {
+                            tail,
+                        },
+                    });
+                }
+                // Sequences are monotonic per session, so the unretained
+                // span `(after, floor_seq]` is bounded by its sequence width.
+                let dropped = if after < replay.floor_seq {
+                    let span = replay.floor_seq - after;
+                    if after >= self.start_seq {
+                        span.min(replay.evicted)
+                    } else {
+                        span
+                    }
+                } else {
+                    0
+                };
+                (
+                    dropped,
+                    replay
+                        .retained
+                        .iter()
+                        .filter(|envelope| envelope.seq > after)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            }
+            _ => {
+                return Err(meerkat_core::comms::StreamError::CursorRejected {
+                    cursor,
+                    reason: meerkat_core::comms::SessionEventCursorRejection::ReplayUnsupported,
+                });
+            }
+        };
+        let rx = self.session_event_tx.subscribe();
+        drop(replay);
+        let gap = (dropped > 0).then(|| stream_lagged_marker(self.session_id.clone(), dropped));
+        let head = gap
+            .into_iter()
+            .chain(replayed.into_iter().map(Arc::unwrap_or_clone));
+        Ok(Box::pin(futures::StreamExt::chain(
+            futures::stream::iter(head),
+            lag_aware_session_event_stream(self.session_id.clone(), rx),
+        )))
     }
 }
 
@@ -502,8 +679,7 @@ async fn publish_session_event_to_channels(
     lossless_event_projection_tx: &Arc<
         tokio::sync::Mutex<Option<Arc<LosslessEventProjectionSink>>>,
     >,
-    session_event_tx: &tokio::sync::broadcast::Sender<Arc<EventEnvelope<AgentEvent>>>,
-    raw_session_event_tx: &tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+    event_journal: &SessionEventJournal,
     envelope: EventEnvelope<AgentEvent>,
 ) {
     let envelope = Arc::new(envelope);
@@ -529,7 +705,7 @@ async fn publish_session_event_to_channels(
             lossless_sink.observe_backlog(envelope.source_session_id());
         }
     }
-    publish_session_event_to_broadcasts(session_event_tx, raw_session_event_tx, envelope);
+    event_journal.publish(envelope);
 }
 
 #[cfg(test)]
@@ -586,10 +762,11 @@ mod session_event_stream_tests {
     -> Result<(), String> {
         const EVENT_COUNT: u64 = 1_100;
         let session_id = SessionId::new();
-        let (broadcast_tx, broadcast_rx) = tokio::sync::broadcast::channel(2);
-        let (raw_broadcast_tx, raw_broadcast_rx) = tokio::sync::broadcast::channel(2);
-        drop(raw_broadcast_rx);
-        let mut broadcast_stream = lag_aware_session_event_stream(session_id.clone(), broadcast_rx);
+        let journal =
+            SessionEventJournal::with_capacities(session_id.clone(), Arc::default(), 2, 2);
+        let mut broadcast_stream = journal
+            .subscribe(meerkat_core::comms::SessionEventCursor::Live)
+            .map_err(|error| error.to_string())?;
         let (lossless_tx, mut lossless_rx) = mpsc::unbounded_channel::<QueuedLosslessEvent>();
         let queued_events = Arc::new(AtomicUsize::new(0));
         let lossless_sink = Arc::new(LosslessEventProjectionSink::new(lossless_tx, queued_events));
@@ -598,8 +775,7 @@ mod session_event_stream_tests {
         for seq in 1..=EVENT_COUNT {
             publish_session_event_to_channels(
                 &lossless_slot,
-                &broadcast_tx,
-                &raw_broadcast_tx,
+                &journal,
                 EventEnvelope::new_session(
                     session_id.clone(),
                     seq,
@@ -641,6 +817,164 @@ mod session_event_stream_tests {
                 }
             }
         ));
+        Ok(())
+    }
+
+    fn journal_event(session_id: &SessionId, seq: u64) -> Arc<EventEnvelope<AgentEvent>> {
+        Arc::new(EventEnvelope::new_session(
+            session_id.clone(),
+            seq,
+            None,
+            AgentEvent::StreamTruncated {
+                reason: meerkat_core::event::StreamTruncationReason::ChannelFull,
+            },
+        ))
+    }
+
+    async fn next_seqs(
+        stream: &mut meerkat_core::comms::EventStream,
+        count: usize,
+    ) -> Result<Vec<u64>, String> {
+        let mut seqs = Vec::with_capacity(count);
+        for _ in 0..count {
+            let envelope = stream
+                .next()
+                .await
+                .ok_or_else(|| "stream ended early".to_string())?;
+            seqs.push(envelope.seq);
+        }
+        Ok(seqs)
+    }
+
+    fn lagged_by(envelope: &EventEnvelope<AgentEvent>) -> Option<u64> {
+        match envelope.payload {
+            AgentEvent::StreamTruncated {
+                reason: meerkat_core::event::StreamTruncationReason::StreamLagged { dropped },
+            } if envelope.seq == 0 => Some(dropped),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn earliest_subscription_replays_events_published_before_it_attached()
+    -> Result<(), String> {
+        use meerkat_core::comms::SessionEventCursor;
+        let session_id = SessionId::new();
+        let journal = SessionEventJournal::new(session_id.clone(), Arc::default());
+        for seq in 1..=3 {
+            journal.publish(journal_event(&session_id, seq));
+        }
+        let mut live = journal
+            .subscribe(SessionEventCursor::Live)
+            .map_err(|error| error.to_string())?;
+        let mut earliest = journal
+            .subscribe(SessionEventCursor::Earliest)
+            .map_err(|error| error.to_string())?;
+        let mut after = journal
+            .subscribe(SessionEventCursor::After(2))
+            .map_err(|error| error.to_string())?;
+        journal.publish(journal_event(&session_id, 4));
+
+        assert_eq!(next_seqs(&mut earliest, 4).await?, vec![1, 2, 3, 4]);
+        assert_eq!(next_seqs(&mut after, 2).await?, vec![3, 4]);
+        assert_eq!(next_seqs(&mut live, 1).await?, vec![4]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replay_older_than_the_window_yields_a_typed_gap_first() -> Result<(), String> {
+        use meerkat_core::comms::SessionEventCursor;
+        let session_id = SessionId::new();
+        let journal =
+            SessionEventJournal::with_capacities(session_id.clone(), Arc::default(), 8, 3);
+        for seq in 1..=5 {
+            journal.publish(journal_event(&session_id, seq));
+        }
+        let mut earliest = journal
+            .subscribe(SessionEventCursor::Earliest)
+            .map_err(|error| error.to_string())?;
+        let gap = earliest.next().await.ok_or("expected a gap marker")?;
+        assert_eq!(lagged_by(&gap), Some(2));
+        assert_eq!(next_seqs(&mut earliest, 3).await?, vec![3, 4, 5]);
+
+        let mut after = journal
+            .subscribe(SessionEventCursor::After(1))
+            .map_err(|error| error.to_string())?;
+        let gap = after.next().await.ok_or("expected a gap marker")?;
+        assert_eq!(lagged_by(&gap), Some(1));
+        assert_eq!(next_seqs(&mut after, 3).await?, vec![3, 4, 5]);
+
+        let mut retained = journal
+            .subscribe(SessionEventCursor::After(3))
+            .map_err(|error| error.to_string())?;
+        journal.publish(journal_event(&session_id, 6));
+        assert_eq!(
+            next_seqs(&mut retained, 3).await?,
+            vec![4, 5, 6],
+            "a retained cursor replays without a gap marker"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cursor_ahead_of_the_tail_is_rejected_typed() -> Result<(), String> {
+        use meerkat_core::comms::{SessionEventCursor, SessionEventCursorRejection, StreamError};
+        let session_id = SessionId::new();
+        let journal = SessionEventJournal::new(session_id.clone(), Arc::default());
+        journal.publish(journal_event(&session_id, 1));
+        let Err(error) = journal.subscribe(SessionEventCursor::After(7)) else {
+            return Err("a cursor ahead of the tail must be rejected".to_string());
+        };
+        assert_eq!(
+            error,
+            StreamError::CursorRejected {
+                cursor: SessionEventCursor::After(7),
+                reason: SessionEventCursorRejection::AheadOfTail { tail: 1 },
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn successor_incarnation_continues_the_session_sequence() -> Result<(), String> {
+        use meerkat_core::comms::SessionEventCursor;
+        let session_id = SessionId::new();
+        let sequence = SessionEventSequence::default();
+        let predecessor = SessionEventJournal::new(session_id.clone(), Arc::clone(&sequence));
+        assert_eq!(predecessor.start_seq(), 0);
+        for seq in 1..=4 {
+            predecessor.publish(journal_event(&session_id, seq));
+        }
+        drop(predecessor);
+
+        let successor = SessionEventJournal::new(session_id.clone(), sequence);
+        assert_eq!(
+            successor.start_seq(),
+            4,
+            "the successor continues after seq 4"
+        );
+        successor.publish(journal_event(&session_id, 5));
+        // A cursor from the predecessor stays meaningful: nothing the
+        // successor published is skipped, and the predecessor's unretained
+        // events are reported as a typed gap rather than silently lost.
+        let mut from_predecessor = successor
+            .subscribe(SessionEventCursor::After(2))
+            .map_err(|error| error.to_string())?;
+        let gap = from_predecessor
+            .next()
+            .await
+            .ok_or("expected a gap marker")?;
+        assert_eq!(lagged_by(&gap), Some(2));
+        assert_eq!(next_seqs(&mut from_predecessor, 1).await?, vec![5]);
+
+        let mut earliest = successor
+            .subscribe(SessionEventCursor::Earliest)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            next_seqs(&mut earliest, 1).await?,
+            vec![5],
+            "earliest is the current incarnation's first event, without a gap"
+        );
         Ok(())
     }
 }
@@ -1490,12 +1824,8 @@ struct SessionHandle {
     /// Typed command sender for cancel-after-boundary requests; the agent
     /// task owns the receiver and drains it at the next boundary.
     cancel_after_boundary_handle: Option<CancelAfterBoundarySender>,
-    /// Broadcast channel for session-wide event subscription.
-    session_event_tx: tokio::sync::broadcast::Sender<Arc<EventEnvelope<AgentEvent>>>,
-    /// Owned-event broadcast reserved for the public synchronous raw receiver.
-    /// Normal streams use the shared-envelope lane above, so large payloads
-    /// are cloned only while a raw receiver is actually attached.
-    raw_session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+    /// Live broadcast and bounded replay for session-wide event subscription.
+    event_journal: Arc<SessionEventJournal>,
     /// Singular unbounded queue reserved for an installed persistent event
     /// projector. UI subscribers stay on the lossy broadcast lane, so UI lag
     /// cannot drop projector input.
@@ -1709,8 +2039,7 @@ struct SessionTaskControl {
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
     interrupt_notify: Arc<tokio::sync::Notify>,
     shutdown_notify: Arc<tokio::sync::Notify>,
-    session_event_tx: tokio::sync::broadcast::Sender<Arc<EventEnvelope<AgentEvent>>>,
-    raw_session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+    event_journal: Arc<SessionEventJournal>,
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     lossless_event_projection_tx: Arc<tokio::sync::Mutex<Option<Arc<LosslessEventProjectionSink>>>>,
     archive_snapshot_gate: Arc<ArchiveSnapshotGate>,
@@ -1733,17 +2062,12 @@ impl SessionTaskControl {
         #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
         publish_session_event_to_channels(
             &self.lossless_event_projection_tx,
-            &self.session_event_tx,
-            &self.raw_session_event_tx,
+            &self.event_journal,
             envelope,
         )
         .await;
         #[cfg(not(all(feature = "session-store", not(target_arch = "wasm32"))))]
-        publish_session_event_to_broadcasts(
-            &self.session_event_tx,
-            &self.raw_session_event_tx,
-            Arc::new(envelope),
-        );
+        self.event_journal.publish(Arc::new(envelope));
     }
 
     fn advance_session_context_at(&self, observed_at: SystemTime, reason: &'static str) {
@@ -2587,6 +2911,11 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     /// across every current holder and waiter without retaining rejected or
     /// retired session IDs forever.
     turn_finalization_gates: Mutex<HashMap<SessionId, std::sync::Weak<Mutex<()>>>>,
+    /// Envelope sequence high-water per session, shared by the session's
+    /// successive actor incarnations. Kept for the service's lifetime (like
+    /// `archived_views`), so a session revived after archive keeps counting
+    /// up instead of reusing sequences a subscriber already observed.
+    session_event_sequences: std::sync::Mutex<HashMap<SessionId, SessionEventSequence>>,
     builder: B,
     /// Single typed owner of session materialization status, staged-capacity
     /// custody, and the global active-capacity admission seam.
@@ -2833,12 +3162,25 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Ok(())
     }
 
+    /// The session's envelope sequence high-water, shared with every actor
+    /// incarnation of the session in this service.
+    fn session_event_sequence(&self, id: &SessionId) -> SessionEventSequence {
+        Arc::clone(
+            self.session_event_sequences
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(id.clone())
+                .or_default(),
+        )
+    }
+
     /// Create a new ephemeral session service.
     pub fn new(builder: B, max_sessions: usize) -> Self {
         Self {
             sessions: RwLock::new(IndexMap::new()),
             archived_views: RwLock::new(IndexMap::new()),
             turn_finalization_gates: Mutex::new(HashMap::new()),
+            session_event_sequences: std::sync::Mutex::new(HashMap::new()),
             builder,
             staged_registry: Arc::new(StagedSessionRegistry::bounded(max_sessions)),
             session_registered: tokio::sync::Notify::new(),
@@ -5283,8 +5625,53 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let handle = sessions
             .get(id)
             .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
-        let rx = handle.session_event_tx.subscribe();
-        Ok(lag_aware_session_event_stream(id.clone(), rx))
+        handle
+            .event_journal
+            .subscribe(meerkat_core::comms::SessionEventCursor::Live)
+    }
+
+    /// Subscribe to session-wide events starting at a typed cursor.
+    ///
+    /// Each actor incarnation retains its last `EVENT_REPLAY_CAPACITY`
+    /// envelopes, so a subscriber that attaches after a freshly created or
+    /// restored actor already started its first run still observes that run
+    /// from its first event with [`meerkat_core::comms::SessionEventCursor::Earliest`].
+    /// Replay and live delivery are captured atomically with respect to
+    /// publication; a position older than the retained window yields a typed
+    /// `StreamTruncated(StreamLagged)` marker before the first retained event,
+    /// and a sequence the session has not published is rejected as
+    /// [`meerkat_core::comms::SessionEventCursorRejection::AheadOfTail`].
+    pub async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        self.subscribe_live_actor_session_events_from(id, cursor)
+            .await
+            .map(|subscription| subscription.stream)
+    }
+
+    /// [`Self::subscribe_session_events_from`], also returning the exact live
+    /// actor incarnation the stream belongs to.
+    ///
+    /// The witness and the stream are captured under the same registry read,
+    /// so the stream is that incarnation's for its whole life: it ends when
+    /// that actor ends, and the witness is revoked before the actor is
+    /// removed or replaced. Hosts use it to order a predecessor's remaining
+    /// events before a successor's.
+    pub async fn subscribe_live_actor_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<LiveActorEventSubscription, meerkat_core::comms::StreamError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
+        Ok(LiveActorEventSubscription {
+            actor: handle.actor_witness.clone(),
+            stream: handle.event_journal.subscribe(cursor)?,
+        })
     }
 
     /// Install the singular lossless event stream consumed by the persistent
@@ -5374,7 +5761,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let handle = sessions
             .get(id)
             .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
-        Ok(handle.raw_session_event_tx.subscribe())
+        Ok(handle.event_journal.subscribe_raw())
     }
 
     fn is_session_state_active(state: SessionState) -> bool {
@@ -5597,13 +5984,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             last_assistant_text: initial_summary.last_assistant_text,
         });
         let (llm_identity_tx, llm_identity_rx) = watch::channel(llm_identity);
-        let (session_event_tx, session_event_rx) = tokio::sync::broadcast::channel::<
-            Arc<EventEnvelope<AgentEvent>>,
-        >(EVENT_CHANNEL_CAPACITY);
-        drop(session_event_rx);
-        let (raw_session_event_tx, raw_session_event_rx) =
-            tokio::sync::broadcast::channel::<EventEnvelope<AgentEvent>>(EVENT_CHANNEL_CAPACITY);
-        drop(raw_session_event_rx);
+        let event_journal = Arc::new(SessionEventJournal::new(
+            session_id.clone(),
+            self.session_event_sequence(&session_id),
+        ));
         #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
         let lossless_event_projection_tx = Arc::new(tokio::sync::Mutex::new(None));
         let interrupt_notify = Arc::new(tokio::sync::Notify::new());
@@ -5626,8 +6010,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
                 shutdown_notify: Arc::clone(&shutdown_notify),
-                session_event_tx: session_event_tx.clone(),
-                raw_session_event_tx: raw_session_event_tx.clone(),
+                event_journal: Arc::clone(&event_journal),
                 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
                 lossless_event_projection_tx: Arc::clone(&lossless_event_projection_tx),
                 session_context: session_context.clone(),
@@ -5650,8 +6033,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
                 shutdown_notify: Arc::clone(&shutdown_notify),
-                session_event_tx: session_event_tx.clone(),
-                raw_session_event_tx: raw_session_event_tx.clone(),
+                event_journal: Arc::clone(&event_journal),
                 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
                 lossless_event_projection_tx: Arc::clone(&lossless_event_projection_tx),
                 session_context: session_context.clone(),
@@ -5684,8 +6066,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             interrupt_notify,
             shutdown_notify,
             cancel_after_boundary_handle,
-            session_event_tx,
-            raw_session_event_tx,
+            event_journal,
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             lossless_event_projection_tx,
         };
@@ -6221,6 +6602,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
         EphemeralSessionService::<B>::subscribe_session_events(self, id).await
+    }
+
+    async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        EphemeralSessionService::<B>::subscribe_session_events_from(self, id, cursor).await
     }
 }
 
@@ -7093,7 +7482,9 @@ async fn session_task<A: SessionAgent>(
     deferred_turn_state: Arc<std::sync::Mutex<SessionDeferredTurnState>>,
     control: SessionTaskControl,
 ) {
-    let mut next_seq: u64 = 0;
+    // Continue the session's sequence across actor incarnations so replay
+    // cursors stay meaningful against a successor actor.
+    let mut next_seq: u64 = control.event_journal.start_seq();
     let mut runtime_interaction_terminals = RuntimeInteractionTerminalJournal::default();
     // Lives on the SessionTask incarnation, not inside replaceable Session
     // state. Durable sync and compaction rollback therefore cannot recreate a

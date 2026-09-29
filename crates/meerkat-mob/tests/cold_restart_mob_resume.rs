@@ -851,6 +851,209 @@ async fn mob_cold_restart_resume_with_durable_runtime_store() {
     run_cold_restart_scenario(true, MobRuntimeMode::TurnDriven).await;
 }
 
+/// Collect a member's agent events until its first run completes.
+async fn collect_until_run_completed(
+    stream: &mut meerkat_core::comms::EventStream,
+    context: &str,
+) -> Vec<meerkat_core::event::EventEnvelope<meerkat_core::AgentEvent>> {
+    use futures::StreamExt as _;
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(envelope) = stream.next().await {
+            let completed = matches!(
+                envelope.payload,
+                meerkat_core::AgentEvent::RunCompleted { .. }
+            );
+            events.push(envelope);
+            if completed {
+                return;
+            }
+        }
+        panic!("[{context}] agent event stream ended before RunCompleted");
+    })
+    .await
+    .unwrap_or_else(|_| panic!("[{context}] timed out waiting for RunCompleted: {events:?}"));
+    events
+}
+
+/// Issue #1236: after an rpc_gateway-style cold restart, a host that attaches
+/// to a restored member through `MobHandle` only after the member's first run
+/// already ran still observes that run from its first `RunStarted` /
+/// `TurnStarted`, with no gap marker. A cursor resumes after an observed
+/// sequence, and a member whose session actor is gone surfaces as the typed
+/// `MemberSessionNotLive` instead of `Internal(String)`.
+#[tokio::test(flavor = "multi_thread")]
+async fn restored_member_first_run_replays_to_a_late_subscriber() {
+    use meerkat_core::comms::SessionEventCursor;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let worker = AgentIdentity::from("w-1");
+
+    // ---------------- Lifetime 1 ----------------
+    let runtime_store_1: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(&paths.realm_db_path)
+            .expect("open durable runtime store"),
+    );
+    let (service_1, _store_1) = persistent_service(&paths, runtime_store_1.clone());
+    let storage_1 = MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage");
+    let handle_1 = MobBuilder::new(mob_definition(MobRuntimeMode::TurnDriven), storage_1)
+        .with_session_service(service_1.clone())
+        .with_default_llm_client(openai_test_client())
+        .create()
+        .await
+        .expect("create persistent mob");
+    handle_1
+        .spawn_spec(SpawnMemberSpec::new("worker", worker.clone()))
+        .await
+        .expect("spawn worker");
+    let w1_sid = handle_1
+        .resolve_bridge_session_id(&worker)
+        .await
+        .expect("worker session id");
+    send_and_wait(
+        &handle_1,
+        service_1.as_ref(),
+        "w-1",
+        "PRE_RESTART_REPLAY_TURN",
+        "lifetime1",
+    )
+    .await;
+    handle_1
+        .shutdown()
+        .await
+        .expect("shutdown mob before restart");
+    service_1
+        .discard_live_session(&w1_sid)
+        .await
+        .expect("discard live session before restart");
+    drop(handle_1);
+    drop(service_1);
+    drop(runtime_store_1);
+
+    // ---------------- Lifetime 2 ----------------
+    let runtime_store_2: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(&paths.realm_db_path)
+            .expect("reopen durable runtime store"),
+    );
+    let (service_2, _store_2) = persistent_service(&paths, runtime_store_2);
+    let storage_2 = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
+    let handle_2 = MobBuilder::for_resume(storage_2)
+        .with_session_service(service_2.clone())
+        .with_default_llm_client(openai_test_client())
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("mob resume after cold restart");
+    assert_member_active(&member_entry(&handle_2, "w-1").await, "lifetime2");
+
+    // The restored actor's first run completes before any host attaches.
+    send_and_wait(
+        &handle_2,
+        service_2.as_ref(),
+        "w-1",
+        "POST_RESTART_REPLAY_TURN",
+        "lifetime2",
+    )
+    .await;
+
+    let replayed = handle_2
+        .subscribe_agent_events_from(&worker, SessionEventCursor::Earliest)
+        .await
+        .expect("late earliest subscription through MobHandle");
+    let restored_actor = replayed
+        .actor
+        .clone()
+        .expect("a local member subscription names its actor incarnation");
+    assert!(restored_actor.is_live());
+    let mut replayed = replayed.stream;
+    let events = collect_until_run_completed(&mut replayed, "earliest").await;
+    let payloads: Vec<&meerkat_core::AgentEvent> =
+        events.iter().map(|envelope| &envelope.payload).collect();
+    assert!(
+        !payloads
+            .iter()
+            .any(|payload| matches!(payload, meerkat_core::AgentEvent::StreamTruncated { .. })),
+        "the restored actor's head is retained, so no gap marker: {payloads:?}"
+    );
+    let run_started = payloads
+        .iter()
+        .position(|payload| matches!(payload, meerkat_core::AgentEvent::RunStarted { .. }))
+        .unwrap_or_else(|| panic!("late subscriber missed RunStarted: {payloads:?}"));
+    let turn_started = payloads
+        .iter()
+        .position(|payload| matches!(payload, meerkat_core::AgentEvent::TurnStarted { .. }))
+        .unwrap_or_else(|| panic!("late subscriber missed TurnStarted: {payloads:?}"));
+    assert!(run_started < turn_started, "{payloads:?}");
+    assert!(
+        events.windows(2).all(|pair| pair[0].seq < pair[1].seq),
+        "replayed envelopes arrive in sequence order: {events:?}"
+    );
+
+    // A cursor resumes strictly after an observed sequence.
+    let run_started_seq = events[run_started].seq;
+    let mut resumed = handle_2
+        .subscribe_agent_events_from(&worker, SessionEventCursor::After(run_started_seq))
+        .await
+        .expect("cursor subscription through MobHandle")
+        .stream;
+    let resumed_events = collect_until_run_completed(&mut resumed, "after").await;
+    assert_eq!(
+        resumed_events
+            .iter()
+            .map(|envelope| envelope.seq)
+            .collect::<Vec<_>>(),
+        events
+            .iter()
+            .map(|envelope| envelope.seq)
+            .filter(|seq| *seq > run_started_seq)
+            .collect::<Vec<_>>(),
+        "a cursor replays exactly the envelopes after it"
+    );
+
+    // A cursor from another sequence space is rejected typed.
+    let tail = events.last().map_or(0, |envelope| envelope.seq);
+    let ahead = match handle_2
+        .subscribe_agent_events_from(&worker, SessionEventCursor::After(tail + 1_000))
+        .await
+    {
+        Ok(_) => panic!("a cursor ahead of the tail must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            ahead,
+            meerkat_mob::MobError::AgentEventCursorRejected {
+                reason: meerkat_core::comms::SessionEventCursorRejection::AheadOfTail { .. },
+                ..
+            }
+        ),
+        "{ahead:?}"
+    );
+
+    // A member whose session actor is gone is a typed not-live outcome.
+    service_2
+        .discard_live_session(&w1_sid)
+        .await
+        .expect("discard the restored actor");
+    assert!(
+        !restored_actor.is_live(),
+        "discarding the actor revokes the subscription's witness"
+    );
+    let not_live = match handle_2.subscribe_agent_events(&worker).await {
+        Ok(_) => panic!("a member without a live session actor cannot be subscribed"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &not_live,
+            meerkat_mob::MobError::MemberSessionNotLive { agent_identity, session_id }
+                if agent_identity == &worker && session_id == &w1_sid
+        ),
+        "{not_live:?}"
+    );
+    assert!(not_live.is_missing_target());
+}
+
 /// RuntimeStore is the singular committed body/catalog authority. Replacing it
 /// with a blank store is durable data loss, so stale non-authoritative
 /// SessionStore projections must not resurrect either member.

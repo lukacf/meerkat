@@ -2961,6 +2961,29 @@ pub trait SessionService: Send + Sync {
         Err(StreamError::NotFound(format!("session {id}")))
     }
 
+    /// Subscribe to session-wide events starting at a typed cursor.
+    ///
+    /// [`crate::comms::SessionEventCursor::Live`] is identical to
+    /// [`Self::subscribe_session_events`]. Replaying cursors need a service
+    /// that retains the session's events; the default refuses them with
+    /// [`StreamError::CursorRejected`] carrying
+    /// [`crate::comms::SessionEventCursorRejection::ReplayUnsupported`], so a
+    /// wrapper that forgets to forward this method fails loudly instead of
+    /// silently degrading to live-only delivery.
+    async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: crate::comms::SessionEventCursor,
+    ) -> Result<EventStream, StreamError> {
+        match cursor {
+            crate::comms::SessionEventCursor::Live => self.subscribe_session_events(id).await,
+            cursor => Err(StreamError::CursorRejected {
+                cursor,
+                reason: crate::comms::SessionEventCursorRejection::ReplayUnsupported,
+            }),
+        }
+    }
+
     /// Record a typed live-adapter terminal error against a session.
     ///
     /// A live (realtime) channel can terminalize for reasons that are not

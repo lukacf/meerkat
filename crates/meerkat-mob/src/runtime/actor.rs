@@ -26915,14 +26915,21 @@ impl MobActor {
                 }
                 MobCommand::EnsureMemberEventTap {
                     agent_identity,
+                    cursor,
                     reply_tx,
                 } => {
                     // Atomic ensure+tap: a tap opened AFTER a separate
                     // ensure can miss the fresh pump's first pages.
                     let result = match self.member_pump_tap_material(&agent_identity).await {
-                        Ok(material) => {
-                            Ok(self.member_event_pumps.ensure_pump_with_tap(material).await)
-                        }
+                        Ok(material) => self
+                            .member_event_pumps
+                            .ensure_pump_with_tap_from(material, cursor)
+                            .await
+                            .map_err(|reason| MobError::AgentEventCursorRejected {
+                                agent_identity: agent_identity.clone(),
+                                cursor,
+                                reason,
+                            }),
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);

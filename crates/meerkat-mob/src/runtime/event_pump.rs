@@ -74,6 +74,116 @@ const POLL_BACKOFF_FLOOR: Duration = Duration::from_secs(1);
 const POLL_BACKOFF_CEIL: Duration = Duration::from_secs(30);
 /// Tap capacity; a full tap drops THAT consumer, never blocks the pump.
 const TAP_CAPACITY: usize = 256;
+/// Attributed events one pump entry retains for cursor replay
+/// ([`meerkat_core::comms::SessionEventCursor`]). Replay beyond this window is
+/// reported as a typed `StreamTruncated(StreamLagged)` marker.
+const TAP_REPLAY_CAPACITY: usize = 1_024;
+
+/// Where a fanned-out event came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FanOutOrigin {
+    /// A durable member event row.
+    Row { durable_seq: u64 },
+    /// A synthetic pump-authored marker (a typed truncation notice).
+    Marker,
+}
+
+/// Bounded replay window of the events one member pump residency fanned out.
+///
+/// It is updated under the manager state lock together with the fan-out to
+/// taps, and replaying taps are opened under the same lock, so a replayed tap
+/// neither misses nor repeats an event at the replay/live boundary.
+#[derive(Default)]
+struct TapReplayWindow {
+    retained: VecDeque<(FanOutOrigin, AttributedEvent)>,
+    /// Newest durable row delivered by this residency. A same-residency pump
+    /// replacement reloads the frozen durable cursor and re-reads rows that
+    /// were already delivered; those are neither retained nor fanned out
+    /// again.
+    newest_durable_seq: Option<u64>,
+    /// Envelope sequence of the newest evicted row.
+    floor_seq: u64,
+    /// Events evicted from the window.
+    evicted: u64,
+}
+
+impl TapReplayWindow {
+    /// Record one event. Returns `false` for an already-delivered row.
+    fn record(&mut self, origin: FanOutOrigin, event: &AttributedEvent) -> bool {
+        if let FanOutOrigin::Row { durable_seq } = origin {
+            if self
+                .newest_durable_seq
+                .is_some_and(|newest| durable_seq <= newest)
+            {
+                return false;
+            }
+            self.newest_durable_seq = Some(durable_seq);
+        }
+        self.retained.push_back((origin, event.clone()));
+        while self.retained.len() > TAP_REPLAY_CAPACITY {
+            if let Some((origin, evicted)) = self.retained.pop_front() {
+                if matches!(origin, FanOutOrigin::Row { .. }) {
+                    self.floor_seq = self.floor_seq.max(evicted.envelope.seq);
+                }
+                self.evicted = self.evicted.saturating_add(1);
+            }
+        }
+        true
+    }
+
+    /// Open a tap that first replays the retained events `cursor` selects.
+    fn open_tap(
+        &self,
+        cursor: meerkat_core::comms::SessionEventCursor,
+        gap_marker: impl FnOnce(u64) -> AttributedEvent,
+    ) -> Result<
+        (
+            mpsc::Sender<AttributedEvent>,
+            mpsc::Receiver<AttributedEvent>,
+        ),
+        meerkat_core::comms::SessionEventCursorRejection,
+    > {
+        use meerkat_core::comms::{SessionEventCursor, SessionEventCursorRejection};
+        let (dropped, first_replayed) = match cursor {
+            SessionEventCursor::Live => (0, self.retained.len()),
+            SessionEventCursor::Earliest => (self.evicted, 0),
+            SessionEventCursor::After(after) => {
+                let tail = self
+                    .retained
+                    .iter()
+                    .rev()
+                    .find(|(origin, _)| matches!(origin, FanOutOrigin::Row { .. }))
+                    .map_or(self.floor_seq, |(_, event)| event.envelope.seq);
+                if after > tail {
+                    return Err(SessionEventCursorRejection::AheadOfTail { tail });
+                }
+                let dropped = if after < self.floor_seq {
+                    (self.floor_seq - after).min(self.evicted)
+                } else {
+                    0
+                };
+                let first = self
+                    .retained
+                    .iter()
+                    .position(|(origin, event)| {
+                        matches!(origin, FanOutOrigin::Row { .. }) && event.envelope.seq > after
+                    })
+                    .unwrap_or(self.retained.len());
+                (dropped, first)
+            }
+            _ => return Err(SessionEventCursorRejection::ReplayUnsupported),
+        };
+        let replayed = self.retained.len() - first_replayed;
+        let (tx, rx) = mpsc::channel(TAP_CAPACITY + replayed + 1);
+        if dropped > 0 {
+            let _ = tx.try_send(gap_marker(dropped));
+        }
+        for (_, event) in self.retained.iter().skip(first_replayed) {
+            let _ = tx.try_send(event.clone());
+        }
+        Ok((tx, rx))
+    }
+}
 /// Typed failure reason resolved into completion waiters when their
 /// member's pump stops before the remote turn completed: the awaiting
 /// completion task holds the waiter registry's `Arc`, so an unresolved
@@ -911,6 +1021,9 @@ struct PumpEntry {
     peer: meerkat_core::comms::TrustedPeerDescriptor,
     /// Live event taps; closed receivers are pruned on send.
     taps: Vec<mpsc::Sender<AttributedEvent>>,
+    /// Bounded replay of what this residency fanned out; inherited by a
+    /// same-residency replacement together with the taps.
+    replay: TapReplayWindow,
     /// Explicit obligation keep-alive (A17): set by
     /// `ensure_pump_for_obligation`, cleared when the machine's
     /// `pending_remote_turn_outcomes` re-derivation says so at resume; the
@@ -1521,16 +1634,17 @@ impl MemberEventPumpManager {
             .pumps
             .remove(&material.agent_identity);
         drop(replacement);
-        let (mut inherited_taps, rewind_same_residency) = if let Some(entry) = replaced {
-            if entry.expected_member == material.expected_member {
-                (entry.taps, true)
+        let (mut inherited_taps, inherited_replay, rewind_same_residency) =
+            if let Some(entry) = replaced {
+                if entry.expected_member == material.expected_member {
+                    (entry.taps, entry.replay, true)
+                } else {
+                    self.waiters.fail_all_for(&entry.expected_member);
+                    (Vec::new(), TapReplayWindow::default(), false)
+                }
             } else {
-                self.waiters.fail_all_for(&entry.expected_member);
-                (Vec::new(), false)
-            }
-        } else {
-            (Vec::new(), false)
-        };
+                (Vec::new(), TapReplayWindow::default(), false)
+            };
         let _transition = transition;
         inherited_taps.retain(|tap| !tap.is_closed());
         if !self
@@ -1570,6 +1684,7 @@ impl MemberEventPumpManager {
                     runtime_id: material.runtime_id.clone(),
                     peer: material.peer.clone(),
                     taps: inherited_taps,
+                    replay: inherited_replay,
                     // `ensure_pump` is the obligation/completion lane. Keep
                     // the fresh task polling immediately; the per-page
                     // machine probe clears this once no custody remains.
@@ -1641,6 +1756,63 @@ impl MemberEventPumpManager {
         Some(rx)
     }
 
+    /// Ensure a pump and open a tap that starts at `cursor`.
+    ///
+    /// A live cursor keeps [`Self::ensure_pump_with_tap`]'s single-transition
+    /// guarantee. A replaying cursor does not need it: every event the pump
+    /// fans out is retained in the residency's replay window, so the tap is
+    /// opened from that window, atomically with fan-out, once the pump
+    /// exists. A pump replaced between the two steps is re-ensured.
+    pub(crate) async fn ensure_pump_with_tap_from(
+        self: &Arc<Self>,
+        material: MemberPumpMaterial,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<mpsc::Receiver<AttributedEvent>, meerkat_core::comms::SessionEventCursorRejection>
+    {
+        if cursor == meerkat_core::comms::SessionEventCursor::Live {
+            return Ok(self.ensure_pump_with_tap(material).await);
+        }
+        loop {
+            // The live tap keeps the pump alive until the replaying tap
+            // replaces it below.
+            let keepalive = self.ensure_pump_with_tap(material.clone()).await;
+            if !self
+                .accepting_pumps
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Ok(keepalive);
+            }
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(entry) = state.pumps.get_mut(&material.agent_identity) else {
+                continue;
+            };
+            if entry.exiting || entry.expected_member != material.expected_member {
+                continue;
+            }
+            let (tx, rx) = entry.replay.open_tap(cursor, |dropped| AttributedEvent {
+                source: material.runtime_id.clone(),
+                source_fence_token: material.fence_token,
+                role: material.role.clone(),
+                envelope: EventEnvelope::new_with_source(
+                    EventSourceIdentity::runtime(material.runtime_id.to_string()),
+                    0,
+                    Some(self.mob_id.to_string()),
+                    AgentEvent::StreamTruncated {
+                        reason: StreamTruncationReason::StreamLagged { dropped },
+                    },
+                ),
+            })?;
+            entry.taps.push(tx);
+            drop(state);
+            drop(keepalive);
+            self.liveness_changed.notify_waiters();
+            return Ok(rx);
+        }
+    }
+
     /// Ensure a pump AND open a tap in ONE state transition: a tap opened
     /// after a separate ensure can miss the fresh pump's first pages (the
     /// loop starts polling as soon as it spawns). Respawn replacement
@@ -1709,16 +1881,16 @@ impl MemberEventPumpManager {
             .pumps
             .remove(&material.agent_identity);
         drop(replacement);
-        let (mut inherited_taps, inherited_keepalive, rewind_same_residency) =
+        let (mut inherited_taps, inherited_replay, inherited_keepalive, rewind_same_residency) =
             if let Some(entry) = replaced {
                 if entry.expected_member == material.expected_member {
-                    (entry.taps, entry.obligation_keepalive, true)
+                    (entry.taps, entry.replay, entry.obligation_keepalive, true)
                 } else {
                     self.waiters.fail_all_for(&entry.expected_member);
-                    (Vec::new(), false, false)
+                    (Vec::new(), TapReplayWindow::default(), false, false)
                 }
             } else {
-                (Vec::new(), false, false)
+                (Vec::new(), TapReplayWindow::default(), false, false)
             };
         let _transition = transition;
         inherited_taps.retain(|tap| !tap.is_closed());
@@ -1757,6 +1929,7 @@ impl MemberEventPumpManager {
                     runtime_id: material.runtime_id.clone(),
                     peer: material.peer.clone(),
                     taps: inherited_taps,
+                    replay: inherited_replay,
                     obligation_keepalive: inherited_keepalive,
                 },
             );
@@ -1957,6 +2130,7 @@ impl MemberEventPumpManager {
         identity: &AgentIdentity,
         expected_member: &BridgeMemberIncarnation,
         incarnation: u64,
+        origin: FanOutOrigin,
         event: &AttributedEvent,
     ) {
         let mut state = self
@@ -1970,6 +2144,9 @@ impl MemberEventPumpManager {
             || entry.incarnation != incarnation
             || &entry.expected_member != expected_member
         {
+            return;
+        }
+        if !entry.replay.record(origin, event) {
             return;
         }
         entry.taps.retain(|tap| match tap.try_send(event.clone()) {
@@ -2004,6 +2181,7 @@ impl MemberEventPumpManager {
             &material.agent_identity,
             &material.expected_member,
             incarnation,
+            FanOutOrigin::Marker,
             &AttributedEvent {
                 source: material.runtime_id.clone(),
                 source_fence_token: material.fence_token,
@@ -2478,6 +2656,7 @@ async fn run_member_pump(
                         &identity,
                         &material.expected_member,
                         incarnation,
+                        FanOutOrigin::Row { durable_seq: seq },
                         &AttributedEvent {
                             source: material.runtime_id.clone(),
                             source_fence_token: material.fence_token,
@@ -2952,6 +3131,108 @@ async fn poll_once(
 // waiter resolution ordering both directions (register-then-resolve and
 // resolve-then-register), never a dispatch-ack degrade.
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tap_replay_window_tests {
+    use super::*;
+    use meerkat_core::comms::{SessionEventCursor, SessionEventCursorRejection};
+
+    fn row(seq: u64) -> AttributedEvent {
+        AttributedEvent {
+            source: AgentRuntimeId::initial(crate::ids::AgentIdentity::from("worker")),
+            source_fence_token: FenceToken::new(1),
+            role: ProfileName::from("worker"),
+            envelope: EventEnvelope::new(
+                "worker".to_string(),
+                seq,
+                None,
+                AgentEvent::TurnStarted {
+                    turn_number: 1,
+                    assistant_message_id: None,
+                },
+            ),
+        }
+    }
+
+    fn gap(dropped: u64) -> AttributedEvent {
+        let mut marker = row(0);
+        marker.envelope.payload = AgentEvent::StreamTruncated {
+            reason: StreamTruncationReason::StreamLagged { dropped },
+        };
+        marker
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<AttributedEvent>) -> Vec<AttributedEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    fn seqs(events: &[AttributedEvent]) -> Vec<u64> {
+        events.iter().map(|event| event.envelope.seq).collect()
+    }
+
+    #[test]
+    fn earliest_tap_replays_what_the_pump_delivered_before_it_opened() {
+        let mut window = TapReplayWindow::default();
+        for seq in 1..=3 {
+            assert!(window.record(
+                FanOutOrigin::Row {
+                    durable_seq: seq * 10
+                },
+                &row(seq)
+            ));
+        }
+        let (_tx, mut rx) = window.open_tap(SessionEventCursor::Earliest, gap).unwrap();
+        assert_eq!(seqs(&drain(&mut rx)), vec![1, 2, 3]);
+        let (_tx, mut rx) = window.open_tap(SessionEventCursor::After(2), gap).unwrap();
+        assert_eq!(seqs(&drain(&mut rx)), vec![3]);
+        let (_tx, mut rx) = window.open_tap(SessionEventCursor::Live, gap).unwrap();
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn same_residency_reread_rows_are_not_retained_or_fanned_out_twice() {
+        let mut window = TapReplayWindow::default();
+        assert!(window.record(FanOutOrigin::Row { durable_seq: 5 }, &row(1)));
+        assert!(window.record(FanOutOrigin::Row { durable_seq: 6 }, &row(2)));
+        assert!(!window.record(FanOutOrigin::Row { durable_seq: 6 }, &row(2)));
+        assert!(window.record(FanOutOrigin::Marker, &gap(1)));
+        assert!(window.record(FanOutOrigin::Row { durable_seq: 7 }, &row(3)));
+        let (_tx, mut rx) = window.open_tap(SessionEventCursor::Earliest, gap).unwrap();
+        assert_eq!(seqs(&drain(&mut rx)), vec![1, 2, 0, 3]);
+    }
+
+    #[test]
+    fn replay_beyond_the_window_is_a_typed_gap_and_a_future_cursor_is_rejected() {
+        let mut window = TapReplayWindow::default();
+        let total = u64::try_from(TAP_REPLAY_CAPACITY).unwrap() + 2;
+        for seq in 1..=total {
+            window.record(FanOutOrigin::Row { durable_seq: seq }, &row(seq));
+        }
+        let (_tx, mut rx) = window.open_tap(SessionEventCursor::Earliest, gap).unwrap();
+        let events = drain(&mut rx);
+        assert!(matches!(
+            events[0].envelope.payload,
+            AgentEvent::StreamTruncated {
+                reason: StreamTruncationReason::StreamLagged { dropped: 2 }
+            }
+        ));
+        assert_eq!(events[1].envelope.seq, 3);
+        assert_eq!(events.len(), TAP_REPLAY_CAPACITY + 1);
+
+        assert_eq!(
+            window
+                .open_tap(SessionEventCursor::After(total + 1), gap)
+                .map(|_| ())
+                .unwrap_err(),
+            SessionEventCursorRejection::AheadOfTail { tail: total }
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -4033,6 +4314,7 @@ mod tests {
                     runtime_id: runtime_id.clone(),
                     peer,
                     taps: Vec::new(),
+                    replay: TapReplayWindow::default(),
                     obligation_keepalive: false,
                 },
             );
@@ -4451,6 +4733,7 @@ mod tests {
                     runtime_id: runtime_id.clone(),
                     peer: peer.clone(),
                     taps: Vec::new(),
+                    replay: TapReplayWindow::default(),
                     obligation_keepalive: true,
                 },
             );
@@ -4553,6 +4836,7 @@ mod tests {
                     runtime_id: runtime_id.clone(),
                     peer: stale_peer,
                     taps: Vec::new(),
+                    replay: TapReplayWindow::default(),
                     obligation_keepalive: true,
                 },
             );
@@ -5238,6 +5522,7 @@ mod tests {
                     runtime_id: runtime_id.clone(),
                     peer,
                     taps: vec![tap],
+                    replay: TapReplayWindow::default(),
                     obligation_keepalive: false,
                 },
             );
@@ -5301,6 +5586,7 @@ mod tests {
             &identity,
             &old_member,
             1,
+            FanOutOrigin::Marker,
             &AttributedEvent {
                 source: runtime_id.clone(),
                 source_fence_token: FenceToken::new(old_member.fence_token),
@@ -5388,6 +5674,7 @@ mod tests {
                     runtime_id: runtime_id.clone(),
                     peer: peer.clone(),
                     taps: vec![tap],
+                    replay: TapReplayWindow::default(),
                     obligation_keepalive: false,
                 },
             );
@@ -5744,6 +6031,7 @@ mod tests {
             &identity,
             &expected_member,
             1,
+            FanOutOrigin::Marker,
             &AttributedEvent {
                 source: runtime_id,
                 source_fence_token: fence_token,

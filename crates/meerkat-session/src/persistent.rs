@@ -13433,6 +13433,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         self.inner.subscribe_session_events(id).await
     }
 
+    async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        self.inner.subscribe_session_events_from(id, cursor).await
+    }
+
     /// Route the typed live-adapter terminal cause onto the session's owned
     /// event stream via the inner ephemeral service. Overrides the trait's
     /// `Unsupported` default so the live projection sink does not regress its
@@ -14343,6 +14351,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
         self.inner.subscribe_session_events(id).await
+    }
+
+    /// Subscribe to session-wide events from the live inner service starting
+    /// at a typed cursor; see
+    /// [`crate::EphemeralSessionService::subscribe_session_events_from`].
+    pub async fn subscribe_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+        self.inner.subscribe_session_events_from(id, cursor).await
+    }
+
+    /// Witness-bearing cursor subscription from the live inner service; see
+    /// [`crate::EphemeralSessionService::subscribe_live_actor_session_events_from`].
+    pub async fn subscribe_live_actor_session_events_from(
+        &self,
+        id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<crate::LiveActorEventSubscription, meerkat_core::comms::StreamError> {
+        self.inner
+            .subscribe_live_actor_session_events_from(id, cursor)
+            .await
     }
 
     /// Whether a live session still has its deferred first turn pending.

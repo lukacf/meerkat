@@ -1035,6 +1035,39 @@ pub(crate) fn durable_fork_unsupported() -> SessionError {
     )
 }
 
+/// A member's agent event subscription, with the exact live actor
+/// incarnation its stream belongs to when the session service knows it.
+///
+/// A known actor's stream ends when that actor ends, and its witness is
+/// revoked before the actor is removed or replaced, so a host can hold a
+/// successor's stream back until a revoked predecessor's stream drained.
+pub struct AgentEventSubscription {
+    /// The member's events.
+    pub stream: EventStream,
+    /// The actor incarnation `stream` belongs to. `None` when the service
+    /// cannot name it (for example a placed member's pump-tap stream).
+    pub actor: Option<meerkat_session::LiveSessionActorWitness>,
+}
+
+impl AgentEventSubscription {
+    /// A subscription whose actor incarnation is unknown.
+    pub fn without_actor(stream: EventStream) -> Self {
+        Self {
+            stream,
+            actor: None,
+        }
+    }
+}
+
+impl From<meerkat_session::LiveActorEventSubscription> for AgentEventSubscription {
+    fn from(subscription: meerkat_session::LiveActorEventSubscription) -> Self {
+        Self {
+            stream: subscription.stream,
+            actor: Some(subscription.actor),
+        }
+    }
+}
+
 /// Extension trait for session services used by the mob runtime.
 ///
 /// Builds on `SessionServiceCommsExt` from core so mob orchestration can use
@@ -1213,6 +1246,28 @@ pub trait MobSessionService:
         session_id: &SessionId,
     ) -> Result<EventStream, StreamError> {
         <Self as SessionService>::subscribe_session_events(self, session_id).await
+    }
+
+    /// Subscribe to a member session's events starting at a typed cursor,
+    /// together with the exact live actor incarnation the stream belongs to
+    /// when the service knows it.
+    ///
+    /// Decorators must forward this. The default names no actor witness: a
+    /// live cursor keeps [`Self::subscribe_session_events`], and a replaying
+    /// cursor delegates to `SessionService::subscribe_session_events_from`,
+    /// whose own default refuses it as `ReplayUnsupported`.
+    async fn subscribe_agent_session_events_from(
+        &self,
+        session_id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<AgentEventSubscription, StreamError> {
+        let stream = if cursor == meerkat_core::comms::SessionEventCursor::Live {
+            MobSessionService::subscribe_session_events(self, session_id).await?
+        } else {
+            <Self as SessionService>::subscribe_session_events_from(self, session_id, cursor)
+                .await?
+        };
+        Ok(AgentEventSubscription::without_actor(stream))
     }
 
     /// Whether this service satisfies the persistent-session contract required
@@ -2418,6 +2473,18 @@ where
             .await
     }
 
+    async fn subscribe_agent_session_events_from(
+        &self,
+        session_id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<AgentEventSubscription, StreamError> {
+        meerkat_session::EphemeralSessionService::<B>::subscribe_live_actor_session_events_from(
+            self, session_id, cursor,
+        )
+        .await
+        .map(AgentEventSubscription::from)
+    }
+
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
         meerkat_session::EphemeralSessionService::<B>::discard_live_session(self, session_id).await
     }
@@ -3368,6 +3435,18 @@ where
     ) -> Result<EventStream, StreamError> {
         meerkat_session::PersistentSessionService::<B>::subscribe_session_events(self, session_id)
             .await
+    }
+
+    async fn subscribe_agent_session_events_from(
+        &self,
+        session_id: &SessionId,
+        cursor: meerkat_core::comms::SessionEventCursor,
+    ) -> Result<AgentEventSubscription, StreamError> {
+        meerkat_session::PersistentSessionService::<B>::subscribe_live_actor_session_events_from(
+            self, session_id, cursor,
+        )
+        .await
+        .map(AgentEventSubscription::from)
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {

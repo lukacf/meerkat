@@ -2013,9 +2013,71 @@ pub enum StreamScope {
 /// Typed stream over enveloped agent events.
 pub type EventStream = Pin<Box<dyn Stream<Item = EventEnvelope<AgentEvent>> + Send>>;
 
+/// Where a session event subscription starts.
+///
+/// Envelope sequences (`EventEnvelope::seq`) are monotonic per session within
+/// one session service: a successor actor for the same session continues the
+/// sequence of its predecessor instead of restarting at zero, so a cursor
+/// taken from one actor incarnation stays meaningful against the next.
+///
+/// A replayed subscription is gap-free against live delivery: the retained
+/// envelopes and the live receiver are captured atomically with respect to
+/// publication, so no envelope is delivered twice or skipped between the two.
+/// When the requested position predates what the service still retains, the
+/// stream begins with a synthetic `AgentEvent::StreamTruncated` marker whose
+/// reason is [`crate::event::StreamTruncationReason::StreamLagged`] before the
+/// first retained envelope, never a silent gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum SessionEventCursor {
+    /// Only envelopes published after the subscription attaches.
+    #[default]
+    Live,
+    /// Every envelope the current actor incarnation still retains, from its
+    /// first envelope while that is retained, then live delivery.
+    Earliest,
+    /// Envelopes whose sequence is strictly greater than the given sequence,
+    /// then live delivery.
+    After(u64),
+}
+
+/// Why a session event subscription rejected its [`SessionEventCursor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SessionEventCursorRejection {
+    /// The service does not retain session events for replay.
+    ReplayUnsupported,
+    /// The cursor names a sequence the session has not published yet, so it
+    /// belongs to a different sequence space (for example one issued before
+    /// a process restart). Resubscribe from [`SessionEventCursor::Earliest`].
+    AheadOfTail {
+        /// Newest sequence the session has published.
+        tail: u64,
+    },
+}
+
+impl std::fmt::Display for SessionEventCursorRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReplayUnsupported => write!(f, "the service does not retain events for replay"),
+            Self::AheadOfTail { tail } => {
+                write!(
+                    f,
+                    "the cursor is ahead of the session's newest sequence {tail}"
+                )
+            }
+        }
+    }
+}
+
 /// Errors for stream attachment and lookup.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum StreamError {
+    #[error("session event cursor {cursor:?} rejected: {reason}")]
+    CursorRejected {
+        cursor: SessionEventCursor,
+        reason: SessionEventCursorRejection,
+    },
     #[error("interaction not reserved: {0}")]
     NotReserved(InteractionId),
     #[error("stream not found: {0}")]

@@ -596,7 +596,11 @@ impl From<WireReasoningEffort> for meerkat_core::lifecycle::run_primitive::Reaso
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireAnthropicThinkingConfig {
     Adaptive,
-    Enabled { budget_tokens: u32 },
+    Enabled {
+        budget_tokens: u32,
+    },
+    /// No up-front thinking; progress updates between tool calls only.
+    BetweenTools,
 }
 
 impl From<meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig>
@@ -607,6 +611,7 @@ impl From<meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig>
         match value {
             Core::Adaptive => Self::Adaptive,
             Core::Enabled { budget_tokens } => Self::Enabled { budget_tokens },
+            Core::BetweenTools => Self::BetweenTools,
         }
     }
 }
@@ -620,6 +625,7 @@ impl From<WireAnthropicThinkingConfig>
             WireAnthropicThinkingConfig::Enabled { budget_tokens } => {
                 Self::Enabled { budget_tokens }
             }
+            WireAnthropicThinkingConfig::BetweenTools => Self::BetweenTools,
         }
     }
 }

@@ -452,6 +452,22 @@ pub enum AnthropicThinkingConfig {
     /// Explicit budget — model emits at most `budget_tokens` tokens of
     /// reasoning before the assistant text.
     Enabled { budget_tokens: u32 },
+    /// No up-front thinking: the model only writes short progress updates
+    /// between tool calls. The lowest thinking setting on models whose
+    /// catalog row admits it (Claude Sonnet 5.5), accepted at `high` effort
+    /// or below; wire shape `{"type": "between_tools"}`.
+    BetweenTools,
+}
+
+impl AnthropicThinkingConfig {
+    /// Provider wire name of the thinking `type`.
+    pub const fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Adaptive => "adaptive",
+            Self::Enabled { .. } => "enabled",
+            Self::BetweenTools => "between_tools",
+        }
+    }
 }
 
 /// Typed shape of Anthropic's response-effort knob.

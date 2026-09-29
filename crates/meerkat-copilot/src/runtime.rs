@@ -992,9 +992,10 @@ impl CopilotCapabilityGatedClient {
                         budget_tokens,
                     },
                 ) => Some(budget_tokens),
-                Some(meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Adaptive) => {
-                    None
-                }
+                Some(
+                    meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Adaptive
+                    | meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::BetweenTools,
+                ) => None,
                 None => tag.thinking_budget_tokens,
             };
             if let (Some(budget), Some(maximum)) = (thinking_budget, supports.max_thinking_budget)

@@ -37,6 +37,22 @@ them.
 
 ### Breaking
 
+- `meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig` gains the
+  variant `AnthropicThinkingConfig::BetweenTools`, the wire mirror
+  `meerkat_contracts::wire::runtime::WireAnthropicThinkingConfig` gains
+  `WireAnthropicThinkingConfig::BetweenTools` (wire value
+  `{"type": "between_tools"}`), and
+  `meerkat_core::model_profile::capabilities::ThinkingSupport` gains
+  `ThinkingSupport::AnthropicAdaptiveOrBetweenTools` (enum variant added).
+  Exhaustive matches must handle them.
+- Behaviour-only (not measured by the gate): an Anthropic request whose
+  thinking type or `thinking_budget_tokens` (including the generic per-turn
+  override) the cataloged model does not accept, or that sets `top_k` on a
+  model without top-k support, now fails with a typed local refusal: when the
+  agent is built (`BuildAgentError::Config`) and before each request
+  (`LlmError::InvalidRequest`). Before, the request reached Anthropic and
+  failed with a 400. Uncatalogued model IDs keep the pass-through.
+
 - `meerkat_core::model_profile::capabilities::OpenAiResponsesParamCapabilities`
   gains the public field `default_prompt_cache_mode:
   Option<OpenAiPromptCacheMode>` (constructible struct adds field): the
@@ -248,6 +264,22 @@ them.
   `resume_session` setter meant unless it pre-assigns a mint).
 
 ### Added
+
+- Anthropic `thinking: {"type": "between_tools"}`
+  (`AnthropicThinkingConfig::BetweenTools`): turns off up-front thinking and
+  keeps only short progress updates between tool calls. Accepted for models
+  whose catalog row is `ThinkingSupport::AnthropicAdaptiveOrBetweenTools`
+  (Claude Sonnet 5.5) at `high` effort or below; other models and
+  `xhigh`/`max` effort are refused locally with a typed error.
+
+- Model catalog: Claude Sonnet 5.5 (`claude-sonnet-5-5`, released
+  September 28, 2026): 1M context, 128K output (300K on the Batch API with
+  the `output-300k-2026-03-24` beta), text and image input, adaptive
+  thinking or `between_tools` (Anthropic refuses `disabled` and
+  `budget_tokens`, and Meerkat refuses them locally), low..max effort with a
+  `high` default, no sampling parameters, mid-conversation system messages,
+  compaction, and `inference_geo`. It is the recommended Sonnet
+  model; the Anthropic default stays `claude-opus-5-5`.
 
 - `IncrementalSessionStore::verify_current_head` (provided method): a
   body-free proof that a head is still the store's current physical head,

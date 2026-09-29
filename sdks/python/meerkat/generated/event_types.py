@@ -889,8 +889,17 @@ class AnthropicThinkingConfigEnabled(TypedDict, total=False):
     type: Required[Literal['enabled']]
 
 
+class AnthropicThinkingConfigBetweenTools(TypedDict, total=False):
+    """No up-front thinking: the model only writes short progress updates
+    between tool calls. The lowest thinking setting on models whose
+    catalog row admits it (Claude Sonnet 5.5), accepted at `high` effort
+    or below; wire shape `{"type": "between_tools"}`.
+    """
+    type: Required[Literal['between_tools']]
+
+
 # Typed shape of Anthropic's extended-thinking knob.
-AnthropicThinkingConfig = AnthropicThinkingConfigAdaptive | AnthropicThinkingConfigEnabled
+AnthropicThinkingConfig = AnthropicThinkingConfigAdaptive | AnthropicThinkingConfigEnabled | AnthropicThinkingConfigBetweenTools
 
 
 # Gemini 3 reasoning levels accepted by the API.

@@ -1933,6 +1933,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -13001,6 +13014,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking; progress updates between tool calls only.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -20944,6 +20970,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking; progress updates between tool calls only.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -23889,6 +23928,19 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -35562,6 +35614,19 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -49229,6 +49294,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -60160,6 +60238,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking; progress updates between tool calls only.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -67334,6 +67425,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking; progress updates between tool calls only.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -70215,6 +70319,19 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -82791,6 +82908,19 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -100434,6 +100564,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking; progress updates between tool calls only.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -104056,6 +104199,19 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No up-front thinking; progress updates between tool calls only.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -111031,6 +111187,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking; progress updates between tool calls only.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -112186,6 +112355,19 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No up-front thinking; progress updates between tool calls only.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -117816,6 +117998,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking; progress updates between tool calls only.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -119249,6 +119444,19 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No up-front thinking; progress updates between tool calls only.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -122988,6 +123196,19 @@
               "budget_tokens"
             ],
             "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -125349,6 +125570,19 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -127726,6 +127960,19 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -138747,6 +138994,19 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -154699,6 +154959,19 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No up-front thinking; progress updates between tool calls only.",
+            "properties": {
+              "type": {
+                "const": "between_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }

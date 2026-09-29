@@ -1385,6 +1385,38 @@ fn validate_openai_prompt_cache_retention(
     }
 }
 
+/// Refuse Anthropic request-shaping knobs the resolved catalog row rejects
+/// (a thinking type or budget the model does not accept, `top_k` without
+/// top-k support, `between_tools` above `high` effort) when the agent is
+/// built, instead of failing its first request. The generic
+/// `thinking_budget_tokens` is checked as the Anthropic lowering applies it.
+fn validate_anthropic_request_shaping(
+    provider: Provider,
+    model: &str,
+    provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+) -> Result<(), BuildAgentError> {
+    use meerkat_core::lifecycle::run_primitive::ProviderTag;
+    if provider != Provider::Anthropic {
+        return Ok(());
+    }
+    let Some(params) = provider_params else {
+        return Ok(());
+    };
+    let mut tag = match params.provider_tag.as_ref() {
+        Some(ProviderTag::Anthropic(tag)) => tag.clone(),
+        _ => Default::default(),
+    };
+    if let Some(budget) = params.thinking_budget_tokens {
+        tag.thinking_budget_tokens = Some(budget);
+    }
+    match meerkat_models::capabilities_for(Provider::Anthropic, model)
+        .and_then(|capabilities| capabilities.anthropic_provider_tag_rejection(&tag))
+    {
+        Some(rejection) => Err(BuildAgentError::Config(rejection)),
+        None => Ok(()),
+    }
+}
+
 fn openai_cache_defaults_supported(
     config: &Config,
     auth_binding: Option<&meerkat_core::AuthBindingRef>,
@@ -7306,6 +7338,11 @@ impl AgentFactory {
             builder = builder.provider_tool_defaults(defaults);
         }
         validate_openai_prompt_cache_retention(
+            provider,
+            &model,
+            build_config.provider_params.as_ref(),
+        )?;
+        validate_anthropic_request_shaping(
             provider,
             &model,
             build_config.provider_params.as_ref(),

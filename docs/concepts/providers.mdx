@@ -74,7 +74,8 @@ Use `rkat models` for every supported ID and its current limits.
     | `claude-fable-5-1` | 1M | 128K | Recommended Fable model |
     | `claude-fable-5` | 1M | 128K | Recommended previous Fable generation |
     | `claude-opus-4-8` | 1M | 128K | Recommended previous Opus generation |
-    | `claude-sonnet-4-6` | 1M | 64K | Recommended Sonnet model |
+    | `claude-sonnet-5-5` | 1M | 128K | Recommended Sonnet model; adaptive thinking, effort default `high`, no sampling parameters |
+    | `claude-sonnet-4-6` | 1M | 64K | Previous Sonnet generation |
 
     ```toml
     [agent]
@@ -308,6 +309,16 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
       '{"provider_tag":{"provider":"anthropic","thinking_budget_tokens":10000,"cache_control":"disabled"}}' \
       "Solve this problem"
     ```
+
+    Thinking is typed per model: `{"type": "adaptive"}`,
+    `{"type": "enabled", "budget_tokens": N}`, or, on Claude Sonnet 5.5,
+    `{"type": "between_tools"}`, which turns off up-front thinking and is
+    accepted only at `high` effort or below. A thinking type or budget
+    (`thinking_budget_tokens`) the model does not accept, `top_k` on a model
+    without top-k support, and `between_tools` above `high` effort are refused
+    when the agent is built and again before each request, never sent to
+    Anthropic. A generic `temperature` is omitted for models that reject
+    sampling parameters.
 
     Anthropic also supports `top_k` and the prompt-cache policies `automatic`
     (the default on the Anthropic API, Vertex, and Foundry), `system_prefix`,

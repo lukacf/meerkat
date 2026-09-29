@@ -632,6 +632,14 @@ impl AnthropicClient {
 
     /// Build request body for Anthropic API
     pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        // Refuse request-shaping knobs the cataloged model rejects before
+        // anything is lowered, so they fail typed here and never as a
+        // provider 400. Uncatalogued models keep the pass-through.
+        if let Some(message) = anthropic_tag(request)
+            .and_then(|tag| crate::request_support::provider_tag_rejection(&request.model, tag))
+        {
+            return Err(LlmError::InvalidRequest { message });
+        }
         let mut messages = Vec::new();
         let mut system_messages = Vec::new();
         let mut leading_system_prefix = true;
@@ -970,6 +978,9 @@ impl AnthropicClient {
             if let Some(cfg) = tag.thinking.as_ref() {
                 body["thinking"] = match cfg {
                     AnthropicThinkingConfig::Adaptive => serde_json::json!({"type": "adaptive"}),
+                    AnthropicThinkingConfig::BetweenTools => {
+                        serde_json::json!({"type": "between_tools"})
+                    }
                     AnthropicThinkingConfig::Enabled { budget_tokens } => serde_json::json!({
                         "type": "enabled",
                         "budget_tokens": budget_tokens,

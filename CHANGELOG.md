@@ -747,6 +747,14 @@ them.
 
 ### Fixed
 
+- `MODULE.bazel.lock` recorded a stale hash for `crates/meerkat-runtime/Cargo.toml`
+  after its self dev-dependency gained `live`; it is refreshed. The
+  session-control and legacy-surface tombstone scans listed ten crates
+  without the `crates/` prefix and silently skipped them since the layout
+  move; they now scan the real paths and fail on a missing path. The
+  session-control scan excludes the historical `docs/internal/archive`, and
+  `docs/api/rpc.mdx` points `turn/stop_run` readers to `session/input_status`
+  instead of the retired `session/input_state`.
 - A host subscribing to a member's events could miss the first events of a
   newly materialized or restored actor: the session broadcast had no replay
   and each actor's sequence restarted at zero, and `NotFound` reached hosts

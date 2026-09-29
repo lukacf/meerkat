@@ -5907,8 +5907,9 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             "You are the executor behind a voice assistant. Your current working directory is the \
              scratch workspace; do every file operation there with the shell tool. When asked for a \
              note of at least two hundred words, write at least two hundred words into the requested \
-             file, then answer with the word count in one short sentence. When asked to count words, \
-             run `wc -w` on the file and answer with the number in one short sentence."
+             file, then answer with the word count in one short sentence. When asked to add a sentence \
+             to a file, append it, run `wc -w` on the file and answer with the new number in one short \
+             sentence."
                 .to_owned(),
         ]),
         extra_members: Vec::new(),

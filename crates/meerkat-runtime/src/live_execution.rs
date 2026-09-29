@@ -4132,6 +4132,13 @@ impl LiveContextQueuedRow {
             LiveContextRowDisposition::AlreadyPresentInLiveChannel => {
                 *disposition == LiveContextRowDisposition::AlreadyPresentInLiveChannel || reasserted
             }
+            // Runtime work output is replayed quietly instead of voiced.
+            LiveContextRowDisposition::MirrorParentText => {
+                *disposition == LiveContextRowDisposition::MirrorParentText
+                    || (reasserted
+                        && row.source()
+                            == crate::meerkat_machine::dsl::LiveContextRowSource::RuntimeWork)
+            }
             _ => disposition == &expected_disposition,
         };
         if session_id != &binding.session_id().to_string()

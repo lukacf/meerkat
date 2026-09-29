@@ -4004,7 +4004,12 @@ impl ExperimentalLiveDelegationCoordinator {
     }
 
     /// A worker that finished after its voice channel closed still merges:
-    /// its result is queued on the source member as ordinary internal work.
+    /// its result is queued on the source member as runtime-authored
+    /// injected execution context, never as a conversational user row. The
+    /// member's reply is an ordinary assistant row; a live channel reopened
+    /// on the session treats it as history (it does not start the
+    /// conversation there), so the reopened voice stays silent until the
+    /// user speaks instead of reading the result aloud unprompted.
     async fn merge_result_into_source(&self, retained: &RetainedDelegation, result_text: &str) {
         let result_spec =
             match BoundedResultSpec::new("gpt_live_delegation_merge", LIVE_DELEGATION_RESULT_BYTES)
@@ -4026,11 +4031,30 @@ impl ExperimentalLiveDelegationCoordinator {
             );
             return;
         };
+        let operation_id = retained.operation.operation_id();
+        let delivery_identity = match MobDeliveryIdentity::new(
+            format!("live-delegation-merge:{operation_id}"),
+            retained
+                .operation
+                .domain_correlation()
+                .interaction_id()
+                .to_string(),
+        ) {
+            Ok(identity) => identity,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    %operation_id,
+                    "post-close voice delegation result has no valid merge delivery identity"
+                );
+                return;
+            }
+        };
         match mob_handle
-            .start_work_for_identity_bounded(
+            .start_injected_context_work_for_identity_bounded(
                 retained.source_identity.clone(),
                 work,
-                meerkat_core::types::HandlingMode::Queue,
+                delivery_identity,
                 result_spec,
             )
             .await

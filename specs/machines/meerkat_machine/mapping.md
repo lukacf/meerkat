@@ -4964,6 +4964,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeLiveContextAppendDeferredByTurnRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByConversationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByConversationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByConversationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeLiveContextAppendDeferredByCloseIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

@@ -4415,6 +4415,56 @@ impl std::fmt::Display for LiveContextRowDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveContextRowSource {
+    #[default]
+    #[serde(rename = "Conversation")]
+    Conversation,
+    #[serde(rename = "RuntimeWork")]
+    RuntimeWork,
+}
+impl LiveContextRowSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Conversation => "Conversation",
+            Self::RuntimeWork => "RuntimeWork",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveContextRowSource {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Conversation" => Ok(Self::Conversation),
+            "RuntimeWork" => Ok(Self::RuntimeWork),
+            other => Err(format!("invalid LiveContextRowSource value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveContextRowSource {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveContextRowSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveConversationStartCause {
     #[default]
     #[serde(rename = "UserTurn")]
@@ -15756,6 +15806,7 @@ pub mod inputs {
         pub commit_authority_token: String,
         pub disposition: LiveContextRowDisposition,
         pub payload_availability: LiveContextPayloadAvailability,
+        pub row_source: LiveContextRowSource,
         pub observation_id: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -21867,6 +21918,9 @@ pub enum TransitionId {
     AuthorizeLiveContextAppendDeferredByTurnIdle,
     AuthorizeLiveContextAppendDeferredByTurnAttached,
     AuthorizeLiveContextAppendDeferredByTurnRunning,
+    AuthorizeLiveContextAppendDeferredByConversationIdle,
+    AuthorizeLiveContextAppendDeferredByConversationAttached,
+    AuthorizeLiveContextAppendDeferredByConversationRunning,
     AuthorizeLiveContextAppendDeferredByCloseIdle,
     AuthorizeLiveContextAppendDeferredByCloseAttached,
     AuthorizeLiveContextAppendDeferredByCloseRunning,

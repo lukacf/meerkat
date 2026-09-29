@@ -1620,6 +1620,19 @@ pub enum LiveContextPayloadAvailability {
     Materializable,
 }
 
+/// What drove the turn that committed a row queued for a live channel. A
+/// `Conversation` row belongs to a turn driven by conversational input (typed,
+/// spoken, or a peer message); a `RuntimeWork` row is the assistant's reply
+/// to runtime-authored injected execution context, such as a voice job's
+/// result merged into the source member after its channel closed. Runtime
+/// work output is history the model has not seen, never speech to voice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveContextRowSource {
+    #[default]
+    Conversation,
+    RuntimeWork,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveContextPreparationPhase {
     #[default]
@@ -1662,8 +1675,10 @@ pub enum LiveContextDeliveryReadiness {
 /// missed the provider open is appended only after one of these facts, since
 /// the provider treats context appended into silence as a cue to speak.
 /// `SpokenCanonicalRow` is a queued canonical row the channel will voice
-/// (`MirrorParentText` with a materializable payload): that row produces
-/// speech on its own, so holding the summary for the user would deadlock it.
+/// (`MirrorParentText` with a materializable payload from a conversational
+/// turn): that row produces speech on its own, so holding the summary for the
+/// user would deadlock it. Runtime work output is replayed quietly and does
+/// not start the conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveConversationStartCause {
     #[default]
@@ -6130,6 +6145,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 commit_authority_token: String,
                 disposition: Enum<LiveContextRowDisposition>,
                 payload_availability: Enum<LiveContextPayloadAvailability>,
+                row_source: Enum<LiveContextRowSource>,
                 observation_id: Option<String>,
             },
             AdvanceLiveContextCanonicalCoverage {
@@ -28701,7 +28717,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input EnqueueLiveContextRow {
                 channel_id, runtime_id, fence_token, generation, append_id,
                 canonical_cursor, content_digest, commit_authority_token,
-                disposition, payload_availability, observation_id
+                disposition, payload_availability, row_source, observation_id
             }
             guard "append_present" { append_id != "" }
             guard "commit_evidence_present" {
@@ -28785,15 +28801,27 @@ macro_rules! meerkat_catalog_machine_dsl {
                     { LiveContextRowDisposition::ReassertCausalTail }
                     else { if disposition == LiveContextRowDisposition::AssistantObservation {
                         LiveContextRowDisposition::ExcludedFromLiveContext
-                    } else { disposition } });
+                    } else { if disposition == LiveContextRowDisposition::MirrorParentText
+                        && payload_availability == LiveContextPayloadAvailability::Materializable
+                        && row_source == LiveContextRowSource::RuntimeWork
+                    // Runtime work output (the member's reply to a post-close
+                    // result merge, which can commit after a reopen's history
+                    // boundary) is history the model has not seen. Voiced, it
+                    // is read aloud unprompted; it is replayed on the quiet
+                    // lane instead, once the conversation has started.
+                    { LiveContextRowDisposition::ReassertCausalTail }
+                    else { disposition } } });
                 self.live_context_queued_append_by_cursor.insert(canonical_cursor, append_id);
                 // A row this channel will voice (the Ordinary append of a
-                // materializable parent text row) starts the conversation, so
-                // a held late summary is delivered ahead of it instead of
-                // waiting for speech that only this row would produce. Quiet
-                // reassertions and rows that need no provider send do not.
+                // materializable parent text row of a conversational turn)
+                // starts the conversation, so a held late summary is delivered
+                // ahead of it instead of waiting for speech that only this row
+                // would produce. Quiet reassertions, rows that need no provider
+                // send, and runtime work output (replayed quietly above) do
+                // not: appended into silence, history is read aloud unprompted.
                 if disposition == LiveContextRowDisposition::MirrorParentText
                     && payload_availability == LiveContextPayloadAvailability::Materializable
+                    && row_source == LiveContextRowSource::Conversation
                     && !self.live_conversation_started_channels.contains_key(channel_id) {
                     self.live_conversation_started_channels.insert(
                         channel_id,
@@ -28911,8 +28939,23 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "channel_accepts_context_delivery" {
                 !self.live_revoked_execution_channels.contains(channel_id)
             }
+            // A quiet reassertion rides the thinking lane, which the provider
+            // injects without taking the turn, so it is not held behind an
+            // active provider turn: history replayed after a late summary
+            // lands while the user's first utterance is still in flight,
+            // before the model answers it. A voiced row waits for the turn
+            // boundary.
             guard "safe_provider_turn_boundary" {
                 !self.live_provider_turn_by_channel.contains_key(channel_id)
+                || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertCausalTail)
+            }
+            // Quiet history appended into silence is still a cue to speak, so
+            // a reassertion waits for the conversation to start.
+            guard "quiet_history_waits_for_the_conversation" {
+                self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    != Some(LiveContextRowDisposition::ReassertCausalTail)
+                || self.live_conversation_started_channels.contains_key(channel_id)
             }
             guard "channel_has_no_recovery_obligation" {
                 !self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
@@ -28990,14 +29033,52 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_append_by_cursor.get_cloned(next_cursor) == Some(append_id)
                 && self.live_context_queued_digest_by_append.contains_key(append_id)
                 && self.live_context_queued_commit_token_by_append.contains_key(append_id)
-                && (self.live_context_queued_disposition_by_append.get_copied(append_id)
+                && self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
-                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
-                    == Some(LiveContextRowDisposition::ReassertCausalTail))
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
             }
             guard "provider_turn_owns_boundary" {
                 self.live_provider_turn_by_channel.contains_key(channel_id)
+                && !self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
+                && !self.live_result_recovery_replacement_by_channel.contains_key(channel_id)
+                && !self.live_revoked_execution_channels.contains(channel_id)
+            }
+            to Idle
+            emit LiveContextAppendDeferred {
+                channel_id: channel_id, append_id: append_id,
+                previous_cursor: previous_cursor, next_cursor: next_cursor
+            }
+        }
+
+        // A quiet reassertion queued before the conversation started waits
+        // for it (guard `quiet_history_waits_for_the_conversation`); the
+        // conversation start requests a drain.
+        transition AuthorizeLiveContextAppendDeferredByConversation {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextAppend {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor
+            }
+            guard "exact_binding" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_queued_edge" {
+                self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
+                && next_cursor == previous_cursor + 1
+                && self.live_context_queued_session_by_append.get_cloned(append_id)
+                    == self.live_channel_session_by_channel.get_cloned(channel_id)
+                && self.live_context_queued_cursor_by_append.get_copied(append_id) == Some(next_cursor)
+                && self.live_context_queued_append_by_cursor.get_cloned(next_cursor) == Some(append_id)
+                && self.live_context_queued_digest_by_append.contains_key(append_id)
+                && self.live_context_queued_commit_token_by_append.contains_key(append_id)
+                && self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertCausalTail)
+                && !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            guard "conversation_not_started" {
+                !self.live_conversation_started_channels.contains_key(channel_id)
                 && !self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
                 && !self.live_result_recovery_replacement_by_channel.contains_key(channel_id)
                 && !self.live_revoked_execution_channels.contains(channel_id)

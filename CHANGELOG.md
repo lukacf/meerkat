@@ -411,8 +411,23 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   literals must add it; `..Default::default()` literals are unaffected (the
   default is `SessionBuildIntent::Resume`, which is what every existing
   `resume_session` setter meant unless it pre-assigns a mint).
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`): the input `EnqueueLiveContextRow`
+  (`MeerkatMachineInput::EnqueueLiveContextRow`, kernel
+  `inputs::EnqueueLiveContextRow`) gains the field
+  `row_source: LiveContextRowSource`, and the enum `LiveContextRowSource`
+  (`Conversation`, `RuntimeWork`) is added. Struct-literal and
+  exhaustive-pattern users must add the field. The transitions
+  `AuthorizeLiveContextAppendDeferredByConversationIdle`,
+  `AuthorizeLiveContextAppendDeferredByConversationAttached` and
+  `AuthorizeLiveContextAppendDeferredByConversationRunning` are added (kernel
+  `TransitionId::*` discriminants move).
 
 ### Added
+
+- `meerkat_mob::MobHandle::start_injected_context_work_for_identity_bounded`
+  queues runtime-authored content on a member as injected execution context
+  (exact runtime-input custody, no synthesized conversational user row).
 
 - Session event subscriptions replay from a typed cursor (#1236).
   `SessionService::subscribe_session_events_from(id, SessionEventCursor)` and
@@ -752,6 +767,21 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Fixed
 
+- A reopened GPT Live channel no longer reads a finished job's result aloud
+  before the user speaks. A voice job that finishes after its channel closed
+  merges into the source member; that merge turn could commit after the
+  reopen's pre-open summary boundary, and its rows were then queued on the new
+  channel as rows the channel will voice, which started the conversation
+  (`SpokenCanonicalRow`) and released the late summary and the result into
+  silence. The merge is now runtime-authored injected execution context (no
+  conversational user row), and the member's reply to it is runtime work
+  output (`EnqueueLiveContextRow` carries `row_source`): it is replayed on the
+  quiet thinking lane once the conversation has started, after the late
+  summary, and never starts the conversation itself. Typed and peer rows are
+  voiced as before (lukacf/meerkat-mobkit#474). Quiet reassertions are no
+  longer held behind an active provider turn, so that history reaches the
+  model while the user's first utterance is still in flight, before it
+  answers; voiced rows still wait for the turn boundary.
 - The placed-member external-edge route inputs (`RecordExternalRouteInstall`,
   `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`,
   `RollbackExternalRouteInstall`) are now declared runtime-internal in the

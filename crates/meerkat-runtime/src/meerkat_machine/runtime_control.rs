@@ -7505,6 +7505,10 @@ impl MeerkatMachine {
                     && effect_turn == &provider_turn_ref
             )
         }) {
+            // A started user turn starts the conversation: quiet history held
+            // for it (guard `quiet_history_waits_for_the_conversation`) may
+            // now be replayed, during this turn.
+            self.request_live_context_drain(session_id, channel_id);
             Ok(LiveProviderTurnStartedAuthority {
                 binding: runtime_binding,
                 interaction_id,
@@ -10633,6 +10637,7 @@ impl MeerkatMachine {
                     commit_authority_token: row.store_commit_authority().to_string(),
                     disposition,
                     payload_availability: row.payload_availability(),
+                    row_source: row.source(),
                     observation_id: row.observation_id().map(ToString::to_string),
                 },
                 "EnqueueLiveContextRow",

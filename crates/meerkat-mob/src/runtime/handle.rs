@@ -12039,6 +12039,38 @@ impl MobHandle {
         .await
     }
 
+    /// Queue runtime-authored content on one identity as injected execution
+    /// context: the member reads it as a typed injected-context message, and
+    /// no conversational user row is synthesized, so nothing downstream (a
+    /// live channel's mirror, a transcript view) mistakes it for human input.
+    /// Exact runtime-input custody like [`Self::start_runtime_work_with_delivery_identity_bounded`];
+    /// retry only with the SAME delivery identity.
+    #[cfg(feature = "runtime-adapter")]
+    pub async fn start_injected_context_work_for_identity_bounded(
+        &self,
+        identity: AgentIdentity,
+        spec: WorkSpec,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        result_spec: BoundedResultSpec,
+    ) -> Result<WorkTurnHandle, MobError> {
+        let (runtime_id, fence_token) = self
+            .resolve_submit_work_runtime_binding(
+                &identity,
+                WorkOrigin::Internal,
+                "start_injected_context_work_for_identity_bounded",
+            )
+            .await?;
+        self.start_runtime_work_with_delivery_identity_bounded(
+            runtime_id,
+            fence_token,
+            spec,
+            delivery_identity,
+            result_spec,
+            crate::mob_machine::WorkContentAttribution::InjectedExecutionContext,
+        )
+        .await
+    }
+
     /// Exact runtime-input custody, independently of the member's ordinary
     /// inbox mode. The live execution service supplies the generated admission.
     #[cfg(feature = "runtime-adapter")]

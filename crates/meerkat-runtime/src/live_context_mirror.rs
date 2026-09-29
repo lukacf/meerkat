@@ -182,6 +182,8 @@ pub struct CommittedLiveContextRow {
     content_digest: String,
     store_commit_authority: String,
     disposition: LiveContextCommittedRowDisposition,
+    #[cfg(feature = "live")]
+    source: crate::meerkat_machine::dsl::LiveContextRowSource,
     provider_context: Option<String>,
     causal_context: Option<String>,
     #[cfg(feature = "live")]
@@ -288,6 +290,7 @@ impl CommittedLiveContextRow {
             content_digest,
             store_commit_authority: store_commit_authority.to_string(),
             disposition,
+            source: crate::meerkat_machine::dsl::LiveContextRowSource::Conversation,
             provider_context,
             causal_context,
             observation_id,
@@ -346,6 +349,13 @@ impl CommittedLiveContextRow {
         }
     }
 
+    /// What drove the turn that committed this row (see
+    /// [`classify_committed_boundary_rows_after`]).
+    #[cfg(feature = "live")]
+    pub(crate) fn source(&self) -> crate::meerkat_machine::dsl::LiveContextRowSource {
+        self.source
+    }
+
     #[cfg(feature = "live")]
     pub(crate) fn observation_id(&self) -> Option<&meerkat_core::LiveContextObservationId> {
         self.observation_id.as_ref()
@@ -402,9 +412,11 @@ pub(crate) fn classify_committed_boundary_rows_after(
         Vec::new()
     };
 
+    let sources = boundary_row_sources(raw_rows.iter().map(|(_, message, _)| message));
     raw_rows
         .into_iter()
-        .map(|(sequence, message, serialized)| {
+        .zip(sources)
+        .map(|((sequence, message, serialized), source)| {
             let origin = match &message {
                 Message::User(user) => user.identity.realtime_origin.as_ref(),
                 Message::BlockAssistant(assistant) => assistant.identity.realtime_origin.as_ref(),
@@ -429,6 +441,36 @@ pub(crate) fn classify_committed_boundary_rows_after(
                 provenance,
                 store_commit_authority,
             )
+            .map(|row| CommittedLiveContextRow { source, ..row })
+        })
+        .collect()
+}
+
+/// What drove the turn of each committed row, in order. The input of the
+/// turn an assistant row answers is the nearest earlier user row of the same
+/// boundary: a reply to runtime-authored injected execution context (no
+/// conversational user input, such as a post-close result merge) is runtime
+/// work output, replayed quietly instead of voiced. A boundary whose input row
+/// lies before it keeps the conversational default.
+#[cfg(feature = "live")]
+fn boundary_row_sources<'a>(
+    messages: impl Iterator<Item = &'a Message>,
+) -> Vec<crate::meerkat_machine::dsl::LiveContextRowSource> {
+    use crate::meerkat_machine::dsl::LiveContextRowSource;
+    let mut turn_input_is_runtime_work = false;
+    messages
+        .map(|message| match message {
+            Message::User(user) => {
+                turn_input_is_runtime_work = matches!(
+                    user.transcript_role,
+                    meerkat_core::types::TranscriptUserRole::InjectedContext
+                );
+                LiveContextRowSource::Conversation
+            }
+            Message::BlockAssistant(_) if turn_input_is_runtime_work => {
+                LiveContextRowSource::RuntimeWork
+            }
+            _ => LiveContextRowSource::Conversation,
         })
         .collect()
 }
@@ -571,6 +613,60 @@ mod tests {
         assert_eq!(
             row.provider_context(),
             Some(r#"{"role":"user","text":"committed parent text"}"#)
+        );
+    }
+
+    /// The reply to runtime-authored injected execution context (a post-close
+    /// result merge) is runtime work output; a reply to a typed turn, even
+    /// one with host-attached injected context before it, is conversation.
+    #[test]
+    fn runtime_work_replies_are_separated_from_conversational_turns() {
+        use crate::meerkat_machine::dsl::LiveContextRowSource::{Conversation, RuntimeWork};
+        let injected = |text: &str| {
+            let mut message = UserMessage::text(text);
+            message.transcript_role = meerkat_core::types::TranscriptUserRole::InjectedContext;
+            Message::User(message)
+        };
+        let reply = |text: &str| {
+            Message::BlockAssistant(meerkat_core::types::BlockAssistantMessage::snapshot(vec![
+                AssistantBlock::Text {
+                    text: text.into(),
+                    meta: None,
+                },
+            ]))
+        };
+        let merge = [
+            injected("Result of the voice request"),
+            reply("Done, the file is written."),
+        ];
+        assert_eq!(
+            boundary_row_sources(merge.iter()),
+            vec![Conversation, RuntimeWork]
+        );
+        let typed = [
+            injected("host context"),
+            Message::User(UserMessage::text("typed turn")),
+            reply("Noted."),
+        ];
+        assert_eq!(
+            boundary_row_sources(typed.iter()),
+            vec![Conversation, Conversation, Conversation]
+        );
+        let merged = classify(
+            &merge[1],
+            LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+        );
+        assert_eq!(
+            merged.disposition(),
+            LiveContextCommittedRowDisposition::MirrorParentText
+        );
+        assert_eq!(
+            classify(
+                &merge[0],
+                LiveContextCommittedTextProvenance::ParentSessionServiceTurn
+            )
+            .disposition(),
+            LiveContextCommittedRowDisposition::ExcludedFromLiveContext
         );
     }
 

@@ -992,88 +992,181 @@ impl ProviderTag {
                 *target = Some(value.clone());
             }
         }
+        // Every tag is destructured without `..`: a new provider knob is a
+        // compile error here until it is merged, never silently dropped.
         match (self, defaults) {
             (Self::Anthropic(target), Self::Anthropic(default)) => {
-                fill(&mut target.thinking, &default.thinking);
+                let AnthropicProviderTag {
+                    thinking: target_thinking,
+                    thinking_budget_tokens: target_thinking_budget_tokens,
+                    web_search: target_web_search,
+                    top_k: target_top_k,
+                    effort: target_effort,
+                    structured_output: target_structured_output,
+                    inference_geo: target_inference_geo,
+                    compaction: target_compaction,
+                    context: target_context,
+                    cache_control: target_cache_control,
+                    cache_ttl: target_cache_ttl,
+                    supports_temperature_override: target_supports_temperature_override,
+                } = target;
+                let AnthropicProviderTag {
+                    thinking: default_thinking,
+                    thinking_budget_tokens: default_thinking_budget_tokens,
+                    web_search: default_web_search,
+                    top_k: default_top_k,
+                    effort: default_effort,
+                    structured_output: default_structured_output,
+                    inference_geo: default_inference_geo,
+                    compaction: default_compaction,
+                    context: default_context,
+                    cache_control: default_cache_control,
+                    cache_ttl: default_cache_ttl,
+                    supports_temperature_override: default_supports_temperature_override,
+                } = default;
+                fill(target_thinking, default_thinking);
                 fill(
-                    &mut target.thinking_budget_tokens,
-                    &default.thinking_budget_tokens,
+                    target_thinking_budget_tokens,
+                    default_thinking_budget_tokens,
                 );
-                fill(&mut target.web_search, &default.web_search);
-                fill(&mut target.top_k, &default.top_k);
-                fill(&mut target.effort, &default.effort);
-                fill(&mut target.structured_output, &default.structured_output);
-                fill(&mut target.inference_geo, &default.inference_geo);
-                fill(&mut target.compaction, &default.compaction);
-                fill(&mut target.context, &default.context);
-                fill(&mut target.cache_control, &default.cache_control);
-                fill(&mut target.cache_ttl, &default.cache_ttl);
+                fill(target_web_search, default_web_search);
+                fill(target_top_k, default_top_k);
+                fill(target_effort, default_effort);
+                fill(target_structured_output, default_structured_output);
+                fill(target_inference_geo, default_inference_geo);
+                fill(target_compaction, default_compaction);
+                fill(target_context, default_context);
+                fill(target_cache_control, default_cache_control);
+                fill(target_cache_ttl, default_cache_ttl);
                 fill(
-                    &mut target.supports_temperature_override,
-                    &default.supports_temperature_override,
+                    target_supports_temperature_override,
+                    default_supports_temperature_override,
                 );
                 Ok(())
             }
             (Self::OpenAi(target), Self::OpenAi(default)) => {
-                fill(&mut target.reasoning_effort, &default.reasoning_effort);
-                fill(&mut target.reasoning_mode, &default.reasoning_mode);
-                fill(&mut target.reasoning_context, &default.reasoning_context);
-                fill(&mut target.text_verbosity, &default.text_verbosity);
-                fill(&mut target.seed, &default.seed);
-                fill(&mut target.frequency_penalty, &default.frequency_penalty);
-                fill(&mut target.presence_penalty, &default.presence_penalty);
-                fill(&mut target.web_search, &default.web_search);
-                fill(&mut target.structured_output, &default.structured_output);
-                fill(&mut target.reasoning, &default.reasoning);
+                let OpenAiProviderTag {
+                    reasoning_effort: target_reasoning_effort,
+                    reasoning_mode: target_reasoning_mode,
+                    reasoning_context: target_reasoning_context,
+                    text_verbosity: target_text_verbosity,
+                    seed: target_seed,
+                    frequency_penalty: target_frequency_penalty,
+                    presence_penalty: target_presence_penalty,
+                    web_search: target_web_search,
+                    structured_output: target_structured_output,
+                    reasoning: target_reasoning,
+                    chat_template_kwargs: target_chat_template_kwargs,
+                    thinking: target_thinking,
+                    store: target_store,
+                    prompt_cache_enabled: target_prompt_cache_enabled,
+                    prompt_cache_key: target_prompt_cache_key,
+                    prompt_cache_retention: target_prompt_cache_retention,
+                    supports_temperature_override: target_supports_temperature_override,
+                    supports_reasoning_override: target_supports_reasoning_override,
+                    prompt_cache_options: target_prompt_cache_options,
+                } = target;
+                let OpenAiProviderTag {
+                    reasoning_effort: default_reasoning_effort,
+                    reasoning_mode: default_reasoning_mode,
+                    reasoning_context: default_reasoning_context,
+                    text_verbosity: default_text_verbosity,
+                    seed: default_seed,
+                    frequency_penalty: default_frequency_penalty,
+                    presence_penalty: default_presence_penalty,
+                    web_search: default_web_search,
+                    structured_output: default_structured_output,
+                    reasoning: default_reasoning,
+                    chat_template_kwargs: default_chat_template_kwargs,
+                    thinking: default_thinking,
+                    store: default_store,
+                    prompt_cache_enabled: default_prompt_cache_enabled,
+                    prompt_cache_key: default_prompt_cache_key,
+                    prompt_cache_retention: default_prompt_cache_retention,
+                    supports_temperature_override: default_supports_temperature_override,
+                    supports_reasoning_override: default_supports_reasoning_override,
+                    prompt_cache_options: default_prompt_cache_options,
+                } = default;
+                fill(target_reasoning_effort, default_reasoning_effort);
+                fill(target_reasoning_mode, default_reasoning_mode);
+                fill(target_reasoning_context, default_reasoning_context);
+                fill(target_text_verbosity, default_text_verbosity);
+                fill(target_seed, default_seed);
+                fill(target_frequency_penalty, default_frequency_penalty);
+                fill(target_presence_penalty, default_presence_penalty);
+                fill(target_web_search, default_web_search);
+                fill(target_structured_output, default_structured_output);
+                fill(target_reasoning, default_reasoning);
+                fill(target_chat_template_kwargs, default_chat_template_kwargs);
+                fill(target_thinking, default_thinking);
+                fill(target_store, default_store);
+                fill(target_prompt_cache_enabled, default_prompt_cache_enabled);
+                fill(target_prompt_cache_key, default_prompt_cache_key);
                 fill(
-                    &mut target.chat_template_kwargs,
-                    &default.chat_template_kwargs,
+                    target_prompt_cache_retention,
+                    default_prompt_cache_retention,
                 );
-                fill(&mut target.thinking, &default.thinking);
-                fill(&mut target.store, &default.store);
                 fill(
-                    &mut target.prompt_cache_enabled,
-                    &default.prompt_cache_enabled,
+                    target_supports_temperature_override,
+                    default_supports_temperature_override,
                 );
-                fill(&mut target.prompt_cache_key, &default.prompt_cache_key);
                 fill(
-                    &mut target.prompt_cache_retention,
-                    &default.prompt_cache_retention,
+                    target_supports_reasoning_override,
+                    default_supports_reasoning_override,
                 );
                 match (
-                    target.prompt_cache_options.as_mut(),
-                    default.prompt_cache_options.as_ref(),
+                    target_prompt_cache_options.as_mut(),
+                    default_prompt_cache_options.as_ref(),
                 ) {
                     (Some(target), Some(default)) => {
-                        fill(&mut target.mode, &default.mode);
-                        fill(&mut target.ttl, &default.ttl);
+                        let OpenAiPromptCacheOptions {
+                            mode: target_mode,
+                            ttl: target_ttl,
+                        } = target;
+                        let OpenAiPromptCacheOptions {
+                            mode: default_mode,
+                            ttl: default_ttl,
+                        } = default;
+                        fill(target_mode, default_mode);
+                        fill(target_ttl, default_ttl);
                     }
-                    (None, Some(default)) => target.prompt_cache_options = Some(*default),
+                    (None, Some(default)) => *target_prompt_cache_options = Some(*default),
                     _ => {}
                 }
-                fill(
-                    &mut target.supports_temperature_override,
-                    &default.supports_temperature_override,
-                );
-                fill(
-                    &mut target.supports_reasoning_override,
-                    &default.supports_reasoning_override,
-                );
                 Ok(())
             }
             (Self::Gemini(target), Self::Gemini(default)) => {
-                fill(&mut target.thinking, &default.thinking);
-                fill(&mut target.thinking_budget, &default.thinking_budget);
-                fill(&mut target.thinking_level, &default.thinking_level);
-                fill(&mut target.top_k, &default.top_k);
-                fill(&mut target.top_p, &default.top_p);
-                fill(&mut target.structured_output, &default.structured_output);
-                fill(&mut target.google_search, &default.google_search);
-                fill(&mut target.candidate_count, &default.candidate_count);
-                fill(
-                    &mut target.cached_content_name,
-                    &default.cached_content_name,
-                );
+                let GeminiProviderTag {
+                    thinking: target_thinking,
+                    thinking_budget: target_thinking_budget,
+                    thinking_level: target_thinking_level,
+                    top_k: target_top_k,
+                    top_p: target_top_p,
+                    structured_output: target_structured_output,
+                    google_search: target_google_search,
+                    candidate_count: target_candidate_count,
+                    cached_content_name: target_cached_content_name,
+                } = target;
+                let GeminiProviderTag {
+                    thinking: default_thinking,
+                    thinking_budget: default_thinking_budget,
+                    thinking_level: default_thinking_level,
+                    top_k: default_top_k,
+                    top_p: default_top_p,
+                    structured_output: default_structured_output,
+                    google_search: default_google_search,
+                    candidate_count: default_candidate_count,
+                    cached_content_name: default_cached_content_name,
+                } = default;
+                fill(target_thinking, default_thinking);
+                fill(target_thinking_budget, default_thinking_budget);
+                fill(target_thinking_level, default_thinking_level);
+                fill(target_top_k, default_top_k);
+                fill(target_top_p, default_top_p);
+                fill(target_structured_output, default_structured_output);
+                fill(target_google_search, default_google_search);
+                fill(target_candidate_count, default_candidate_count);
+                fill(target_cached_content_name, default_cached_content_name);
                 Ok(())
             }
             // An opaque pass-through bag cannot be field-merged; the explicit
@@ -1099,85 +1192,179 @@ impl ProviderTag {
                 *target = None;
             }
         }
+        // Destructured without `..` like `merge_missing_from`: a new knob a
+        // build default can set must be cleared here too, or it would read as
+        // a caller requirement.
         match (self, defaults) {
             (Self::Anthropic(target), Self::Anthropic(default)) => {
-                clear(&mut target.thinking, &default.thinking);
+                let AnthropicProviderTag {
+                    thinking: target_thinking,
+                    thinking_budget_tokens: target_thinking_budget_tokens,
+                    web_search: target_web_search,
+                    top_k: target_top_k,
+                    effort: target_effort,
+                    structured_output: target_structured_output,
+                    inference_geo: target_inference_geo,
+                    compaction: target_compaction,
+                    context: target_context,
+                    cache_control: target_cache_control,
+                    cache_ttl: target_cache_ttl,
+                    supports_temperature_override: target_supports_temperature_override,
+                } = target;
+                let AnthropicProviderTag {
+                    thinking: default_thinking,
+                    thinking_budget_tokens: default_thinking_budget_tokens,
+                    web_search: default_web_search,
+                    top_k: default_top_k,
+                    effort: default_effort,
+                    structured_output: default_structured_output,
+                    inference_geo: default_inference_geo,
+                    compaction: default_compaction,
+                    context: default_context,
+                    cache_control: default_cache_control,
+                    cache_ttl: default_cache_ttl,
+                    supports_temperature_override: default_supports_temperature_override,
+                } = default;
+                clear(target_thinking, default_thinking);
                 clear(
-                    &mut target.thinking_budget_tokens,
-                    &default.thinking_budget_tokens,
+                    target_thinking_budget_tokens,
+                    default_thinking_budget_tokens,
                 );
-                clear(&mut target.web_search, &default.web_search);
-                clear(&mut target.top_k, &default.top_k);
-                clear(&mut target.effort, &default.effort);
-                clear(&mut target.structured_output, &default.structured_output);
-                clear(&mut target.inference_geo, &default.inference_geo);
-                clear(&mut target.compaction, &default.compaction);
-                clear(&mut target.context, &default.context);
-                clear(&mut target.cache_control, &default.cache_control);
-                clear(&mut target.cache_ttl, &default.cache_ttl);
+                clear(target_web_search, default_web_search);
+                clear(target_top_k, default_top_k);
+                clear(target_effort, default_effort);
+                clear(target_structured_output, default_structured_output);
+                clear(target_inference_geo, default_inference_geo);
+                clear(target_compaction, default_compaction);
+                clear(target_context, default_context);
+                clear(target_cache_control, default_cache_control);
+                clear(target_cache_ttl, default_cache_ttl);
                 clear(
-                    &mut target.supports_temperature_override,
-                    &default.supports_temperature_override,
+                    target_supports_temperature_override,
+                    default_supports_temperature_override,
                 );
             }
             (Self::OpenAi(target), Self::OpenAi(default)) => {
-                clear(&mut target.reasoning_effort, &default.reasoning_effort);
-                clear(&mut target.reasoning_mode, &default.reasoning_mode);
-                clear(&mut target.reasoning_context, &default.reasoning_context);
-                clear(&mut target.text_verbosity, &default.text_verbosity);
-                clear(&mut target.seed, &default.seed);
-                clear(&mut target.frequency_penalty, &default.frequency_penalty);
-                clear(&mut target.presence_penalty, &default.presence_penalty);
-                clear(&mut target.web_search, &default.web_search);
-                clear(&mut target.structured_output, &default.structured_output);
-                clear(&mut target.reasoning, &default.reasoning);
+                let OpenAiProviderTag {
+                    reasoning_effort: target_reasoning_effort,
+                    reasoning_mode: target_reasoning_mode,
+                    reasoning_context: target_reasoning_context,
+                    text_verbosity: target_text_verbosity,
+                    seed: target_seed,
+                    frequency_penalty: target_frequency_penalty,
+                    presence_penalty: target_presence_penalty,
+                    web_search: target_web_search,
+                    structured_output: target_structured_output,
+                    reasoning: target_reasoning,
+                    chat_template_kwargs: target_chat_template_kwargs,
+                    thinking: target_thinking,
+                    store: target_store,
+                    prompt_cache_enabled: target_prompt_cache_enabled,
+                    prompt_cache_key: target_prompt_cache_key,
+                    prompt_cache_retention: target_prompt_cache_retention,
+                    supports_temperature_override: target_supports_temperature_override,
+                    supports_reasoning_override: target_supports_reasoning_override,
+                    prompt_cache_options: target_prompt_cache_options,
+                } = target;
+                let OpenAiProviderTag {
+                    reasoning_effort: default_reasoning_effort,
+                    reasoning_mode: default_reasoning_mode,
+                    reasoning_context: default_reasoning_context,
+                    text_verbosity: default_text_verbosity,
+                    seed: default_seed,
+                    frequency_penalty: default_frequency_penalty,
+                    presence_penalty: default_presence_penalty,
+                    web_search: default_web_search,
+                    structured_output: default_structured_output,
+                    reasoning: default_reasoning,
+                    chat_template_kwargs: default_chat_template_kwargs,
+                    thinking: default_thinking,
+                    store: default_store,
+                    prompt_cache_enabled: default_prompt_cache_enabled,
+                    prompt_cache_key: default_prompt_cache_key,
+                    prompt_cache_retention: default_prompt_cache_retention,
+                    supports_temperature_override: default_supports_temperature_override,
+                    supports_reasoning_override: default_supports_reasoning_override,
+                    prompt_cache_options: default_prompt_cache_options,
+                } = default;
+                clear(target_reasoning_effort, default_reasoning_effort);
+                clear(target_reasoning_mode, default_reasoning_mode);
+                clear(target_reasoning_context, default_reasoning_context);
+                clear(target_text_verbosity, default_text_verbosity);
+                clear(target_seed, default_seed);
+                clear(target_frequency_penalty, default_frequency_penalty);
+                clear(target_presence_penalty, default_presence_penalty);
+                clear(target_web_search, default_web_search);
+                clear(target_structured_output, default_structured_output);
+                clear(target_reasoning, default_reasoning);
+                clear(target_chat_template_kwargs, default_chat_template_kwargs);
+                clear(target_thinking, default_thinking);
+                clear(target_store, default_store);
+                clear(target_prompt_cache_enabled, default_prompt_cache_enabled);
+                clear(target_prompt_cache_key, default_prompt_cache_key);
                 clear(
-                    &mut target.chat_template_kwargs,
-                    &default.chat_template_kwargs,
+                    target_prompt_cache_retention,
+                    default_prompt_cache_retention,
                 );
-                clear(&mut target.thinking, &default.thinking);
-                clear(&mut target.store, &default.store);
                 clear(
-                    &mut target.prompt_cache_enabled,
-                    &default.prompt_cache_enabled,
+                    target_supports_temperature_override,
+                    default_supports_temperature_override,
                 );
-                clear(&mut target.prompt_cache_key, &default.prompt_cache_key);
                 clear(
-                    &mut target.prompt_cache_retention,
-                    &default.prompt_cache_retention,
+                    target_supports_reasoning_override,
+                    default_supports_reasoning_override,
                 );
                 if let (Some(options), Some(default)) = (
-                    target.prompt_cache_options.as_mut(),
-                    default.prompt_cache_options.as_ref(),
+                    target_prompt_cache_options.as_mut(),
+                    default_prompt_cache_options.as_ref(),
                 ) {
-                    clear(&mut options.mode, &default.mode);
-                    clear(&mut options.ttl, &default.ttl);
-                    if *options == OpenAiPromptCacheOptions::default() {
-                        target.prompt_cache_options = None;
+                    let OpenAiPromptCacheOptions {
+                        mode: target_mode,
+                        ttl: target_ttl,
+                    } = options;
+                    let OpenAiPromptCacheOptions {
+                        mode: default_mode,
+                        ttl: default_ttl,
+                    } = default;
+                    clear(target_mode, default_mode);
+                    clear(target_ttl, default_ttl);
+                    if target_mode.is_none() && target_ttl.is_none() {
+                        *target_prompt_cache_options = None;
                     }
                 }
-                clear(
-                    &mut target.supports_temperature_override,
-                    &default.supports_temperature_override,
-                );
-                clear(
-                    &mut target.supports_reasoning_override,
-                    &default.supports_reasoning_override,
-                );
             }
             (Self::Gemini(target), Self::Gemini(default)) => {
-                clear(&mut target.thinking, &default.thinking);
-                clear(&mut target.thinking_budget, &default.thinking_budget);
-                clear(&mut target.thinking_level, &default.thinking_level);
-                clear(&mut target.top_k, &default.top_k);
-                clear(&mut target.top_p, &default.top_p);
-                clear(&mut target.structured_output, &default.structured_output);
-                clear(&mut target.google_search, &default.google_search);
-                clear(&mut target.candidate_count, &default.candidate_count);
-                clear(
-                    &mut target.cached_content_name,
-                    &default.cached_content_name,
-                );
+                let GeminiProviderTag {
+                    thinking: target_thinking,
+                    thinking_budget: target_thinking_budget,
+                    thinking_level: target_thinking_level,
+                    top_k: target_top_k,
+                    top_p: target_top_p,
+                    structured_output: target_structured_output,
+                    google_search: target_google_search,
+                    candidate_count: target_candidate_count,
+                    cached_content_name: target_cached_content_name,
+                } = target;
+                let GeminiProviderTag {
+                    thinking: default_thinking,
+                    thinking_budget: default_thinking_budget,
+                    thinking_level: default_thinking_level,
+                    top_k: default_top_k,
+                    top_p: default_top_p,
+                    structured_output: default_structured_output,
+                    google_search: default_google_search,
+                    candidate_count: default_candidate_count,
+                    cached_content_name: default_cached_content_name,
+                } = default;
+                clear(target_thinking, default_thinking);
+                clear(target_thinking_budget, default_thinking_budget);
+                clear(target_thinking_level, default_thinking_level);
+                clear(target_top_k, default_top_k);
+                clear(target_top_p, default_top_p);
+                clear(target_structured_output, default_structured_output);
+                clear(target_google_search, default_google_search);
+                clear(target_candidate_count, default_candidate_count);
+                clear(target_cached_content_name, default_cached_content_name);
             }
             _ => {}
         }

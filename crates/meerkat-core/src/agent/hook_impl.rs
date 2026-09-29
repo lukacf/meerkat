@@ -18,12 +18,15 @@ where
 {
     pub(super) async fn execute_hooks(
         &self,
-        invocation: HookInvocation,
+        mut invocation: HookInvocation,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) -> Result<HookExecutionReport, AgentError> {
         let Some(hook_engine) = &self.hook_engine else {
             return Ok(HookExecutionReport::empty());
         };
+        if invocation.run_id.is_none() {
+            invocation.run_id = self.tool_dispatch_context.run_id().cloned();
+        }
 
         let report = match hook_engine
             .execute(invocation.clone(), Some(&self.hook_run_overrides))

@@ -5437,10 +5437,6 @@ impl AgentFactory {
         composite: &CompositeDispatcher,
         session_id: Option<&str>,
     ) -> Result<(), CompositeDispatcherError> {
-        use meerkat_tools::builtin::shell::{
-            PROCESS_CUSTODY_DIR, ProcessCustody, ProcessCustodyScope,
-        };
-
         Self::install_process_group_observers();
         let Some(job_manager) = composite.shell_job_manager() else {
             return Ok(());
@@ -5455,21 +5451,11 @@ impl AgentFactory {
             );
             return Ok(());
         };
-        let (custody, report) = ProcessCustody::recover_and_open(
-            &runtime_root.join(PROCESS_CUSTODY_DIR),
-            ProcessCustodyScope::session(&session_id),
-        )
-        .await?;
-        for recovered in &report.recovered {
-            tracing::warn!(
-                %session_id,
-                entry_id = %recovered.entry_id,
-                prior_incarnation = %recovered.prior_incarnation,
-                tool_call_id = ?recovered.tool_call_id,
-                cessation = ?recovered.cessation,
-                "settled a shell tool process left by a prior host incarnation"
-            );
-        }
+        // The build already settled the scope (see `build_agent`); this
+        // returns that same open handle without recovering again.
+        let custody = crate::process_custody::open_session_custody(runtime_root, &session_id)
+            .await
+            .map_err(CompositeDispatcherError::ProcessCustody)?;
         job_manager.bind_process_custody(custody).map_err(|_| {
             CompositeDispatcherError::ToolInitFailed {
                 name: "shell".to_string(),

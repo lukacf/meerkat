@@ -170,6 +170,15 @@ pub fn build_runtime_backed_service_with_capacities(
     Arc<MeerkatMachine>,
 ) {
     let runtime_adapter = persistence.runtime_adapter();
+    // Every attachment of a recovered session settles the session's
+    // earlier-incarnation tool processes before it serves, whichever surface
+    // attaches it and whether or not an agent was built first.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(runtime_root) = builder.factory().runtime_root.clone() {
+        runtime_adapter.set_interrupted_tool_evidence_source(Arc::new(
+            crate::process_custody::CustodyEvidenceSource::new(runtime_root),
+        ));
+    }
     #[cfg(not(target_arch = "wasm32"))]
     let default_realm_id = persistence
         .manifest()
@@ -1551,10 +1560,10 @@ impl<B: SessionAgentBuilder + 'static> meerkat_core::lifecycle::CoreExecutorTran
 {
     async fn append_system_notice_under_turn_finalization_boundary(
         &self,
-        notice: meerkat_core::types::SystemNoticeMessage,
+        record: meerkat_core::types::SystemNoticeRecord,
     ) -> Result<(), CoreExecutorError> {
         self.service
-            .append_system_notice_under_runtime_turn_boundary(&self.session_id, notice)
+            .append_system_notice_under_runtime_turn_boundary(&self.session_id, record)
             .await
             .map(|_| ())
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))

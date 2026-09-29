@@ -1052,7 +1052,7 @@ pub trait MobSessionService:
     async fn append_system_notice_under_runtime_turn_boundary(
         &self,
         _session_id: &SessionId,
-        _notice: meerkat_core::types::SystemNoticeMessage,
+        _record: meerkat_core::types::SystemNoticeRecord,
     ) -> Result<(), SessionError> {
         Err(SessionError::Unsupported(
             "typed system-notice append is not supported by this session service".to_string(),
@@ -2551,10 +2551,10 @@ where
     async fn append_system_notice_under_runtime_turn_boundary(
         &self,
         session_id: &SessionId,
-        notice: meerkat_core::types::SystemNoticeMessage,
+        record: meerkat_core::types::SystemNoticeRecord,
     ) -> Result<(), SessionError> {
         meerkat_session::PersistentSessionService::<B>::append_system_notice_under_runtime_turn_boundary(
-            self, session_id, notice,
+            self, session_id, record,
         )
         .await
         .map(|_| ())

@@ -81,8 +81,8 @@ pub enum ProcessCustodyError {
     #[error("process custody record {path} is unreadable: {reason}")]
     CorruptRecord { path: PathBuf, reason: String },
     /// A record was written by a custody format this build does not know
-    /// (for example by a newer release before a rollback), in the same boot
-    /// and pid namespace, by another host incarnation. Its phase and process
+    /// (for example by a newer release before a rollback), in the same boot,
+    /// by another host incarnation. Its phase and process
     /// identity cannot be interpreted, so cessation cannot be proven.
     /// Operator action: run the newer release again to settle it, or confirm
     /// the tool process is not running and delete the file at `path`.
@@ -99,6 +99,17 @@ pub enum ProcessCustodyError {
         incarnation: Uuid,
         host_pid: i32,
     },
+    /// The entry was written in this boot but in another pid namespace (for
+    /// example another container sharing the realm root). Neither its host
+    /// nor its process group can be observed from here, and nothing proves
+    /// they ended, so nothing was signalled or settled. Operator action:
+    /// confirm the container that wrote it has stopped (or settle the scope
+    /// from inside it), then delete the entry's record and retry. A reboot
+    /// also settles it.
+    #[error(
+        "custody entry {entry_id} of host incarnation {incarnation} was written in another pid namespace of this boot and cannot be verified from here"
+    )]
+    ForeignPidNamespace { entry_id: Uuid, incarnation: Uuid },
     /// Recovery SIGKILLed the group but some member did not exit before the
     /// deadline (a process stuck in an uninterruptible kernel wait), or the
     /// kernel refused to let this host signal a member (EPERM, for example a

@@ -2310,15 +2310,20 @@ pub enum SystemNoticeBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<Value>,
     },
-    /// A tool process of an interrupted run was settled by the host's
-    /// process-custody recovery. The run's input was settled as interrupted
-    /// and not replayed; the tool's effects may be partial or complete.
+    /// A tool process of an earlier run was settled by the host's
+    /// process-custody recovery after the host stopped abruptly. When the run
+    /// was still in flight its inputs were settled as interrupted and not
+    /// replayed; the tool's effects may be partial or complete.
     ToolProcessInterrupted {
+        /// The run the process belonged to; with the other fields, the
+        /// notice's typed identity.
+        run_id: crate::lifecycle::RunId,
         /// Provider tool-call id of the interrupted call, when known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_call_id: Option<String>,
         spawner: crate::tool_process::ToolProcessSpawner,
         cessation: crate::tool_process::ToolProcessCessation,
+        disposition: crate::tool_process::InterruptedToolRunDisposition,
     },
     Unknown {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2405,10 +2410,12 @@ enum SystemNoticeBlockKnown {
         payload: Option<Value>,
     },
     ToolProcessInterrupted {
+        run_id: crate::lifecycle::RunId,
         #[serde(default)]
         tool_call_id: Option<String>,
         spawner: crate::tool_process::ToolProcessSpawner,
         cessation: crate::tool_process::ToolProcessCessation,
+        disposition: crate::tool_process::InterruptedToolRunDisposition,
     },
     Unknown {
         #[serde(default)]
@@ -2516,13 +2523,17 @@ impl From<SystemNoticeBlockKnown> for SystemNoticeBlock {
                 payload,
             },
             SystemNoticeBlockKnown::ToolProcessInterrupted {
+                run_id,
                 tool_call_id,
                 spawner,
                 cessation,
+                disposition,
             } => Self::ToolProcessInterrupted {
+                run_id,
                 tool_call_id,
                 spawner,
                 cessation,
+                disposition,
             },
             SystemNoticeBlockKnown::Unknown { summary, payload } => {
                 Self::Unknown { summary, payload }
@@ -2731,18 +2742,44 @@ impl SystemNoticeBlock {
                 tool_call_id,
                 spawner,
                 cessation,
+                disposition,
+                ..
             } => {
+                use crate::tool_process::InterruptedToolRunDisposition;
                 let call = tool_call_id
                     .as_deref()
                     .map(|id| format!(" (tool call {id})"))
                     .unwrap_or_default();
-                format!(
-                    "A previous run was interrupted when the host stopped abruptly. Its {}{call} {}. \
-                     The interrupted request was not re-run automatically; its effects may be \
-                     partial or complete. Verify the current state before repeating the action.",
-                    spawner.description(),
-                    cessation.description(),
-                )
+                let spawner = spawner.description();
+                let cessation = cessation.description();
+                match disposition {
+                    InterruptedToolRunDisposition::InputsSettled { inputs } => {
+                        let absorbed = inputs.saturating_sub(1);
+                        let request = if absorbed == 0 {
+                            "The interrupted request was".to_owned()
+                        } else {
+                            format!(
+                                "The interrupted request, and {absorbed} message(s) delivered to \
+                                 it while it was running, were"
+                            )
+                        };
+                        format!(
+                            "A previous run was interrupted when the host stopped abruptly. Its \
+                             {spawner}{call} {cessation}. {request} not re-run automatically; \
+                             effects may be partial or complete. Verify the current state before \
+                             repeating the action."
+                        )
+                    }
+                    InterruptedToolRunDisposition::RunCompleted => format!(
+                        "The host stopped abruptly. The {spawner}{call} started by an earlier, \
+                         completed run {cessation}. Nothing was re-run; verify its effects \
+                         before relying on them."
+                    ),
+                    InterruptedToolRunDisposition::Unknown => format!(
+                        "The host stopped abruptly. The {spawner}{call} of an earlier run \
+                         {cessation}. Verify the current state before repeating the action."
+                    ),
+                }
             }
             _ => self.summary().unwrap_or_default().to_string(),
         }
@@ -2765,6 +2802,30 @@ pub struct RuntimeAppendOrigin {
     pub input_id: crate::lifecycle::InputId,
     /// Zero-based position in the input's complete projected append list.
     pub append_ordinal: u64,
+}
+
+/// A typed system notice to append to the transcript without a turn,
+/// preceded by the user requests it accounts for.
+///
+/// Appending is idempotent as a whole: when an equal notice (same kind and
+/// typed blocks) is already in the transcript, nothing is appended, so the
+/// requests are never duplicated either.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SystemNoticeRecord {
+    /// User requests to append before the notice, in order (for example the
+    /// requests of an interrupted run that was not re-run and never
+    /// committed).
+    pub requests: Vec<UserMessage>,
+    pub notice: SystemNoticeMessage,
+}
+
+impl From<SystemNoticeMessage> for SystemNoticeRecord {
+    fn from(notice: SystemNoticeMessage) -> Self {
+        Self {
+            requests: Vec::new(),
+            notice,
+        }
+    }
 }
 
 /// System notice message stored in the canonical transcript.
@@ -2899,14 +2960,14 @@ impl SystemNoticeMessage {
         )
     }
 
-    /// The typed record that an interrupted run's tool processes were settled
-    /// by the host's process-custody recovery and the run's input was not
-    /// replayed. One block per interrupted tool process.
+    /// The typed record that an earlier run's tool processes were settled by
+    /// the host's process-custody recovery after an abrupt stop, and what
+    /// that did to the run. One block per settled tool process.
     pub fn tool_process_interrupted(blocks: Vec<SystemNoticeBlock>) -> Self {
         Self::with_blocks(
             SystemNoticeKind::ToolProcessRecovery,
             Some(
-                "The host stopped abruptly during a previous run; that run was not re-run."
+                "The host stopped abruptly; recovery settled tool processes of an earlier run."
                     .to_string(),
             ),
             blocks,

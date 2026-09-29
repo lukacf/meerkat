@@ -814,6 +814,13 @@ impl HookToolResult {
 pub struct HookInvocation {
     pub point: HookPoint,
     pub session_id: SessionId,
+    /// The run the invocation belongs to, when it happens inside one. The
+    /// agent fills it in from its bound run; a host that keeps durable
+    /// process custody records it with the hook's process, so a hook
+    /// interrupted by an abrupt host stop settles its run instead of letting
+    /// the run replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<crate::RunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -849,6 +856,7 @@ impl Serialize for HookInvocation {
             .as_ref()
             .map(|report| report.message.clone());
         let len = 2
+            + usize::from(self.run_id.is_some())
             + usize::from(self.turn_number.is_some())
             + usize::from(self.prompt_input.is_some())
             + usize::from(prompt.is_some())
@@ -863,6 +871,9 @@ impl Serialize for HookInvocation {
         let mut state = serializer.serialize_struct("HookInvocation", len)?;
         state.serialize_field("point", &self.point)?;
         state.serialize_field("session_id", &self.session_id)?;
+        if let Some(run_id) = &self.run_id {
+            state.serialize_field("run_id", run_id)?;
+        }
         if let Some(turn_number) = &self.turn_number {
             state.serialize_field("turn_number", turn_number)?;
         }
@@ -905,6 +916,7 @@ impl HookInvocation {
         Self {
             point,
             session_id,
+            run_id: None,
             turn_number: None,
             prompt_input: None,
             error_report: None,

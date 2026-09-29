@@ -7,8 +7,9 @@
 //!   earlier-incarnation tool processes before the agent (and so any new work
 //!   for the session) exists, whatever spawners the new build enables;
 //! - the session's interrupted-run evidence is handed to the runtime through
-//!   the session bindings, so recovered inputs of interrupted runs are settled
-//!   instead of replayed;
+//!   the session bindings and, for attachments that precede any agent build,
+//!   through the runtime's evidence source, so recovered inputs of
+//!   interrupted runs are settled instead of replayed on every surface;
 //! - command hooks run in custody through the meerkat-hooks seam;
 //! - a realm sweep settles sessions that are never resumed.
 
@@ -16,6 +17,9 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use meerkat_core::tool_process::{
+    InterruptedToolEvidence, InterruptedToolEvidenceError, InterruptedToolEvidenceSource,
+};
 use meerkat_core::types::SessionId;
 use meerkat_hooks::{CommandHookCustodyError, CommandHookCustodySpawn, CommandHookProcessCustody};
 use meerkat_tools::builtin::shell::{
@@ -29,7 +33,8 @@ pub(crate) fn custody_root(runtime_root: &Path) -> PathBuf {
 }
 
 /// Settle the session's earlier-incarnation tool processes and open its
-/// custody for this incarnation.
+/// custody for this incarnation. A scope this process already holds open is
+/// returned as is (settled once per process, not once per caller).
 pub(crate) async fn open_session_custody(
     runtime_root: &Path,
     session_id: &SessionId,
@@ -52,6 +57,35 @@ pub(crate) async fn open_session_custody(
         );
     }
     Ok(custody)
+}
+
+/// The runtime's source of interrupted-run evidence: settles a session's
+/// earlier-incarnation tool processes when the runtime attaches the session,
+/// before anything recovered is served, even when no agent has been built
+/// for it yet (for example an RPC on-demand attach).
+pub(crate) struct CustodyEvidenceSource {
+    runtime_root: PathBuf,
+}
+
+impl CustodyEvidenceSource {
+    pub(crate) fn new(runtime_root: PathBuf) -> Self {
+        Self { runtime_root }
+    }
+}
+
+#[async_trait::async_trait]
+impl InterruptedToolEvidenceSource for CustodyEvidenceSource {
+    async fn settle_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Arc<dyn InterruptedToolEvidence>>, InterruptedToolEvidenceError> {
+        let custody = open_session_custody(&self.runtime_root, session_id)
+            .await
+            .map_err(|error| InterruptedToolEvidenceError {
+                reason: error.to_string(),
+            })?;
+        Ok(Some(custody as Arc<dyn InterruptedToolEvidence>))
+    }
 }
 
 /// Settle every session under the realm's custody root once per process, on
@@ -86,6 +120,7 @@ impl CommandHookProcessCustody for HookProcessCustody {
     async fn prepare(
         &self,
         hook_id: &meerkat_core::HookId,
+        run_id: Option<&meerkat_core::RunId>,
         program: &OsStr,
         args: &[OsString],
     ) -> Result<(Box<dyn CommandHookCustodySpawn>, tokio::process::Command), CommandHookCustodyError>
@@ -97,7 +132,7 @@ impl CommandHookProcessCustody for HookProcessCustody {
                     hook_id: hook_id.to_string(),
                 },
                 None,
-                None,
+                run_id,
                 program,
                 args,
             )
@@ -189,6 +224,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: session_id.clone(),
                     turn_number: Some(1),

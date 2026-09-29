@@ -4822,16 +4822,28 @@ impl MeerkatMachine {
             )));
         }
 
-        Ok(EnsureRuntimeExecutorAttachment::Pending(
-            PendingRuntimeExecutorAttachment::new(
-                Arc::clone(self),
-                witness,
-                pending_guard,
-                cleanup_spawner,
-                should_wake,
-                persist_lifecycle_on_commit,
-            ),
-        ))
+        let mut pending = PendingRuntimeExecutorAttachment::new(
+            Arc::clone(self),
+            witness,
+            pending_guard,
+            cleanup_spawner,
+            should_wake,
+            persist_lifecycle_on_commit,
+        );
+        // Every pending attachment of a session settles the session's
+        // interrupted-run evidence before it can serve, whichever surface
+        // attaches (prepared materialization, RPC on-demand attach, schedule
+        // hosts, detached owners): recovered inputs of a run whose tool
+        // process host custody proved had started are settled, not replayed.
+        // The evidence comes from the canonical session bindings (installed by
+        // an agent build) or, before any build, from the host's evidence
+        // source, which first proves the session's earlier-incarnation tool
+        // processes stopped. A failure drops the pending attachment, which
+        // rolls it back.
+        if let Some(evidence) = self.session_interrupted_tool_evidence(&session_id).await? {
+            pending.settle_interrupted_tool_evidence(evidence).await?;
+        }
+        Ok(EnsureRuntimeExecutorAttachment::Pending(pending))
     }
 
     /// Retire a candidate that exited before its serving gate opened.

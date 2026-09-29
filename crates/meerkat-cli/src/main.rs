@@ -14092,12 +14092,12 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
     async fn append_system_notice_under_runtime_turn_boundary(
         &self,
         session_id: &SessionId,
-        notice: meerkat_core::types::SystemNoticeMessage,
+        record: meerkat_core::types::SystemNoticeRecord,
     ) -> Result<(), meerkat_core::service::SessionError> {
         meerkat_mob::MobSessionService::append_system_notice_under_runtime_turn_boundary(
             self.inner.as_ref(),
             session_id,
-            notice,
+            record,
         )
         .await
     }

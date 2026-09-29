@@ -4466,6 +4466,30 @@ impl RuntimeLoopAuthorityBinding {
     /// the pre-dequeue position (boundary held, actor idle, next input not
     /// dequeued), so the notices are part of the next real turn's transcript.
     /// Notices that cannot be recorded yet stay owed for a later lap.
+    /// Tell the session's interrupted-run evidence store that `run_id`'s
+    /// boundary committed durably, off the loop's critical path. Best effort:
+    /// a marker left behind is moot at the next recovery.
+    fn release_committed_run_tool_markers(&self, run_id: &RunId) {
+        let Some(machine) = self.machine.upgrade() else {
+            return;
+        };
+        let session_id = self.session_id.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            let Some(evidence) = machine.bound_interrupted_tool_evidence(&session_id).await else {
+                return;
+            };
+            if let Err(error) = evidence.run_committed(&run_id).await {
+                tracing::warn!(
+                    %session_id,
+                    %run_id,
+                    %error,
+                    "could not release completed-tool markers of a committed run"
+                );
+            }
+        });
+    }
+
     async fn record_interrupted_tool_notices(
         &self,
         executor: &dyn meerkat_core::lifecycle::CoreExecutor,
@@ -4505,7 +4529,7 @@ impl RuntimeLoopAuthorityBinding {
                     calls: notices
                         .calls
                         .iter()
-                        .filter(|call| !recorded.contains(&call.entry_id))
+                        .filter(|owed| !recorded.contains(&owed.call.entry_id))
                         .cloned()
                         .collect(),
                 };
@@ -4516,7 +4540,9 @@ impl RuntimeLoopAuthorityBinding {
             }
             if let Err(error) = notices.evidence.acknowledge(&entry_ids).await {
                 // The notice is in the transcript; a later materialization
-                // re-records it as a duplicate (no-op) and acknowledges.
+                // owes the same typed notice again (the settlement and its
+                // input count are durable), which the transcript records as a
+                // duplicate (no-op) before acknowledging.
                 tracing::warn!(
                     session_id = %self.session_id,
                     %error,
@@ -6997,6 +7023,10 @@ async fn process_queue(
                                 return should_stop;
                             }
                         };
+
+                        // The run's inputs can no longer be replayed: the
+                        // host may drop its completed-tool markers for it.
+                        authority_binding.release_committed_run_tool_markers(&run_id);
 
                         // Acknowledge the exact store commit before any
                         // derived compaction projection advances that same

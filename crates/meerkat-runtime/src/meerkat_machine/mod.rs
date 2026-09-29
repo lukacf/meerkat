@@ -2483,11 +2483,28 @@ pub struct PendingRuntimeExecutorAttachment {
     interrupted_tool_notices: Option<InterruptedToolNotices>,
 }
 
-/// Interrupted-run evidence whose inputs are settled and whose model notice
-/// is still owed.
+/// Interrupted-run evidence whose model notice is still owed: settled runs
+/// (inputs settled as interrupted) and moot runs (already completed) whose
+/// process outlived them.
 pub(crate) struct InterruptedToolNotices {
     pub(crate) evidence: Arc<dyn meerkat_core::tool_process::InterruptedToolEvidence>,
-    pub(crate) calls: Vec<meerkat_core::tool_process::InterruptedToolCall>,
+    pub(crate) calls: Vec<OwedInterruptedToolNotice>,
+}
+
+/// One piece of evidence owed to the model, with what settling it did to the
+/// run and the run's user requests (recorded once, before the notice).
+#[derive(Clone)]
+pub(crate) struct OwedInterruptedToolNotice {
+    pub(crate) call: meerkat_core::tool_process::InterruptedToolCall,
+    pub(crate) disposition: meerkat_core::tool_process::InterruptedToolRunDisposition,
+    pub(crate) requests: Vec<meerkat_core::types::ContentInput>,
+}
+
+/// A recovered, non-terminal input of an evidenced run.
+struct InterruptedRunInput {
+    run_id: RunId,
+    /// The user request content, for prompt inputs.
+    request: Option<meerkat_core::types::ContentInput>,
 }
 
 impl MeerkatMachine {
@@ -2526,37 +2543,63 @@ impl MeerkatMachine {
 
 impl InterruptedToolNotices {
     /// Group the owed notices by interrupted run: one typed
-    /// `ToolProcessRecovery` notice per run, with the evidence entries it
-    /// settles.
+    /// `ToolProcessRecovery` notice per run, preceded by the run's user
+    /// requests, with the evidence entries it settles.
     pub(crate) fn run_notices(
         &self,
-    ) -> Vec<(meerkat_core::types::SystemNoticeMessage, Vec<uuid::Uuid>)> {
+    ) -> Vec<(meerkat_core::types::SystemNoticeRecord, Vec<uuid::Uuid>)> {
         let mut runs: Vec<RunId> = Vec::new();
-        for call in &self.calls {
-            if !runs.contains(&call.run_id) {
-                runs.push(call.run_id.clone());
+        for owed in &self.calls {
+            if !runs.contains(&owed.call.run_id) {
+                runs.push(owed.call.run_id.clone());
             }
         }
         runs.into_iter()
             .map(|run_id| {
-                let run_calls: Vec<&meerkat_core::tool_process::InterruptedToolCall> = self
+                let run_calls: Vec<&OwedInterruptedToolNotice> = self
                     .calls
                     .iter()
-                    .filter(|call| call.run_id == run_id)
+                    .filter(|owed| owed.call.run_id == run_id)
                     .collect();
                 let blocks = run_calls
                     .iter()
                     .map(
-                        |call| meerkat_core::types::SystemNoticeBlock::ToolProcessInterrupted {
-                            tool_call_id: call.tool_call_id.clone(),
-                            spawner: call.spawner.clone(),
-                            cessation: call.cessation,
+                        |owed| meerkat_core::types::SystemNoticeBlock::ToolProcessInterrupted {
+                            run_id: owed.call.run_id.clone(),
+                            tool_call_id: owed.call.tool_call_id.clone(),
+                            spawner: owed.call.spawner.clone(),
+                            cessation: owed.call.cessation,
+                            disposition: owed.disposition,
                         },
                     )
                     .collect();
+                let requests = run_calls
+                    .iter()
+                    .find(|owed| !owed.requests.is_empty())
+                    .map(|owed| {
+                        owed.requests
+                            .iter()
+                            .map(|request| meerkat_core::types::UserMessage {
+                                content: request.clone().into_blocks(),
+                                render_metadata: None,
+                                identity: meerkat_core::types::TranscriptMessageIdentity {
+                                    run_id: Some(run_id.clone()),
+                                    ..Default::default()
+                                },
+                                transcript_role: meerkat_core::types::TranscriptUserRole::default(),
+                                created_at: meerkat_core::types::message_timestamp_now(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 (
-                    meerkat_core::types::SystemNoticeMessage::tool_process_interrupted(blocks),
-                    run_calls.iter().map(|call| call.entry_id).collect(),
+                    meerkat_core::types::SystemNoticeRecord {
+                        requests,
+                        notice: meerkat_core::types::SystemNoticeMessage::tool_process_interrupted(
+                            blocks,
+                        ),
+                    },
+                    run_calls.iter().map(|owed| owed.call.entry_id).collect(),
                 )
             })
             .collect()
@@ -2766,25 +2809,45 @@ impl PendingRuntimeExecutorAttachment {
         Ok((entry.driver.clone(), entry.completions.clone()))
     }
 
-    /// Recovered non-terminal inputs whose last run is one of `runs`.
+    /// Recovered non-terminal inputs whose last run is one of `runs`, in
+    /// admission order, with the user request content of prompt inputs that
+    /// never reached the committed transcript (no recorded boundary).
     async fn interrupted_run_inputs(
         &self,
         runs: &[RunId],
-    ) -> Result<Vec<(InputId, RunId)>, RuntimeDriverError> {
+    ) -> Result<Vec<InterruptedRunInput>, RuntimeDriverError> {
         if runs.is_empty() {
             return Ok(Vec::new());
         }
         let (driver, _) = self.exact_pending_driver("interrupted-run lookup").await?;
         let driver = driver.lock().await;
-        Ok(driver
+        let mut inputs: Vec<(Option<u64>, InterruptedRunInput)> = driver
             .as_driver()
             .active_input_ids()
             .into_iter()
             .filter_map(|input_id| {
                 let run_id = driver.input_last_run_id(&input_id)?;
-                runs.contains(&run_id).then_some((input_id, run_id))
+                if !runs.contains(&run_id) {
+                    return None;
+                }
+                let stored = driver.as_driver().stored_input_state(&input_id);
+                let admission = stored
+                    .as_ref()
+                    .and_then(|stored| stored.seed.admission_sequence);
+                // A durably applied input records the boundary sequence that
+                // owns it, so its content already reached the committed
+                // transcript: it is not captured again.
+                let request = stored
+                    .filter(|stored| stored.seed.last_boundary_sequence.is_none())
+                    .and_then(|stored| match stored.state.persisted_input {
+                        Some(crate::input::Input::Prompt(prompt)) => Some(prompt.content),
+                        _ => None,
+                    });
+                Some((admission, InterruptedRunInput { run_id, request }))
             })
-            .collect())
+            .collect();
+        inputs.sort_by_key(|(admission, _)| *admission);
+        Ok(inputs.into_iter().map(|(_, input)| input).collect())
     }
 
     /// Settle, before this attachment serves, the recovered inputs of runs
@@ -2822,20 +2885,28 @@ impl PendingRuntimeExecutorAttachment {
                     runs.contains(&run_id).then_some((input_id, run_id))
                 })
                 .collect();
-            for (input_id, _) in &candidates {
-                if !driver
+            let mut abandoned = Vec::with_capacity(candidates.len());
+            for (input_id, run_id) in candidates {
+                if driver
                     .abandon_queued_input(
-                        input_id,
+                        &input_id,
                         crate::input_state::InputAbandonReason::ToolProcessInterrupted,
                     )
                     .await?
                 {
-                    return Err(RuntimeDriverError::Internal(format!(
-                        "recovered input {input_id} of an interrupted run was not queued at settlement"
-                    )));
+                    abandoned.push((input_id, run_id));
+                } else {
+                    // Not queued: recovery did not hand it back for replay, so
+                    // there is nothing to settle for it.
+                    tracing::warn!(
+                        session_id = %self.witness.session_id(),
+                        %input_id,
+                        %run_id,
+                        "recovered input of an interrupted run was not queued at settlement; left as is"
+                    );
                 }
             }
-            candidates
+            abandoned
         };
         if !abandoned.is_empty() {
             completions.lock().await.fail_inputs(
@@ -2853,22 +2924,33 @@ impl PendingRuntimeExecutorAttachment {
     /// crash-safe order under the retained mutation guard:
     ///
     /// 1. find the recovered inputs of every evidenced run;
-    /// 2. durably mark pending evidence whose run has such inputs as settled
-    ///    (evidence whose run has none is moot - its run was not in flight -
-    ///    and is acknowledged);
+    /// 2. durably mark pending evidence whose run has such inputs as settled,
+    ///    with the run's input count (the request plus inputs absorbed into
+    ///    the run while it ran) and its user requests, captured before the
+    ///    inputs and their payloads are abandoned;
     /// 3. abandon the inputs of every settled run (idempotent: a crash between
     ///    2 and 3 abandons them at the next materialization);
-    /// 4. owe the model one notice per settled run, delivered after commit.
+    /// 4. owe the model one notice per settled run, delivered after commit
+    ///    preceded by the run's user requests, which never reached the
+    ///    transcript because the run never committed.
+    ///
+    /// Pending evidence whose run has no recovered input is moot: the run had
+    /// completed. A process that merely completed in it (a completed-tool
+    /// marker) is acknowledged silently; any other (for example a background
+    /// job killed by recovery) is owed a notice saying the run had completed.
     async fn settle_interrupted_tool_evidence(
         &mut self,
         evidence: Arc<dyn meerkat_core::tool_process::InterruptedToolEvidence>,
     ) -> Result<(), RuntimeDriverError> {
-        use meerkat_core::tool_process::InterruptedToolSettlement;
+        use meerkat_core::tool_process::{
+            InterruptedRunInputs, InterruptedToolRunDisposition, InterruptedToolSettlement,
+            ToolProcessCessation,
+        };
 
         let evidence_error = |error: meerkat_core::tool_process::InterruptedToolEvidenceError| {
             RuntimeDriverError::Internal(error.to_string())
         };
-        let mut calls = evidence.interrupted_calls().await.map_err(evidence_error)?;
+        let calls = evidence.interrupted_calls().await.map_err(evidence_error)?;
         if calls.is_empty() {
             return Ok(());
         }
@@ -2879,38 +2961,93 @@ impl PendingRuntimeExecutorAttachment {
             }
         }
         let in_flight = self.interrupted_run_inputs(&runs).await?;
-        let run_in_flight = |run_id: &RunId| {
-            in_flight
+        let run_inputs = |run_id: &RunId| {
+            let run: Vec<&InterruptedRunInput> = in_flight
                 .iter()
-                .any(|(_, in_flight_run)| in_flight_run == run_id)
+                .filter(|input| &input.run_id == run_id)
+                .collect();
+            InterruptedRunInputs {
+                inputs: u32::try_from(run.len()).unwrap_or(u32::MAX),
+                requests: run
+                    .into_iter()
+                    .filter_map(|input| input.request.clone())
+                    .collect(),
+            }
         };
-        let mut newly_settled = Vec::new();
-        let mut moot = Vec::new();
-        for call in &mut calls {
-            if call.settlement == InterruptedToolSettlement::Pending {
-                if run_in_flight(&call.run_id) {
-                    newly_settled.push(call.entry_id);
-                    call.settlement = InterruptedToolSettlement::InputsSettled;
-                } else {
-                    moot.push(call.entry_id);
+        let mut owed = Vec::new();
+        let mut silently_moot = Vec::new();
+        let mut settled_runs: Vec<RunId> = Vec::new();
+        for run_id in &runs {
+            let run_calls: Vec<&meerkat_core::tool_process::InterruptedToolCall> =
+                calls.iter().filter(|call| &call.run_id == run_id).collect();
+            let recorded_inputs = run_calls
+                .iter()
+                .find_map(|call| call.settlement.settled_inputs().cloned());
+            let settled = match recorded_inputs {
+                Some(settled) => {
+                    // Settled by an earlier materialization; finish it.
+                    let pending: Vec<uuid::Uuid> = run_calls
+                        .iter()
+                        .filter(|call| call.settlement == InterruptedToolSettlement::Pending)
+                        .map(|call| call.entry_id)
+                        .collect();
+                    if !pending.is_empty() {
+                        evidence
+                            .mark_inputs_settled(&pending, &settled)
+                            .await
+                            .map_err(evidence_error)?;
+                    }
+                    Some(settled)
+                }
+                None => {
+                    let settled = run_inputs(run_id);
+                    if settled.inputs == 0 {
+                        None
+                    } else {
+                        // Durable before the inputs (and their payloads) are
+                        // abandoned below.
+                        let entries: Vec<uuid::Uuid> =
+                            run_calls.iter().map(|call| call.entry_id).collect();
+                        evidence
+                            .mark_inputs_settled(&entries, &settled)
+                            .await
+                            .map_err(evidence_error)?;
+                        Some(settled)
+                    }
+                }
+            };
+            match settled {
+                Some(settled) => {
+                    settled_runs.push(run_id.clone());
+                    owed.extend(run_calls.into_iter().map(|call| OwedInterruptedToolNotice {
+                        call: call.clone(),
+                        disposition: InterruptedToolRunDisposition::InputsSettled {
+                            inputs: settled.inputs,
+                        },
+                        requests: settled.requests.clone(),
+                    }));
+                }
+                None => {
+                    for call in run_calls {
+                        if call.cessation == ToolProcessCessation::ExitedBeforeCommit {
+                            // The run committed the tool's result normally.
+                            silently_moot.push(call.entry_id);
+                        } else {
+                            owed.push(OwedInterruptedToolNotice {
+                                call: call.clone(),
+                                disposition: InterruptedToolRunDisposition::RunCompleted,
+                                requests: Vec::new(),
+                            });
+                        }
+                    }
                 }
             }
         }
-        if !newly_settled.is_empty() {
+        if !silently_moot.is_empty() {
             evidence
-                .mark_inputs_settled(&newly_settled)
+                .acknowledge(&silently_moot)
                 .await
                 .map_err(evidence_error)?;
-        }
-        if !moot.is_empty() {
-            evidence.acknowledge(&moot).await.map_err(evidence_error)?;
-        }
-        calls.retain(|call| call.settlement == InterruptedToolSettlement::InputsSettled);
-        let mut settled_runs: Vec<RunId> = Vec::new();
-        for call in &calls {
-            if !settled_runs.contains(&call.run_id) {
-                settled_runs.push(call.run_id.clone());
-            }
         }
         let abandoned = self.abandon_interrupted_run_inputs(&settled_runs).await?;
         if !abandoned.is_empty() {
@@ -2921,8 +3058,11 @@ impl PendingRuntimeExecutorAttachment {
                 "settled recovered inputs of runs whose tool processes were interrupted by an abrupt host stop"
             );
         }
-        if !calls.is_empty() {
-            self.interrupted_tool_notices = Some(InterruptedToolNotices { evidence, calls });
+        if !owed.is_empty() {
+            self.interrupted_tool_notices = Some(InterruptedToolNotices {
+                evidence,
+                calls: owed,
+            });
         }
         Ok(())
     }
@@ -4445,19 +4585,12 @@ impl PreparedSessionMaterialization {
                 executor_factory,
             )
             .await?;
-        let mut outcome = outcome;
-        if let EnsureRuntimeExecutorAttachment::Pending(pending) = &mut outcome {
+        if matches!(&outcome, EnsureRuntimeExecutorAttachment::Pending(_)) {
             // The exact machine attachment now owns rollback. Its publication
             // cleared this claim synchronously, so dropping this shell must not
-            // start a second cleanup saga.
+            // start a second cleanup saga. Interrupted-run evidence was settled
+            // when the machine created the pending attachment.
             self.armed = false;
-            // Settle runs interrupted by an abrupt host stop before anything
-            // recovered can be served (see
-            // `PendingRuntimeExecutorAttachment::settle_interrupted_tool_evidence`).
-            // A failure drops the pending attachment, which rolls it back.
-            if let Some(evidence) = self.bindings.interrupted_tool_evidence().get() {
-                pending.settle_interrupted_tool_evidence(evidence).await?;
-            }
         }
         Ok(outcome)
     }
@@ -8383,6 +8516,12 @@ pub struct MeerkatMachineShared {
     /// `LiveTransportUnavailable`. Shell composition slot, NOT machine
     /// state — no catalog delta.
     member_live_host: StdRwLock<Option<Arc<dyn crate::member_live::MemberLiveHost>>>,
+    /// Host-injected provider of interrupted-run evidence (durable tool
+    /// process custody). Every pending attachment of a session settles the
+    /// session's earlier-incarnation tool processes through it before it can
+    /// serve. Shell composition slot, NOT machine state.
+    interrupted_tool_evidence_source:
+        StdRwLock<Option<Arc<dyn meerkat_core::tool_process::InterruptedToolEvidenceSource>>>,
     /// Provider-neutral host for generated canonical context appends.
     #[cfg(feature = "live")]
     live_context_mirror_host:
@@ -8912,6 +9051,81 @@ impl MeerkatMachine {
             .member_live_host
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
+    }
+
+    /// Install the host's provider of interrupted-run evidence. Every
+    /// subsequent pending executor attachment settles its session's
+    /// earlier-incarnation tool processes through it before serving, on
+    /// every surface, even when no agent has been built for the session yet.
+    pub fn set_interrupted_tool_evidence_source(
+        &self,
+        source: Arc<dyn meerkat_core::tool_process::InterruptedToolEvidenceSource>,
+    ) {
+        *self
+            .interrupted_tool_evidence_source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
+    }
+
+    pub(crate) fn interrupted_tool_evidence_source(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::tool_process::InterruptedToolEvidenceSource>> {
+        self.interrupted_tool_evidence_source
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The interrupted-run evidence store installed in the session's
+    /// canonical bindings, if any. Never settles anything.
+    pub(crate) async fn bound_interrupted_tool_evidence(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn meerkat_core::tool_process::InterruptedToolEvidence>> {
+        let sessions = self.sessions.read().await;
+        sessions.get(session_id).and_then(|entry| {
+            entry
+                .canonical_runtime_bindings
+                .as_ref()
+                .and_then(|bindings| bindings.interrupted_tool_evidence().get())
+        })
+    }
+
+    /// The session's interrupted-run evidence store: the one installed in the
+    /// canonical session bindings by an agent build, else the one the host's
+    /// evidence source settles and returns (installed into the canonical
+    /// bindings so later builds share it).
+    pub(crate) async fn session_interrupted_tool_evidence(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Option<Arc<dyn meerkat_core::tool_process::InterruptedToolEvidence>>,
+        RuntimeDriverError,
+    > {
+        let slot = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).and_then(|entry| {
+                entry
+                    .canonical_runtime_bindings
+                    .as_ref()
+                    .map(|bindings| Arc::clone(bindings.interrupted_tool_evidence()))
+            })
+        };
+        if let Some(evidence) = slot.as_ref().and_then(|slot| slot.get()) {
+            return Ok(Some(evidence));
+        }
+        let Some(source) = self.interrupted_tool_evidence_source() else {
+            return Ok(None);
+        };
+        let evidence = source.settle_session(session_id).await.map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "session {session_id} could not settle its interrupted tool processes: {error}"
+            ))
+        })?;
+        if let (Some(slot), Some(evidence)) = (slot.as_ref(), evidence.as_ref()) {
+            slot.install(Arc::clone(evidence));
+        }
+        Ok(evidence)
     }
 
     /// Resolve the injected member live host, if composed.
@@ -9826,6 +10040,7 @@ impl MeerkatMachine {
                 reconfigure_host_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
+                interrupted_tool_evidence_source: StdRwLock::new(None),
                 #[cfg(feature = "live")]
                 live_context_mirror_host: StdRwLock::new(None),
                 #[cfg(feature = "live")]
@@ -9915,6 +10130,7 @@ impl MeerkatMachine {
                 reconfigure_host_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
+                interrupted_tool_evidence_source: StdRwLock::new(None),
                 #[cfg(feature = "live")]
                 live_context_mirror_host: StdRwLock::new(None),
                 #[cfg(feature = "live")]
@@ -10004,6 +10220,7 @@ impl MeerkatMachine {
                 reconfigure_host_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
+                interrupted_tool_evidence_source: StdRwLock::new(None),
                 #[cfg(feature = "live")]
                 live_context_mirror_host: StdRwLock::new(None),
                 #[cfg(feature = "live")]

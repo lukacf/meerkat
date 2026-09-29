@@ -76,11 +76,13 @@ pub use meerkat_core::config::HookInProcessHandlerId as InProcessHookHandlerId;
 #[async_trait::async_trait]
 pub trait CommandHookProcessCustody: Send + Sync {
     /// Reserve custody for a hook process that will run `program args...`
-    /// and return the gated command to configure and spawn. The command must
-    /// stay in the process group it was given.
+    /// (inside run `run_id`, when the invocation belongs to one) and return
+    /// the gated command to configure and spawn. The command must stay in the
+    /// process group it was given.
     async fn prepare(
         &self,
         hook_id: &HookId,
+        run_id: Option<&meerkat_core::RunId>,
         program: &std::ffi::OsStr,
         args: &[std::ffi::OsString],
     ) -> Result<(Box<dyn CommandHookCustodySpawn>, Command), CommandHookCustodyError>;
@@ -829,7 +831,12 @@ impl DefaultHookEngine {
                 let args: Vec<std::ffi::OsString> =
                     args.iter().map(std::ffi::OsString::from).collect();
                 let (spawn, command) = custody
-                    .prepare(&entry.id, std::ffi::OsStr::new(command), &args)
+                    .prepare(
+                        &entry.id,
+                        invocation.run_id.as_ref(),
+                        std::ffi::OsStr::new(command),
+                        &args,
+                    )
                     .await
                     .map_err(|err| HookEngineError::ExecutionFailed {
                         hook_id: entry.id.clone(),
@@ -1486,6 +1493,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreLlmRequest,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1545,6 +1553,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PostToolExecution,
                     session_id: session_id.clone(),
                     turn_number: Some(1),
@@ -1605,6 +1614,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PostToolExecution,
                     session_id: session_id.clone(),
                     turn_number: Some(1),
@@ -1676,6 +1686,7 @@ mod tests {
         let err = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreLlmRequest,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1746,6 +1757,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreLlmRequest,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1797,6 +1809,7 @@ mod tests {
         let err = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1836,6 +1849,7 @@ mod tests {
         let err = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1919,6 +1933,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -1978,6 +1993,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -2028,6 +2044,7 @@ mod tests {
         let err = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::RunStarted,
                     session_id: SessionId::new(),
                     turn_number: Some(0),
@@ -2064,6 +2081,7 @@ mod tests {
         let err = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PostToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -2139,6 +2157,7 @@ mod tests {
         let report = DefaultHookEngine::new(config)
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -2189,6 +2208,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -2302,6 +2322,7 @@ mod tests {
         let report = engine
             .execute(
                 HookInvocation {
+                    run_id: None,
                     point: HookPoint::PreToolExecution,
                     session_id: SessionId::new(),
                     turn_number: Some(1),
@@ -2328,6 +2349,7 @@ mod tests {
 
     fn invocation(point: HookPoint, session_id: SessionId) -> HookInvocation {
         HookInvocation {
+            run_id: None,
             point,
             session_id,
             turn_number: Some(1),

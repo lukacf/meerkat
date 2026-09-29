@@ -1754,8 +1754,9 @@ pub trait CoreExecutorPreDequeueHandle: Send + Sync {
     ) -> Result<CorePreDequeueOutcome, CoreExecutorError>;
 }
 
-/// Endpoint that records a typed system notice in the session's durable
-/// transcript without a turn (no model call).
+/// Endpoint that records a typed system notice (with the user requests it
+/// accounts for, see [`crate::types::SystemNoticeRecord`]) in the session's
+/// durable transcript without a turn (no model call).
 ///
 /// The runtime invokes it at the same position as
 /// [`CoreExecutorPreDequeueHandle`]: the turn-finalization boundary is held,
@@ -1768,7 +1769,7 @@ pub trait CoreExecutorPreDequeueHandle: Send + Sync {
 pub trait CoreExecutorTranscriptNoticeHandle: Send + Sync {
     async fn append_system_notice_under_turn_finalization_boundary(
         &self,
-        notice: crate::types::SystemNoticeMessage,
+        record: crate::types::SystemNoticeRecord,
     ) -> Result<(), CoreExecutorError>;
 }
 

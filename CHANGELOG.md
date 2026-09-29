@@ -153,19 +153,63 @@ them.
   disagree now returns it instead of `MobError::Internal` (#1264).
 - `meerkat_core::SystemNoticeKind` gains the variant `ToolProcessRecovery`,
   and `meerkat_core::SystemNoticeBlock` gains the variant
-  `ToolProcessInterrupted { tool_call_id, spawner, cessation }`: the typed
-  transcript record that a run interrupted by an abrupt host stop was not
-  re-run because tool processes it started were settled by process custody.
-- Behaviour-only (not measured by the gate): runtime materialization of a
-  session whose previous host stopped abruptly no longer replays a recovered
-  input whose run had a tool process that durable process custody proved had
-  started (killed by recovery, or already exited). The input is abandoned
-  with the typed `meerkat_runtime::InputAbandonReason::ToolProcessInterrupted`
-  before the attachment serves. One typed `ToolProcessRecovery` system notice
-  per interrupted run is recorded in the durable transcript without a model
-  call, at the runtime loop's pre-dequeue position, so it is part of the
-  transcript the next real turn sees. Inputs of runs without such evidence
+  `ToolProcessInterrupted { run_id, tool_call_id, spawner, cessation,
+  disposition }`: the typed transcript record that tool processes of an
+  earlier run were settled by process custody after an abrupt host stop, and
+  what that did to the run (`InterruptedToolRunDisposition::InputsSettled {
+  inputs }`: the run was in flight and its request, plus `inputs - 1`
+  messages absorbed into it while it ran, were not re-run; `RunCompleted`:
+  the run had completed and only the process outlived it). The run id is
+  part of the block, so a notice delivered twice is a typed duplicate.
+- The machine vocabulary `InputAbandonReason` gains the variant
+  `ToolProcessInterrupted` in `meerkat_machine_kernels::generated::meerkat::InputAbandonReason`,
+  `meerkat_runtime::meerkat_machine::dsl::InputAbandonReason` and
+  `meerkat_runtime::InputAbandonReason` (`InputAbandonReason::*`); exhaustive
+  matches over the generated enums must handle it. The wire form is
+  `tool_process_interrupted` (domain) / `ToolProcessInterrupted` (kernel).
+- `meerkat_core::HookInvocation` gains the public field
+  `run_id: Option<RunId>` (constructible struct adds field), filled in by the
+  agent from its bound run and serialized as `run_id` in the command and HTTP
+  hook payload when present. Command hooks run in durable process custody
+  record it, so a hook interrupted by an abrupt host stop settles its run
+  instead of letting the run replay.
+- Behaviour-only (not measured by the gate): attaching a runtime executor to
+  a session whose previous host stopped abruptly no longer replays a
+  recovered input whose run had a tool process that durable process custody
+  proved had started (killed by recovery, already exited, or exited before
+  the run committed). This holds on every attach path (prepared
+  materialization, RPC on-demand attach, schedule hosts, detached owners):
+  the machine settles the session's custody through the host's
+  `InterruptedToolEvidenceSource` when it creates the pending attachment,
+  before anything recovered is served and even when no agent was built yet.
+  The input is abandoned with the typed
+  `meerkat_runtime::InputAbandonReason::ToolProcessInterrupted` (an input
+  recovery did not hand back as queued is left as is and logged). One typed
+  `ToolProcessRecovery` system notice per settled run is recorded in the
+  durable transcript without a model call, at the runtime loop's pre-dequeue
+  position, so it is part of the transcript the next real turn sees; a
+  process of an already completed run that recovery killed (for example a
+  background job) is reported the same way with the `RunCompleted`
+  disposition instead of being dropped. Inputs of runs without such evidence
   still replay as before.
+- Behaviour-only (not measured by the gate): a custody-bound process spawned
+  inside a run (foreground shell call, background job attempt, monitor,
+  command hook) that exits before its run commits now leaves an `Exited`
+  marker instead of removing its custody record; the runtime drops the
+  run's markers once its boundary commits. A crash in between no longer
+  replays the run (repeating a tool that already ran): recovery settles the
+  run with cessation `ToolProcessCessation::ExitedBeforeCommit`.
+- Behaviour-only (not measured by the gate): process custody recovery is
+  safe across host processes sharing a realm root, not only within one.
+  Every recoverer read-modify-write of a scope (recovery, the realm sweep,
+  interrupted-run evidence) holds an in-process lock plus `flock(2)` on the
+  scope directory; a record whose host still runs is never rewritten or
+  removed (host liveness is checked first), so a record that host deletes is
+  never resurrected; and a record from another pid namespace of the same
+  boot now fails closed with `ProcessCustodyError::ForeignPidNamespace`
+  instead of being settled as `PriorEnvironmentEnded` (only a changed boot
+  proves an environment ended). Opening a session scope this process already
+  holds open reuses the open custody instead of recovering it again.
 - Behaviour-only (not measured by the gate): on Linux and macOS, every
   `AgentFactory` agent build under a realm `runtime_root` now settles the
   session's earlier-incarnation tool processes (shell calls, background
@@ -195,9 +239,12 @@ them.
   `CessationUnproven` - end the named process group (or the stuck I/O), then
   retry; `CorruptRecord` - confirm the tool it named is not running, then
   delete the named file; `UnsupportedRecordVersion` (a record written by a
-  newer release in the same boot and pid namespace, for example after a
-  rollback) - run the newer release again, or confirm the tool is not
-  running and delete the file; `ExitNotificationUnavailable` (Linux without
+  newer release in the same boot, for example after a rollback) - run the
+  newer release again, or confirm the tool is not running and delete the
+  file; `ForeignPidNamespace` (a record written in this boot by a host in
+  another pid namespace, for example another container sharing the realm
+  root; nothing is signalled) - confirm that container has stopped, then
+  delete the record (a reboot also settles it); `ExitNotificationUnavailable` (Linux without
   `pidfd_open`: kernel before 5.3 or a blocking seccomp profile; nothing is
   signalled) - run the host where pidfds are available, or end the named
   group manually and delete its record; `Io` - fix the named I/O condition. A reused
@@ -472,13 +519,18 @@ them.
   carry the run id and the spawner (`ToolProcessSpawner`).
 - `meerkat_core::tool_process`: the platform-independent vocabulary
   `ToolProcessCessation` and `ToolProcessSpawner` (re-exported by
-  `meerkat_tools::builtin::shell`), interrupted-run evidence
-  (`InterruptedToolCall`, `InterruptedToolSettlement`,
-  `InterruptedToolEvidence`, `InterruptedToolEvidenceError`,
-  `InterruptedToolEvidenceSlot`), and
+  `meerkat_tools::builtin::shell`; both, and `InterruptedToolRunDisposition`,
+  decode variants written by a newer version as `Unknown`), interrupted-run
+  evidence (`InterruptedToolCall`, `InterruptedToolSettlement`,
+  `InterruptedToolRunDisposition`, `InterruptedToolEvidence`,
+  `InterruptedToolEvidenceError`, `InterruptedToolEvidenceSlot`,
+  `InterruptedToolEvidenceSource`), and
   `SessionRuntimeBindings::interrupted_tool_evidence`, the hand-off from agent
   construction to runtime materialization.
-- `meerkat_runtime::PendingRuntimeExecutorAttachment::abandon_interrupted_run_inputs`
+- `meerkat_runtime::MeerkatMachine::set_interrupted_tool_evidence_source`
+  (installed by `meerkat::surface::build_runtime_backed_service*` when the
+  factory has a realm `runtime_root`),
+  `meerkat_runtime::PendingRuntimeExecutorAttachment::abandon_interrupted_run_inputs`
   and `meerkat_core::SystemNoticeMessage::tool_process_interrupted`.
 - Typed system notices recorded without a turn:
   `meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle` with

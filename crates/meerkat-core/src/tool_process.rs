@@ -11,8 +11,13 @@
 //!   proven stopped.
 //! - [`ToolProcessSpawner`]: what spawned it.
 //! - [`InterruptedToolCall`] and [`InterruptedToolEvidence`]: durable evidence
-//!   that such a process belonged to a run that was still in flight, so the
-//!   run's inputs must be settled as interrupted instead of replayed.
+//!   that such a process belonged to a run that may still have been in
+//!   flight, so the run's inputs must be settled as interrupted instead of
+//!   replayed.
+//! - [`InterruptedToolEvidenceSource`]: how a runtime obtains a session's
+//!   evidence before it serves the session, whichever surface attaches it.
+//! - [`InterruptedToolRunDisposition`]: what settling the evidence did to the
+//!   run, as told to the model.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -20,12 +25,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::lifecycle::RunId;
+use crate::types::SessionId;
 
 /// How recovery established that an earlier incarnation's tool process has
 /// ceased.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "cessation", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ToolProcessCessation {
     /// The host died before releasing the spawn gate, so the command never
@@ -40,9 +46,17 @@ pub enum ToolProcessCessation {
     GroupReassigned,
     /// Recovery SIGKILLed the group and observed every member exit.
     KilledByRecovery { members: usize },
-    /// The earlier incarnation ran in a boot or pid namespace that has since
-    /// been replaced; every process of it has ended. Nothing was signalled.
+    /// The earlier incarnation ran in a boot that has since ended; every
+    /// process of it has ended. Nothing was signalled.
     PriorEnvironmentEnded,
+    /// The tool's process group exited and its owner proved every member
+    /// gone, but the host stopped before the run that started it committed,
+    /// so the run's result (including the tool's) was not committed.
+    ExitedBeforeCommit,
+    /// A cessation recorded by a newer version that this version does not
+    /// recognize. The process has ceased; how is unknown here.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ToolProcessCessation {
@@ -62,8 +76,10 @@ impl ToolProcessCessation {
             Self::GroupReassigned => "was already gone; its result was lost",
             Self::KilledByRecovery { .. } => "was still running and was terminated by recovery",
             Self::PriorEnvironmentEnded => {
-                "ended with the host's previous boot or container; its result was lost"
+                "ended with the host's previous boot; its result was lost"
             }
+            Self::ExitedBeforeCommit => "had exited, but its run's result was not committed",
+            Self::Unknown => "has ceased; its result was lost",
         }
     }
 }
@@ -83,6 +99,10 @@ pub enum ToolProcessSpawner {
     Monitor { job_id: String },
     /// A command hook invocation.
     CommandHook { hook_id: String },
+    /// A spawner recorded by a newer version that this version does not
+    /// recognize.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ToolProcessSpawner {
@@ -94,23 +114,72 @@ impl ToolProcessSpawner {
             Self::BackgroundJob { job_id } => format!("background shell job {job_id}"),
             Self::Monitor { job_id } => format!("monitor {job_id}"),
             Self::CommandHook { hook_id } => format!("command hook {hook_id}"),
+            Self::Unknown => "tool process".to_owned(),
         }
     }
 }
 
 /// Progress of one piece of interrupted-run evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "settlement", rename_all = "snake_case")]
 pub enum InterruptedToolSettlement {
     /// The run's in-flight inputs have not been settled yet.
     Pending,
     /// The run's in-flight inputs were settled as interrupted; the model has
     /// not been told yet.
-    InputsSettled,
+    InputsSettled(InterruptedRunInputs),
+}
+
+impl InterruptedToolSettlement {
+    /// The run's settled inputs, once settled.
+    #[must_use]
+    pub const fn settled_inputs(&self) -> Option<&InterruptedRunInputs> {
+        match self {
+            Self::Pending => None,
+            Self::InputsSettled(inputs) => Some(inputs),
+        }
+    }
+}
+
+/// An interrupted run's in-flight inputs, as settled.
+///
+/// The run never committed, so none of its inputs reached the transcript.
+/// The user requests among them are kept with the evidence (captured before
+/// the inputs were abandoned) so the transcript can hold each of them once,
+/// followed by the notice, instead of losing them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterruptedRunInputs {
+    /// How many inputs the run had: its request plus every input absorbed
+    /// into it while it was in flight (steering).
+    pub inputs: u32,
+    /// The user request content among them, in admission order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<crate::types::ContentInput>,
+}
+
+/// What settling interrupted-run evidence did to the run the process belonged
+/// to, as told to the model.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InterruptedToolRunDisposition {
+    /// The run was still in flight. Its `inputs` (the request plus every
+    /// input absorbed into the run while it ran) were settled as interrupted
+    /// and not re-run.
+    InputsSettled { inputs: u32 },
+    /// The run had already completed; only the process outlived it. Nothing
+    /// was re-run or settled.
+    RunCompleted,
+    /// A disposition recorded by a newer version that this version does not
+    /// recognize.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Durable evidence that an earlier host incarnation's tool process of this
-/// session ceased while the run that started it was still in flight.
+/// session ceased while the run that started it may still have been in
+/// flight.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterruptedToolCall {
     /// Identity of the evidence (the custody entry).
@@ -133,10 +202,10 @@ pub struct InterruptedToolEvidenceError {
 
 /// Host-owned durable store of interrupted-run evidence for one session.
 ///
-/// The runtime settles the evidence in order: settle the run's in-flight
-/// inputs, [`Self::mark_inputs_settled`], deliver the typed notice to the
-/// model, then [`Self::acknowledge`]. A crash between steps resumes from the
-/// recorded settlement.
+/// The runtime settles the evidence in order: [`Self::mark_inputs_settled`],
+/// settle the run's in-flight inputs, deliver the typed notice to the model,
+/// then [`Self::acknowledge`]. A crash between steps resumes from the
+/// recorded settlement, and a notice delivered twice is a typed duplicate.
 #[async_trait::async_trait]
 pub trait InterruptedToolEvidence: Send + Sync {
     /// Every unacknowledged piece of evidence for the session.
@@ -144,15 +213,39 @@ pub trait InterruptedToolEvidence: Send + Sync {
         &self,
     ) -> Result<Vec<InterruptedToolCall>, InterruptedToolEvidenceError>;
 
-    /// Record that the in-flight inputs of these entries' runs are settled.
+    /// Durably record that the in-flight inputs of these entries' run are
+    /// settled, with the run's inputs as captured before they were
+    /// abandoned.
     async fn mark_inputs_settled(
         &self,
         entry_ids: &[Uuid],
+        inputs: &InterruptedRunInputs,
     ) -> Result<(), InterruptedToolEvidenceError>;
 
     /// Discard these entries: fully settled, or moot (their run was not in
     /// flight).
     async fn acknowledge(&self, entry_ids: &[Uuid]) -> Result<(), InterruptedToolEvidenceError>;
+
+    /// The run's boundary committed durably in this host incarnation: its
+    /// inputs can no longer be replayed, so the host may discard the
+    /// completed-tool markers it kept for the run. Best effort; a marker left
+    /// behind is moot at the next recovery.
+    async fn run_committed(&self, run_id: &RunId) -> Result<(), InterruptedToolEvidenceError>;
+}
+
+/// Host-side provider of interrupted-run evidence, installed on a runtime
+/// so every attachment of a recovered session settles the session's
+/// earlier-incarnation tool processes before it serves, even when no agent
+/// has been built for the session yet.
+#[async_trait::async_trait]
+pub trait InterruptedToolEvidenceSource: Send + Sync {
+    /// Settle the session's earlier-incarnation tool processes (proving each
+    /// stopped, or stopping it) and return the session's evidence store.
+    /// `Ok(None)` when the host keeps no process custody for the session.
+    async fn settle_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Arc<dyn InterruptedToolEvidence>>, InterruptedToolEvidenceError>;
 }
 
 /// Hand-off slot for a session's [`InterruptedToolEvidence`], carried by the
@@ -192,5 +285,65 @@ impl InterruptedToolEvidenceSlot {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .is_some()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::types::SystemNoticeBlock;
+
+    #[test]
+    fn cessation_and_spawner_nest_under_their_own_kind_tag() {
+        let block = SystemNoticeBlock::ToolProcessInterrupted {
+            run_id: RunId::new(),
+            tool_call_id: Some("call-1".to_owned()),
+            spawner: ToolProcessSpawner::BackgroundJob {
+                job_id: "job-1".to_owned(),
+            },
+            cessation: ToolProcessCessation::KilledByRecovery { members: 2 },
+            disposition: InterruptedToolRunDisposition::InputsSettled { inputs: 1 },
+        };
+        let value = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            value["cessation"],
+            serde_json::json!({ "kind": "killed_by_recovery", "members": 2 })
+        );
+        assert_eq!(
+            value["spawner"],
+            serde_json::json!({ "kind": "background_job", "job_id": "job-1" })
+        );
+        assert_eq!(
+            value["disposition"],
+            serde_json::json!({ "kind": "inputs_settled", "inputs": 1 })
+        );
+        let back: SystemNoticeBlock = serde_json::from_value(value).unwrap();
+        assert_eq!(back, block);
+    }
+
+    #[test]
+    fn variants_from_a_newer_version_decode_as_unknown_inside_the_block() {
+        let value = serde_json::json!({
+            "type": "tool_process_interrupted",
+            "run_id": RunId::new(),
+            "spawner": { "kind": "future_spawner", "detail": 1 },
+            "cessation": { "kind": "future_cessation" },
+            "disposition": { "kind": "future_disposition" },
+        });
+        let block: SystemNoticeBlock = serde_json::from_value(value).unwrap();
+        let SystemNoticeBlock::ToolProcessInterrupted {
+            spawner,
+            cessation,
+            disposition,
+            ..
+        } = block
+        else {
+            panic!("expected the typed block, got {block:?}");
+        };
+        assert_eq!(spawner, ToolProcessSpawner::Unknown);
+        assert_eq!(cessation, ToolProcessCessation::Unknown);
+        assert_eq!(disposition, InterruptedToolRunDisposition::Unknown);
+        assert!(cessation.may_have_run());
     }
 }

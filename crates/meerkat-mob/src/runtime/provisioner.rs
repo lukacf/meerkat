@@ -10284,10 +10284,10 @@ struct MobTranscriptNoticeHandle {
 impl meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle for MobTranscriptNoticeHandle {
     async fn append_system_notice_under_turn_finalization_boundary(
         &self,
-        notice: meerkat_core::types::SystemNoticeMessage,
+        record: meerkat_core::types::SystemNoticeRecord,
     ) -> Result<(), CoreExecutorError> {
         self.session_service
-            .append_system_notice_under_runtime_turn_boundary(&self.session_id, notice)
+            .append_system_notice_under_runtime_turn_boundary(&self.session_id, record)
             .await
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }

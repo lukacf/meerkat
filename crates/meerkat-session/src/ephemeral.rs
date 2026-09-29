@@ -1366,7 +1366,7 @@ enum SessionCommand {
     },
     #[cfg_attr(not(feature = "session-store"), allow(dead_code))]
     AppendSystemNoticeControl {
-        notice: meerkat_core::types::SystemNoticeMessage,
+        record: meerkat_core::types::SystemNoticeRecord,
         reply_tx: oneshot::Sender<
             Result<meerkat_core::service::AppendSystemContextStatus, AgentError>,
         >,
@@ -2303,7 +2303,7 @@ pub trait SessionAgent: Send {
     /// (no turn).
     fn append_system_notice_control(
         &mut self,
-        _notice: meerkat_core::types::SystemNoticeMessage,
+        _record: meerkat_core::types::SystemNoticeRecord,
     ) -> Result<meerkat_core::service::AppendSystemContextStatus, AgentError> {
         Err(AgentError::ConfigError(
             "typed system-notice control append is not supported by this session agent".to_string(),
@@ -4589,7 +4589,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     pub(crate) async fn append_system_notice_control(
         &self,
         id: &SessionId,
-        notice: meerkat_core::types::SystemNoticeMessage,
+        record: meerkat_core::types::SystemNoticeRecord,
     ) -> Result<meerkat_core::service::AppendSystemContextStatus, SessionError> {
         let command_tx = self
             .sessions
@@ -4601,7 +4601,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .clone();
         let (reply_tx, reply_rx) = oneshot::channel();
         command_tx
-            .send(SessionCommand::AppendSystemNoticeControl { notice, reply_tx })
+            .send(SessionCommand::AppendSystemNoticeControl { record, reply_tx })
             .await
             .map_err(|_| {
                 SessionError::Agent(AgentError::InternalError(
@@ -8440,9 +8440,9 @@ async fn session_task<A: SessionAgent>(
             } => {
                 let _ = reply_tx.send(agent.update_mob_tool_authority_context(authority_context));
             }
-            SessionCommand::AppendSystemNoticeControl { notice, reply_tx } => {
+            SessionCommand::AppendSystemNoticeControl { record, reply_tx } => {
                 let result = match control.archive_snapshot_gate.enter_apply() {
-                    Ok(_gate) => agent.append_system_notice_control(notice),
+                    Ok(_gate) => agent.append_system_notice_control(record),
                     Err(error) => Err(AgentError::InternalError(error.to_string())),
                 };
                 if result.is_ok() {

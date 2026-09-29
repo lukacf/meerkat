@@ -7080,7 +7080,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     pub async fn append_system_notice_under_runtime_turn_boundary(
         &self,
         id: &SessionId,
-        notice: meerkat_core::types::SystemNoticeMessage,
+        record: meerkat_core::types::SystemNoticeRecord,
     ) -> Result<meerkat_core::service::AppendSystemContextStatus, SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
         let _ = self.discard_stale_live_session_if_needed(id).await?;
@@ -7089,7 +7089,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await
                 .map_err(crate::control_error_into_session_error)?;
         }
-        let status = self.inner.append_system_notice_control(id, notice).await?;
+        let status = self.inner.append_system_notice_control(id, record).await?;
         if status == meerkat_core::service::AppendSystemContextStatus::Duplicate {
             return Ok(status);
         }

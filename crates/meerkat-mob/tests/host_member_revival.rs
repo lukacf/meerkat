@@ -441,6 +441,16 @@ async fn broken_member_refuses_revival_retry_typed() {
         .cloned()
         .expect("materialized row");
     let session_id = meerkat_core::SessionId::parse(&row.session_id).expect("session id");
+    let placed = controlling
+        .handle
+        .get_member(&AgentIdentity::from("b2"))
+        .await
+        .expect("read placed member")
+        .expect("placed member present");
+    assert!(
+        placed.peer_id().is_some() && placed.transport_public_key().is_some(),
+        "a placed member publishes its peer id and key at spawn"
+    );
 
     // Kill the runtime AND the durable snapshot: revival observes
     // DurableSnapshotMissing ⇒ BrokenRecorded. As in the T19 row above, the
@@ -489,6 +499,24 @@ async fn broken_member_refuses_revival_retry_typed() {
         (after.generation, after.fence_token),
         (row.generation, row.fence_token),
         "BrokenRecorded must suppress RequestMemberMaterialization"
+    );
+
+    // A placed member recorded Broken at runtime publishes no endpoint (#1269).
+    let broken = controlling
+        .handle
+        .get_member(&AgentIdentity::from("b2"))
+        .await
+        .expect("read broken placed member")
+        .expect("broken placed member stays in the roster");
+    assert_eq!(broken.peer_id(), None);
+    assert_eq!(broken.transport_public_key(), None);
+    assert!(
+        controlling
+            .handle
+            .member_peer_endpoint(&AgentIdentity::from("b2"))
+            .await
+            .expect("query broken placed endpoint")
+            .is_none()
     );
 
     fixture.shutdown().await;

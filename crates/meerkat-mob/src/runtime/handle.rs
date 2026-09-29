@@ -1537,6 +1537,29 @@ pub enum MobMemberStatus {
     Unknown,
 }
 
+/// Who owns a member's comms endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MobMemberEndpointOwner {
+    /// The member runs in this process; its local comms runtime owns the
+    /// endpoint.
+    Local,
+    /// The member is placed on a remote host; the host-acknowledged endpoint
+    /// is the only address it can be reached at.
+    Host,
+}
+
+/// A member's canonical comms endpoint, as returned by
+/// [`MobHandle::member_peer_endpoint`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MobMemberPeerEndpoint {
+    /// Name, peer id, transport address and Ed25519 transport key.
+    pub descriptor: TrustedPeerDescriptor,
+    /// Who owns the endpoint.
+    pub owner: MobMemberEndpointOwner,
+}
+
 /// Identity-native owner reference for external-member observation and hooks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -8798,6 +8821,55 @@ impl MobHandle {
             })
             .await?;
         Self::project_get_member_result(result)
+    }
+
+    /// The member's canonical comms endpoint: the exact generation endpoint
+    /// MobMachine holds for its current incarnation (display name, peer id,
+    /// transport address and Ed25519 transport key), with who owns it.
+    ///
+    /// For a placed member ([`MobMemberEndpointOwner::Host`]) this is the
+    /// host-acknowledged endpoint with its real remote address, which a
+    /// cross-process host can dial; the controlling process holds no local
+    /// comms runtime for it. For a local member
+    /// ([`MobMemberEndpointOwner::Local`]) the address is the one its runtime
+    /// advertised when the endpoint was registered (`inproc://` for an
+    /// in-process member); its live runtime remains the authority for where
+    /// it listens now.
+    ///
+    /// Returns `Ok(None)` when the member is absent, has no registered
+    /// endpoint, or is Broken (a Broken member publishes no endpoint, exactly
+    /// like its roster projection). A Retiring member still returns its
+    /// endpoint: retirement cleanup addresses exactly that endpoint until the
+    /// member is retired. A query fault is `Err`, never `None`.
+    pub async fn member_peer_endpoint(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<MobMemberPeerEndpoint>, MobError> {
+        let state = self.query_machine_state().await?;
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        if state.member_restore_failures.contains_key(&dsl_identity) {
+            return Ok(None);
+        }
+        let Some(endpoint) = state.member_peer_endpoints.get(&dsl_identity) else {
+            return Ok(None);
+        };
+        let descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
+            endpoint.name.0.clone(),
+            endpoint.peer_id.0.clone(),
+            endpoint.signing_key.0,
+            endpoint.address.0.clone(),
+        )
+        .map_err(|error| {
+            MobError::WiringError(format!(
+                "member '{identity}' has an invalid MobMachine peer endpoint: {error}"
+            ))
+        })?;
+        let owner = if super::member_runtime_is_host_owned(&state, identity) {
+            MobMemberEndpointOwner::Host
+        } else {
+            MobMemberEndpointOwner::Local
+        };
+        Ok(Some(MobMemberPeerEndpoint { descriptor, owner }))
     }
 
     /// Read the total stored observation for one identity intent row.

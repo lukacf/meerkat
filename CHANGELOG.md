@@ -163,6 +163,15 @@ them.
 
 ### Added
 
+- `MobHandle::member_peer_endpoint(&identity)` returns a member's canonical
+  comms endpoint as a `MobMemberPeerEndpoint`: the exact generation
+  endpoint MobMachine holds for its current incarnation (name, peer id,
+  transport address and Ed25519 key) plus a typed `MobMemberEndpointOwner`
+  (`Local` or `Host`), or `None` when the member is absent, has no endpoint,
+  or is Broken. For a placed member (`Host`) it is the host-acknowledged
+  endpoint with its real remote address, which a cross-process host can dial
+  even though the controlling process has no local comms runtime for the
+  member (#1269).
 - `MeerkatMachine::stop_run(session_id, expected_run_id, reason)` stops one
   exact run and terminalizes every contributor already bound to it (#1261).
   The stop is linearized under the session mutation gate as the generated
@@ -294,6 +303,28 @@ them.
   recovery returned `AlreadyAligned` over a stray row beyond the head that a
   direct `materialize_head` rejects. Recovery now fails closed on that row
   (`head_canonical_aligned_recovery_rejects_a_stray_row_beyond_the_head`).
+- A placed (host-owned) member now publishes its transport key (#1269).
+  Spawn projected only its host-acknowledged peer id, so
+  `get_member(..).transport_public_key()` was always `None` for a placed
+  member and MobKit's `member_peer_info` failed for it even right after
+  spawn. The key now comes from the same host-acknowledged endpoint at spawn
+  and is republished from the durable MobMachine endpoint after Running and
+  Stopped restarts. Because a placed member now carries a roster key, the
+  roster-based fallback descriptor used by retirement and dispose cleanup
+  explicitly skips placed members, so it can never render one at an
+  `inproc://` address; their cleanup keeps using the durable host endpoint.
+  A member recorded Broken while the mob is Running (a missing bridge
+  session, a terminal revival classification, a failed revival, a refused
+  runtime binding) now clears its projected peer ID and key, local and
+  placed alike, consistent with the resume paths. A successful revival
+  republishes them only after verifying the live runtime's endpoint (local)
+  or the durable host endpoint (placed) against the member's durable
+  generation endpoint: a warm revival that minted a new key (a lost identity
+  store), an unusable live endpoint, or a missing durable endpoint records
+  the member Broken with the respawn action instead. A placed revival whose
+  host acknowledges a different endpoint than the durable one, or that has
+  no durable endpoint to verify, likewise fails and records the member
+  Broken instead of being adopted.
 - A member restored from a cleanly Stopped mob now publishes its preserved
   comms endpoint (#1262). After `MobStopped`, a restart through
   `MobBuilder::for_resume` and an explicit `MobHandle::resume()`, the member

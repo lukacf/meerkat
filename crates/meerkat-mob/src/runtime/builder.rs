@@ -1206,6 +1206,22 @@ pub(super) fn member_endpoint_mismatch_detail(
     )
 }
 
+/// Why an observed member endpoint cannot be published against the member's
+/// durable generation endpoint, or `None` when they agree. A missing durable
+/// endpoint is itself a defect (`missing` names it): nothing durable vouches
+/// for the observed endpoint.
+pub(super) fn member_endpoint_defect(
+    durable: Option<&crate::machines::mob_machine::MemberPeerEndpoint>,
+    observed: &crate::machines::mob_machine::MemberPeerEndpoint,
+    missing: &str,
+) -> Option<String> {
+    match durable {
+        Some(durable) if durable == observed => None,
+        Some(durable) => Some(member_endpoint_mismatch_detail(observed, durable)),
+        None => Some(missing.to_string()),
+    }
+}
+
 /// Cold-boot twin of explicit Resume's per-member endpoint isolation: record
 /// only this member Broken (typed MobMachine restore failure plus the handle
 /// diagnostic), clear its projection, and let the rest of the mob boot.
@@ -14424,5 +14440,58 @@ mod tests {
         )
         .expect("revoked remote terminal proof should clear the runtime checkpoint");
         assert!(authority.state().remote_runtime_retired_ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod member_endpoint_defect_tests {
+    use super::member_endpoint_defect;
+    use crate::machines::mob_machine as mob_dsl;
+
+    fn endpoint(seed: u8, address: &str) -> mob_dsl::MemberPeerEndpoint {
+        let signing_key = [seed; 32];
+        mob_dsl::MemberPeerEndpoint {
+            name: mob_dsl::PeerName("mob/worker/member".to_string()),
+            peer_id: mob_dsl::PeerId(
+                meerkat_core::comms::PeerId::from_ed25519_pubkey(&signing_key).to_string(),
+            ),
+            address: mob_dsl::PeerAddress(address.to_string()),
+            signing_key: mob_dsl::PeerSigningKey(signing_key),
+        }
+    }
+
+    #[test]
+    fn matching_endpoint_has_no_defect() {
+        let durable = endpoint(3, "tcp://host.test:4200");
+        assert_eq!(
+            member_endpoint_defect(Some(&durable), &durable.clone(), "missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_new_key_is_a_mismatch_naming_both_peers() {
+        let durable = endpoint(3, "tcp://host.test:4200");
+        let revived = endpoint(4, "tcp://host.test:4200");
+        let defect = member_endpoint_defect(Some(&durable), &revived, "missing")
+            .expect("a revived runtime under a new key is a defect");
+        assert!(defect.contains("disagrees with its durable generation endpoint"));
+        assert!(defect.contains(&durable.peer_id.0) && defect.contains(&revived.peer_id.0));
+    }
+
+    #[test]
+    fn a_changed_address_is_a_mismatch() {
+        let durable = endpoint(3, "tcp://host.test:4200");
+        let moved = endpoint(3, "tcp://other.test:4200");
+        assert!(member_endpoint_defect(Some(&durable), &moved, "missing").is_some());
+    }
+
+    #[test]
+    fn a_missing_durable_endpoint_is_a_defect() {
+        let revived = endpoint(3, "tcp://host.test:4200");
+        assert_eq!(
+            member_endpoint_defect(None, &revived, "no durable endpoint"),
+            Some("no durable endpoint".to_string())
+        );
     }
 }

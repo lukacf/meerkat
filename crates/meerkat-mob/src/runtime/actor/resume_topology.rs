@@ -425,8 +425,9 @@ pub(in crate::runtime) enum MemberCommsIdentityObservation {
     Unavailable { detail: String },
     /// The member's restore already failed: clear any stale projection.
     ClearBroken,
-    /// A host-owned (placed) member: republish the peer id of its durable,
-    /// host-acknowledged generation endpoint, exactly as spawn projected it.
+    /// A host-owned (placed) member: republish the peer id and transport key
+    /// of its durable, host-acknowledged generation endpoint, exactly as spawn
+    /// projected them.
     HostOwnedDurable,
 }
 
@@ -1329,7 +1330,7 @@ where
 /// is recorded Broken (with a reason naming the mismatch and the respawn
 /// action) and nothing is published for it; every other member and the resume
 /// itself carry on. Host-owned members republish their durable
-/// host-acknowledged peer id.
+/// host-acknowledged peer id and transport key.
 fn project_member_comms_identity<R>(
     ctx: &mut ResumeTopologyAuthorityContext<'_, R>,
     agent_identity: &crate::ids::AgentIdentity,
@@ -1393,12 +1394,14 @@ where
                     return record_member_endpoint_broken(ctx, &entry, &dsl_identity, &detail);
                 }
             };
-            // Spawn projects only the host-acknowledged peer id for a placed
-            // member; its transport key stays exactly as spawn left it.
+            // Spawn projects the host-acknowledged peer id and the member's
+            // own transport key from this same endpoint (#1269).
+            let transport_public_key =
+                meerkat_comms::PubKey::new(endpoint.signing_key.0).to_pubkey_string();
             ctx.roster.resume_topology_set_member_comms_identity(
                 agent_identity,
                 Some(peer_id),
-                entry.transport_public_key.clone(),
+                Some(transport_public_key),
             );
             Ok(())
         }
@@ -2084,9 +2087,11 @@ async fn observe_member_comms_identity(
         let Some(endpoint) = member.peer_endpoint.as_ref() else {
             return Ok(None);
         };
+        let durable_key = meerkat_comms::PubKey::new(endpoint.signing_key.0).to_pubkey_string();
         if entry
             .peer_id
             .is_some_and(|peer_id| peer_id.to_string() == endpoint.peer_id.0)
+            && entry.transport_public_key.as_deref() == Some(durable_key.as_str())
         {
             return Ok(None);
         }
@@ -4489,7 +4494,7 @@ mod tests {
     }
 
     #[test]
-    fn host_owned_member_republishes_its_durable_peer_id() {
+    fn host_owned_member_republishes_its_durable_peer_id_and_key() {
         let mut fixture = PlacedMemberFixture::new();
         fixture
             .project(MemberCommsIdentityObservation::HostOwnedDurable)
@@ -4500,8 +4505,9 @@ mod tests {
             Some(fixture.endpoint.peer_id.0.clone())
         );
         assert_eq!(
-            entry.transport_public_key, None,
-            "spawn never projects a placed member's transport key; resume keeps parity"
+            entry.transport_public_key,
+            Some(meerkat_comms::PubKey::new(fixture.endpoint.signing_key.0).to_pubkey_string()),
+            "the durable host-acknowledged key is republished (#1269)"
         );
     }
 

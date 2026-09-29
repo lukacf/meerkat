@@ -109,7 +109,6 @@ impl RosterAuthority {
 
     /// Project the resolved comms identity (peer id and transport key) for an
     /// existing member. Returns whether the member was present.
-    #[cfg(feature = "runtime-adapter")]
     pub(crate) fn set_comms_identity(
         &mut self,
         agent_identity: &AgentIdentity,

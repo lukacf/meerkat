@@ -108,9 +108,10 @@ async fn controlling_restart_skips_local_recreate_for_placed_members() {
 }
 
 // ===========================================================================
-// #1262 - a controlling restart republishes a placed member's durable,
-// host-acknowledged peer id (spawn projected it; replay does not), for both a
-// Running restart and an explicit Resume of a cleanly Stopped mob.
+// #1262/#1269 - a controlling restart republishes a placed member's durable,
+// host-acknowledged peer id and transport key (spawn projected them; replay
+// does not), for both a Running restart and an explicit Resume of a cleanly
+// Stopped mob.
 // ===========================================================================
 
 async fn assert_controlling_restart_republishes_placed_member_peer_id(stopped: bool) {
@@ -132,13 +133,19 @@ async fn assert_controlling_restart_republishes_placed_member_peer_id(stopped: b
         .await
         .expect("placed spawn");
     let placed = AgentIdentity::from("b2");
-    let spawned_peer_id = controlling
+    let spawned = controlling
         .handle
         .get_member(&placed)
         .await
         .expect("read placed member")
-        .and_then(|entry| entry.peer_id())
+        .expect("placed member present");
+    let spawned_peer_id = spawned
+        .peer_id()
         .expect("spawn projects the placed member's host-acknowledged peer id");
+    let spawned_key = spawned
+        .transport_public_key()
+        .expect("spawn projects the placed member's transport key (#1269)")
+        .to_string();
     if stopped {
         controlling.handle.stop().await.expect("clean stop");
     }
@@ -156,15 +163,29 @@ async fn assert_controlling_restart_republishes_placed_member_peer_id(stopped: b
             .expect("explicit resume of the stopped mob");
     }
 
+    let restored = controlling
+        .handle
+        .get_member(&placed)
+        .await
+        .expect("read restored placed member")
+        .expect("restored placed member present");
     assert_eq!(
-        controlling
-            .handle
-            .get_member(&placed)
-            .await
-            .expect("read restored placed member")
-            .and_then(|entry| entry.peer_id()),
+        restored.peer_id(),
         Some(spawned_peer_id),
         "the restored placed member must publish its durable peer id"
+    );
+    // MobKit-style member_peer_info after restart: the same key, decodable to
+    // the same peer id.
+    assert_eq!(
+        restored.transport_public_key(),
+        Some(spawned_key.as_str()),
+        "the restored placed member must republish its durable transport key"
+    );
+    assert_eq!(
+        meerkat_comms::PubKey::from_pubkey_string(&spawned_key)
+            .expect("published key decodes")
+            .to_peer_id(),
+        spawned_peer_id
     );
 
     fixture.shutdown().await;

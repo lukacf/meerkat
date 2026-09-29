@@ -17978,6 +17978,22 @@ async fn assert_running_boot_broke_only(
         .expect("healthy member listed");
     assert_eq!(healthy_entry.status, MobMemberStatus::Active);
     assert_eq!(healthy_entry.peer_id, Some(healthy_peer_id));
+    assert!(
+        handle
+            .member_peer_endpoint(broken)
+            .await
+            .expect("query broken endpoint")
+            .is_none(),
+        "a Broken member publishes no durable endpoint"
+    );
+    assert_eq!(
+        handle
+            .member_peer_endpoint(healthy)
+            .await
+            .expect("query healthy endpoint")
+            .map(|endpoint| (endpoint.owner, endpoint.descriptor.peer_id)),
+        Some((crate::MobMemberEndpointOwner::Local, healthy_peer_id))
+    );
 }
 
 /// A Running mob restarts after one member's comms identity store was lost.
@@ -18035,6 +18051,185 @@ async fn test_running_cold_restart_breaks_only_the_member_with_a_changed_endpoin
     .expect("one member's endpoint mismatch must not abort the Running cold boot");
     assert_eq!(resumed.status().await.unwrap(), MobState::Running);
     assert_running_boot_broke_only(&resumed, &changed, &healthy, healthy_peer_id).await;
+}
+
+/// A successful warm revival republishes the member's preserved endpoint
+/// after verifying it against the durable generation endpoint (#1269).
+#[tokio::test]
+async fn test_warm_revival_republishes_the_preserved_member_endpoint() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member = AgentIdentity::from("revived-endpoint");
+    let mut spec = SpawnMemberSpec::new("worker", member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(spec).await.expect("spawn member");
+    let spawned = handle
+        .get_member(&member)
+        .await
+        .unwrap()
+        .expect("spawned member");
+    let session = spawned
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    let (peer_id, key) = (
+        spawned.peer_id().expect("spawn peer id"),
+        spawned
+            .transport_public_key()
+            .expect("spawn key")
+            .to_string(),
+    );
+    MobSessionService::discard_live_session(service.as_ref(), &session)
+        .await
+        .expect("discard the live session");
+    handle
+        .member(&member)
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect("warm revival rebuilds the member");
+    let revived = handle
+        .get_member(&member)
+        .await
+        .unwrap()
+        .expect("revived member");
+    assert_eq!(revived.peer_id(), Some(peer_id));
+    assert_eq!(revived.transport_public_key(), Some(key.as_str()));
+    let listed = handle
+        .list_members()
+        .await
+        .into_iter()
+        .find(|entry| entry.agent_identity == member)
+        .expect("revived member listed");
+    assert_eq!(listed.status, MobMemberStatus::Active);
+    assert_eq!(
+        handle
+            .member_peer_endpoint(&member)
+            .await
+            .expect("query revived endpoint")
+            .map(|endpoint| endpoint.descriptor.peer_id),
+        Some(peer_id)
+    );
+}
+
+/// A warm revival that mints a new comms key (a lost identity store) must
+/// not publish it: peers trust the durable endpoint. The member is recorded
+/// Broken with the mismatch and the respawn action, and publishes nothing.
+#[tokio::test]
+async fn test_warm_revival_with_a_lost_comms_identity_breaks_only_that_member() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let changed = AgentIdentity::from("revival-changed");
+    let healthy = AgentIdentity::from("revival-healthy");
+    for identity in [&changed, &healthy] {
+        let mut spec = SpawnMemberSpec::new("worker", identity.clone());
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        handle.spawn_spec(spec).await.expect("spawn member");
+    }
+    let session = handle
+        .resolve_bridge_session_id(&changed)
+        .await
+        .expect("changed member session");
+    let healthy_peer_id = handle
+        .get_member(&healthy)
+        .await
+        .unwrap()
+        .and_then(|entry| entry.peer_id())
+        .expect("healthy peer id");
+    MobSessionService::discard_live_session(service.as_ref(), &session)
+        .await
+        .expect("discard the live session");
+    service
+        .set_comms_identity_seed(&session, "lost-identity-store")
+        .await;
+    let _ = handle
+        .member(&changed)
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await;
+
+    let members = handle.list_members().await;
+    let broken = members
+        .iter()
+        .find(|entry| entry.agent_identity == changed)
+        .expect("changed member listed");
+    assert_eq!(broken.status, MobMemberStatus::Broken);
+    assert_eq!(broken.peer_id, None);
+    assert_eq!(broken.transport_public_key, None);
+    let reason = broken.error.clone().expect("typed Broken reason");
+    assert!(
+        reason.contains("disagrees with its durable generation endpoint")
+            && reason.contains("respawn the member"),
+        "{reason}"
+    );
+    assert!(
+        handle
+            .member_peer_endpoint(&changed)
+            .await
+            .expect("query broken endpoint")
+            .is_none()
+    );
+    let healthy_entry = members
+        .iter()
+        .find(|entry| entry.agent_identity == healthy)
+        .expect("healthy member listed");
+    assert_eq!(healthy_entry.status, MobMemberStatus::Active);
+    assert_eq!(healthy_entry.peer_id, Some(healthy_peer_id));
+}
+
+/// Explicit Resume that classifies a member Broken (its durable snapshot is
+/// gone) clears the endpoint it projected at spawn, in-process, before any
+/// restart would have reset the roster (#1269).
+#[tokio::test]
+async fn test_explicit_resume_broken_member_publishes_no_endpoint() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member = AgentIdentity::from("explicit-resume-broken");
+    let mut spec = SpawnMemberSpec::new("worker", member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(spec).await.expect("spawn member");
+    let spawned = handle
+        .get_member(&member)
+        .await
+        .unwrap()
+        .expect("spawned member");
+    assert!(spawned.peer_id().is_some() && spawned.transport_public_key().is_some());
+    let session = spawned
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    handle.stop().await.expect("stop");
+    service
+        .archive(&session)
+        .await
+        .expect("archive live session");
+    service.delete_persisted_session(&session).await;
+    handle
+        .resume()
+        .await
+        .expect("explicit resume classifies the missing snapshot");
+
+    let broken = handle
+        .get_member(&member)
+        .await
+        .unwrap()
+        .expect("broken member stays in the roster");
+    assert_eq!(broken.peer_id(), None);
+    assert_eq!(broken.transport_public_key(), None);
+    assert!(
+        handle
+            .member_peer_endpoint(&member)
+            .await
+            .expect("query broken endpoint")
+            .is_none()
+    );
+    assert_eq!(
+        handle
+            .member_status(&member)
+            .await
+            .expect("member status")
+            .status,
+        MobMemberStatus::Broken
+    );
 }
 
 #[tokio::test]
@@ -28495,6 +28690,12 @@ async fn test_wait_for_members_ready_marks_missing_bridge_session_broken() {
         .bridge_session_id()
         .expect("session-backed member")
         .clone();
+    let spawned = handle
+        .get_member(&member)
+        .await
+        .expect("read spawned member")
+        .expect("spawned member present");
+    assert!(spawned.peer_id().is_some() && spawned.transport_public_key().is_some());
 
     service
         .archive(&bridge_session_id)
@@ -28525,6 +28726,21 @@ async fn test_wait_for_members_ready_marks_missing_bridge_session_broken() {
             .is_some_and(|message| message.contains("missing bridge session")),
         "broken member should surface missing bridge-session reason: {:?}",
         snapshots[0].1
+    );
+    // A member recorded Broken at runtime publishes no endpoint (#1269).
+    let broken = handle
+        .get_member(&member)
+        .await
+        .expect("read broken member")
+        .expect("broken member stays in the roster");
+    assert_eq!(broken.peer_id(), None);
+    assert_eq!(broken.transport_public_key(), None);
+    assert!(
+        handle
+            .member_peer_endpoint(&member)
+            .await
+            .expect("query broken endpoint")
+            .is_none()
     );
 }
 

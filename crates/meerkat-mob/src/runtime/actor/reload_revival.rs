@@ -394,10 +394,8 @@ impl MobActor {
                 if let Err(error) = result {
                     work.reply(Err(error));
                 } else {
-                    self.restore_diagnostics
-                        .write()
-                        .await
-                        .remove(&work.entry.agent_identity);
+                    self.clear_member_restore_failure(&work.entry.agent_identity)
+                        .await;
                     work.reply(Ok(MemberLiveRevivalOutcome::AlreadyLive));
                 }
             }
@@ -466,10 +464,8 @@ impl MobActor {
                     work.reply(Err(error));
                     return;
                 }
-                self.restore_diagnostics
-                    .write()
-                    .await
-                    .remove(&work.entry.agent_identity);
+                self.clear_member_restore_failure(&work.entry.agent_identity)
+                    .await;
                 self.dispatch_warm_readiness(work, built.publication);
             }
             RevivalStep::Ready {
@@ -804,14 +800,15 @@ impl MobActor {
             // minted for this Broken member carries it; this reply keeps
             // meerkat's typed refusal itself.
             let hold = error.durable_resume_hold();
-            self.restore_diagnostics.write().await.insert(
-                work.entry.agent_identity.clone(),
+            self.record_member_restore_failure(
+                &work.entry.agent_identity,
                 super::super::handle::RestoreFailureDiagnostic {
                     bridge_session_id: Some(work.session_id.clone()),
                     reason: reason.clone(),
                     hold,
                 },
-            );
+            )
+            .await;
             if hold.is_some() {
                 work.reply(Err(error));
                 return;

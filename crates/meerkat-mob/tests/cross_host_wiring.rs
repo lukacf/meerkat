@@ -1363,6 +1363,132 @@ async fn members_unwired_written_persistent_poll_outage_fail_stops_then_cold_com
     scripted.shutdown();
 }
 
+/// #1269: a freshly placed member publishes its host-acknowledged transport
+/// key next to its peer id (what a cross-mob host's `member_peer_info`
+/// needs), a wired local member trusts it at its real remote address, and
+/// retiring it removes that trust through the real endpoint, never an
+/// `inproc://` descriptor synthesized from the roster.
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_member_publishes_its_transport_key_and_retires_at_its_real_address() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let fixture =
+        spawn_host_daemon_fixture(HostFixtureOptions::named("xhw-1269-host").with_member_build())
+            .await
+            .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("xhw-1269").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    let mob_id = controlling.mob_id.to_string();
+
+    spawn_local_worker(&controlling, "a1").await;
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("b2 materializes on host B");
+    controlling
+        .handle
+        .wire(identity("a1"), identity("b2"))
+        .await
+        .expect("cross-host wire converges");
+
+    let b2_row = fixture
+        .host_binding_record(&mob_id)
+        .await
+        .materialized
+        .get("b2")
+        .cloned()
+        .expect("b2 materialized row on host B");
+    let b2_runtime = fixture.member_comms_runtime(&b2_row.session_id).await;
+    let b2_peer = b2_runtime.peer_id().expect("b2 peer id");
+    let b2_key = b2_runtime.public_key().expect("b2 transport key");
+
+    // MobKit-style member_peer_info: peer id plus a decodable key that
+    // derives that same peer id.
+    let entry = controlling
+        .handle
+        .get_member(&identity("b2"))
+        .await
+        .expect("get b2")
+        .expect("b2 present");
+    assert_eq!(entry.peer_id(), Some(b2_peer));
+    assert_eq!(
+        entry.transport_public_key(),
+        Some(b2_key.as_str()),
+        "a placed member publishes its host-acknowledged transport key at spawn"
+    );
+    let decoded = meerkat_comms::PubKey::from_pubkey_string(
+        entry.transport_public_key().expect("published key"),
+    )
+    .expect("published key decodes");
+    assert_eq!(decoded.to_peer_id(), b2_peer);
+
+    // The public durable-endpoint read carries the member's real remote
+    // address and key: what a cross-process host dials for a placed member.
+    let endpoint = controlling
+        .handle
+        .member_peer_endpoint(&identity("b2"))
+        .await
+        .expect("query b2 endpoint")
+        .expect("a placed member has a durable endpoint");
+    assert_eq!(endpoint.owner, meerkat_mob::MobMemberEndpointOwner::Host);
+    let endpoint = endpoint.descriptor;
+    assert_eq!(endpoint.peer_id, b2_peer);
+    assert_eq!(endpoint.pubkey, *decoded.as_bytes());
+    assert_ne!(
+        endpoint.address.transport(),
+        meerkat_core::comms::PeerTransport::Inproc,
+        "a placed member's durable endpoint is its real remote address"
+    );
+
+    let a1_session = controlling.member_session_id(&identity("a1")).await;
+    let a1_runtime = controlling.member_comms_runtime(&a1_session).await;
+    let b2_in_a1 = a1_runtime
+        .peers()
+        .await
+        .into_iter()
+        .find(|peer| peer.peer_id == b2_peer)
+        .expect("a1 trusts b2 after the wire");
+    assert_ne!(
+        b2_in_a1.address.transport(),
+        meerkat_core::comms::PeerTransport::Inproc,
+        "a placed member is trusted at its real remote address"
+    );
+
+    controlling
+        .handle
+        .retire(identity("b2"))
+        .await
+        .expect("retire the placed member");
+    assert!(
+        controlling
+            .handle
+            .get_member(&identity("b2"))
+            .await
+            .expect("query b2")
+            .is_none(),
+        "the retired placed member leaves the roster"
+    );
+    assert!(
+        controlling
+            .handle
+            .member_peer_endpoint(&identity("b2"))
+            .await
+            .expect("query retired b2 endpoint")
+            .is_none(),
+        "a retired placed member publishes no endpoint"
+    );
+    wait_until(
+        "a1's trust row for the retired placed member to go",
+        || async {
+            !controlling
+                .local_member_trusts_peer(&a1_session, &b2_peer.to_string())
+                .await
+        },
+    )
+    .await;
+
+    fixture.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn placed_retirement_removes_only_surviving_placed_target_trust() {
     let _guard = REAL_COMMS_TEST_LOCK.lock().await;

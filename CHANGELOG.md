@@ -752,6 +752,15 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Fixed
 
+- A GPT Live open whose pre-open summary was ready but failed its projection
+  check no longer fails the whole open. The seeded path took the open
+  projection lease from the body-free config before its fallible steps (tool
+  listing, re-projection, `validate_projection`); when one failed, the open
+  fell back to the late summary path with a config whose lease was gone, and
+  the adapter refused it with "experimental live canonical seed custody was
+  already consumed". The lease now moves only once the re-projected config
+  validates, so the fallback opens late as intended.
+
 - The placed-member external-edge route inputs (`RecordExternalRouteInstall`,
   `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`,
   `RollbackExternalRouteInstall`) are now declared runtime-internal in the

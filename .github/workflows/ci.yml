@@ -10,7 +10,9 @@ name: CI
 #   changes         - changed-path classification (packages, shards, closure,
 #                     conditional-lane flags)
 #   fmt-governance  - always: fmt, docs, semver self-test, version parity,
-#                     lock consistency, classifier self-test
+#                     lock consistency, classifier self-tests, and the
+#                     ripgrep tombstone scans (legacy surface names,
+#                     session-control routes, deprecated backend)
 #   ratchets        - generated-contract freshness when contract paths
 #                     changed; machine/protocol drift when machine authority
 #                     changed
@@ -265,6 +267,30 @@ jobs:
 
       - name: Release doctor workflow assertions still bind
         run: scripts/test-release-doctor-workflow-contract.sh
+
+      # The tombstone scans (retired public names, session-control routes,
+      # the deprecated backend) are ripgrep text scans. The hosted image
+      # does not ship ripgrep, and each scan refuses to run without it
+      # rather than report a false green, so install it and prove it is on
+      # PATH before the scans run. These used to run only in make ci and the
+      # uncalled cargo.yml, which let a retired route reach a release branch.
+      - name: Install ripgrep for the tombstone scans
+        run: |
+          set -euo pipefail
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ripgrep
+          fi
+          rg --version
+
+      - name: Legacy public surface names stay retired
+        run: make legacy-surface-gate
+
+      - name: Retired session-control routes stay retired
+        run: make session-control-gate
+
+      - name: Deprecated backend stays unreferenced
+        run: make deprecated-backend-gate
 
   ratchets:
     name: Generation ratchets

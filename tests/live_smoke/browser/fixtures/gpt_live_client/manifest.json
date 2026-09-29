@@ -303,12 +303,12 @@
       "name": "fork_a",
       "file": "fork-a.wav",
       "voice": "echo",
-      "text": "Pick a whole number between ten and ninety, sleep eight seconds first, then write just that number into a file called number.txt in the workspace, and tell me the number.",
-      "sha256": "ac0818f98e2128dd15009ee140412b1d29fb6aa0947682650af8632f51424873",
-      "duration_ms": 11771,
+      "text": "Pick a whole number between ten and ninety and write just that number into a file called number.txt in the workspace right away. Then sleep twenty seconds and tell me the number.",
+      "sha256": "57aa3f41700d00440ebc1e1b265fb6a8bce4b0ad1f9572b88d5e3f7d5bff34c3",
+      "duration_ms": 12323,
       "sample_rate_hz": 24000,
-      "trailing_silence_ms": 1646,
-      "notes": "S105 request A: forks the first worker and writes artifact A after an 8 s pause so request B overlaps it. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, echo), VAD-normalised, 1500 ms trailing-silence floor."
+      "trailing_silence_ms": 1580,
+      "notes": "S105 request A: forks the first worker, writes artifact A at once, then holds the fork for 20 s so request B (delegated about 14 s after A) overlaps it and always finds number.txt. The earlier wording wrote A only after an 8 s sleep, so B's fork could reach the file first and invent its own number (Turbo S 2026-09-29: number.txt 37, doubled.txt 94). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, echo), VAD-normalised, 1500 ms trailing-silence floor."
     },
     {
       "name": "fork_b",

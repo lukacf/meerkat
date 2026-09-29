@@ -12072,17 +12072,6 @@ ORDER BY runtime_id";
                 let boundary_head = committed_authority.boundary_head();
                 let provisional =
                     load_head_canonical_provisional_tail_authority(&tx, &runtime_id)?;
-                let committed =
-                    meerkat_store::sqlite_store::verify_runtime_boundary_head_canonical_in_txn(
-                        &tx,
-                        boundary_head,
-                    )
-                    .map_err(|error| {
-                        map_head_canonical_session_store_error(
-                            &runtime_id,
-                            error,
-                        )
-                    })?;
                 let (physical_head, physical_token) =
                     meerkat_store::sqlite_store::load_head_canonical_for_runtime_in_txn(
                         &tx,
@@ -12100,13 +12089,41 @@ ORDER BY runtime_id";
                             "runtime authority exists without a physical canonical head",
                         )
                     })?;
-                if &physical_head == boundary_head {
-                    if committed_authority.committed_head_token() != physical_token {
-                        return Err(session_authority_conflict(
-                            &runtime_id,
-                            "aligned runtime and physical heads carry divergent committed authority",
-                        ));
-                    }
+                let aligned = &physical_head == boundary_head;
+                if aligned && committed_authority.committed_head_token() != physical_token {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "aligned runtime and physical heads carry divergent committed authority",
+                    ));
+                }
+                // An aligned source with no unapplied provisional intent is
+                // returned as the committed body itself, so it is verified as
+                // the physical head too (exact physical row shape included).
+                // An unapplied provisional intent may leave rows beyond the
+                // head until recovery rolls it back, so that source keeps the
+                // boundary-only verification and is never returned as aligned.
+                let aligned_without_pending_intent = aligned
+                    && provisional
+                        .as_ref()
+                        .is_none_or(|provisional| provisional.physical_head_token() == physical_token);
+                let committed = if aligned_without_pending_intent {
+                    meerkat_store::sqlite_store::verify_aligned_runtime_boundary_head_canonical_in_txn(
+                        &tx,
+                        boundary_head,
+                    )
+                } else {
+                    meerkat_store::sqlite_store::verify_runtime_boundary_head_canonical_in_txn(
+                        &tx,
+                        boundary_head,
+                    )
+                }
+                .map_err(|error| {
+                    map_head_canonical_session_store_error(
+                        &runtime_id,
+                        error,
+                    )
+                })?;
+                if aligned {
                     let source = PreparedDurableTailRecoverySource::new(
                         authority,
                         provisional,

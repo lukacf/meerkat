@@ -1160,6 +1160,18 @@ pub struct CommittedBoundaryResumePreparationReceipt {
     observation: meerkat_runtime::store::RuntimeSessionResumeObservation,
     runtime_store: Arc<dyn RuntimeStore>,
     recovery: CommittedBoundaryRecovery,
+    /// The exact committed HeadCanonical body the preparation bracket
+    /// accepted, verified against the store authority named by
+    /// `observation.session_authority()`.
+    ///
+    /// Actor creation seeds from this body instead of re-reading and
+    /// re-verifying the same committed head: it first proves the session
+    /// authority and the physical head unchanged, so a second
+    /// materialization would reproduce these exact bytes at the cost of
+    /// another whole-transcript decode, row-prefix hash and content digest.
+    /// `None` for WholeBlob, whose actor seed also needs the snapshot
+    /// authority and keeps its exact committed read.
+    committed_body: Option<Box<Session>>,
 }
 
 impl std::fmt::Debug for CommittedBoundaryResumePreparationReceipt {
@@ -1234,6 +1246,12 @@ impl CommittedBoundaryResumePreparationReceipt {
         self.observation = current;
         Ok(self)
     }
+}
+
+/// What actor creation keeps from a consumed resume-preparation receipt.
+struct ConsumedCommittedBoundaryResumePreparation {
+    observation: meerkat_runtime::store::RuntimeSessionResumeObservation,
+    committed_body: Option<Box<Session>>,
 }
 
 /// Complete result of the persistent owner's one resume-preparation pipeline.
@@ -3562,6 +3580,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await?;
         }
         Ok(replay.session)
+    }
+
+    /// The rewrite-audit half of [`Self::load_authoritative_session_base`]
+    /// over a committed body the caller already read and verified under an
+    /// exact RuntimeStore observation.
+    ///
+    /// Replay and receipt finalization are identical to the authoritative
+    /// read; only the redundant materialization of the same committed head is
+    /// skipped. The replayed projection is discarded, as it is for a read
+    /// performed only for its audit effect.
+    async fn replay_transcript_rewrite_audit_for_committed_body(
+        &self,
+        id: &SessionId,
+        session: Session,
+    ) -> Result<(), SessionError> {
+        let replay = self
+            .apply_transcript_rewrite_replay(id, Some(session))
+            .await?;
+        if let Some(session) = replay.session.as_ref() {
+            self.verify_transcript_rewrite_audit_events(session, &replay)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Read one committed session body without leaking the narrow
@@ -11413,7 +11454,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         session_id: &SessionId,
         preparation: CommittedBoundaryResumePreparationReceipt,
-    ) -> Result<meerkat_runtime::store::RuntimeSessionResumeObservation, SessionError> {
+    ) -> Result<ConsumedCommittedBoundaryResumePreparation, SessionError> {
         if &preparation.session_id != session_id {
             return Err(SessionError::Agent(AgentError::InternalError(format!(
                 "committed-boundary preparation for '{}' cannot materialize session '{session_id}'",
@@ -11434,7 +11475,115 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "committed-boundary preparation for session '{session_id}' did not prove a materializable recovery disposition"
             ))));
         }
-        Ok(preparation.observation)
+        Ok(ConsumedCommittedBoundaryResumePreparation {
+            observation: preparation.observation,
+            committed_body: preparation.committed_body,
+        })
+    }
+
+    /// Body-free proof that the physical HeadCanonical head still equals the
+    /// boundary head a consumed resume preparation verified.
+    ///
+    /// The resume observation binds RuntimeStore authority, not the physical
+    /// head row. A re-materialization of the committed head would fail with
+    /// the same typed conflict if the physical head had moved, so a caller
+    /// that reuses the prepared body runs this compact head comparison in
+    /// its place. WholeBlob authority is the committed snapshot itself and
+    /// needs no separate physical comparison.
+    async fn verify_prepared_physical_head_current(
+        &self,
+        id: &SessionId,
+        observation: &meerkat_runtime::store::RuntimeSessionResumeObservation,
+    ) -> Result<(), SessionError> {
+        let Some(authority) = observation
+            .session_authority()
+            .and_then(RuntimeSessionAuthority::head_canonical)
+        else {
+            return Ok(());
+        };
+        let incremental = self.incremental.as_ref().ok_or_else(|| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "cannot compare the HeadCanonical physical head of session {id} without incremental store capability"
+            )))
+        })?;
+        let physical = incremental
+            .load_head(id)
+            .await
+            .map_err(|error| SessionError::Store(Box::new(error)))?
+            .ok_or_else(|| {
+                SessionError::Store(Box::new(SessionStoreError::NotFound(id.clone())))
+            })?;
+        let expected = session_head_cas_token(authority.boundary_head())
+            .map_err(|error| SessionError::Store(Box::new(error)))?;
+        let actual = session_head_cas_token(&physical)
+            .map_err(|error| SessionError::Store(Box::new(error)))?;
+        if actual != expected {
+            return Err(SessionError::Store(Box::new(
+                SessionStoreError::TranscriptRevisionConflict {
+                    id: id.clone(),
+                    expected,
+                    actual,
+                },
+            )));
+        }
+        Ok(())
+    }
+
+    /// Archive re-check for a resumed actor, taken under its recovery gate.
+    ///
+    /// The archive verdict is RuntimeStore-owned and body-independent (see
+    /// [`Self::session_archived_by_authority`]). A resume without a consumed
+    /// preparation still performs the authoritative read, whose rewrite-audit
+    /// replay the preparation otherwise owns. With a consumed preparation, an
+    /// unchanged resume observation proves the committed head that
+    /// preparation audited is still current, so only the body-free verdict is
+    /// read; a changed observation falls back to the authoritative read.
+    async fn reject_archived_resume_under_recovery_gate(
+        &self,
+        resume_session_id: &SessionId,
+        prepared_observation: Option<&meerkat_runtime::store::RuntimeSessionResumeObservation>,
+        archived_resume_allowed: bool,
+    ) -> Result<(), SessionError> {
+        if let Some(expected) = prepared_observation {
+            let current = self
+                .runtime_store
+                .load_session_resume_observation(&Self::runtime_id_for_session(
+                    resume_session_id,
+                ))
+                .await
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to re-observe resume authority for session {resume_session_id}: {error}"
+                    )))
+                })?;
+            if &current == expected && current.session_authority().is_some() {
+                self.verify_prepared_physical_head_current(resume_session_id, &current)
+                    .await?;
+                if !archived_resume_allowed
+                    && self
+                        .session_archived_by_runtime_store_authority(resume_session_id)
+                        .await?
+                {
+                    return Err(SessionError::NotFound {
+                        id: resume_session_id.clone(),
+                    });
+                }
+                return Ok(());
+            }
+        }
+        if let Some(session) = self
+            .load_authoritative_session_base(resume_session_id)
+            .await?
+            && self
+                .session_archived_by_authority(resume_session_id, &session)
+                .await?
+            && !archived_resume_allowed
+        {
+            self.reject_if_archived_session(resume_session_id, &session)
+                .await
+                .map_err(crate::control_error_into_session_error)?;
+        }
+        Ok(())
     }
 
     async fn create_session_with_admission(
@@ -11471,7 +11620,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .as_ref()
             .and_then(|build| build.resume_session.as_ref())
             .map(|session| session.id().clone());
-        let prepared_observation = match requested_resume_session_id.as_ref() {
+        let prepared = match requested_resume_session_id.as_ref() {
             Some(session_id) => resume_preparation
                 .map(|preparation| {
                     self.consume_committed_boundary_resume_preparation(session_id, preparation)
@@ -11486,6 +11635,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 }
                 None
             }
+        };
+        let (prepared_observation, mut prepared_committed_body) = match prepared {
+            Some(prepared) => (Some(prepared.observation), prepared.committed_body),
+            None => (None, None),
         };
         if let Some(resume_session_id) = requested_resume_session_id.as_ref() {
             // Receipt-backed mob materialization has already completed the
@@ -11566,15 +11719,60 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     RuntimeSessionPersistenceProfile::HeadCanonicalV1,
                     ActorSessionSeedAuthority::DurableCommitted,
                 ) => {
-                    let exact_session = self
-                        .load_committed_runtime_session_for_body(
-                            resume_session_id,
-                            "live actor materialization",
-                        )
-                        .await?
-                        .ok_or_else(|| SessionError::NotFound {
-                            id: resume_session_id.clone(),
-                        })?;
+                    // A consumed preparation already carries the exact body
+                    // its bracket verified. When a fresh observation equals
+                    // the prepared one and the physical head has not moved,
+                    // that body is still the committed head, so it is not
+                    // materialized and verified a second time. A changed
+                    // observation falls back to the authoritative read.
+                    let prepared_body = match (
+                        prepared_committed_body.take(),
+                        prepared_observation.as_ref(),
+                    ) {
+                        (Some(committed_body), Some(observation)) => {
+                            let current = self
+                                .runtime_store
+                                .load_session_resume_observation(&Self::runtime_id_for_session(
+                                    resume_session_id,
+                                ))
+                                .await
+                                .map_err(|error| {
+                                    SessionError::Agent(AgentError::InternalError(format!(
+                                        "failed to re-observe resume authority for session {resume_session_id}: {error}"
+                                    )))
+                                })?;
+                            // A committed read finds no body once the
+                            // authority is gone; keep that typed outcome.
+                            if current.session_authority().is_none() {
+                                return Err(SessionError::NotFound {
+                                    id: resume_session_id.clone(),
+                                });
+                            }
+                            if &current == observation {
+                                self.verify_prepared_physical_head_current(
+                                    resume_session_id,
+                                    observation,
+                                )
+                                .await?;
+                                Some(*committed_body)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    let exact_session = match prepared_body {
+                        Some(session) => session,
+                        None => self
+                            .load_committed_runtime_session_for_body(
+                                resume_session_id,
+                                "live actor materialization",
+                            )
+                            .await?
+                            .ok_or_else(|| SessionError::NotFound {
+                                id: resume_session_id.clone(),
+                            })?,
+                    };
                     req.build
                         .get_or_insert_with(Default::default)
                         .resume_session = Some(exact_session);
@@ -11796,18 +11994,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     materialization_session_id,
                 )
                 .await?;
-                if let Some(resume_session_id) = resume_session_id.as_ref()
-                    && let Some(session) = self
-                        .load_authoritative_session_base(resume_session_id)
-                        .await?
-                    && self
-                        .session_archived_by_authority(resume_session_id, &session)
-                        .await?
-                    && !archived_resume_allowed
-                {
-                    self.reject_if_archived_session(resume_session_id, &session)
-                        .await
-                        .map_err(crate::control_error_into_session_error)?;
+                if let Some(resume_session_id) = resume_session_id.as_ref() {
+                    self.reject_archived_resume_under_recovery_gate(
+                        resume_session_id,
+                        prepared_observation.as_ref(),
+                        archived_resume_allowed,
+                    )
+                    .await?;
                 }
                 Some(guard)
             } else {
@@ -13859,6 +14052,27 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<CommittedBoundaryRecovery, SessionError> {
+        self.recover_committed_boundary_retaining_aligned_body(id)
+            .await
+            .map(|(recovery, _aligned_body)| recovery)
+    }
+
+    /// [`Self::recover_committed_boundary`], additionally returning the
+    /// committed body when the store-owned recovery proved a HeadCanonical
+    /// durable head already aligned with its RuntimeStore boundary.
+    ///
+    /// That body is the recovery source's own `VerifiedSessionHeadMaterialization`
+    /// of the exact boundary head, which the store verified as the current
+    /// physical head as well (`verify_aligned_runtime_boundary_head_canonical_in_txn`):
+    /// the runtime-boundary metadata owner, the row-prefix commitment, the
+    /// exact physical row shape, every decoded row, and the content digest
+    /// against the committed head revision. Resume preparation brackets the
+    /// recovery with equal resume observations and then adopts this body
+    /// instead of materializing and verifying the same head a second time.
+    async fn recover_committed_boundary_retaining_aligned_body(
+        &self,
+        id: &SessionId,
+    ) -> Result<(CommittedBoundaryRecovery, Option<Session>), SessionError> {
         if self.inner.has_live_session(id).await? {
             return Err(SessionError::Busy { id: id.clone() });
         }
@@ -13874,26 +14088,37 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         match self.store_owned_durable_tail_recovery_outcome(id).await? {
             meerkat_runtime::recovery::DurableTailRecoveryOutcome::Committed {
                 recovered, ..
-            } => Ok(CommittedBoundaryRecovery::Recovered {
-                message_count: recovered.messages().len(),
-            }),
-            meerkat_runtime::recovery::DurableTailRecoveryOutcome::AlreadyAligned { .. } => {
-                Ok(CommittedBoundaryRecovery::AlreadyCommitted)
+            } => Ok((
+                CommittedBoundaryRecovery::Recovered {
+                    message_count: recovered.messages().len(),
+                },
+                None,
+            )),
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome::AlreadyAligned { recovered } => {
+                // Only the HeadCanonical source is a verified materialization
+                // of the committed boundary head itself; other profiles keep
+                // their own exact committed-body read.
+                let aligned_body = (self.runtime_store.session_persistence_profile()
+                    == RuntimeSessionPersistenceProfile::HeadCanonicalV1)
+                    .then_some(*recovered);
+                Ok((CommittedBoundaryRecovery::AlreadyCommitted, aligned_body))
             }
-            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held => {
-                Ok(CommittedBoundaryRecovery::Unprovable {
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held => Ok((
+                CommittedBoundaryRecovery::Unprovable {
                     reason: format!(
                         "the durable tail for session {id} was held intact: the RuntimeStore could not produce and atomically consume exact recovery evidence; every durable copy is retained for reconciliation"
                     ),
-                })
-            }
-            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Refused => {
-                Ok(CommittedBoundaryRecovery::Unprovable {
+                },
+                None,
+            )),
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Refused => Ok((
+                CommittedBoundaryRecovery::Unprovable {
                     reason: format!(
                         "the durable tail for session {id} was refused by machine authority because persisted runtime facts contradict or already supersede the candidate; every durable copy is retained for operator reconciliation"
                     ),
-                })
-            }
+                },
+                None,
+            )),
         }
     }
 
@@ -13908,15 +14133,40 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<PreparedCommittedBoundaryResume, SessionError> {
-        let recovery = match self.recover_committed_boundary(id).await {
-            Ok(
+        let runtime_id = Self::runtime_id_for_session(id);
+        // HeadCanonical recovery verifies the committed boundary head itself.
+        // Bracketing the recovery with resume observations lets an aligned
+        // outcome's verified body serve as the bracketed resume body, so the
+        // committed head is materialized once per resume, not once per read.
+        let pre_recovery_observation = if self.runtime_store.session_persistence_profile()
+            == RuntimeSessionPersistenceProfile::HeadCanonicalV1
+        {
+            Some(
+                self.runtime_store
+                    .load_session_resume_observation(&runtime_id)
+                    .await
+                    .map_err(|error| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "failed to observe resume authority before recovering session {id}: {error}"
+                        )))
+                    })?,
+            )
+        } else {
+            None
+        };
+        let (recovery, aligned_body) = match self
+            .recover_committed_boundary_retaining_aligned_body(id)
+            .await
+        {
+            Ok((
                 recovery @ (CommittedBoundaryRecovery::AlreadyCommitted
                 | CommittedBoundaryRecovery::Recovered { .. }),
-            ) => Some(recovery),
-            Ok(CommittedBoundaryRecovery::Unprovable { reason }) => {
+                aligned_body,
+            )) => (Some(recovery), aligned_body),
+            Ok((CommittedBoundaryRecovery::Unprovable { reason }, _)) => {
                 let observation = self
                     .runtime_store
-                    .load_session_resume_observation(&Self::runtime_id_for_session(id))
+                    .load_session_resume_observation(&runtime_id)
                     .await
                     .map_err(|error| {
                         SessionError::Agent(AgentError::InternalError(format!(
@@ -13930,42 +14180,70 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     },
                 );
             }
-            Err(SessionError::NotFound { .. }) => None,
+            Err(SessionError::NotFound { .. }) => (None, None),
             Err(error) => return Err(error),
         };
 
-        if recovery.is_some() {
-            // Preserve rewrite-audit replay/finalization after physical A/H
-            // convergence, before the body bracket that mints the capability.
-            let _ = self.load_authoritative_session(id).await?;
-        }
+        // An aligned recovery performs no write. Equal observations around it
+        // prove its verified body is still the committed authority, exactly as
+        // they prove a separately loaded body below.
+        let aligned = match (pre_recovery_observation, aligned_body) {
+            (Some(before), Some(body)) => {
+                let observation = self
+                    .runtime_store
+                    .load_session_resume_observation(&runtime_id)
+                    .await
+                    .map_err(|error| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "failed to observe resume authority after recovering session {id}: {error}"
+                        )))
+                    })?;
+                (before == observation).then_some((Some(body), observation))
+            }
+            _ => None,
+        };
+        let (session, observation) = match aligned {
+            Some(aligned) => aligned,
+            None => {
+                let before = self
+                    .runtime_store
+                    .load_session_resume_observation(&runtime_id)
+                    .await
+                    .map_err(|error| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "failed to observe resume authority before materializing session {id}: {error}"
+                        )))
+                    })?;
+                let session = self.observe_authoritative_session_body(id).await?;
+                let observation = self
+                    .runtime_store
+                    .load_session_resume_observation(&runtime_id)
+                    .await
+                    .map_err(|error| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "failed to observe resume authority after materializing session {id}: {error}"
+                        )))
+                    })?;
+                if before != observation {
+                    return Ok(
+                        PreparedCommittedBoundaryResume::AuthorityChangedDuringMaterialization {
+                            observation,
+                        },
+                    );
+                }
+                (session, observation)
+            }
+        };
 
-        let runtime_id = Self::runtime_id_for_session(id);
-        let before = self
-            .runtime_store
-            .load_session_resume_observation(&runtime_id)
-            .await
-            .map_err(|error| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "failed to observe resume authority before materializing session {id}: {error}"
-                )))
-            })?;
-        let session = self.observe_authoritative_session_body(id).await?;
-        let observation = self
-            .runtime_store
-            .load_session_resume_observation(&runtime_id)
-            .await
-            .map_err(|error| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "failed to observe resume authority after materializing session {id}: {error}"
-                )))
-            })?;
-        if before != observation {
-            return Ok(
-                PreparedCommittedBoundaryResume::AuthorityChangedDuringMaterialization {
-                    observation,
-                },
-            );
+        // Preserve rewrite-audit replay/finalization after physical A/H
+        // convergence and before any capability is minted. It runs over the
+        // exact bracketed body instead of a second committed-body read, so the
+        // audit is bound to the same authority the capability carries.
+        if recovery.is_some()
+            && let Some(session) = session.as_ref()
+        {
+            self.replay_transcript_rewrite_audit_for_committed_body(id, session.clone())
+                .await?;
         }
 
         let Some(session) = session else {
@@ -14025,6 +14303,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             observation: observation.clone(),
             runtime_store: Arc::clone(&self.runtime_store),
             recovery,
+            committed_body: (self.runtime_store.session_persistence_profile()
+                == RuntimeSessionPersistenceProfile::HeadCanonicalV1)
+                .then(|| Box::new(session.clone())),
         };
         Ok(PreparedCommittedBoundaryResume::Materializable {
             session: Box::new(session),
@@ -38739,6 +39020,112 @@ mod tests {
         )
         .await;
         (runtime_store, service, session_id, superseded, storage_dir)
+    }
+
+    /// A consumed resume preparation reuses the body its bracket verified
+    /// instead of re-materializing the committed head. The resume observation
+    /// binds RuntimeStore authority only, so both reuse sites must still
+    /// refuse a physical head that moved past the prepared boundary, with the
+    /// same typed conflict a re-materialization reports.
+    #[tokio::test]
+    async fn prepared_resume_reuse_refuses_a_physical_head_past_the_boundary() {
+        let storage_dir = tempfile::tempdir_in(".").expect("prepared resume test directory");
+        let database_path = storage_dir.path().join("runtime.sqlite3");
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(
+            meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path)
+                .expect("head-canonical runtime store"),
+        );
+        let sqlite_session_store = Arc::new(
+            meerkat_store::SqliteSessionStore::open(&database_path)
+                .expect("co-located head-canonical session store"),
+        );
+        let session_store: Arc<dyn SessionStore> = sqlite_session_store.clone();
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            session_store,
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let session_id = created.session_id;
+        committed_content_turn(&service, runtime_store.as_ref(), &session_id, "first turn").await;
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live actor before a cold resume");
+
+        let PreparedCommittedBoundaryResume::Materializable {
+            session,
+            observation,
+            preparation,
+            ..
+        } = service
+            .prepare_committed_boundary_resume(&session_id)
+            .await
+            .expect("prepare the committed boundary resume")
+        else {
+            panic!("a committed session is materializable");
+        };
+        assert_eq!(
+            preparation.committed_body.as_deref().map(Session::messages),
+            Some(session.messages()),
+            "the receipt carries the exact bracketed HeadCanonical body"
+        );
+        service
+            .verify_prepared_physical_head_current(&session_id, &observation)
+            .await
+            .expect("an untouched physical head is current");
+
+        // Advance only the physical head: RuntimeStore authority, and so the
+        // resume observation, stay at the prepared boundary.
+        let incremental: Arc<dyn IncrementalSessionStore> = Arc::clone(&sqlite_session_store)
+            .as_incremental()
+            .expect("sqlite session store is incremental");
+        let physical = incremental
+            .load_head(&session_id)
+            .await
+            .expect("load physical head")
+            .expect("physical head present");
+        let mut advanced = (*session).clone();
+        advanced.push(Message::User(UserMessage::text(
+            "written past the boundary",
+        )));
+        let mutation = meerkat_core::session_store::PreparedHeadCanonicalMutation::prepare(
+            &advanced,
+            Some(physical),
+        )
+        .expect("prepare a physical-only successor");
+        incremental
+            .apply_prepared_head_canonical_mutation(&mutation)
+            .await
+            .expect("advance the physical head");
+        let current = runtime_store
+            .load_session_resume_observation(&LogicalRuntimeId::for_session(&session_id))
+            .await
+            .expect("re-observe resume authority");
+        assert_eq!(
+            current, observation,
+            "instrument honesty: the resume observation does not see the physical head"
+        );
+
+        let is_conflict = |result: &Result<(), SessionError>| {
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(result)
+        };
+        let seed = service
+            .verify_prepared_physical_head_current(&session_id, &observation)
+            .await;
+        assert!(is_conflict(&seed), "actor seeding must refuse: {seed:?}");
+        let archive_check = service
+            .reject_archived_resume_under_recovery_gate(&session_id, Some(&observation), false)
+            .await;
+        assert!(
+            is_conflict(&archive_check),
+            "the gated archive re-check must refuse: {archive_check:?}"
+        );
     }
 
     /// #1104: a reader whose authority read is superseded by a writer's commit

@@ -3163,11 +3163,27 @@ async fn mob_stop_member_run(
     let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
     let run_id = meerkat::surface::parse_wire_run_id(&run_id)
         .map_err(|message| ApiError::BadRequest(message).into_response())?;
-    let receipt = state
+    let receipt = match state
         .mob_state
         .mob_stop_member_run(&mob_id, identity, run_id, request.reason)
         .await
-        .map_err(|err| mob_rest_error(&err, ApiError::BadRequest))?;
+    {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            // Caller-addressable refusals keep a 4xx class; everything else is
+            // an internal fault, never a 400.
+            let fallback: fn(String) -> ApiError = match &err {
+                meerkat_mob::MobError::MemberNotFound(_) => ApiError::NotFound,
+                meerkat_mob::MobError::UnsupportedForMode { .. }
+                | meerkat_mob::MobError::BridgeCommandRejected { .. } => ApiError::BadRequest,
+                meerkat_mob::MobError::SessionError(
+                    meerkat_core::service::SessionError::NotRunning { .. },
+                ) => ApiError::Conflict,
+                _ => ApiError::Internal,
+            };
+            return Err(mob_rest_error(&err, fallback));
+        }
+    };
     Ok(Json(meerkat_contracts::MobStopMemberRunResult {
         mob_id: id,
         agent_identity,
@@ -5959,6 +5975,27 @@ async fn get_session_history(
 }
 
 /// Interrupt an in-flight turn on a session.
+/// Typed REST classes for a run-stop mechanism failure (a stale run is the
+/// `not_current` receipt, never an error, so none of these is a stale stop).
+fn stop_run_driver_error_to_api(error: meerkat_runtime::RuntimeDriverError) -> ApiError {
+    match error {
+        meerkat_runtime::RuntimeDriverError::ValidationFailed { reason } => {
+            ApiError::BadRequest(reason)
+        }
+        meerkat_runtime::RuntimeDriverError::NotFound { .. }
+        | meerkat_runtime::RuntimeDriverError::Destroyed => {
+            ApiError::NotFound(format!("run stop target is gone: {error}"))
+        }
+        meerkat_runtime::RuntimeDriverError::NotReady { .. }
+        | meerkat_runtime::RuntimeDriverError::StaleAuthority { .. }
+        | meerkat_runtime::RuntimeDriverError::UnregisterInProgress { .. }
+        | meerkat_runtime::RuntimeDriverError::RuntimeStopInProgress { .. } => {
+            ApiError::Conflict(format!("run stop refused: {error}"))
+        }
+        other => ApiError::Internal(format!("Failed to stop run: {other}")),
+    }
+}
+
 /// Run-fenced Stop: stop the exact run and terminalize every contributor
 /// bound to it. A stale run id is the `not_current` receipt, never an error.
 async fn stop_session_run(
@@ -5982,7 +6019,7 @@ async fn stop_session_run(
         .runtime_adapter
         .stop_run(&session_id, &run_id, request.reason)
         .await
-        .map_err(|error| ApiError::Internal(format!("Failed to stop run: {error}")))?;
+        .map_err(stop_run_driver_error_to_api)?;
     let receipt = meerkat::surface::wire_run_stop_receipt(&receipt).map_err(ApiError::Internal)?;
     Ok(Json(meerkat_contracts::StopRunResult {
         session_id: session_id.to_string(),

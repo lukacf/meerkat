@@ -547,6 +547,21 @@ impl SessionEventLine {
         self.allocated.fetch_add(count, Ordering::AcqRel)
     }
 
+    /// Give back the unused end `(keep, reserved_end]` of a reservation, if
+    /// nothing was allocated after it. If something was, those numbers stay
+    /// unused: numbering gaps with no events behind them.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    fn release_reservation(&self, reserved_end: u64, keep: u64) {
+        if keep < reserved_end {
+            let _ = self.allocated.compare_exchange(
+                reserved_end,
+                keep,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+    }
+
     /// Claim `(observed, through]` iff nothing was allocated since
     /// `observed` was read.
     fn try_claim(&self, observed: u64, through: u64) -> bool {
@@ -7543,18 +7558,27 @@ async fn publish_interaction_terminal_batch(
 
     // Reserve the batch's sequences in the shared space; the store assigns
     // canonical sequences above the floor (possibly above the reservation,
-    // when its durable tail is ahead), which are then recorded. Sequences a
-    // failed append or a store assignment above the reservation leaves
-    // unused are numbering gaps with no events behind them: nothing was
-    // published under them, so no gap marker is published (a marker would
-    // claim dropped events that never existed). Seeding new spaces from the
-    // durable stream tail keeps the store's assignment inside the
-    // reservation in the ordinary case.
-    let stream_seq_floor = next_seq.reserve(u64::try_from(terminals.len()).unwrap_or(u64::MAX));
-    let appends = event_store
+    // when its durable tail is ahead), which are then recorded. The unused
+    // end of the reservation (all of it for an exact replay, which inserts
+    // nothing) is given back unless another incarnation allocated after it.
+    // Sequences that stay unused are numbering gaps with no events behind
+    // them: nothing was published under them, so no gap marker is published
+    // (a marker would claim dropped events that never existed). Seeding new
+    // spaces from the durable stream tail keeps the store's assignment inside
+    // the reservation in the ordinary case.
+    let batch_len = u64::try_from(terminals.len()).unwrap_or(u64::MAX);
+    let stream_seq_floor = next_seq.reserve(batch_len);
+    let reserved_end = stream_seq_floor.saturating_add(batch_len);
+    let appends = match event_store
         .append_interaction_terminals_exact_batch(session_id, stream_seq_floor, &terminals)
         .await
-        .map_err(|error| SessionError::Store(Box::new(error)))?;
+    {
+        Ok(appends) => appends,
+        Err(error) => {
+            next_seq.release_reservation(reserved_end, stream_seq_floor);
+            return Err(SessionError::Store(Box::new(error)));
+        }
+    };
     if appends.len() != terminals.len() {
         return Err(SessionError::Agent(
             meerkat_core::error::AgentError::InternalError(format!(
@@ -7669,6 +7693,10 @@ async fn publish_interaction_terminal_batch(
     let actor_still_exact = expected_actor.is_none_or(|expected_actor| {
         expected_actor.same_incarnation(&control.actor_witness) && expected_actor.is_live()
     });
+    let inserted_tail = inserted
+        .last()
+        .map_or(stream_seq_floor, |(stream_seq, _)| *stream_seq);
+    next_seq.release_reservation(reserved_end, inserted_tail);
     next_seq.advance_to(canonical_tail);
     if actor_still_exact {
         for (_, envelope) in inserted {

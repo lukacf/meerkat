@@ -187,7 +187,11 @@ them.
   recovery did not hand back as queued is left as is and logged). One typed
   `ToolProcessRecovery` system notice per settled run is recorded in the
   durable transcript without a model call, at the runtime loop's pre-dequeue
-  position, so it is part of the transcript the next real turn sees; a
+  position, so it is part of the transcript the next real turn sees. It is
+  preceded, once and atomically with it, by the run's user requests: the run
+  never committed, so they never reached the transcript. They are captured
+  with the evidence before the inputs are abandoned, and an input that was
+  already durably applied is not repeated. A
   process of an already completed run that recovery killed (for example a
   background job) is reported the same way with the `RunCompleted`
   disposition instead of being dropped. Inputs of runs without such evidence
@@ -535,8 +539,11 @@ them.
 - Typed system notices recorded without a turn:
   `meerkat_core::lifecycle::CoreExecutorTranscriptNoticeHandle` with
   `CoreExecutor::transcript_notice_handle` (default `None`),
+  `meerkat_core::SystemNoticeRecord` (a notice plus the user requests it
+  accounts for, appended once as a whole),
   `meerkat_core::Session::append_system_notice_once`,
-  `PersistentSessionService::append_system_notice_under_runtime_turn_boundary`,
+  `PersistentSessionService::append_system_notice_under_runtime_turn_boundary`
+  (which also records into a session that has no live actor yet),
   `meerkat::surface::persistent_runtime_transcript_notice_handle` (returned by
   the facade, REST, RPC, CLI and MCP executors), and the defaulted
   `meerkat_mob::MobSessionService::append_system_notice_under_runtime_turn_boundary`

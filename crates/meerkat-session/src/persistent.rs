@@ -7070,13 +7070,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .map(|(message_count, _revision)| message_count)
     }
 
-    /// Record a typed system notice in the live session's durable transcript
-    /// without a turn (no model call), once.
+    /// Record a typed system notice (with the user requests it accounts
+    /// for) in the session's durable transcript without a turn (no model
+    /// call), once.
     ///
     /// The caller holds the runtime turn-finalization boundary and the actor
     /// is idle (the runtime's pre-dequeue position), so the notice is part of
     /// the transcript the next real turn sees. A notice already present is a
-    /// duplicate and is not persisted again.
+    /// duplicate and nothing is persisted again. A session without a live
+    /// actor yet (a host that builds the agent on the first apply) is updated
+    /// in its persisted form, which the actor then loads.
     pub async fn append_system_notice_under_runtime_turn_boundary(
         &self,
         id: &SessionId,
@@ -7084,6 +7087,37 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<meerkat_core::service::AppendSystemContextStatus, SessionError> {
         let _recovery_guard = self.recovery_gate_for_session(id).await.lock_owned().await;
         let _ = self.discard_stale_live_session_if_needed(id).await?;
+        if !self.inner.has_live_session(id).await? {
+            let mut session = self
+                .load_persisted_session_for_control(id, "append_system_notice")
+                .await?
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            self.reject_if_archived_session(id, &session)
+                .await
+                .map_err(crate::control_error_into_session_error)?;
+            let status = session.append_system_notice_once(record);
+            if status == meerkat_core::service::AppendSystemContextStatus::Duplicate {
+                return Ok(status);
+            }
+            match self.runtime_store.session_persistence_profile() {
+                RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                    self.save_normalized_session(session).await?;
+                }
+                RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                    self.persist_detached_head_canonical_session(
+                        session,
+                        "store-only system-notice append",
+                    )
+                    .await?;
+                }
+                profile => {
+                    return Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "unsupported runtime session persistence profile {profile} while appending a system notice for session {id}"
+                    ))));
+                }
+            }
+            return Ok(status);
+        }
         if let Some(session) = self.load_authoritative_session_base(id).await? {
             self.reject_if_archived_session(id, &session)
                 .await

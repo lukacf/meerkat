@@ -20017,12 +20017,17 @@ ORDER BY runtime_id";
             );
             assert_eq!(facts.message_count(), 1);
 
-            let foreign_digest = WholeBlobStoreAuthority::issued(
-                session.id().clone(),
-                first.store_revision(),
-                "row-sha256:not-this-document".to_string(),
-            )
-            .unwrap();
+            // A well-formed row digest of other bytes: the authority must be
+            // valid (issued refuses non-canonical tokens) and still not match.
+            let foreign_digest =
+                WholeBlobStoreAuthority::issued(session.id().clone(), first.store_revision(), {
+                    use sha2::Digest as _;
+                    format!(
+                        "row-sha256:{:x}",
+                        sha2::Sha256::digest(b"not this document")
+                    )
+                })
+                .unwrap();
             assert!(
                 store
                     .session_authority_ops()

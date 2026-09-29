@@ -144,7 +144,11 @@ them.
   reaches its canonical terminal. Each `RunStopContributor` carries the
   delivered `CompletionOutcome` and the committed `InputTerminalOutcome`. A
   late stop returns `RunStopReceipt::NotCurrent { run_id, current_run_id }`
-  and touches no queued input or newer run.
+  and touches no queued input or newer run. A stop refused because a runtime
+  stop or teardown took the still-bound run returns
+  `RunStopReceipt::NotStoppable { run_id, state }`. Once the stop is
+  committed, a failed or unconfirmed interrupt dispatch does not fail the
+  call; it returns at the stopped run's terminal.
 - `meerkat_runtime::RuntimeSessionAttachmentState` (`Unregistered`,
   `Attached`, `ReloadRequired { registration, attachment }`,
   `Detached { registration, unregister }`), `RuntimeDetachedUnregister`

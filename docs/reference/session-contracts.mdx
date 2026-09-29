@@ -833,10 +833,19 @@ above and can take a follow-up turn.
   its staged batch.
 - The call returns `RunStopReceipt::Stopped { run_id, contributors }` once
   every contributor staged at the stop has reached its canonical terminal. Each
-  entry carries the delivered completion and the committed input terminal.
+  entry carries the delivered completion and the committed input terminal. A
+  cancelled join's completion is `RuntimeTerminated`, while its committed
+  terminal is `Abandoned { reason: Cancelled }`, so read the terminal for the
+  lifecycle fact.
+- Once the stop is committed, an interrupt dispatch that fails, times out, or
+  finds the executor not yet inside the run does not fail the call. The run
+  still ends as a stopped run, and the call returns at its terminal.
 - A stop whose run is no longer current returns
   `RunStopReceipt::NotCurrent { run_id, current_run_id }` and touches nothing.
   Queued input and newer runs are never interrupted.
+- If a runtime stop or teardown has taken the still-bound run between the
+  compare and the stop, the call returns
+  `RunStopReceipt::NotStoppable { run_id, state }` and stages nothing.
 
 The stop intent lives in machine state and is not recovered after a crash. A
 process that dies mid-stop recovers the run's staged inputs like any other

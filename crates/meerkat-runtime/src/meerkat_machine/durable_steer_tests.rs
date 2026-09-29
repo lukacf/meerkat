@@ -87,6 +87,8 @@ struct RunnerScript {
     /// `None` to acknowledge the interrupt without ending the run yet.
     interrupt_step: std::sync::Mutex<Option<RunnerStep>>,
     interrupts: AtomicUsize,
+    /// When set, the exact-run interrupt callback fails after counting.
+    interrupt_fails: AtomicBool,
 }
 
 impl RunnerScript {
@@ -111,6 +113,7 @@ impl RunnerScript {
             active_run: std::sync::Mutex::new(None),
             interrupt_step: std::sync::Mutex::new(Some(RunnerStep::CancelDiscardingImage)),
             interrupts: AtomicUsize::new(0),
+            interrupt_fails: AtomicBool::new(false),
         })
     }
 
@@ -209,6 +212,11 @@ impl meerkat_core::lifecycle::CoreExecutorInterruptHandle for DurableSteerInterr
             return Ok(false);
         }
         self.script.interrupts.fetch_add(1, Ordering::SeqCst);
+        if self.script.interrupt_fails.load(Ordering::SeqCst) {
+            return Err(CoreExecutorError::Internal(
+                "scripted interrupt callback failure".into(),
+            ));
+        }
         if let Some(step) = *self.script.interrupt_step.lock().unwrap() {
             self.script.step(step);
         }
@@ -1500,6 +1508,26 @@ async fn stop_bounded(
     .expect("stop_run returns once every contributor is terminal")
 }
 
+/// Event-based "no successor" proof. A stopped contributor that re-entered a
+/// lane would be staged no later than fresh queued work (a requeued steer has
+/// Steer-lane priority and a replayed batch returns to the head of its lane),
+/// so the next apply carrying exactly the sentinel proves none did.
+async fn assert_next_run_carries_only_a_fresh_sentinel(rig: &DurableSteerRig) {
+    let applied_before = rig.script.apply_calls.load(Ordering::SeqCst);
+    let sentinel = queued_prompt("sentinel after the stop");
+    let sentinel_id = sentinel.id().clone();
+    rig.admit(sentinel).await;
+    rig.wait_for_apply_calls(applied_before + 1).await;
+    assert_eq!(
+        rig.script.primitives()[applied_before],
+        vec![sentinel_id.clone()],
+        "the run after the stop carries no stopped contributor"
+    );
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_phase(&sentinel_id, InputLifecycleState::Consumed)
+        .await;
+}
+
 fn current_run(rig: &DurableSteerRig) -> RunId {
     rig.script
         .active_run
@@ -1566,15 +1594,15 @@ async fn stop_run_terminalizes_a_discarded_durable_join(
 async fn stop_run_terminalizes_a_discarded_durable_join_without_a_successor() {
     let rig = DurableSteerRig::ephemeral().await;
     let (_batch, steer_id) = stop_run_terminalizes_a_discarded_durable_join(&rig).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(rig.steer_queue().await.is_empty());
+    assert!(rig.queue().await.is_empty());
     assert_eq!(
         rig.script.apply_calls.load(Ordering::SeqCst),
         1,
         "no successor provider request after the stop"
     );
+    assert_next_run_carries_only_a_fresh_sentinel(&rig).await;
     assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
-    assert!(rig.steer_queue().await.is_empty());
-    assert!(rig.queue().await.is_empty());
 }
 
 #[tokio::test]
@@ -1593,8 +1621,8 @@ async fn persistent_stop_run_terminalizes_a_discarded_durable_join_without_a_suc
         assert_eq!(row.seed.phase, InputLifecycleState::Abandoned);
         assert_eq!(row.seed.terminal_outcome, cancelled_terminal());
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 1);
+    assert_next_run_carries_only_a_fresh_sentinel(&rig).await;
     assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
 }
 
@@ -1680,8 +1708,7 @@ async fn stop_run_preserves_unrelated_queued_input_and_a_late_stop_is_harmless()
     );
     rig.wait_for_phase(&unrelated_id, InputLifecycleState::Consumed)
         .await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 2);
+    assert_next_run_carries_only_a_fresh_sentinel(&rig).await;
     assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
 }
 
@@ -1717,8 +1744,11 @@ async fn steer_that_reaches_its_boundary_after_the_stop_never_joins_the_stopped_
     .expect("stop dispatched its interrupt");
 
     // The runner reaches the boundary after the stop: the join is refused.
-    rig.script.step(RunnerStep::BoundaryThenToolCalls);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The runner parks at the boundary for every registered preparation, so
+    // the join decision is made before the step completes.
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
     assert_eq!(
         rig.phase(&steer_id).await,
         Some(InputLifecycleState::Queued),
@@ -1757,9 +1787,19 @@ async fn steer_that_reaches_its_boundary_after_the_stop_never_joins_the_stopped_
 /// Stop racing the join boundary itself: whichever the generated machine
 /// linearizes first decides, and S is either a terminal contributor of R or
 /// ordinary follow-up work delivered once, never both and never lost.
-#[tokio::test]
+///
+/// Which side wins is up to the scheduler (the launch order alternates, but
+/// the machine gate decides), so the loop records the outcome of each
+/// iteration but does not require both: each side has its own
+/// deterministic test
+/// (`stop_run_terminalizes_a_discarded_durable_join_without_a_successor` and
+/// `steer_that_reaches_its_boundary_after_the_stop_never_joins_the_stopped_run`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_racing_the_join_boundary_never_both_cancels_and_redelivers_the_steer() {
-    for _ in 0..8 {
+    const ITERATIONS: usize = 8;
+    let mut joined_then_cancelled = 0;
+    let mut refused_then_delivered = 0;
+    for iteration in 0..ITERATIONS {
         let rig = DurableSteerRig::ephemeral().await;
         rig.start_busy_turn().await;
         let stopped_run = current_run(&rig);
@@ -1769,6 +1809,12 @@ async fn stop_racing_the_join_boundary_never_both_cancels_and_redelivers_the_ste
         rig.admit(steer).await;
         rig.wait_for_waiting_delivery().await;
 
+        // Alternate which side is launched first so both linearizations
+        // are exercised on the multi-threaded runtime.
+        let boundary_first = iteration % 2 == 1;
+        if boundary_first {
+            rig.script.step(RunnerStep::BoundaryThenToolCalls);
+        }
         let adapter = Arc::clone(&rig.adapter);
         let session_id = rig.session_id.clone();
         let run_for_stop = stopped_run.clone();
@@ -1777,7 +1823,9 @@ async fn stop_racing_the_join_boundary_never_both_cancels_and_redelivers_the_ste
                 .stop_run(&session_id, &run_for_stop, "racing stop")
                 .await
         });
-        rig.script.step(RunnerStep::BoundaryThenToolCalls);
+        if !boundary_first {
+            rig.script.step(RunnerStep::BoundaryThenToolCalls);
+        }
         tokio::time::timeout(Duration::from_secs(5), async {
             while rig.script.interrupts.load(Ordering::SeqCst) == 0 {
                 tokio::task::yield_now().await;
@@ -1799,17 +1847,23 @@ async fn stop_racing_the_join_boundary_never_both_cancels_and_redelivers_the_ste
             .find(|contributor| contributor.input_id == steer_id);
         if let Some(joined) = joined {
             assert_eq!(joined.terminal, cancelled_terminal());
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 1);
+            assert_next_run_carries_only_a_fresh_sentinel(&rig).await;
             assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
+            joined_then_cancelled += 1;
         } else {
             rig.wait_for_apply_calls(2).await;
             rig.script.step(RunnerStep::Finish);
             rig.wait_for_phase(&steer_id, InputLifecycleState::Consumed)
                 .await;
             assert_eq!(contributions(&rig.script.primitives(), &steer_id), 1);
+            refused_then_delivered += 1;
         }
     }
+    eprintln!(
+        "stop/join race: {joined_then_cancelled} joined-then-cancelled, \
+         {refused_then_delivered} refused-then-delivered"
+    );
+    assert_eq!(joined_then_cancelled + refused_then_delivered, ITERATIONS);
 }
 
 /// A retryable failure racing the stop never replays the stopped batch: the
@@ -1829,11 +1883,122 @@ async fn stop_run_never_replays_the_batch_when_the_stopped_run_fails() {
     assert_eq!(contributors.len(), 1);
     assert_eq!(contributors[0].input_id, batch);
     assert_eq!(contributors[0].terminal, cancelled_terminal());
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         rig.script.apply_calls.load(Ordering::SeqCst),
         1,
         "the failed stopped run is not retried"
+    );
+    assert_next_run_carries_only_a_fresh_sentinel(&rig).await;
+    assert_eq!(contributions(&rig.script.primitives(), &batch), 1);
+}
+
+/// Once the stop is committed, a failed interrupt dispatch does not fail the
+/// stop: the run still ends as a stopped run, and the contributors' terminals
+/// are the outcome.
+#[tokio::test]
+async fn committed_stop_waits_for_contributor_terminals_when_the_interrupt_fails() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let batch = rig.start_busy_turn().await;
+    let stopped_run = current_run(&rig);
+    let steer = typed_steer(
+        "joined before a failing interrupt",
+        ConversationAppendRole::User,
+    );
+    let steer_id = steer.id().clone();
+    rig.admit(steer).await;
+    rig.wait_for_waiting_delivery().await;
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    rig.wait_for_phase(&steer_id, InputLifecycleState::Staged)
+        .await;
+    rig.wait_for_applied_durable(1).await;
+    rig.script.interrupt_fails.store(true, Ordering::SeqCst);
+
+    let adapter = Arc::clone(&rig.adapter);
+    let session_id = rig.session_id.clone();
+    let run_for_stop = stopped_run.clone();
+    let stop = tokio::spawn(async move {
+        adapter
+            .stop_run(&session_id, &run_for_stop, "stop with a failing interrupt")
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while rig.script.interrupts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("stop dispatched its interrupt");
+    // The run ends on its own, discarding its image, after the failed
+    // interrupt; the committed stop still governs its terminal.
+    rig.script.step(RunnerStep::CancelDiscardingImage);
+    let contributors = stopped_contributors(
+        tokio::time::timeout(Duration::from_secs(10), stop)
+            .await
+            .expect("stop returns")
+            .expect("stop task")
+            .expect("a committed stop does not fail on its interrupt dispatch"),
+        &stopped_run,
+    );
+    let mut ids = contributors
+        .iter()
+        .map(|contributor| contributor.input_id.clone())
+        .collect::<Vec<_>>();
+    ids.sort_by_key(ToString::to_string);
+    let mut expected = vec![batch, steer_id.clone()];
+    expected.sort_by_key(ToString::to_string);
+    assert_eq!(ids, expected);
+    for contributor in &contributors {
+        assert_eq!(
+            contributor.terminal,
+            cancelled_terminal(),
+            "{contributor:?}"
+        );
+    }
+    assert_next_run_carries_only_a_fresh_sentinel(&rig).await;
+    assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
+}
+
+/// Behaviour unchanged for the plain exact-run interrupt: without a Stop, a
+/// discarded join still returns to its lane and is delivered by exactly one
+/// follow-up turn.
+#[tokio::test]
+async fn plain_exact_run_interrupt_still_requeues_a_discarded_join() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let batch = rig.start_busy_turn().await;
+    let run_id = current_run(&rig);
+    let steer = typed_steer("interrupted, not stopped", ConversationAppendRole::User);
+    let steer_id = steer.id().clone();
+    rig.admit(steer).await;
+    rig.wait_for_waiting_delivery().await;
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    rig.wait_for_phase(&steer_id, InputLifecycleState::Staged)
+        .await;
+    rig.wait_for_applied_durable(1).await;
+
+    assert!(
+        rig.adapter
+            .hard_cancel_run_if_current(&rig.session_id, &run_id, "plain interrupt")
+            .await
+            .expect("plain exact-run interrupt")
+    );
+    rig.wait_for_phase(&batch, InputLifecycleState::Abandoned)
+        .await;
+    rig.wait_for_apply_calls(2).await;
+    assert_eq!(
+        rig.script.primitives()[1],
+        vec![steer_id.clone()],
+        "the discarded join takes its one follow-up turn"
+    );
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_phase(&steer_id, InputLifecycleState::Consumed)
+        .await;
+    assert_eq!(
+        *rig.script.discarded.lock().unwrap(),
+        vec![meerkat_core::event::BoundaryAppendsDiscarded {
+            session_id: rig.session_id.clone(),
+            run_id,
+            input_ids: vec![steer_id],
+        }]
     );
 }
 

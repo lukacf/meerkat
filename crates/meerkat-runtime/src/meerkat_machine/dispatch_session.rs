@@ -1763,14 +1763,20 @@ impl MeerkatMachine {
             )
             .is_err()
             {
-                let state = self
-                    .existing_session_runtime_state(session_id)
-                    .await
-                    .unwrap_or(RuntimeState::Destroyed);
-                if state == RuntimeState::Destroyed {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
-                return Err(RuntimeDriverError::NotReady { state });
+                // Generated authority moved between the compare and the stage
+                // without this gate (a runtime stop or teardown owns the run
+                // now). Report the fresh machine truth as a typed outcome.
+                let authority = captured_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                capture.current_run_id =
+                    crate::meerkat_machine::dsl_authority::current_run_id_from_authority(
+                        &authority,
+                    );
+                capture.refused_state = Some(
+                    crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority),
+                );
+                return Ok(false);
             }
             capture.staged = true;
             let driver_guard = captured_driver.lock().await;

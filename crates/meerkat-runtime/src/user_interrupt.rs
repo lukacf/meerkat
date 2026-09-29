@@ -15,6 +15,9 @@ pub(super) struct RunStopCapture {
     pub(super) current_run_id: Option<meerkat_core::RunId>,
     /// Whether `StopCurrentRunForRun` committed for the expected run.
     pub(super) staged: bool,
+    /// The runtime phase observed when generated authority refused the stop
+    /// after the compare had matched.
+    pub(super) refused_state: Option<RuntimeState>,
     /// One completion waiter per input staged for the stopped run.
     pub(super) contributors: Vec<(
         meerkat_core::lifecycle::InputId,
@@ -222,7 +225,14 @@ impl MeerkatMachine {
     /// starts a successor. A retained join is consumed with the run as usual.
     ///
     /// The call returns after every contributor staged at the stop reached
-    /// its canonical terminal ([`crate::RunStopReceipt::Stopped`]). A late
+    /// its canonical terminal ([`crate::RunStopReceipt::Stopped`]). Once the
+    /// stop is committed, an interrupt dispatch that fails, times out, or
+    /// finds the executor not yet inside the run does not fail the call: the
+    /// run still ends as a stopped run, and the contributors' terminals are
+    /// the outcome. If the executor had not entered the run, the run executes
+    /// until its own terminal before the call returns. A stop refused because
+    /// a runtime stop or teardown took the run is
+    /// [`crate::RunStopReceipt::NotStoppable`]. A late
     /// stop, whose run is no longer current, touches nothing and returns
     /// [`crate::RunStopReceipt::NotCurrent`]: queued input and newer runs are
     /// never interrupted. Input admitted but not joined to the run is not a
@@ -248,14 +258,41 @@ impl MeerkatMachine {
             .await;
         if !capture.staged {
             dispatched?;
+            if let Some(state) = capture.refused_state
+                && capture.current_run_id.as_ref() == Some(expected_run_id)
+            {
+                return Ok(crate::run_stop::RunStopReceipt::NotStoppable {
+                    run_id: expected_run_id.clone(),
+                    state,
+                });
+            }
             return Ok(crate::run_stop::RunStopReceipt::NotCurrent {
                 run_id: expected_run_id.clone(),
                 current_run_id: capture.current_run_id,
             });
         }
-        // `Ok(false)` means the run ended between the committed stop and the
-        // executor callback: its terminal still resolved under the stop.
-        dispatched?;
+        // The stop is committed, so the run's contributors terminalize under
+        // stop semantics whatever the interrupt dispatch reports. Their
+        // terminals are the outcome; the dispatch result is diagnostic only.
+        // `Ok(false)` means the run was no longer current at the executor
+        // callback, or the executor had not entered it yet; an unknown or
+        // failed dispatch leaves the run to reach its terminal on its own.
+        // Either way the run ends as a stopped run: its unretained joins are
+        // cancelled and a failed attempt is not replayed.
+        match dispatched {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
+                %session_id,
+                run_id = %expected_run_id,
+                "committed run stop found no executor interrupt target; awaiting the run terminal"
+            ),
+            Err(error) => tracing::warn!(
+                %session_id,
+                run_id = %expected_run_id,
+                %error,
+                "committed run stop could not confirm its interrupt; awaiting the run terminal"
+            ),
+        }
         let mut contributors = Vec::with_capacity(capture.contributors.len());
         for (input_id, waiter) in capture.contributors {
             let (outcome, observed_terminal) = waiter
@@ -283,6 +320,8 @@ impl MeerkatMachine {
         })
     }
 
+    /// The committed terminal of one contributor: the live ledger first, then
+    /// the durable row an archived input left in the store.
     async fn committed_input_terminal(
         &self,
         session_id: &SessionId,
@@ -290,13 +329,25 @@ impl MeerkatMachine {
     ) -> Option<crate::input_state::InputTerminalOutcome> {
         let driver = {
             let sessions = self.sessions.read().await;
-            sessions.get(session_id)?.driver.clone()
+            sessions.get(session_id).map(|entry| entry.driver.clone())
         };
-        let driver = driver.lock().await;
-        driver
-            .as_driver()
-            .stored_input_state(input_id)
-            .and_then(|stored| stored.seed.terminal_outcome)
+        if let Some(driver) = driver
+            && let Some(stored) = driver.lock().await.as_driver().stored_input_state(input_id)
+        {
+            return stored.seed.terminal_outcome;
+        }
+        let store = self.store.as_ref()?;
+        match store
+            .load_input_state(&Self::logical_runtime_id(session_id), input_id)
+            .await
+        {
+            Ok(stored) => stored.and_then(|stored| stored.seed.terminal_outcome),
+            Err(error) => {
+                tracing::warn!(%session_id, %input_id, %error,
+                    "stopped-run contributor terminal could not be read from the store");
+                None
+            }
+        }
     }
 
     /// Run-fenced hard cancel additionally pinned to one exact host-member

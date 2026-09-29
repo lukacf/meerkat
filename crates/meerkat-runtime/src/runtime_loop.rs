@@ -6754,9 +6754,14 @@ async fn process_queue(
                             );
                             if let Some(completions) = completions.as_ref() {
                                 let mut completions = completions.lock().await;
+                                let waiter_ids = input_ids
+                                    .iter()
+                                    .chain(join_resolution.stopped.iter())
+                                    .cloned()
+                                    .collect::<Vec<_>>();
                                 fail_completion_waiters(
                                     &mut completions,
-                                    &input_ids,
+                                    &waiter_ids,
                                     format!(
                                         "runtime stopped-run durable join cancellation failed: {error}"
                                     ),
@@ -7331,6 +7336,19 @@ async fn process_queue(
                                 %error,
                                 "failed closed cancelling durable live-boundary joins of a stopped run"
                             );
+                            // The stopped joins are not batch contributors, so
+                            // no teardown path resolves their waiters: fail
+                            // them now so a waiting stop sees a typed error.
+                            if let Some(completions) = completions.as_ref() {
+                                let mut completions = completions.lock().await;
+                                fail_completion_waiters(
+                                    &mut completions,
+                                    &join_resolution.stopped,
+                                    format!(
+                                        "runtime stopped-run durable join cancellation failed: {error}"
+                                    ),
+                                );
+                            }
                             drop(terminal_authority_guard);
                             return stop_runtime_loop_executor_from_dsl_effect(
                                 driver,

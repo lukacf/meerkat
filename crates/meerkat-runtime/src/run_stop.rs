@@ -8,6 +8,7 @@ use meerkat_core::lifecycle::{InputId, RunId};
 
 use crate::completion::CompletionOutcome;
 use crate::input_state::InputTerminalOutcome;
+use crate::runtime_state::RuntimeState;
 
 /// One input that contributed to a stopped run, with its canonical terminal.
 #[derive(Debug, Clone)]
@@ -15,11 +16,19 @@ use crate::input_state::InputTerminalOutcome;
 pub struct RunStopContributor {
     /// The contributor's input id.
     pub input_id: InputId,
-    /// The generated completion delivered for this input.
+    /// The generated completion delivered for this input. A batch
+    /// contributor of a cancelled run receives `Cancelled`. An unretained
+    /// durable join is terminalized through the runless terminal carrier, so
+    /// its completion is `RuntimeTerminated` while its committed terminal
+    /// below is `Abandoned { reason: Cancelled }`: read `terminal` for the
+    /// lifecycle fact.
     pub outcome: CompletionOutcome,
     /// The committed input terminal. A batch contributor of a cancelled run
     /// and an unretained durable join are `Abandoned { reason: Cancelled }`;
     /// a durable join whose append survives in the kept image is `Consumed`.
+    /// Read from the completion witness, then the live ledger, then the
+    /// durable row of an archived input. `None` only when none of them
+    /// retains the row (an ephemeral runtime that already released it).
     pub terminal: Option<InputTerminalOutcome>,
 }
 
@@ -44,4 +53,8 @@ pub enum RunStopReceipt {
         run_id: RunId,
         current_run_id: Option<RunId>,
     },
+    /// The expected run is still bound, but generated authority refused the
+    /// stop because the runtime left `Running`/`Retired` (a runtime stop or
+    /// teardown owns the run and terminalizes it). Nothing was staged.
+    NotStoppable { run_id: RunId, state: RuntimeState },
 }

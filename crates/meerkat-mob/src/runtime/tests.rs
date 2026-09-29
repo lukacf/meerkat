@@ -17991,8 +17991,8 @@ async fn assert_running_boot_broke_only(
             .member_peer_endpoint(healthy)
             .await
             .expect("query healthy endpoint")
-            .map(|endpoint| endpoint.peer_id),
-        Some(healthy_peer_id)
+            .map(|endpoint| (endpoint.owner, endpoint.descriptor.peer_id)),
+        Some((crate::MobMemberEndpointOwner::Local, healthy_peer_id))
     );
 }
 

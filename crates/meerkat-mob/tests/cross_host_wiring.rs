@@ -1429,6 +1429,8 @@ async fn placed_member_publishes_its_transport_key_and_retires_at_its_real_addre
         .await
         .expect("query b2 endpoint")
         .expect("a placed member has a durable endpoint");
+    assert_eq!(endpoint.owner, meerkat_mob::MobMemberEndpointOwner::Host);
+    let endpoint = endpoint.descriptor;
     assert_eq!(endpoint.peer_id, b2_peer);
     assert_eq!(endpoint.pubkey, *decoded.as_bytes());
     assert_ne!(

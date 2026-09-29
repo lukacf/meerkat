@@ -135,12 +135,14 @@ them.
 ### Added
 
 - `MobHandle::member_peer_endpoint(&identity)` returns a member's canonical
-  comms endpoint: the exact generation endpoint MobMachine holds for its
-  current incarnation (name, peer id, transport address and Ed25519 key), or
-  `None` when the member is absent, has no endpoint, or is Broken. For a
-  placed (host-owned) member it is the host-acknowledged endpoint with its
-  real remote address, which a cross-process host can dial even though the
-  controlling process has no local comms runtime for the member (#1269).
+  comms endpoint as a `MobMemberPeerEndpoint`: the exact generation
+  endpoint MobMachine holds for its current incarnation (name, peer id,
+  transport address and Ed25519 key) plus a typed `MobMemberEndpointOwner`
+  (`Local` or `Host`), or `None` when the member is absent, has no endpoint,
+  or is Broken. For a placed member (`Host`) it is the host-acknowledged
+  endpoint with its real remote address, which a cross-process host can dial
+  even though the controlling process has no local comms runtime for the
+  member (#1269).
 - `MeerkatMachine::stop_run(session_id, expected_run_id, reason)` stops one
   exact run and terminalizes every contributor already bound to it (#1261).
   The stop is linearized under the session mutation gate as the generated

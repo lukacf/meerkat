@@ -1,0 +1,25 @@
+# Temporary probe for PR #1266: run the shell tool custody tests on real macOS.
+# Lives only on the ci/macos-custody-probe branch; never merged.
+name: macOS custody probe
+on:
+  push:
+    branches: [ci/macos-custody-probe]
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runs-on: [macos-15, macos-15-large]
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-rust-ci
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-custody-probe
+      - name: Custody tests
+        run: cargo test -p meerkat-tools --lib custody -- --nocapture
+      - name: Shell tool tests
+        run: cargo test -p meerkat-tools --lib shell
+      - name: Full meerkat-tools lib tests
+        run: cargo test -p meerkat-tools --lib

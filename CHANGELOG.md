@@ -769,6 +769,17 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Fixed
 
+- The placed-member external-edge route inputs (`RecordExternalRouteInstall`,
+  `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`,
+  `RollbackExternalRouteInstall`) are now declared runtime-internal in the
+  MobMachine schema and in meerkat-mob's typed runtime-internal
+  classifications (reason `RouteInstallObligationAuthority`), exactly like
+  their member-route analogs: only the actor drives them while realizing an
+  edge on the member's host. As public inputs without an executable parity
+  probe they failed the main-only mob runtime parity lane (the probe
+  inventory, pair report and audit writer tests), and the parity field
+  evaluator lacked `pending_external_route_installs`. The generated MobMachine
+  contract moves the four inputs to its Runtime-Internal Inputs section.
 - A reopened GPT Live channel no longer reads a finished job's result aloud
   before the user speaks. A voice job that finishes after its channel closed
   merges into the source member; that merge turn could commit after the
@@ -785,17 +796,6 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   provider turn, so the result reaches the model while the user's first
   utterance is still in flight, before it answers; voiced rows and
   reassertions of live speech still wait for the turn boundary.
-- The placed-member external-edge route inputs (`RecordExternalRouteInstall`,
-  `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`,
-  `RollbackExternalRouteInstall`) are now declared runtime-internal in the
-  MobMachine schema and in meerkat-mob's typed runtime-internal
-  classifications (reason `RouteInstallObligationAuthority`), exactly like
-  their member-route analogs: only the actor drives them while realizing an
-  edge on the member's host. As public inputs without an executable parity
-  probe they failed the main-only mob runtime parity lane (the probe
-  inventory, pair report and audit writer tests), and the parity field
-  evaluator lacked `pending_external_route_installs`. The generated MobMachine
-  contract moves the four inputs to its Runtime-Internal Inputs section.
 - Model fallback from GPT-6 no longer skips every target as
   `request_unsupported`. Since the GPT-6 rows gained the prompt-cache
   capabilities, their build-derived cache defaults (mode, TTL and a

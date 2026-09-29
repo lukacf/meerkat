@@ -879,6 +879,24 @@ impl LiveContextSummary {
         Ok(())
     }
 
+    /// Seed `config` with this summary, moving the open projection lease from
+    /// the body-free concurrent config onto it only once the summary
+    /// validates against `config`. A failed check leaves the lease with
+    /// `body_free`, which the late path then opens with; `Ok(None)` means the
+    /// body-free config holds no lease to move.
+    pub(crate) fn adopt_seeded_projection(
+        &self,
+        session_id: &SessionId,
+        body_free: &RealtimeSessionOpenConfig,
+        config: RealtimeSessionOpenConfig,
+    ) -> Result<Option<RealtimeSessionOpenConfig>, LiveContextSummaryError> {
+        self.validate_projection(session_id, &config)?;
+        let Some(lease) = body_free.take_open_projection_lease() else {
+            return Ok(None);
+        };
+        Ok(Some(config.with_open_projection_lease(lease)))
+    }
+
     pub(crate) fn validate_projection(
         &self,
         session_id: &SessionId,
@@ -1413,6 +1431,49 @@ mod tests {
             summary.validate_projection(&SessionId::new(), &config),
             Err(LiveContextSummaryError::ConflictingProjection)
         ));
+    }
+
+    /// A seeded open whose projection check fails keeps the body-free
+    /// config's lease, so the late open that follows can still take it; a
+    /// validated seeded config takes it over.
+    #[tokio::test]
+    async fn failed_seeded_projection_leaves_the_lease_for_the_late_open() {
+        let (session, config) = source("Compare tables.");
+        let policy = LiveContextSummaryPolicy::new(
+            producer("Comparing tables."),
+            4096,
+            100,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let summary = policy.produce(session.clone(), &config).await.unwrap();
+        let admission =
+            meerkat_core::image_content::RealtimeOpenProjectionAdmission::new(2, 1).unwrap();
+        let body_free = config
+            .clone()
+            .with_open_projection_lease(admission.try_acquire().unwrap());
+        let mismatched = config
+            .clone()
+            .with_transcript_rewrite_generation(config.transcript_rewrite_generation + 1);
+        assert!(matches!(
+            summary.adopt_seeded_projection(session.id(), &body_free, mismatched),
+            Err(LiveContextSummaryError::ConflictingProjection)
+        ));
+        let late = body_free.clone();
+        assert!(
+            late.take_open_projection_lease().is_some(),
+            "the late open still holds the projection lease"
+        );
+
+        let body_free = config
+            .clone()
+            .with_open_projection_lease(admission.try_acquire().unwrap());
+        let seeded = summary
+            .adopt_seeded_projection(session.id(), &body_free, config.clone())
+            .unwrap()
+            .expect("a validated seeded config takes the lease");
+        assert!(body_free.take_open_projection_lease().is_none());
+        assert!(seeded.take_open_projection_lease().is_some());
     }
 
     #[tokio::test]

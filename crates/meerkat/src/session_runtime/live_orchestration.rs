@@ -2737,16 +2737,12 @@ mod orchestrator {
             .with_user_content_identities(current.realtime_user_content_identities())
             .with_user_content_tombstones(current.realtime_user_content_tombstones())
             .with_transcript_rewrite_generation(generation);
-            summary.validate_projection(session_id, &config)?;
             // Only a projection the summary validates against takes over the
             // lease. Every fallible step above leaves it with the body-free
             // config, which the late path opens with; taken earlier, a failed
             // check fell back to a late open whose adapter then found the seed
             // custody consumed and refused the open.
-            let Some(lease) = body_free.take_open_projection_lease() else {
-                return Ok(None);
-            };
-            Ok(Some(config.with_open_projection_lease(lease)))
+            Ok(summary.adopt_seeded_projection(session_id, body_free, config)?)
         }
 
         /// Hand an adopted pre-open generation to its preparation job once

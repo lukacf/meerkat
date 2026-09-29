@@ -57,6 +57,13 @@ impl CustodyHold {
     }
 }
 
+/// What a custody record says about the process it guards.
+pub(super) struct SpawnIdentity<'a> {
+    pub(super) spawner: ToolProcessSpawner,
+    pub(super) tool_call_id: Option<&'a str>,
+    pub(super) run_id: Option<&'a meerkat_core::RunId>,
+}
+
 /// A process spawned in custody, with its group guard.
 pub(super) struct SpawnedInCustody {
     pub(super) child: Child,
@@ -76,9 +83,7 @@ pub(super) struct SpawnedInCustody {
 )]
 pub(super) async fn spawn_in_custody(
     binding: &CustodyBinding,
-    spawner: ToolProcessSpawner,
-    tool_call_id: Option<&str>,
-    run_id: Option<&meerkat_core::RunId>,
+    identity: SpawnIdentity<'_>,
     program: &OsStr,
     args: &[OsString],
     configure: impl FnOnce(&mut Command),
@@ -87,7 +92,13 @@ pub(super) async fn spawn_in_custody(
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(custody) = binding.custody.as_ref() {
         let (prepared, mut command) = custody
-            .prepare_spawn(spawner, tool_call_id, run_id, program, args)
+            .prepare_spawn(
+                identity.spawner,
+                identity.tool_call_id,
+                identity.run_id,
+                program,
+                args,
+            )
             .await
             .map_err(std::io::Error::other)?;
         configure(&mut command);

@@ -269,9 +269,11 @@ impl ShellTool {
         let timeout_duration = Duration::from_secs(timeout_secs);
         let spawned = super::custody_spawn::spawn_in_custody(
             &self.job_manager.custody_binding(),
-            super::ToolProcessSpawner::ShellCall,
-            tool_call_id,
-            run_id,
+            super::custody_spawn::SpawnIdentity {
+                spawner: super::ToolProcessSpawner::ShellCall,
+                tool_call_id,
+                run_id,
+            },
             shell_path.as_os_str(),
             &[
                 std::ffi::OsString::from("-c"),

@@ -159,28 +159,30 @@ mod tests {
             .unwrap();
         let scope_dir = custody_root(temp.path()).join(session_id.to_string());
         let listing = temp.path().join("listing");
-        let mut config = HooksConfig::default();
-        config.entries = vec![HookEntryConfig {
-            id: HookId::new("custody-hook"),
-            point: HookPoint::PreToolExecution,
-            runtime: HookAdapterConfig::from_kind_and_value(
-                HookRuntimeKind::Command,
-                Some(serde_json::json!({
-                    "command": "sh",
-                    "args": [
-                        "-c",
-                        format!(
-                            "ls '{}' > '{}'; cat >/dev/null; printf '{{}}'",
-                            scope_dir.display(),
-                            listing.display()
-                        )
-                    ],
-                    "env": {}
-                })),
-            )
-            .unwrap_or_default(),
+        let config = HooksConfig {
+            entries: vec![HookEntryConfig {
+                id: HookId::new("custody-hook"),
+                point: HookPoint::PreToolExecution,
+                runtime: HookAdapterConfig::from_kind_and_value(
+                    HookRuntimeKind::Command,
+                    Some(serde_json::json!({
+                        "command": "sh",
+                        "args": [
+                            "-c",
+                            format!(
+                                "ls '{}' > '{}'; cat >/dev/null; printf '{{}}'",
+                                scope_dir.display(),
+                                listing.display()
+                            )
+                        ],
+                        "env": {}
+                    })),
+                )
+                .unwrap_or_default(),
+                ..Default::default()
+            }],
             ..Default::default()
-        }];
+        };
         let engine = meerkat_hooks::DefaultHookEngine::new(config)
             .with_command_process_custody(Arc::new(HookProcessCustody::new(custody)));
 

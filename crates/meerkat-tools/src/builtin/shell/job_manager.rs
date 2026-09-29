@@ -655,6 +655,7 @@ impl JobManager {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_runner_for_call(
         &self,
         command: &str,
@@ -855,9 +856,11 @@ impl JobManager {
         };
         let spawned = super::custody_spawn::spawn_in_custody(
             &self.custody_binding(),
-            spawner,
-            Some(tool_call_id),
-            run_id,
+            super::custody_spawn::SpawnIdentity {
+                spawner,
+                tool_call_id: Some(tool_call_id),
+                run_id,
+            },
             shell_path.as_os_str(),
             &[
                 std::ffi::OsString::from("-c"),
@@ -1019,11 +1022,13 @@ impl JobManager {
         let redactions = configured_redactions(&self.config);
         let spawned = super::custody_spawn::spawn_in_custody(
             &self.custody_binding(),
-            super::ToolProcessSpawner::Monitor {
-                job_id: public_job_id.to_string(),
+            super::custody_spawn::SpawnIdentity {
+                spawner: super::ToolProcessSpawner::Monitor {
+                    job_id: public_job_id.to_string(),
+                },
+                tool_call_id: None,
+                run_id: None,
             },
-            None,
-            None,
             shell_path.as_os_str(),
             &[
                 std::ffi::OsString::from("-c"),

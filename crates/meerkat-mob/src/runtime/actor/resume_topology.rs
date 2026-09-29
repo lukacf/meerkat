@@ -395,6 +395,32 @@ pub(in crate::runtime) struct BackendPeerBindingProjection {
     direct_member_fence: Option<BridgeDirectMemberFence>,
 }
 
+/// Exact roster delta publishing one local member's comms identity.
+///
+/// `MemberSpawned` replay never carries the live endpoint, so after a cold
+/// restart the roster's peer id and transport key are empty until resume
+/// projects them from the member's live comms runtime. The delta is bound to
+/// the incarnation it was observed for: a concurrent respawn or retirement
+/// makes it stale instead of publishing a foreign runtime's endpoint.
+#[derive(Debug, Clone)]
+pub(in crate::runtime) struct MemberCommsIdentityProjection {
+    expected_runtime_id: crate::ids::AgentRuntimeId,
+    expected_generation: crate::ids::Generation,
+    expected_fence_token: crate::ids::FenceToken,
+    /// `None` clears the projection for a member whose restore failed.
+    observed: Option<ObservedMemberCommsIdentity>,
+}
+
+/// The live comms identity of one member, read off the actor.
+#[derive(Debug, Clone)]
+pub(in crate::runtime) struct ObservedMemberCommsIdentity {
+    peer_id: PeerId,
+    transport_public_key: String,
+    /// Descriptor rendered from the same live runtime; the actor compares it
+    /// with the member's durable MobMachine generation endpoint.
+    descriptor: TrustedPeerDescriptor,
+}
+
 /// Machine/roster-validated material for a V5 direct-member adoption.
 #[derive(Debug, Clone)]
 pub(in crate::runtime) struct DirectMemberAdoptionAuthorization {
@@ -457,6 +483,13 @@ enum ResumeTopologyAuthorityOperation {
     ClassifyBridgeRejectionRecovery {
         cause: BridgeRejectionCause,
         reply_tx: AuthorityReply<bool>,
+    },
+    /// Publish (or, for a broken member, clear) the roster projection of a
+    /// local member's live comms identity.
+    ProjectMemberCommsIdentity {
+        agent_identity: crate::ids::AgentIdentity,
+        projection: Box<MemberCommsIdentityProjection>,
+        reply_tx: AuthorityReply<()>,
     },
     AuthorizePeerOnlyRebind {
         agent_identity: crate::ids::AgentIdentity,
@@ -585,6 +618,9 @@ impl ResumeTopologyAuthorityRequest {
             ResumeTopologyAuthorityOperation::ClassifyBridgeRejectionRecovery { .. } => {
                 "ClassifyBridgeRejectionRecovery"
             }
+            ResumeTopologyAuthorityOperation::ProjectMemberCommsIdentity { .. } => {
+                "ProjectMemberCommsIdentity"
+            }
             ResumeTopologyAuthorityOperation::AuthorizePeerOnlyRebind { .. } => {
                 "AuthorizePeerOnlyRebind"
             }
@@ -634,6 +670,13 @@ pub(in crate::runtime) trait ResumeTopologyRosterProjection {
         bootstrap_token: Option<BridgeBootstrapToken>,
         direct_member_fence: Option<BridgeDirectMemberFence>,
     ) -> Vec<(crate::ids::AgentIdentity, crate::ids::Generation, [u8; 32])>;
+
+    fn resume_topology_set_member_comms_identity(
+        &mut self,
+        identity: &crate::ids::AgentIdentity,
+        peer_id: Option<PeerId>,
+        transport_public_key: Option<String>,
+    ) -> bool;
 }
 
 impl ResumeTopologyRosterProjection for Roster {
@@ -661,6 +704,15 @@ impl ResumeTopologyRosterProjection for Roster {
             direct_member_fence,
         )
     }
+
+    fn resume_topology_set_member_comms_identity(
+        &mut self,
+        identity: &crate::ids::AgentIdentity,
+        peer_id: Option<PeerId>,
+        transport_public_key: Option<String>,
+    ) -> bool {
+        self.set_comms_identity(identity, peer_id, transport_public_key)
+    }
 }
 
 impl ResumeTopologyRosterProjection for crate::runtime::roster_authority::RosterAuthority {
@@ -687,6 +739,15 @@ impl ResumeTopologyRosterProjection for crate::runtime::roster_authority::Roster
             bootstrap_token,
             direct_member_fence,
         )
+    }
+
+    fn resume_topology_set_member_comms_identity(
+        &mut self,
+        identity: &crate::ids::AgentIdentity,
+        peer_id: Option<PeerId>,
+        transport_public_key: Option<String>,
+    ) -> bool {
+        self.set_comms_identity(identity, peer_id, transport_public_key)
     }
 }
 
@@ -849,6 +910,16 @@ where
             let result = admitted.and_then(|()| {
                 project_backend_peer_binding(ctx.roster, &agent_identity, &projection)
             });
+            let _ = reply_tx.send(result);
+            true
+        }
+        ResumeTopologyAuthorityOperation::ProjectMemberCommsIdentity {
+            agent_identity,
+            projection,
+            reply_tx,
+        } => {
+            let result = admitted
+                .and_then(|()| project_member_comms_identity(ctx, &agent_identity, &projection));
             let _ = reply_tx.send(result);
             true
         }
@@ -1231,6 +1302,85 @@ where
             session_id: None,
         },
     }))
+}
+
+/// Publish one member's live comms identity into the roster projection.
+///
+/// Mirrors the cold-boot endpoint refresh: the delta must address the current
+/// roster incarnation, the member must still be a local, non-retiring member,
+/// and a live endpoint must agree with the durable generation endpoint
+/// MobMachine restored from the journal. Only then is the projection written.
+fn project_member_comms_identity<R>(
+    ctx: &mut ResumeTopologyAuthorityContext<'_, R>,
+    agent_identity: &crate::ids::AgentIdentity,
+    projection: &MemberCommsIdentityProjection,
+) -> Result<(), ResumeTopologyAuthorityError>
+where
+    R: ResumeTopologyRosterProjection + ?Sized,
+{
+    let entry = ctx
+        .roster
+        .resume_topology_entry(agent_identity)
+        .ok_or_else(|| {
+            ResumeTopologyAuthorityError::Stale(format!(
+                "resume comms identity projection for '{agent_identity}' lost its roster incarnation"
+            ))
+        })?;
+    if entry.agent_runtime_id != projection.expected_runtime_id
+        || entry.generation != projection.expected_generation
+        || entry.fence_token != projection.expected_fence_token
+    {
+        return Err(ResumeTopologyAuthorityError::Stale(format!(
+            "resume comms identity projection for '{agent_identity}' does not match the current incarnation"
+        )));
+    }
+    let state = ctx.authority.state();
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+    if recovered_endpoint_runtime_is_retiring(state, &dsl_identity)
+        || crate::runtime::member_runtime_is_host_owned(state, agent_identity)
+    {
+        return Err(ResumeTopologyAuthorityError::Stale(format!(
+            "resume comms identity projection for '{agent_identity}' no longer targets a local live member"
+        )));
+    }
+    let broken = state.member_restore_failures.contains_key(&dsl_identity);
+    let (peer_id, transport_public_key) = match &projection.observed {
+        None if broken => (None, None),
+        None => {
+            return Err(ResumeTopologyAuthorityError::Stale(format!(
+                "resume comms identity clear for '{agent_identity}' no longer targets a broken member"
+            )));
+        }
+        Some(_) if broken => {
+            return Err(ResumeTopologyAuthorityError::Stale(format!(
+                "resume comms identity projection for '{agent_identity}' targets a broken member"
+            )));
+        }
+        Some(observed) => {
+            let candidate = mob_dsl::MemberPeerEndpoint::from(&observed.descriptor);
+            if state
+                .member_peer_endpoints
+                .get(&dsl_identity)
+                .is_some_and(|durable| durable != &candidate)
+            {
+                return Err(ResumeTopologyAuthorityError::Failed(MobError::WiringError(
+                    format!(
+                        "resume_project_member_comms_identity: live endpoint for '{agent_identity}' disagrees with its durable generation binding"
+                    ),
+                )));
+            }
+            (
+                Some(observed.peer_id),
+                Some(observed.transport_public_key.clone()),
+            )
+        }
+    };
+    ctx.roster.resume_topology_set_member_comms_identity(
+        agent_identity,
+        peer_id,
+        transport_public_key,
+    );
+    Ok(())
 }
 
 fn project_backend_peer_binding<R>(
@@ -1884,6 +2034,7 @@ where
         let pending_peer_ids =
             pending_supervisor_operation_peer_ids(self.io.supervisor_bridge).await;
         let plan = self.observe().await?;
+        self.project_member_comms_identities(&plan).await?;
         self.register_legacy_backend_member_peers(&plan).await?;
         self.reconcile_peer_only_members(&plan, &pending_peer_ids)
             .await?;
@@ -1892,6 +2043,88 @@ where
         let plan = self.observe().await?;
         let batch = self.plan_trust_batch(&plan, &pending_peer_ids).await?;
         self.apply_trust_batch(&plan, batch).await
+    }
+
+    /// Publish every local member's live comms identity into the roster.
+    ///
+    /// `MemberSpawned` replay leaves the peer id and transport key empty; the
+    /// live comms runtime of a restored member still holds them. Every resume
+    /// (cold boot of a Running mob and explicit Resume of a Stopped one) runs
+    /// this one workflow, so peer lookup and the member list carry the exact
+    /// preserved endpoint before resume returns and before any new turn or
+    /// topology operation. Broken members have their projection cleared.
+    async fn project_member_comms_identities(
+        &mut self,
+        plan: &ResumeTopologyPlanObservation,
+    ) -> Result<(), ResumeTopologyAuthorityError> {
+        for entry in &plan.entries {
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+            let member = plan.member(&dsl_identity);
+            if member.retiring || member.host_owned {
+                // Retirement replay owns the exact retiring endpoint, and a
+                // host owns a placed member's endpoint; neither is derived
+                // from the controller's local comms runtime.
+                continue;
+            }
+            let observed = if member.broken {
+                if entry.peer_id.is_none() && entry.transport_public_key.is_none() {
+                    continue;
+                }
+                None
+            } else {
+                let Some(comms) = self.io.provisioner.comms_runtime(&entry.member_ref).await else {
+                    continue;
+                };
+                let peer_id = comms.peer_id().ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "resume requires peer id for member '{}'",
+                        entry.agent_identity
+                    ))
+                })?;
+                let transport_public_key = comms.public_key().ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "resume requires public key for member '{}'",
+                        entry.agent_identity
+                    ))
+                })?;
+                if entry.peer_id == Some(peer_id)
+                    && entry.transport_public_key.as_deref() == Some(transport_public_key.as_str())
+                {
+                    continue;
+                }
+                let name = render_member_comms_name(
+                    self.io.definition.id.as_str(),
+                    entry.role.as_str(),
+                    entry.agent_identity.as_str(),
+                )?;
+                let descriptor = self
+                    .io
+                    .provisioner
+                    .trusted_peer_spec(&entry.member_ref, &name, &transport_public_key)
+                    .await?;
+                Some(ObservedMemberCommsIdentity {
+                    peer_id,
+                    transport_public_key,
+                    descriptor,
+                })
+            };
+            let agent_identity = entry.agent_identity.clone();
+            let projection = Box::new(MemberCommsIdentityProjection {
+                expected_runtime_id: entry.agent_runtime_id.clone(),
+                expected_generation: entry.generation,
+                expected_fence_token: entry.fence_token,
+                observed,
+            });
+            self.ask(move |reply_tx| {
+                ResumeTopologyAuthorityOperation::ProjectMemberCommsIdentity {
+                    agent_identity,
+                    projection,
+                    reply_tx,
+                }
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     /// Legacy `MemberSpawned` journals predate the replay-only endpoint field.

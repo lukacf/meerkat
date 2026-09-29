@@ -238,6 +238,20 @@ them.
   recovery returned `AlreadyAligned` over a stray row beyond the head that a
   direct `materialize_head` rejects. Recovery now fails closed on that row
   (`head_canonical_aligned_recovery_rejects_a_stray_row_beyond_the_head`).
+- A member restored from a cleanly Stopped mob now publishes its preserved
+  comms endpoint (#1262). After `MobStopped`, a restart through
+  `MobBuilder::for_resume` and an explicit `MobHandle::resume()`, the member
+  kept its session and its live comms runtime kept the original peer ID and
+  key, but `get_member`, `list_members` and `list_all_members` reported no
+  `peer_id` or `transport_public_key` (so MobKit's `local_member_peer_info`
+  and cross-mob topology failed with `NoCommsInfo`): `MemberSpawned` replay
+  carries no live endpoint, and only the Running cold-boot path refreshed
+  it. The shared resume topology workflow, which both cold boot and
+  explicit Resume run, now publishes each local member's live peer ID and
+  key into the roster projection through a typed, incarnation-bound delta
+  that must agree with the member's durable MobMachine endpoint, before
+  Resume returns and before any new turn or topology operation. No turn,
+  respawn or host roster edit is needed.
 - `MobHandle::subscribe_mob_events` returns only once the router is
   subscribed to every member it starts with (local session streams and
   placed members' pump taps). Those subscriptions used to be made inside the

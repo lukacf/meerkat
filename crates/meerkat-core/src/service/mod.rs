@@ -2974,9 +2974,14 @@ pub trait SessionService: Send + Sync {
         &self,
         id: &SessionId,
         cursor: crate::comms::SessionEventCursor,
-    ) -> Result<EventStream, StreamError> {
+    ) -> Result<crate::comms::SessionEventSubscription, StreamError> {
         match cursor {
-            crate::comms::SessionEventCursor::Live => self.subscribe_session_events(id).await,
+            crate::comms::SessionEventCursor::Live => {
+                Ok(crate::comms::SessionEventSubscription::new(
+                    None,
+                    self.subscribe_session_events(id).await?,
+                ))
+            }
             cursor => Err(StreamError::CursorRejected {
                 cursor,
                 reason: crate::comms::SessionEventCursorRejection::ReplayUnsupported,

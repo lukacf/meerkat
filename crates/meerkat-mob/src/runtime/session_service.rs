@@ -1041,20 +1041,29 @@ pub(crate) fn durable_fork_unsupported() -> SessionError {
 /// A known actor's stream ends when that actor ends, and its witness is
 /// revoked before the actor is removed or replaced, so a host can hold a
 /// successor's stream back until a revoked predecessor's stream drained.
+#[non_exhaustive]
 pub struct AgentEventSubscription {
     /// The member's events.
     pub stream: EventStream,
     /// The actor incarnation `stream` belongs to. `None` when the service
     /// cannot name it (for example a placed member's pump-tap stream).
     pub actor: Option<meerkat_session::LiveSessionActorWitness>,
+    /// Sequence space of the stream's envelope sequences, to be carried in
+    /// a later [`meerkat_core::comms::SessionEventCursor::After`]. `None`
+    /// when the service cannot name one (a live-only service).
+    pub epoch: Option<meerkat_core::comms::SessionEventEpoch>,
 }
 
 impl AgentEventSubscription {
     /// A subscription whose actor incarnation is unknown.
-    pub fn without_actor(stream: EventStream) -> Self {
+    pub fn without_actor(
+        epoch: Option<meerkat_core::comms::SessionEventEpoch>,
+        stream: EventStream,
+    ) -> Self {
         Self {
             stream,
             actor: None,
+            epoch,
         }
     }
 }
@@ -1064,7 +1073,14 @@ impl From<meerkat_session::LiveActorEventSubscription> for AgentEventSubscriptio
         Self {
             stream: subscription.stream,
             actor: Some(subscription.actor),
+            epoch: Some(subscription.epoch),
         }
+    }
+}
+
+impl From<meerkat_core::comms::SessionEventSubscription> for AgentEventSubscription {
+    fn from(subscription: meerkat_core::comms::SessionEventSubscription) -> Self {
+        Self::without_actor(subscription.epoch, subscription.stream)
     }
 }
 
@@ -1261,13 +1277,15 @@ pub trait MobSessionService:
         session_id: &SessionId,
         cursor: meerkat_core::comms::SessionEventCursor,
     ) -> Result<AgentEventSubscription, StreamError> {
-        let stream = if cursor == meerkat_core::comms::SessionEventCursor::Live {
-            MobSessionService::subscribe_session_events(self, session_id).await?
-        } else {
-            <Self as SessionService>::subscribe_session_events_from(self, session_id, cursor)
-                .await?
-        };
-        Ok(AgentEventSubscription::without_actor(stream))
+        if cursor == meerkat_core::comms::SessionEventCursor::Live {
+            return Ok(AgentEventSubscription::without_actor(
+                None,
+                MobSessionService::subscribe_session_events(self, session_id).await?,
+            ));
+        }
+        <Self as SessionService>::subscribe_session_events_from(self, session_id, cursor)
+            .await
+            .map(AgentEventSubscription::from)
     }
 
     /// Whether this service satisfies the persistent-session contract required

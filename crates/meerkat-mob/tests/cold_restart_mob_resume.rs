@@ -965,6 +965,9 @@ async fn restored_member_first_run_replays_to_a_late_subscriber() {
         .clone()
         .expect("a local member subscription names its actor incarnation");
     assert!(restored_actor.is_live());
+    let epoch = replayed
+        .epoch
+        .expect("a local member subscription names its sequence space");
     let mut replayed = replayed.stream;
     let events = collect_until_run_completed(&mut replayed, "earliest").await;
     let payloads: Vec<&meerkat_core::AgentEvent> =
@@ -992,7 +995,13 @@ async fn restored_member_first_run_replays_to_a_late_subscriber() {
     // A cursor resumes strictly after an observed sequence.
     let run_started_seq = events[run_started].seq;
     let mut resumed = handle_2
-        .subscribe_agent_events_from(&worker, SessionEventCursor::After(run_started_seq))
+        .subscribe_agent_events_from(
+            &worker,
+            SessionEventCursor::After {
+                epoch,
+                seq: run_started_seq,
+            },
+        )
         .await
         .expect("cursor subscription through MobHandle")
         .stream;
@@ -1013,7 +1022,13 @@ async fn restored_member_first_run_replays_to_a_late_subscriber() {
     // A cursor from another sequence space is rejected typed.
     let tail = events.last().map_or(0, |envelope| envelope.seq);
     let ahead = match handle_2
-        .subscribe_agent_events_from(&worker, SessionEventCursor::After(tail + 1_000))
+        .subscribe_agent_events_from(
+            &worker,
+            SessionEventCursor::After {
+                epoch,
+                seq: tail + 1_000,
+            },
+        )
         .await
     {
         Ok(_) => panic!("a cursor ahead of the tail must be rejected"),
@@ -1030,7 +1045,42 @@ async fn restored_member_first_run_replays_to_a_late_subscriber() {
         "{ahead:?}"
     );
 
-    // A member whose session actor is gone is a typed not-live outcome.
+    // A cursor from another sequence space (a cursor carried across a
+    // restart) is rejected typed rather than skipping the new space's
+    // first events.
+    let foreign = match handle_2
+        .subscribe_agent_events_from(
+            &worker,
+            SessionEventCursor::After {
+                epoch: meerkat_core::comms::SessionEventEpoch::new(),
+                seq: 1,
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("a cursor from another sequence space must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            foreign,
+            meerkat_mob::MobError::AgentEventCursorRejected {
+                reason: meerkat_core::comms::SessionEventCursorRejection::EpochMismatch { .. },
+                ..
+            }
+        ),
+        "{foreign:?}"
+    );
+
+    // Cross-actor continuity through MobHandle: the member's actor is
+    // replaced in the same process (stop, discard, resume on the same
+    // service). The successor continues the session's sequence space, so
+    // the predecessor's cursor stays valid and nothing the successor
+    // publishes is skipped.
+    handle_2
+        .shutdown()
+        .await
+        .expect("shutdown before in-process resume");
     service_2
         .discard_live_session(&w1_sid)
         .await
@@ -1039,7 +1089,60 @@ async fn restored_member_first_run_replays_to_a_late_subscriber() {
         !restored_actor.is_live(),
         "discarding the actor revokes the subscription's witness"
     );
-    let not_live = match handle_2.subscribe_agent_events(&worker).await {
+    drop(handle_2);
+    let storage_3 = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
+    let handle_3 = MobBuilder::for_resume(storage_3)
+        .with_session_service(service_2.clone())
+        .with_default_llm_client(openai_test_client())
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("in-process mob resume");
+    send_and_wait(
+        &handle_3,
+        service_2.as_ref(),
+        "w-1",
+        "SUCCESSOR_REPLAY_TURN",
+        "successor",
+    )
+    .await;
+    let successor = handle_3
+        .subscribe_agent_events_from(&worker, SessionEventCursor::After { epoch, seq: tail })
+        .await
+        .expect("the predecessor's cursor is valid against the successor");
+    assert_eq!(
+        successor.epoch,
+        Some(epoch),
+        "one sequence space in-process"
+    );
+    let successor_actor = successor.actor.clone().expect("successor actor");
+    assert!(
+        successor_actor.is_live() && !restored_actor.is_live(),
+        "the subscription names the new incarnation"
+    );
+    let mut successor_stream = successor.stream;
+    let successor_events = collect_until_run_completed(&mut successor_stream, "successor").await;
+    assert!(
+        successor_events
+            .iter()
+            .filter(|envelope| envelope.seq != 0)
+            .all(|envelope| envelope.seq > tail),
+        "the successor never reuses the predecessor's sequences: {successor_events:?}"
+    );
+    assert!(
+        successor_events.iter().any(|envelope| matches!(
+            envelope.payload,
+            meerkat_core::AgentEvent::RunStarted { .. }
+        )),
+        "the successor's run is replayed from RunStarted: {successor_events:?}"
+    );
+
+    // A member whose session actor is gone is a typed not-live outcome.
+    service_2
+        .discard_live_session(&w1_sid)
+        .await
+        .expect("discard the successor actor");
+    let not_live = match handle_3.subscribe_agent_events(&worker).await {
         Ok(_) => panic!("a member without a live session actor cannot be subscribed"),
         Err(error) => error,
     };

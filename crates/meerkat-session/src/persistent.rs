@@ -13437,7 +13437,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         &self,
         id: &SessionId,
         cursor: meerkat_core::comms::SessionEventCursor,
-    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+    ) -> Result<meerkat_core::comms::SessionEventSubscription, meerkat_core::comms::StreamError>
+    {
         self.inner.subscribe_session_events_from(id, cursor).await
     }
 
@@ -14360,8 +14361,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         cursor: meerkat_core::comms::SessionEventCursor,
-    ) -> Result<meerkat_core::comms::EventStream, meerkat_core::comms::StreamError> {
+    ) -> Result<meerkat_core::comms::SessionEventSubscription, meerkat_core::comms::StreamError>
+    {
         self.inner.subscribe_session_events_from(id, cursor).await
+    }
+
+    /// Bound each subsequently created actor incarnation's replay window; see
+    /// [`crate::EphemeralSessionService::set_session_event_replay_limits`].
+    pub fn set_session_event_replay_limits(
+        &self,
+        limits: meerkat_core::comms::SessionEventReplayLimits,
+    ) {
+        self.inner.set_session_event_replay_limits(limits);
     }
 
     /// Witness-bearing cursor subscription from the live inner service; see

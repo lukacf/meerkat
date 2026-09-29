@@ -286,24 +286,36 @@ them.
   `SessionService::subscribe_session_events_from(id, SessionEventCursor)` and
   `EphemeralSessionService`/`PersistentSessionService`
   `subscribe_session_events_from` accept `SessionEventCursor::Live`,
-  `Earliest` or `After(seq)`. Each actor incarnation retains its last 1024
-  envelopes; replay and live delivery are captured atomically with respect
-  to publication, so nothing is repeated or skipped at the boundary. A
-  position older than the retained window starts with a typed
-  `StreamTruncated(StreamLagged { dropped })` marker, and a sequence the
-  session never published is rejected as
-  `SessionEventCursorRejection::AheadOfTail { tail }`.
-  `subscribe_live_actor_session_events_from` also returns the exact
+  `Earliest` or `After { epoch, seq }` and return a `SessionEventSubscription
+  { epoch, stream }`. Each actor incarnation retains a bounded window of its
+  latest envelopes, 1024 envelopes and 4 MiB of encoded bytes by default
+  (`SessionEventReplayLimits`, `set_session_event_replay_limits`); both
+  bounds evict. Replay and live delivery are captured atomically with
+  respect to publication, so nothing is repeated or skipped at the boundary.
+  A position older than the retained window starts with a typed
+  `StreamTruncated(StreamLagged { dropped })` marker whose event id is
+  stable across replays. A sequence the space never allocated is rejected
+  as `SessionEventCursorRejection::AheadOfTail { tail }`, and a cursor from
+  another sequence space (a restart, a cross-process revive) as
+  `EpochMismatch { current }` instead of silently skipping the new space's
+  first events. All of a session's actor incarnations in one service share
+  one sequence allocator, so a replaced incarnation still publishing (its
+  shutdown drain, a turn it could not interrupt) never reuses a successor's
+  sequence, and its late events appear on the successor's stream as a typed
+  gap. `subscribe_live_actor_session_events_from` also returns the exact
   `LiveSessionActorWitness` the stream belongs to.
 - `MobHandle::subscribe_agent_events_from(identity, cursor)` (and
   `MobMcpState::subscribe_agent_events_from`) returns an
-  `AgentEventSubscription { stream, actor }`. With
+  `AgentEventSubscription { stream, actor, epoch }`. With
   `SessionEventCursor::Earliest`, a host that attaches after a newly
   materialized or restored member already began its first run still sees
   that run's `RunStarted`/`TurnStarted`. `actor` names the local member's
   exact actor incarnation. Placed members replay from their event pump's
-  bounded window. `MobSessionService::subscribe_agent_session_events_from`
-  is the forwarding seam, so session-service decorators must forward it.
+  window, bounded the same way, shared rather than copied, and kept across
+  pump restarts of the same residency, so a reconnecting subscriber's
+  cursor stays valid. A new residency starts a new sequence space.
+  `MobSessionService::subscribe_agent_session_events_from` is the
+  forwarding seam, so session-service decorators must forward it.
 - Anthropic `thinking: {"type": "between_tools"}`
   (`AnthropicThinkingConfig::BetweenTools`): turns off up-front thinking and
   keeps only short progress updates between tool calls. Accepted for models

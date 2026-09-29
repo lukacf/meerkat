@@ -1447,9 +1447,7 @@ pub(super) enum MobCommand {
     EnsureMemberEventTap {
         agent_identity: AgentIdentity,
         cursor: meerkat_core::comms::SessionEventCursor,
-        reply_tx: oneshot::Sender<
-            Result<tokio::sync::mpsc::Receiver<crate::event::AttributedEvent>, MobError>,
-        >,
+        reply_tx: oneshot::Sender<Result<super::event_pump::MemberEventTap, MobError>>,
     },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,

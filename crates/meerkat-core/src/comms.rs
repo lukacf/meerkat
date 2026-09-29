@@ -2013,12 +2013,54 @@ pub enum StreamScope {
 /// Typed stream over enveloped agent events.
 pub type EventStream = Pin<Box<dyn Stream<Item = EventEnvelope<AgentEvent>> + Send>>;
 
-/// Where a session event subscription starts.
+/// Identity of one session event sequence space.
 ///
 /// Envelope sequences (`EventEnvelope::seq`) are monotonic per session within
-/// one session service: a successor actor for the same session continues the
-/// sequence of its predecessor instead of restarting at zero, so a cursor
-/// taken from one actor incarnation stays meaningful against the next.
+/// one sequence space: one session service instance for a local session (its
+/// actor incarnations, including one revived after archive, share it), or one
+/// event pump residency for a placed member. A restart or a cross-process
+/// revive starts a new space whose sequences may restart, so a cursor carries
+/// the epoch it was taken in and a mismatched epoch is rejected typed instead
+/// of silently skipping the new space's first events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SessionEventEpoch(uuid::Uuid);
+
+impl SessionEventEpoch {
+    /// A fresh sequence space.
+    pub fn new() -> Self {
+        Self(crate::time_compat::new_uuid_v7())
+    }
+
+    /// The epoch's identifier.
+    pub fn as_uuid(&self) -> uuid::Uuid {
+        self.0
+    }
+
+    /// A deterministic event id for a synthetic marker that stands for the
+    /// same gap of this space every time it is replayed, so a consumer that
+    /// deduplicates by event id does not see a re-sent marker as new.
+    pub fn marker_event_id(&self, position: u64, dropped: u64) -> uuid::Uuid {
+        let (high, low) = self.0.as_u64_pair();
+        uuid::Uuid::from_u64_pair(
+            high ^ position.rotate_left(17),
+            low ^ dropped.rotate_left(41) ^ 0x5eed_0f_ca7_u64,
+        )
+    }
+}
+
+impl Default for SessionEventEpoch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for SessionEventEpoch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Where a session event subscription starts.
 ///
 /// A replayed subscription is gap-free against live delivery: the retained
 /// envelopes and the live receiver are captured atomically with respect to
@@ -2036,9 +2078,15 @@ pub enum SessionEventCursor {
     /// Every envelope the current actor incarnation still retains, from its
     /// first envelope while that is retained, then live delivery.
     Earliest,
-    /// Envelopes whose sequence is strictly greater than the given sequence,
-    /// then live delivery.
-    After(u64),
+    /// Envelopes of sequence space `epoch` whose sequence is strictly greater
+    /// than `seq`, then live delivery. The epoch is the one the subscription
+    /// that delivered `seq` reported.
+    After {
+        /// Sequence space the position belongs to.
+        epoch: SessionEventEpoch,
+        /// Last sequence already observed.
+        seq: u64,
+    },
 }
 
 /// Why a session event subscription rejected its [`SessionEventCursor`].
@@ -2047,12 +2095,17 @@ pub enum SessionEventCursor {
 pub enum SessionEventCursorRejection {
     /// The service does not retain session events for replay.
     ReplayUnsupported,
-    /// The cursor names a sequence the session has not published yet, so it
-    /// belongs to a different sequence space (for example one issued before
-    /// a process restart). Resubscribe from [`SessionEventCursor::Earliest`].
+    /// The cursor names a sequence this space has not allocated yet.
     AheadOfTail {
-        /// Newest sequence the session has published.
+        /// Newest sequence the space has allocated.
         tail: u64,
+    },
+    /// The cursor belongs to another sequence space (a restart, a
+    /// cross-process revive, or a reset event pump window). Resubscribe from
+    /// [`SessionEventCursor::Earliest`]; the space's sequences may restart.
+    EpochMismatch {
+        /// The current sequence space.
+        current: SessionEventEpoch,
     },
 }
 
@@ -2063,10 +2116,90 @@ impl std::fmt::Display for SessionEventCursorRejection {
             Self::AheadOfTail { tail } => {
                 write!(
                     f,
-                    "the cursor is ahead of the session's newest sequence {tail}"
+                    "the cursor is ahead of the space's newest sequence {tail}"
+                )
+            }
+            Self::EpochMismatch { current } => {
+                write!(
+                    f,
+                    "the cursor belongs to another sequence space than {current}"
                 )
             }
         }
+    }
+}
+
+/// Bounds of the replay window a session actor (or a placed member's event
+/// pump) keeps for cursor replay. Both bounds apply: the oldest envelopes are
+/// evicted once either is exceeded, and evictions are reported to replaying
+/// subscribers as a typed `StreamTruncated(StreamLagged)` gap.
+///
+/// Memory cost: at most `max_bytes` of retained envelopes (measured as their
+/// JSON encoding) per live actor, whether or not anyone subscribes. Tool
+/// results and run inputs can be large (inline images), which is what the
+/// byte bound is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionEventReplayLimits {
+    /// Most envelopes retained.
+    pub max_envelopes: usize,
+    /// Most encoded bytes retained.
+    pub max_bytes: usize,
+}
+
+impl SessionEventReplayLimits {
+    /// Default envelope bound.
+    pub const DEFAULT_MAX_ENVELOPES: usize = 1_024;
+    /// Default byte bound (4 MiB).
+    pub const DEFAULT_MAX_BYTES: usize = 4 * 1024 * 1024;
+}
+
+impl Default for SessionEventReplayLimits {
+    fn default() -> Self {
+        Self {
+            max_envelopes: Self::DEFAULT_MAX_ENVELOPES,
+            max_bytes: Self::DEFAULT_MAX_BYTES,
+        }
+    }
+}
+
+/// Encoded (JSON) size of an envelope, measured without allocating the
+/// encoding. An envelope that cannot be encoded counts as `usize::MAX`, so a
+/// byte-bounded window never retains it.
+pub fn encoded_envelope_len<T: serde::Serialize>(
+    envelope: &crate::event::EventEnvelope<T>,
+) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    match serde_json::to_writer(&mut counter, envelope) {
+        Ok(()) => counter.0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// A session event subscription and the sequence space its envelopes belong
+/// to (`None` when the service cannot name one, for example a live-only
+/// service).
+#[non_exhaustive]
+pub struct SessionEventSubscription {
+    /// Sequence space of the stream's envelope sequences.
+    pub epoch: Option<SessionEventEpoch>,
+    /// The session's events.
+    pub stream: EventStream,
+}
+
+impl SessionEventSubscription {
+    /// A subscription in sequence space `epoch`.
+    pub fn new(epoch: Option<SessionEventEpoch>, stream: EventStream) -> Self {
+        Self { epoch, stream }
     }
 }
 

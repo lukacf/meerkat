@@ -1095,7 +1095,7 @@ impl SessionService for RpcMobSessionService {
         &self,
         id: &SessionId,
         cursor: meerkat_core::comms::SessionEventCursor,
-    ) -> Result<EventStream, StreamError> {
+    ) -> Result<meerkat_core::comms::SessionEventSubscription, StreamError> {
         self.service.subscribe_session_events_from(id, cursor).await
     }
 }

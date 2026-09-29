@@ -10612,7 +10612,7 @@ impl SessionService for RunMobSessionService {
         &self,
         id: &SessionId,
         cursor: meerkat_core::SessionEventCursor,
-    ) -> Result<meerkat_core::EventStream, meerkat_core::StreamError> {
+    ) -> Result<meerkat_core::SessionEventSubscription, meerkat_core::StreamError> {
         self.inner.subscribe_session_events_from(id, cursor).await
     }
 
@@ -14036,7 +14036,7 @@ impl SessionService for MobCliSessionService {
         &self,
         id: &SessionId,
         cursor: meerkat_core::SessionEventCursor,
-    ) -> Result<meerkat_core::EventStream, meerkat_core::StreamError> {
+    ) -> Result<meerkat_core::SessionEventSubscription, meerkat_core::StreamError> {
         self.inner.subscribe_session_events_from(id, cursor).await
     }
 

@@ -6923,10 +6923,8 @@ impl MobHandle {
                     // subscribes through the member event pump's tap. Its
                     // host-resident actor has no local witness.
                     AgentEventSubscriptionAuthority::External => {
-                        AgentEventSubscription::without_actor(
-                            self.external_member_event_stream_from(&agent_identity, cursor)
-                                .await?,
-                        )
+                        self.external_member_event_subscription(&agent_identity, cursor)
+                            .await?
                     }
                 };
                 Ok(MobMachineCommandResult::AgentEventSubscription(
@@ -8495,13 +8493,14 @@ impl MobHandle {
     ) -> Result<tokio::sync::mpsc::Receiver<crate::event::AttributedEvent>, MobError> {
         self.external_member_event_tap_from(agent_identity, SessionEventCursor::Live)
             .await
+            .map(|tap| tap.live)
     }
 
     pub(super) async fn external_member_event_tap_from(
         &self,
         agent_identity: &AgentIdentity,
         cursor: SessionEventCursor,
-    ) -> Result<tokio::sync::mpsc::Receiver<crate::event::AttributedEvent>, MobError> {
+    ) -> Result<super::event_pump::MemberEventTap, MobError> {
         self.send_actor_command(|reply_tx| super::state::MobCommand::EnsureMemberEventTap {
             agent_identity: agent_identity.clone(),
             cursor,
@@ -8518,28 +8517,41 @@ impl MobHandle {
         &self,
         agent_identity: &AgentIdentity,
     ) -> Result<EventStream, MobError> {
-        self.external_member_event_stream_from(agent_identity, SessionEventCursor::Live)
+        self.external_member_event_subscription(agent_identity, SessionEventCursor::Live)
             .await
+            .map(|subscription| subscription.stream)
     }
 
     /// [`Self::external_member_event_stream`] starting at a typed cursor,
-    /// replayed from the member pump's bounded retained window.
-    pub(super) async fn external_member_event_stream_from(
+    /// replayed from the member's bounded replay window. Replayed events are
+    /// copied as the stream is read, never under the pump manager's lock.
+    pub(super) async fn external_member_event_subscription(
         &self,
         agent_identity: &AgentIdentity,
         cursor: SessionEventCursor,
-    ) -> Result<EventStream, MobError> {
-        let tap = self
+    ) -> Result<AgentEventSubscription, MobError> {
+        let super::event_pump::MemberEventTap {
+            epoch,
+            gap,
+            replay,
+            live,
+        } = self
             .external_member_event_tap_from(agent_identity, cursor)
             .await?;
-        Ok(Box::pin(futures::stream::unfold(
-            tap,
-            |mut tap| async move {
-                tap.recv()
-                    .await
-                    .map(|attributed| (attributed.envelope, tap))
-            },
-        )))
+        let head = gap.map(|gap| gap.envelope).into_iter().chain(
+            replay
+                .into_iter()
+                .map(|event| Arc::unwrap_or_clone(event).envelope),
+        );
+        let live = futures::stream::unfold(live, |mut live| async move {
+            live.recv()
+                .await
+                .map(|attributed| (attributed.envelope, live))
+        });
+        Ok(AgentEventSubscription::without_actor(
+            epoch,
+            Box::pin(futures::StreamExt::chain(futures::stream::iter(head), live)),
+        ))
     }
 
     fn agent_event_subscription_authority_from_effects(

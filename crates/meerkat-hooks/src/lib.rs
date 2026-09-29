@@ -6,7 +6,7 @@ mod tokio {
     pub use meerkat_core::time_compat::wasm as time;
     // Keep one canonical task route in this private facade, even when unused.
     #[allow(unused_imports)]
-    pub use meerkat_core::tokio::task;
+    pub use meerkat_core::tokio::{spawn, task};
     pub use tokio_with_wasm::alias::*;
 }
 

@@ -16,7 +16,8 @@
 /**
  * The release build's turn stack budget: fail the smoke when one turn needs
  * more. The release build (profile release, opt-level "s") measures about
- * 133 KB; the budget leaves roughly four times that before a frame's growth
+ * 116 KB (230 KB before every spawn boxed its future, issue #1230); the
+ * budget leaves roughly four times that before a frame's growth
  * fails the smoke. Other builds (the dev profile, or an overridden
  * opt-level) have much larger frames; see {@link turnStackBudget}.
  */
@@ -54,7 +55,7 @@ export function turnStackBudget(build) {
 
 /**
  * The least high-water a real turn can leave. A turn at the release build
- * reaches about 133 KB below the resting pointer (at opt-level 0, about
+ * reaches about 116 KB below the resting pointer (at opt-level 0, about
  * 1.46 MB); a probe that reads less than this floor is not measuring the
  * memory the turn ran on (a different memory, or a stack that was never
  * painted), and would pass any budget. Enforced for every build, budgeted or

@@ -68,7 +68,7 @@ test("a high-water under the floor means the probe missed the turn", () => {
   assert.throws(() => assertStackProbeObservedTurn(TURN_STACK_FLOOR_BYTES - 1), /below the 16384-byte floor/);
   assert.ok(
     TURN_STACK_FLOOR_BYTES < TURN_STACK_BUDGET_BYTES / 8,
-    "the floor sits far below a real release-build turn (about 133 KB)",
+    "the floor sits far below a real release-build turn (about 116 KB)",
   );
 });
 

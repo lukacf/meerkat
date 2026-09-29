@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { assertSpawnFrameBudget } from "./wasm-frames.mjs";
 import { wasmBuildEnv } from "./wasm-rustflags.mjs";
 import { assertWasmStack } from "./wasm-stack.mjs";
+import { BUDGETED_BUILD } from "./wasm-stack-highwater.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SDK_DIR = path.resolve(__dirname, "..");
@@ -384,6 +386,38 @@ async function verifyWasmStack() {
   console.log(`meerkat web wasm stack: ${stack.stackBytes} bytes (${stack.layout})`);
 }
 
+// The release build's spawn wrapper frames must stay within budget
+// (scripts/wasm-frames.mjs, issue #1230). They are read from the linked
+// module Cargo wrote, before wasm-opt strips the function names they are
+// found by; other builds' frames are not budgeted.
+async function verifySpawnFrames() {
+  if (
+    BUILD_SETTINGS.profile !== BUDGETED_BUILD.profile ||
+    BUILD_SETTINGS.opt_level !== BUDGETED_BUILD.opt_level
+  ) {
+    return;
+  }
+  const metadata = JSON.parse(
+    await runCapture(CARGO_BIN, ["metadata", "--format-version", "1", "--no-deps"], {
+      cwd: WORKSPACE_DIR,
+    }),
+  );
+  const linked = path.join(
+    metadata.target_directory,
+    "wasm32-unknown-unknown",
+    "release",
+    "meerkat_web_runtime.wasm",
+  );
+  const { largest, instances } = assertSpawnFrameBudget(
+    new Uint8Array(await readFile(linked)),
+    undefined,
+    linked,
+  );
+  console.log(
+    `meerkat web wasm spawn frames: largest ${largest.frameBytes} bytes of ${instances} instances`,
+  );
+}
+
 async function run() {
   const heartbeat = await acquireLock();
   try {
@@ -446,6 +480,7 @@ async function run() {
     await rm(path.join(OUT_DIR, ".gitignore"), { force: true });
     // Before the cache manifest: a module that fails is rebuilt next time.
     await verifyWasmStack();
+    await verifySpawnFrames();
     await writeFile(
       CACHE_MANIFEST,
       JSON.stringify(

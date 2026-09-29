@@ -1186,7 +1186,7 @@ where
         }
     });
     #[cfg(target_arch = "wasm32")]
-    tokio_with_wasm::alias::task::spawn(async move {
+    crate::tokio::task::spawn(async move {
         while let Some(event) = rx.recv().await {
             callback(event);
         }

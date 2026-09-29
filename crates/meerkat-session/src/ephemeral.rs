@@ -5635,7 +5635,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             },
         ));
         #[cfg(target_arch = "wasm32")]
-        tokio_with_wasm::alias::task::spawn(session_task(
+        crate::tokio::task::spawn(session_task(
             agent,
             session_id.clone(),
             agent_event_tx,

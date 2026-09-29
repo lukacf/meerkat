@@ -6,14 +6,17 @@
 //! fence primitives, so this crate is not a blanket no-I/O layer.
 
 // All WASM Tokio users share these host adapters. Time and cooperative yields
-// own cancellable JavaScript resources here; spawning retains the upstream scheduler.
-// Native code continues to resolve the real Tokio crate.
+// own cancellable JavaScript resources here; spawning retains the upstream
+// scheduler but boxes every future it hands it (`wasm_task`). Native code
+// continues to resolve the real Tokio crate.
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use crate::time_compat::wasm as time;
+    pub use task::spawn;
     pub use tokio_with_wasm::alias::*;
 
     pub mod task {
+        pub use crate::wasm_task::{JoinSet, spawn};
         pub use tokio_with_wasm::alias::task::*;
 
         /// Cooperatively yields through an owned, cancellable host timer.
@@ -112,6 +115,8 @@ pub mod turn_boundary;
 pub mod turn_execution_authority;
 pub mod turn_terminal;
 pub mod types;
+#[cfg(target_arch = "wasm32")]
+mod wasm_task;
 pub mod web_search;
 
 // Re-export main types at crate root

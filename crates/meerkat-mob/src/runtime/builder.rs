@@ -2041,7 +2041,17 @@ async fn resolve_seeded_member_runtime_restoration(
 struct PersistedMemberSessionCandidate {
     session_id: meerkat_core::types::SessionId,
     updated_at: meerkat_core::time_compat::SystemTime,
-    session_metadata: Option<meerkat_core::SessionMetadata>,
+    metadata: PersistedMemberSessionCandidateMetadata,
+}
+
+/// Outcome of one candidate's metadata read during the shared scan.
+enum PersistedMemberSessionCandidateMetadata {
+    Read(Option<meerkat_core::SessionMetadata>),
+    /// The read failed. The failure belongs only to a member search that
+    /// actually considers this candidate: a member's own rejected session
+    /// must not abort every other member's search (or the whole resume).
+    /// A considering search re-reads it to surface the typed error.
+    ReadFailed,
 }
 
 /// Realm-wide successor-search index (#1250).
@@ -2061,24 +2071,44 @@ impl PersistedMemberSessionIndex {
     ///
     /// `on_session_scanned` runs after each session read, so a caller with a
     /// progress watchdog can report that the scan is advancing.
+    ///
+    /// `member_bound_sessions` are sessions currently bound to members of the
+    /// resume. They are owned by their members and are never another
+    /// member's successor, so they are not read at all: a member's own
+    /// rejected or unreadable session cannot abort any search (#1250).
     pub(super) async fn scan(
         session_service: &dyn MobSessionService,
         listed_sessions: &[meerkat_core::service::SessionSummary],
+        member_bound_sessions: &std::collections::HashSet<meerkat_core::types::SessionId>,
         mut on_session_scanned: impl FnMut(),
     ) -> Result<Self, MobError> {
         let mut candidates = Vec::with_capacity(listed_sessions.len());
         for summary in listed_sessions {
-            let view = session_service
-                .load_persisted_session_metadata(&summary.session_id)
-                .await?;
-            on_session_scanned();
-            let Some(view) = view else {
+            if member_bound_sessions.contains(&summary.session_id) {
                 continue;
+            }
+            let read = session_service
+                .load_persisted_session_metadata(&summary.session_id)
+                .await;
+            on_session_scanned();
+            let metadata = match read {
+                Ok(Some(view)) => {
+                    PersistedMemberSessionCandidateMetadata::Read(view.session_metadata)
+                }
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::debug!(
+                        session_id = %summary.session_id,
+                        %error,
+                        "successor scan could not read session metadata; deferring to searches that consider it"
+                    );
+                    PersistedMemberSessionCandidateMetadata::ReadFailed
+                }
             };
             candidates.push(PersistedMemberSessionCandidate {
                 session_id: summary.session_id.clone(),
                 updated_at: summary.updated_at,
-                session_metadata: view.session_metadata,
+                metadata,
             });
         }
         Ok(Self { candidates })
@@ -2089,10 +2119,19 @@ impl PersistedMemberSessionIndex {
         slot: &'a mut Option<Self>,
         session_service: &dyn MobSessionService,
         listed_sessions: &[meerkat_core::service::SessionSummary],
+        member_bound_sessions: &std::collections::HashSet<meerkat_core::types::SessionId>,
         on_session_scanned: impl FnMut(),
     ) -> Result<&'a Self, MobError> {
         if slot.is_none() {
-            *slot = Some(Self::scan(session_service, listed_sessions, on_session_scanned).await?);
+            *slot = Some(
+                Self::scan(
+                    session_service,
+                    listed_sessions,
+                    member_bound_sessions,
+                    on_session_scanned,
+                )
+                .await?,
+            );
         }
         slot.as_ref().ok_or_else(|| {
             MobError::Internal("persisted member session index was not retained".to_string())
@@ -2140,8 +2179,23 @@ impl PersistedMemberSessionIndex {
             if &candidate.session_id == missing_session_id {
                 continue;
             }
+            let reread;
+            let session_metadata = match &candidate.metadata {
+                PersistedMemberSessionCandidateMetadata::Read(metadata) => metadata.as_ref(),
+                PersistedMemberSessionCandidateMetadata::ReadFailed => {
+                    // Considered by this search: surface its typed read
+                    // failure exactly as a per-member scan did.
+                    reread = session_service
+                        .load_persisted_session_metadata(&candidate.session_id)
+                        .await?;
+                    match reread.as_ref() {
+                        Some(view) => view.session_metadata.as_ref(),
+                        None => continue,
+                    }
+                }
+            };
             let Some(match_rank) = persisted_session_member_match_rank(
-                candidate.session_metadata.as_ref(),
+                session_metadata,
                 mob_id,
                 role,
                 agent_identity,
@@ -8354,6 +8408,10 @@ impl MobBuilder {
         }
 
         let mut roster_entries = roster.list().cloned().collect::<Vec<_>>();
+        let member_bound_sessions = roster_entries
+            .iter()
+            .filter_map(|entry| entry.member_ref.bridge_session_id().cloned())
+            .collect::<std::collections::HashSet<_>>();
         // A fork-derived member seated with its source's overlay is restored
         // with the overlay its source is restored with, so every source is
         // restored before its forks (and a fork before the forks of it).
@@ -8628,6 +8686,7 @@ impl MobBuilder {
                             &mut successor_index,
                             session_service.as_ref(),
                             &listed_sessions,
+                            &member_bound_sessions,
                             || {},
                         )
                         .await?;
@@ -9839,6 +9898,7 @@ impl MobBuilder {
                 dsl_topology_epoch,
                 dsl_authority_owner_token,
                 machine_state_watch_tx,
+                published_roster_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
                 phase_watch_tx: phase_watch_tx_actor,
                 default_external_tools_provider,
                 identity_local_external_tools_provider,

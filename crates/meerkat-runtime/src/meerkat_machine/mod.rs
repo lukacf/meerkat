@@ -4543,6 +4543,18 @@ enum RuntimeLoopAttachmentSlot {
 }
 
 impl RuntimeSessionEntry {
+    /// Wake materialization-claim release waiters because this registration
+    /// is leaving the registry (its claim can no longer be held).
+    fn notify_registration_removed(&self) {
+        self.materialization_claim_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .changed
+            .notify_waiters();
+    }
+}
+
+impl RuntimeSessionEntry {
     fn require_durability_ready(&self) -> Result<(), DurabilityReloadRequired> {
         match self.durability_health.as_ref() {
             Some(health) => health.require_ready(),
@@ -4939,7 +4951,10 @@ impl RuntimeSessionEntry {
                 return Err(spawned_loop);
             };
             state.legacy_capability_generation = next_legacy_generation;
-            let claim_changed = state.current.take().is_some();
+            // A `RetainedActor` claim has no current id; its release to
+            // Vacant is still a claim change that release waiters observe.
+            let claim_changed = state.current.take().is_some()
+                || state.phase != crate::RuntimeActorMaterializationClaimPhase::Vacant;
             state.phase = crate::RuntimeActorMaterializationClaimPhase::Vacant;
             state.rollback_registration_available = false;
             claim_changed.then(|| Arc::clone(&state.changed))

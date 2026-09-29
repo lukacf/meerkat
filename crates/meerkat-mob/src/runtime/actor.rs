@@ -11,7 +11,7 @@ use super::terminalization::{FlowFailureCause, TerminalizationOutcome, Terminali
 use super::transaction::LifecycleRollback;
 use super::*;
 
-mod explicit_resume;
+pub(super) mod explicit_resume;
 #[cfg(feature = "openai-live")]
 pub(super) mod live_durable_source_loads;
 pub(super) mod member_effect_lane;
@@ -5115,6 +5115,10 @@ enum SpawnProvisionInput {
     DeferredResume(Box<DeferredResumeProvision>),
 }
 
+/// Cloneable so an explicit-resume member refused by an occupied
+/// materialization claim can rebuild its request after the claim-release
+/// event (#1251).
+#[derive(Clone)]
 struct DeferredResumeProvision {
     definition: Arc<MobDefinition>,
     profile_name: ProfileName,
@@ -6729,6 +6733,17 @@ pub(super) enum ExplicitResumeMemberDecision {
     Rollback(ExplicitResumeCleanupReason),
 }
 
+/// Where an explicit-resume member stood when its own custody became
+/// uncertifiable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UnprovenResumeCustodyStage {
+    /// Before the actor accepted the rebuilt member: the member fails.
+    BeforeAcceptance,
+    /// After acceptance: the member is live and settles accepted; only the
+    /// custody obligation is parked.
+    AfterAcceptance,
+}
+
 pub(super) enum ExplicitResumeMemberCompletion {
     Accepted,
     Failed(MobError),
@@ -7154,6 +7169,8 @@ pub(super) struct MobActor {
     /// surfaces. The actor is the sole writer; handles can borrow the latest
     /// state without enqueueing behind long shell cleanup work.
     pub(super) machine_state_watch_tx: tokio::sync::watch::Sender<mob_dsl::MobMachineState>,
+    /// Roster projection revision last published to machine-state watchers.
+    pub(super) published_roster_revision: std::sync::atomic::AtomicU64,
     pub(super) reachability_observations: Arc<super::handle::ReachabilityObservations>,
     /// Terminal-phase projection for external observers. Written by the
     /// actor after every DSL phase transition and once more right before
@@ -11377,23 +11394,32 @@ impl MobActor {
     /// tick between wakes; a mutation path that bypasses this publish
     /// degrades their convergence latency to that safety interval. Any new
     /// commit path must call this function after mutating `dsl_authority`.
-    /// Publish the machine state to watchers only when it changed.
+    /// Publish the machine state to watchers only when it, or the actor's
+    /// roster projection, changed.
     ///
-    /// An applied input that leaves the state unchanged (a no-op observation,
-    /// an idempotent retry) must not clone the full state and wake every
+    /// An applied input that leaves both unchanged (a no-op observation, an
+    /// idempotent retry) must not clone the full state and wake every
     /// watcher: under cold-boot retry storms that turned each no-op input into
-    /// a forwarder and health-monitor reconcile (#1250).
+    /// a forwarder and health-monitor reconcile (#1250). A roster-only change
+    /// (for example a projected backend-peer binding) still wakes watchers,
+    /// because list projections combine both.
     fn publish_machine_state_projection(&self) {
         let state = self.dsl_authority.state();
         self.dsl_topology_epoch
             .store(state.topology_epoch, std::sync::atomic::Ordering::Release);
+        // A roster write in progress cannot be observed; wake conservatively.
+        let roster_changed = self.roster.try_read().map_or(true, |roster| {
+            let revision = roster.revision();
+            self.published_roster_revision
+                .swap(revision, std::sync::atomic::Ordering::AcqRel)
+                != revision
+        });
         self.machine_state_watch_tx.send_if_modified(|published| {
-            if published == state {
-                false
-            } else {
+            let state_changed = published != state;
+            if state_changed {
                 published.clone_from(state);
-                true
             }
+            state_changed || roster_changed
         });
     }
 
@@ -17971,6 +17997,10 @@ impl ExplicitResumePreparationContext {
         let mut rebuild = Vec::new();
         let mut listed_sessions = None;
         let mut successor_index = None;
+        let member_bound_sessions = candidates
+            .iter()
+            .map(|(_, _, session_id)| session_id.clone())
+            .collect::<std::collections::HashSet<_>>();
         for (member_index, (entry, member_ref, session_id)) in candidates.into_iter().enumerate() {
             let member_position = member_index + 1;
             progress.awaiting_member(
@@ -18112,6 +18142,7 @@ impl ExplicitResumePreparationContext {
                 &mut successor_index,
                 self.session_service.as_ref(),
                 listed_sessions.as_deref().unwrap_or_default(),
+                &member_bound_sessions,
                 || {
                     progress.member_progress(
                         &entry.agent_identity,
@@ -22417,7 +22448,7 @@ impl MobActor {
         identity: &AgentIdentity,
         intent: &crate::identity::IdentityIntentRecord,
     ) -> crate::identity::IdentityResourceObservation {
-        if self.pending_spawns.contains_member(identity) {
+        if self.member_materialization_in_flight(identity) {
             return crate::identity::IdentityResourceObservation::Unavailable {
                 detail: "member materialization is in flight".to_string(),
             };
@@ -23064,7 +23095,7 @@ impl MobActor {
                 // no async completion owns it and no typed disposition
                 // replaced the deadline, release it back to the timer without
                 // resetting the accumulated failure debt.
-                if !self.pending_spawns.contains_member(&identity)
+                if !self.member_materialization_in_flight(&identity)
                     && let Some(backoff) = self.identity_reconcile_backoff.get_mut(&identity)
                     && backoff.retry_enqueued
                 {
@@ -24147,6 +24178,22 @@ impl MobActor {
                     self.settle_member_turn_admission(&agent_identity, ticket);
                 }
                 #[cfg(test)]
+                MobCommand::BeginStopQuiesceForTest { reply_tx } => {
+                    let result = self
+                        .begin_placed_completion_lifecycle_quiesce(
+                            mob_dsl::PlacedCompletionLifecycleIntentKind::Stop,
+                        )
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
+                #[cfg(test)]
+                MobCommand::SpawnPreparationProbe {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let _ = reply_tx.send(self.spawn_preparation_census(&agent_identity));
+                }
+                #[cfg(test)]
                 MobCommand::SpawnActivationCustodyProbe { reply_tx } => {
                     let _ = reply_tx.send(self.spawn_activation_quiescence());
                 }
@@ -24263,8 +24310,12 @@ impl MobActor {
                     ))
                     .await;
                 }
-                MobCommand::ResumeLifecycleMemberUnproven { work, failure } => {
-                    Box::pin(self.explicit_resume_member_unproven(work, failure)).await;
+                MobCommand::ResumeLifecycleMemberUnproven {
+                    work,
+                    failure,
+                    stage,
+                } => {
+                    Box::pin(self.explicit_resume_member_unproven(work, failure, stage)).await;
                 }
                 MobCommand::ResumeLifecycleRollbackStep { attempt } => {
                     Box::pin(self.drive_explicit_resume_rollback(attempt)).await;
@@ -28290,9 +28341,10 @@ impl MobActor {
                         &identity,
                         &pending_carrier,
                         true,
-                        MobError::Internal(format!(
-                            "spawn canceled for '{agent_identity}': {reason}"
-                        )),
+                        MobError::SpawnCanceled {
+                            member_id: identity.clone(),
+                            reason: reason.to_string(),
+                        },
                         "materialize_canceled".to_string(),
                         "fail_all_pending_spawns_remote",
                     )
@@ -28320,7 +28372,10 @@ impl MobActor {
                 ));
             }
             if may_reply {
-                slot.fail(&format!("spawn canceled for '{agent_identity}': {reason}"));
+                slot.fail_with(MobError::SpawnCanceled {
+                    member_id: AgentIdentity::from(agent_identity.as_str()),
+                    reason: reason.to_string(),
+                });
             }
             tracing::debug!(
                 spawn_ticket,
@@ -28614,6 +28669,15 @@ impl MobActor {
         {
             reject_spawn_before_custody!("customize_spawn_spec", error);
         }
+        // A local preparation for this identity is still running off the
+        // actor loop; it owns the identity exactly like a staged pending
+        // spawn, on either lane (#1249).
+        if self.spawn_preparation_in_flight(&AgentIdentity::from(spec.identity.as_str())) {
+            reject_spawn_before_custody!(
+                "preparation_in_flight",
+                MobError::MemberAlreadyExists(AgentIdentity::from(spec.identity.as_str()))
+            );
+        }
         if spec.placement.is_some() && spec.compaction_curator_override.is_some() {
             reject_spawn_before_custody!(
                 "compaction_curator_placement",
@@ -28799,11 +28863,6 @@ impl MobActor {
                 if roster.get(&agent_identity).is_some() {
                     return Err(MobError::MemberAlreadyExists(agent_identity.clone()));
                 }
-            }
-            // A preparation for this identity is still running off the actor
-            // loop; it owns the identity exactly like a staged pending spawn.
-            if self.spawn_preparation_in_flight(&agent_identity) {
-                return Err(MobError::MemberAlreadyExists(agent_identity.clone()));
             }
 
             // Always validate role_name exists in definition for roster consistency,

@@ -123,6 +123,21 @@ them.
   refusal happens before the call reserves a claim, inserts a registration, or
   installs handles; the new `RuntimeBindingsError::rejected_before_effect()`
   reports that (#1251).
+- `MobError` gains the variant `MobError::SpawnCanceled { member_id, reason }`
+  (`MobError` is not `#[non_exhaustive]`, so exhaustive matches must add an
+  arm). Behavior-only: a spawn canceled by a lifecycle transition (stop,
+  complete, reset, destroy, shutdown, or retire of the member), whether still
+  preparing or staged and provisioning, now fails with
+  `MobError::SpawnCanceled` instead of `MobError::Internal("spawn canceled
+  for ...")` (#1249).
+
+### Changed
+
+- `MobHandle::machine_state_changes` (and the actor's machine-state watch)
+  fires when an applied machine input changes the machine state or the
+  actor's roster projection changed, instead of on every applied machine
+  input. An input that leaves both unchanged no longer wakes watchers
+  (#1250). Consumers already treat a wake as "re-project now".
 
 ### Fixed
 
@@ -216,23 +231,33 @@ them.
   bound). The actor keeps custody of the reply, respawn origin, and identity
   actuation permit, re-checks admission when the typed completion arrives, and
   a lifecycle transition that fails pending spawns also cancels in-flight
-  preparations with the same typed reason. A second spawn of an identity whose
-  preparation is still running is refused with `MemberAlreadyExists`, as for
-  a staged pending spawn. The inline-step watchdog now reports typed per-stage
+  preparations with the typed `MobError::SpawnCanceled`, without aborting the
+  preparation task (its reads may converge durable-tail authority); the late
+  completion is inert. A second spawn of an identity whose preparation is
+  still running is refused with `MemberAlreadyExists` on either lane, as for
+  a staged pending spawn, and identity reconciliation treats an in-flight
+  preparation as an in-flight materialization. The inline-step watchdog now reports typed per-stage
   timing (`stage_timings_ms`, `slowest_step`) for any step that exceeds its
   budget, with typed `Spawn` stages, so a slow step names its slow part.
 - A failed explicit-resume member no longer parks the whole mob resume (#1251).
   A provisioning attempt refused by typed runtime authority before it created
-  anything (an occupied materialization claim) now settles as proven
-  `NoEffect` and the member fails cleanly as Broken instead of `Unproven`.
-  Explicit-resume preparation that discards an unattached live actor also
-  releases that actor's runtime registration when it still holds a claim
+  anything settles as proven `NoEffect` instead of `Unproven`. An occupied
+  materialization claim (`RegistrationOwned`) is transient: the member
+  re-attempts on the typed claim-release event
+  (`MeerkatMachine::materialization_claim_released`, which waits on the
+  claim's own change notification, never a timer) instead of being marked
+  Broken. Explicit-resume preparation that discards an unattached live actor
+  also releases that actor's runtime registration when it still holds a claim
   (`RetainedActor`, or a stranded `Aborting`), so the rebuild's unique claim
   is admitted. An attempt whose own effects cannot be certified, or whose
-  cleanup custody is retained, still parks that custody for retry on
-  lifecycle control, but the member now settles as Broken with a repair
-  diagnostic and the resume continues for every other member; operation
-  binding restoration skips members the resume settled as Broken.
+  cleanup custody is held, keeps that custody parked for retry on lifecycle
+  control, but the member now settles Broken with its actual repair path
+  (retire or respawn) and the resume continues for every other member. A
+  member accepted before its provision guard failed to commit settles
+  accepted with only the custody parked. Operation binding restoration skips
+  members the resume settled as Broken. The successor scan never reads
+  members' own bound sessions and keeps per-candidate read outcomes, so one
+  member's unreadable session cannot abort another member's search.
 
 ## [0.8.48] - 2026-09-28
 

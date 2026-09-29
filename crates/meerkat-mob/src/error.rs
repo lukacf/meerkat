@@ -360,6 +360,16 @@ pub enum MobError {
     #[error("mob member already exists: {0}")]
     MemberAlreadyExists(AgentIdentity),
 
+    /// A spawn that had not reached custody (still preparing, or staged and
+    /// provisioning) was canceled by a lifecycle transition (stop, complete,
+    /// reset, destroy, shutdown, or retire of the member). Nothing of it was
+    /// seated; `reason` names the transition.
+    #[error("spawn canceled for '{member_id}': {reason}")]
+    SpawnCanceled {
+        member_id: AgentIdentity,
+        reason: String,
+    },
+
     /// Desired member material is committed but its replacement executor is
     /// not yet active. New work remains closed until identity convergence.
     #[error("member '{member_id}' admission is closed for identity convergence")]

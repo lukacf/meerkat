@@ -737,6 +737,19 @@ pub(super) enum MobCommand {
     /// This is the exact predicate a graph-scoped lifecycle gate waits on, so
     /// a regression can observe it directly instead of inferring it from
     /// timing.
+    /// Test-only census of off-loop spawn preparations and parked explicit
+    /// resume custody (#1249, #1251).
+    /// Test-only: begin a Stop lifecycle quiesce through the sealed actor
+    /// verb, closing the lifecycle origin without failing pending spawns.
+    #[cfg(test)]
+    BeginStopQuiesceForTest {
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    #[cfg(test)]
+    SpawnPreparationProbe {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<super::actor::spawn_preparation::SpawnPreparationCensus>,
+    },
     #[cfg(test)]
     SpawnActivationCustodyProbe {
         reply_tx:
@@ -838,6 +851,7 @@ pub(super) enum MobCommand {
     ResumeLifecycleMemberUnproven {
         work: std::sync::Arc<super::actor::ExplicitResumeMemberWork>,
         failure: super::provisioner::ProvisionAttemptFailure,
+        stage: super::actor::UnprovenResumeCustodyStage,
     },
     ResumeLifecycleRollbackStep {
         attempt: mob_dsl::ResumeAttemptId,
@@ -1642,6 +1656,10 @@ impl MobCommand {
             Self::SpawnActivationStageSettled { .. } => "SpawnActivationStageSettled",
             Self::SpawnCleanupSettled { .. } => "SpawnCleanupSettled",
             Self::PendingSpawnAnchorSettled { .. } => "PendingSpawnAnchorSettled",
+            #[cfg(test)]
+            Self::SpawnPreparationProbe { .. } => "SpawnPreparationProbe",
+            #[cfg(test)]
+            Self::BeginStopQuiesceForTest { .. } => "BeginStopQuiesceForTest",
             #[cfg(test)]
             Self::SpawnActivationCustodyProbe { .. } => "SpawnActivationCustodyProbe",
             #[cfg(test)]

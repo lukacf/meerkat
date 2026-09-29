@@ -844,17 +844,42 @@ pub enum ProvisionEffectSettlement {
     /// runtime registration, materialization claim, actor, attachment, or ops
     /// row (#1251). This is a recorded positive fact, never inferred from an
     /// empty ledger: the attempt provably has nothing to compensate.
-    NoEffect,
+    NoEffect(PreEffectRefusal),
     /// This provisioner cannot prove either outcome. Callers must treat it
     /// exactly like [`Self::RetainedUncertain`]; it is never proof of absence.
     Unproven,
+}
+
+/// Why typed runtime authority refused an attempt before any effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreEffectRefusal {
+    /// Another owner holds the session's materialization claim. Transient
+    /// within one process: the owner releases it, and the claim-release event
+    /// (`MeerkatMachine::materialization_claim_released`) is the retry signal.
+    RegistrationOwned,
+    /// The expected registration was replaced before the attempt.
+    RegistrationNotCurrent,
+}
+
+impl PreEffectRefusal {
+    fn from_bindings_error(error: &meerkat_runtime::RuntimeBindingsError) -> Option<Self> {
+        match error {
+            meerkat_runtime::RuntimeBindingsError::RegistrationOwned(_) => {
+                Some(Self::RegistrationOwned)
+            }
+            meerkat_runtime::RuntimeBindingsError::RegistrationNotCurrent(_) => {
+                Some(Self::RegistrationNotCurrent)
+            }
+            _ => None,
+        }
+    }
 }
 
 impl ProvisionEffectSettlement {
     /// Whether the caller must keep compensation open. True for everything
     /// except a proven owner-side release or a proven no-effect refusal.
     pub fn requires_further_cleanup(self) -> bool {
-        !matches!(self, Self::ReleasedByOwner | Self::NoEffect)
+        !matches!(self, Self::ReleasedByOwner | Self::NoEffect(_))
     }
 }
 
@@ -1172,7 +1197,7 @@ pub(super) struct ProvisionSettlementLedger {
 struct ProvisionSettlementFacts {
     owner_releases: usize,
     /// Typed runtime authority refused the attempt before any effect.
-    rejected_before_effect: bool,
+    rejected_before_effect: Option<PreEffectRefusal>,
     retained_details: Vec<String>,
     retained_attachment: Option<(SessionId, ResumedMemberRollbackAuthority)>,
     /// Ops anchor captured AT the moment custody was first recorded.
@@ -1222,8 +1247,8 @@ impl ProvisionSettlementLedger {
 
     /// Typed runtime authority refused this attempt before it reserved a
     /// claim, inserted a registration, or installed any handle.
-    pub(super) fn record_rejected_before_effect(&self) {
-        self.with_facts(|facts| facts.rejected_before_effect = true);
+    pub(super) fn record_rejected_before_effect(&self, refusal: PreEffectRefusal) {
+        self.with_facts(|facts| facts.rejected_before_effect = Some(refusal));
     }
 
     /// `RetainedUncertain` is sticky: a later release inside the same attempt
@@ -1233,8 +1258,8 @@ impl ProvisionSettlementLedger {
             ProvisionEffectSettlement::RetainedUncertain
         } else if facts.owner_releases > 0 {
             ProvisionEffectSettlement::ReleasedByOwner
-        } else if facts.rejected_before_effect {
-            ProvisionEffectSettlement::NoEffect
+        } else if let Some(refusal) = facts.rejected_before_effect {
+            ProvisionEffectSettlement::NoEffect(refusal)
         } else {
             ProvisionEffectSettlement::Unproven
         }
@@ -2013,6 +2038,9 @@ pub(super) enum ProvisionPrepareTestFault {
     OccupiedClaim,
     /// The attempt fails having recorded no settlement fact at all.
     UnrecordedFailure,
+    /// The attempt leaves a claimed runtime registration behind (residue)
+    /// and then fails with no recorded settlement fact.
+    RegistrationResidueThenUnrecorded,
 }
 
 #[cfg(all(test, feature = "runtime-adapter"))]
@@ -2045,6 +2073,19 @@ async fn apply_provision_prepare_test_fault(
         Some(ProvisionPrepareTestFault::UnrecordedFailure) => Err(MobError::Internal(format!(
             "test-forced provisioning failure for '{session_id}' with no recorded settlement"
         ))),
+        Some(ProvisionPrepareTestFault::RegistrationResidueThenUnrecorded) => {
+            let bindings = adapter
+                .prepare_bindings(session_id.clone())
+                .await
+                .map_err(|error| MobError::Internal(error.to_string()))?;
+            meerkat_runtime::begin_session_runtime_actor_materialization(&bindings)
+                .map_err(|error| MobError::Internal(error.to_string()))?
+                .commit()
+                .map_err(|error| MobError::Internal(error.to_string()))?;
+            Err(MobError::Internal(format!(
+                "test-forced provisioning failure for '{session_id}' after registration residue"
+            )))
+        }
         Some(ProvisionPrepareTestFault::OccupiedClaim) => {
             let bindings = adapter
                 .prepare_bindings(session_id.clone())
@@ -4942,10 +4983,10 @@ impl SessionBackend {
     /// proven [`ProvisionEffectSettlement::NoEffect`] instead of `Unproven`
     /// (#1251).
     fn record_pre_effect_prepare_rejection(&self, error: &meerkat_runtime::RuntimeBindingsError) {
-        if error.rejected_before_effect()
+        if let Some(refusal) = PreEffectRefusal::from_bindings_error(error)
             && let Some(ledger) = self.settlement_ledger.as_ref()
         {
-            ledger.record_rejected_before_effect();
+            ledger.record_rejected_before_effect(refusal);
         }
     }
 
@@ -8119,12 +8160,17 @@ mod tests {
         #[test]
         fn typed_pre_effect_refusal_is_proven_no_effect() {
             let ledger = ProvisionSettlementLedger::default();
-            ledger.record_rejected_before_effect();
+            ledger.record_rejected_before_effect(super::super::PreEffectRefusal::RegistrationOwned);
             let failure = ledger.settle_failure(MobError::Internal(
                 "materialization registration has another owner".to_string(),
             ));
 
-            assert_eq!(failure.settlement(), ProvisionEffectSettlement::NoEffect);
+            assert_eq!(
+                failure.settlement(),
+                ProvisionEffectSettlement::NoEffect(
+                    super::super::PreEffectRefusal::RegistrationOwned
+                )
+            );
             assert!(!failure.requires_further_cleanup());
             assert!(failure.retained_effects().is_none());
         }
@@ -8132,7 +8178,7 @@ mod tests {
         #[test]
         fn retained_effect_outranks_a_pre_effect_refusal() {
             let ledger = ProvisionSettlementLedger::default();
-            ledger.record_rejected_before_effect();
+            ledger.record_rejected_before_effect(super::super::PreEffectRefusal::RegistrationOwned);
             ledger.record_retained("cleanup did not settle");
 
             assert_eq!(

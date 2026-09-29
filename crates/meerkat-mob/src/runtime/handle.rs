@@ -2262,9 +2262,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::FlowStepDispatchRejected { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
-        MobError::Internal(_) | MobError::ExternalMemberCleanupUncertain { .. } => {
-            mob_dsl::MobSpawnManyFailureObservationKind::Internal
-        }
+        // A lifecycle-canceled spawn keeps the observation it had while it
+        // was reported as an internal error.
+        MobError::Internal(_)
+        | MobError::ExternalMemberCleanupUncertain { .. }
+        | MobError::SpawnCanceled { .. } => mob_dsl::MobSpawnManyFailureObservationKind::Internal,
         // Chokepoint-(a) scope denial: the caller's principal lacked the verb's
         // required ControlScope, so the spawn was refused at admission — the
         // same denied-admission family as SpawnMemberAdmissionDenied above.
@@ -4830,10 +4832,11 @@ pub type FlowTargetProvisioner =
 /// Opaque change signal over the actor-published [`mob_dsl::MobMachineState`]
 /// watch (see [`MobHandle::machine_state_changes`]).
 ///
-/// Constraints: the underlying watch fires on EVERY applied machine input
-/// (including transitions that leave observable membership unchanged), so
-/// consumers must treat a wake as "re-project now", never as a semantic
-/// event. The wrapper exposes no state access by design — projections go
+/// Constraints: the underlying watch fires whenever an applied machine input
+/// changes the machine state and on every actor roster mutation (including
+/// changes that leave observable membership unchanged); a machine input that
+/// leaves the state unchanged does not fire. Consumers must treat a wake as
+/// "re-project now", never as a semantic event. The wrapper exposes no state access by design — projections go
 /// through the `list_members*` surfaces, which borrow the watch value
 /// without cloning it.
 #[derive(Debug, Clone)]
@@ -7191,8 +7194,10 @@ impl MobHandle {
     /// Interval observers that only need to know WHEN membership/binding
     /// truth may have moved (not the state itself) should await
     /// [`MobMachineStateChanges::changed`] instead of polling
-    /// `list_members*` on a timer: every poll pays a roster projection, and
-    /// the state watch fires on every applied machine input. The wrapper is
+    /// `list_members*` on a timer: every poll pays a roster projection. The
+    /// watch fires when an applied machine input changes the machine state,
+    /// and on every actor roster mutation (roster-only projections
+    /// included); an input that leaves both unchanged does not fire. The wrapper is
     /// deliberately opaque so observers cannot clone the (potentially
     /// restore-scale) state out of the watch.
     pub fn machine_state_changes(&self) -> MobMachineStateChanges {

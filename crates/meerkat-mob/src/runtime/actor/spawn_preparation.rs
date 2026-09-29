@@ -16,7 +16,8 @@
 //! completion, [`MobCommand::SpawnPreparationSettled`], which re-enters the
 //! loop, re-checks admission against current state, and continues the
 //! ordinary spawn ladder. A lifecycle transition that fails pending spawns
-//! also cancels every in-flight preparation and settles its custody.
+//! also cancels every in-flight preparation and settles its custody; the
+//! detached task finishes on its own and its late completion is inert.
 
 use super::*;
 
@@ -27,7 +28,7 @@ use super::*;
 /// durable session document. The bound keeps a cold-boot burst of spawns
 /// from running unbounded concurrent durable reads; a waiting preparation
 /// awaits a permit off the actor, so the loop itself never waits on it.
-pub(super) const SPAWN_PREPARATION_CONCURRENCY: usize = 8;
+pub(in crate::runtime) const SPAWN_PREPARATION_CONCURRENCY: usize = 8;
 
 /// Everything a settled preparation hands back to the actor's ordinary
 /// pre-custody spawn ladder.
@@ -101,10 +102,13 @@ pub(super) struct SpawnPreparationCarry {
     pub(super) ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
 }
 
+/// The preparation task itself is detached, never aborted: its reads may
+/// converge durable-tail authority (`materialize_session_resume_verdict`),
+/// which must not be cut mid-flight. Removing the slot is what makes a late
+/// completion inert.
 struct SpawnPreparationSlot {
     agent_identity: AgentIdentity,
     carry: SpawnPreparationCarry,
-    task: tokio::task::JoinHandle<()>,
     started: Instant,
 }
 
@@ -126,20 +130,6 @@ impl SpawnPreparations {
 
     pub(super) fn permits(&self) -> Arc<tokio::sync::Semaphore> {
         Arc::clone(&self.permits)
-    }
-
-    #[cfg(test)]
-    pub(super) fn in_flight(&self) -> usize {
-        self.slots.len()
-    }
-}
-
-impl Drop for SpawnPreparations {
-    /// An exiting actor must not leak preparation tasks.
-    fn drop(&mut self) {
-        for slot in self.slots.values() {
-            slot.task.abort();
-        }
     }
 }
 
@@ -170,11 +160,49 @@ impl LocalSpawnPreparationContext {
 }
 
 #[cfg(test)]
-pub(super) static SPAWN_PREPARATION_TEST_GATES: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<AgentIdentity, Arc<tokio::sync::Semaphore>>>,
+pub(in crate::runtime) static SPAWN_PREPARATION_TEST_GATES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<AgentIdentity, SpawnPreparationTestGate>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
+/// Test-only seam over one identity's preparation task: `entered` fires once
+/// the task holds its concurrency permit, the task then waits on `release`,
+/// and `settled` fires once its typed completion has been sent to the actor.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(in crate::runtime) struct SpawnPreparationTestGate {
+    pub(in crate::runtime) entered: Option<tokio::sync::mpsc::UnboundedSender<AgentIdentity>>,
+    pub(in crate::runtime) release: Option<Arc<tokio::sync::Semaphore>>,
+    pub(in crate::runtime) settled: Option<Arc<tokio::sync::Notify>>,
+}
+
+/// Test-only census answered by `MobCommand::SpawnPreparationProbe`.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) struct SpawnPreparationCensus {
+    pub(in crate::runtime) preparations_in_flight: usize,
+    pub(in crate::runtime) preparation_permits_in_use: usize,
+    pub(in crate::runtime) identity_materialization_in_flight: bool,
+    pub(in crate::runtime) retained_resume_cleanup: usize,
+    pub(in crate::runtime) unproven_resume_cleanup: usize,
+}
+
 impl MobActor {
+    #[cfg(test)]
+    pub(super) fn spawn_preparation_census(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> SpawnPreparationCensus {
+        SpawnPreparationCensus {
+            preparations_in_flight: self.spawn_preparations.slots.len(),
+            preparation_permits_in_use: SPAWN_PREPARATION_CONCURRENCY
+                - self.spawn_preparations.permits.available_permits(),
+            identity_materialization_in_flight: self
+                .member_materialization_in_flight(agent_identity),
+            retained_resume_cleanup: self.retained_resume_cleanup.len(),
+            unproven_resume_cleanup: self.unproven_resume_cleanup.len(),
+        }
+    }
+
     /// Whether a preparation for `agent_identity` is still running off the
     /// loop. Such an identity is owned exactly like a staged pending spawn.
     pub(super) fn spawn_preparation_in_flight(&self, agent_identity: &AgentIdentity) -> bool {
@@ -182,6 +210,16 @@ impl MobActor {
             .slots
             .values()
             .any(|slot| &slot.agent_identity == agent_identity)
+    }
+
+    /// Whether an async materialization owns `agent_identity`: a staged
+    /// pending spawn, or a preparation still running off the loop. Identity
+    /// reconciliation must treat both as in flight, or it would re-actuate
+    /// (lease renewal, permit mint, durable disposition) against a spawn it
+    /// cannot see.
+    pub(super) fn member_materialization_in_flight(&self, agent_identity: &AgentIdentity) -> bool {
+        self.pending_spawns.contains_member(agent_identity)
+            || self.spawn_preparation_in_flight(agent_identity)
     }
 
     /// Hand one preparation to a supervised, bounded task. The actor keeps
@@ -204,14 +242,19 @@ impl MobActor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&agent_identity)
-            .cloned();
-        let task = tokio::spawn(async move {
+            .cloned()
+            .unwrap_or_default();
+        tokio::spawn(async move {
             // The permit is awaited here, off the actor loop. The semaphore
             // is never closed, so a failed acquire cannot occur.
             let permit = permits.acquire_owned().await.ok();
             #[cfg(test)]
-            if let Some(gate) = test_gate {
-                let _released = gate.acquire_owned().await;
+            if let Some(entered) = test_gate.entered.as_ref() {
+                let _ = entered.send(task_identity.clone());
+            }
+            #[cfg(test)]
+            if let Some(release) = test_gate.release.clone() {
+                let _released = release.acquire_owned().await;
             }
             let result = super::super::panic_capture::run_spawn_provision_guarded(
                 panic_log_ledger.as_ref(),
@@ -221,7 +264,6 @@ impl MobActor {
                 preparation,
             )
             .await;
-            drop(permit);
             // A closed channel means the actor is gone; its keyed table (and
             // the custody in it) went with it.
             let _ = command_tx
@@ -232,13 +274,19 @@ impl MobActor {
                     },
                 ))
                 .await;
+            // The permit spans the completion send, so a released permit
+            // implies the completion is already queued to the actor.
+            drop(permit);
+            #[cfg(test)]
+            if let Some(settled) = test_gate.settled.as_ref() {
+                settled.notify_one();
+            }
         });
         self.spawn_preparations.slots.insert(
             ticket,
             SpawnPreparationSlot {
                 agent_identity,
                 carry,
-                task,
                 started: Instant::now(),
             },
         );
@@ -278,21 +326,22 @@ impl MobActor {
 
     /// Cancel every in-flight preparation for a lifecycle transition and
     /// settle its custody (respawn-topology abandonment, identity reconcile
-    /// disposition, reply) with a typed cancellation.
+    /// disposition, reply) with the typed [`MobError::SpawnCanceled`].
+    ///
+    /// The detached tasks are not aborted (see [`SpawnPreparationSlot`]);
+    /// their completions find no slot and are dropped.
     pub(super) async fn cancel_spawn_preparations(&mut self, reason: &str) {
         for (ticket, slot) in std::mem::take(&mut self.spawn_preparations.slots) {
-            slot.task.abort();
-            let _ = slot.task.await;
             tracing::debug!(
                 ticket,
                 agent_identity = %slot.agent_identity,
                 reason,
                 "cancelled in-flight spawn preparation for lifecycle transition"
             );
-            let error = MobError::Internal(format!(
-                "spawn canceled for '{}': {reason}",
-                slot.agent_identity
-            ));
+            let error = MobError::SpawnCanceled {
+                member_id: slot.agent_identity.clone(),
+                reason: reason.to_string(),
+            };
             Box::pin(self.finish_local_spawn_preparation(slot.carry, Err(error))).await;
         }
     }

@@ -271,6 +271,8 @@ impl MobCommand {
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
             | Self::SpawnActivationCustodyProbe { .. }
+            | Self::SpawnPreparationProbe { .. }
+            | Self::BeginStopQuiesceForTest { .. }
             | Self::MemberStatusLaneProbe { .. }
             | Self::DslT2Snapshot { .. } => None,
         }
@@ -605,6 +607,8 @@ impl MobCommand {
             | Self::OrchestratorSnapshot { .. }
             | Self::LifecycleSnapshot { .. }
             | Self::SpawnActivationCustodyProbe { .. }
+            | Self::SpawnPreparationProbe { .. }
+            | Self::BeginStopQuiesceForTest { .. }
             | Self::MemberStatusLaneProbe { .. }
             | Self::DslT2Snapshot { .. } => {
                 tracing::error!("scope denial reached a test-only command; dropped");

@@ -1707,6 +1707,7 @@ impl MeerkatMachine {
         };
         if let Some(entry) = removed.as_ref() {
             entry.post_commit_hooks.shutdown();
+            entry.notify_registration_removed();
         }
         drop(removed);
         Ok(())

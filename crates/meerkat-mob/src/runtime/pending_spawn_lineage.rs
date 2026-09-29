@@ -209,4 +209,12 @@ impl PendingSpawnSlot {
             handle.abort();
         }
     }
+
+    /// Fail the slot with a typed error (e.g. [`MobError::SpawnCanceled`]).
+    pub(super) fn fail_with(mut self, error: MobError) {
+        let _ = self.spawn.reply_tx.send(Err(error));
+        if let Some(handle) = self.task.take() {
+            handle.abort();
+        }
+    }
 }

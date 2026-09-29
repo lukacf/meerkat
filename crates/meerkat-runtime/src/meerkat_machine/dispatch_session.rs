@@ -2096,6 +2096,7 @@ impl MeerkatMachine {
                 if state.current == Some(requested_claim_id) {
                     state.current = None;
                     state.phase = crate::RuntimeActorMaterializationClaimPhase::Vacant;
+                    state.changed.notify_waiters();
                 }
             }
             None

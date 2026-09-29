@@ -1978,6 +1978,8 @@ struct MockSessionService {
     /// per-session metadata read counts (proves a single realm scan).
     load_persisted_session_metadata_delay_ms: AtomicU64,
     metadata_reads_for: std::sync::Mutex<HashMap<SessionId, u64>>,
+    /// Sessions whose metadata-only read fails with a store error.
+    metadata_read_failures_for: std::sync::Mutex<HashSet<SessionId>>,
     load_persisted_session_in_flight: AtomicU64,
     load_persisted_session_max_in_flight: AtomicU64,
     create_session_in_flight: AtomicU64,
@@ -2151,6 +2153,7 @@ impl MockSessionService {
             load_persisted_session_metadata_calls: AtomicU64::new(0),
             load_persisted_session_metadata_delay_ms: AtomicU64::new(0),
             metadata_reads_for: Default::default(),
+            metadata_read_failures_for: Default::default(),
             load_persisted_session_in_flight: AtomicU64::new(0),
             load_persisted_session_max_in_flight: AtomicU64::new(0),
             create_session_in_flight: AtomicU64::new(0),
@@ -2955,6 +2958,13 @@ impl MockSessionService {
     fn set_persisted_session_metadata_delay_ms(&self, delay_ms: u64) {
         self.load_persisted_session_metadata_delay_ms
             .store(delay_ms, Ordering::Relaxed);
+    }
+
+    fn fail_persisted_session_metadata_reads_for(&self, session_id: SessionId) {
+        self.metadata_read_failures_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id);
     }
 
     fn persisted_session_metadata_reads_for(&self, session_id: &SessionId) -> u64 {
@@ -5134,6 +5144,16 @@ impl MobSessionService for MockSessionService {
             .load(Ordering::Relaxed);
         if delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        if self
+            .metadata_read_failures_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(session_id)
+        {
+            return Err(SessionError::Store(Box::new(std::io::Error::other(
+                "mock metadata read failure",
+            ))));
         }
         let _authority_guard = self.resume_authority_gate.lock().await;
         let persisted = if self.archived_session_ids.read().await.contains(session_id) {
@@ -46271,13 +46291,13 @@ async fn test_stop_fails_pending_spawns_and_cleans_up_provisioned_session() {
         .expect("spawn join")
         .expect_err("pending spawn should fail once stop begins");
     match spawn_error {
-        MobError::Internal(message) => {
+        MobError::SpawnCanceled { reason, .. } => {
             assert!(
-                message.contains("mob is stopping"),
-                "expected stop cancellation message, got: {message}"
+                reason.contains("mob is stopping"),
+                "expected stop cancellation reason, got: {reason}"
             );
         }
-        other => panic!("expected internal pending-spawn cancellation, got: {other}"),
+        other => panic!("expected typed pending-spawn cancellation, got: {other}"),
     }
 
     tokio::time::sleep(Duration::from_millis(260)).await;
@@ -54456,48 +54476,84 @@ async fn explicit_resume_preparation_releases_retained_actor_registration() {
 }
 
 /// #1251 fix (1): an attempt refused because another owner holds the
-/// session's materialization claim created nothing. Its settlement is the
-/// proven `NoEffect`, so the member fails cleanly (Broken, with a repair
-/// diagnostic) instead of parking as Unproven, and the mob-wide Resume
-/// completes for everyone else.
+/// session's materialization claim created nothing. Its typed settlement is
+/// the proven `NoEffect(RegistrationOwned)`, which is transient: the member
+/// is neither parked as Unproven nor marked Broken, but re-attempts on the
+/// typed claim-release event, and the resume completes with every member
+/// active once the owner releases the claim.
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
-async fn cold_resume_occupied_claim_marks_member_broken_without_stalling() {
-    let (_service, _adapter, resumed, members) =
+async fn cold_resume_occupied_claim_reattempts_on_claim_release() {
+    let (_service, adapter, resumed, members) =
         cold_resume_crew_for_test(&["owned-a", "owned-b"]).await;
     let (blocked_identity, blocked_session) = &members[0];
     super::provisioner::arm_provision_prepare_fault_for_test(
         blocked_session.clone(),
         super::provisioner::ProvisionPrepareTestFault::OccupiedClaim,
     );
+    let waiting = Arc::new(tokio::sync::Notify::new());
+    super::actor::explicit_resume::CLAIM_RELEASE_WAIT_TEST_HOOKS
+        .lock()
+        .expect("claim release hook")
+        .insert(blocked_session.clone(), Arc::clone(&waiting));
 
-    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+    let resume = tokio::spawn({
+        let resumed = resumed.clone();
+        async move { resumed.resume().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), waiting.notified())
         .await
-        .expect("an occupied claim must not stall the mob-wide resume")
-        .expect("resume completes with the refused member failed cleanly");
-    let broken = assert_member_status_for_test(
-        &resumed,
-        blocked_identity,
-        crate::runtime::handle::MobMemberStatus::Broken,
-        "occupied claim",
-    )
-    .await;
-    assert!(broken.is_final);
+        .expect("the refused member awaits the claim-release event");
     assert!(
-        broken
-            .error
-            .as_deref()
-            .is_some_and(|message| message.contains("has another owner")),
-        "the typed pre-effect refusal must name the owner conflict: {broken:?}"
+        !resume.is_finished(),
+        "the member re-attempts instead of failing"
     );
-    assert_member_status_for_test(
-        &resumed,
-        &members[1].0,
-        crate::runtime::handle::MobMemberStatus::Active,
-        "sibling of the refused member",
-    )
-    .await;
-    assert_eq!(resumed.status().await.expect("status"), MobState::Running);
+    let owner = adapter
+        .current_session_registration_witness(blocked_session)
+        .await
+        .expect("the other owner's registration holds the claim");
+    assert!(
+        adapter
+            .unregister_session_registration_until_terminal_if_current(&owner)
+            .await
+            .expect("the other owner releases its claim")
+    );
+
+    tokio::time::timeout(Duration::from_secs(20), resume)
+        .await
+        .expect("resume completes after the claim release")
+        .expect("resume task")
+        .expect("the re-attempt materializes the member");
+    for (identity, _) in &members {
+        let snapshot = assert_member_status_for_test(
+            &resumed,
+            identity,
+            crate::runtime::handle::MobMemberStatus::Active,
+            "occupied claim released",
+        )
+        .await;
+        assert!(
+            snapshot
+                .error
+                .as_deref()
+                .is_none_or(|message| !message.contains("repair required")),
+            "'{identity}' is not parked as Unproven: {snapshot:?}"
+        );
+    }
+    let census = spawn_preparation_census_for_test(&resumed, blocked_identity).await;
+    assert_eq!(
+        (
+            census.unproven_resume_cleanup,
+            census.retained_resume_cleanup
+        ),
+        (0, 0),
+        "a proven no-effect refusal parks no custody"
+    );
+    assert_eq!(
+        resumed.status().await.expect("status"),
+        MobState::Running,
+        "'{blocked_identity}' resumed"
+    );
 }
 
 /// #1251 fix (3): an attempt whose own effects cannot be certified parks its
@@ -54532,6 +54588,11 @@ async fn cold_resume_unproven_member_is_parked_and_others_continue() {
             .is_some_and(|message| message.contains("repair required")),
         "the parked member must carry its repair path: {parked:?}"
     );
+    let census = spawn_preparation_census_for_test(&resumed, parked_identity).await;
+    assert_eq!(
+        census.unproven_resume_cleanup, 1,
+        "its custody stays parked"
+    );
     for (identity, _) in members
         .iter()
         .filter(|(identity, _)| identity != parked_identity)
@@ -54545,6 +54606,206 @@ async fn cold_resume_unproven_member_is_parked_and_others_continue() {
         .await;
     }
     assert_eq!(resumed.status().await.expect("status"), MobState::Running);
+}
+
+/// #1251 isolation: a member whose attempt leaves retained cleanup custody
+/// held by the actor settles Broken with its actual repair path (retire or
+/// respawn) while the held custody stays retained, and the resume completes
+/// for every other member.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cold_resume_cleanup_held_member_is_isolated() {
+    let (_service, _adapter, resumed, members) =
+        cold_resume_crew_for_test(&["held-a", "held-b", "held-c"]).await;
+    let (held_identity, held_session) = &members[0];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        held_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::UnrecordedFailure,
+    );
+    super::actor::explicit_resume::CLEANUP_HELD_TEST_SESSIONS
+        .lock()
+        .expect("cleanup held hook")
+        .insert(held_session.clone());
+
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("held cleanup must not stall the mob-wide resume")
+        .expect("resume completes with the held member isolated");
+    let held = assert_member_status_for_test(
+        &resumed,
+        held_identity,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "held cleanup member",
+    )
+    .await;
+    let message = held.error.clone().unwrap_or_default();
+    assert!(
+        message.contains("retire or respawn") && !message.contains("stop and resume"),
+        "the diagnostic names the actual repair: {message}"
+    );
+    for (identity, _) in members.iter().skip(1) {
+        assert_member_status_for_test(
+            &resumed,
+            identity,
+            crate::runtime::handle::MobMemberStatus::Active,
+            "sibling of the held member",
+        )
+        .await;
+    }
+    let census = spawn_preparation_census_for_test(&resumed, held_identity).await;
+    assert_eq!(
+        census.retained_resume_cleanup, 1,
+        "held custody stays retained"
+    );
+    assert_eq!(resumed.status().await.expect("status"), MobState::Running);
+}
+
+/// #1251 isolation: a member settled Broken whose failed attempt left a
+/// claimed runtime registration behind is skipped by post-commit operation
+/// binding restoration, so its residue cannot fail the whole resume.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn cold_resume_binding_restore_skips_broken_member_residue() {
+    let (_service, _adapter, resumed, members) =
+        cold_resume_crew_for_test(&["residue-a", "residue-b"]).await;
+    let (broken_identity, broken_session) = &members[0];
+    super::provisioner::arm_provision_prepare_fault_for_test(
+        broken_session.clone(),
+        super::provisioner::ProvisionPrepareTestFault::RegistrationResidueThenUnrecorded,
+    );
+
+    tokio::time::timeout(Duration::from_secs(20), resumed.resume())
+        .await
+        .expect("resume must not stall")
+        .expect("binding restore skips the Broken member's residue");
+    assert_member_status_for_test(
+        &resumed,
+        broken_identity,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "member with registration residue",
+    )
+    .await;
+    assert_member_status_for_test(
+        &resumed,
+        &members[1].0,
+        crate::runtime::handle::MobMemberStatus::Active,
+        "sibling of the residue member",
+    )
+    .await;
+    assert_eq!(resumed.status().await.expect("status"), MobState::Running);
+}
+
+/// #1250 finding: the shared successor scan never reads members' own bound
+/// sessions, so a member's own unreadable session cannot abort another
+/// member's successor search; an unreadable candidate that a search does
+/// consider still surfaces its typed read failure to that search.
+#[tokio::test]
+async fn successor_scan_isolates_unreadable_member_sessions() {
+    let service = Arc::new(MockSessionService::new());
+    let identity = AgentIdentity::from("scan-owner");
+    let own_unreadable = create_realm_session_for_test(&service, None).await;
+    let successor = create_realm_session_for_test(&service, Some(&identity)).await;
+    let missing = SessionId::new();
+    service.fail_persisted_session_metadata_reads_for(own_unreadable.clone());
+    let listed = service
+        .list(SessionQuery::default())
+        .await
+        .expect("list realm");
+    let definition = sample_definition();
+
+    let excluded = std::collections::HashSet::from([own_unreadable.clone(), missing.clone()]);
+    let index = super::builder::PersistedMemberSessionIndex::scan(
+        service.as_ref(),
+        &listed,
+        &excluded,
+        || {},
+    )
+    .await
+    .expect("the scan tolerates unreadable sessions");
+    let found = index
+        .latest_for_member(
+            service.as_ref(),
+            &missing,
+            &definition.id,
+            &ProfileName::from("worker"),
+            &identity,
+            None,
+        )
+        .await
+        .expect("a member-bound unreadable session never aborts the search")
+        .expect("successor found");
+    assert_eq!(found.0, successor);
+    assert_eq!(
+        service.persisted_session_metadata_reads_for(&own_unreadable),
+        0,
+        "member-bound sessions are not read by the scan"
+    );
+
+    let unexcluded = super::builder::PersistedMemberSessionIndex::scan(
+        service.as_ref(),
+        &listed,
+        &std::collections::HashSet::new(),
+        || {},
+    )
+    .await
+    .expect("the scan itself still tolerates the unreadable session");
+    assert!(
+        unexcluded
+            .latest_for_member(
+                service.as_ref(),
+                &missing,
+                &definition.id,
+                &ProfileName::from("worker"),
+                &identity,
+                None,
+            )
+            .await
+            .is_err(),
+        "a considered unreadable candidate surfaces its typed failure"
+    );
+}
+
+/// #1250: a roster-only mutation still wakes machine-state watchers even
+/// though the machine state itself is unchanged.
+#[tokio::test]
+async fn roster_only_mutation_still_publishes_machine_state() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("roster-probe"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    let mut watch = handle.machine_state_watch_rx.clone();
+    watch.borrow_and_update();
+    handle
+        .apply_machine_input_effects(
+            crate::machines::mob_machine::MobMachineInput::ClassifyMemberWait {
+                agent_identity: crate::machines::mob_machine::AgentIdentity::from("roster-probe"),
+            },
+        )
+        .await
+        .expect("no-op input");
+    assert!(!watch.has_changed().expect("sender alive"));
+    super::roster_authority::RosterMutator::set_kickoff(
+        &mut *handle.roster.write().await,
+        &AgentIdentity::from("roster-probe"),
+        None,
+    );
+    handle
+        .apply_machine_input_effects(
+            crate::machines::mob_machine::MobMachineInput::ClassifyMemberWait {
+                agent_identity: crate::machines::mob_machine::AgentIdentity::from("roster-probe"),
+            },
+        )
+        .await
+        .expect("publishing input after the roster mutation");
+    assert!(
+        watch.has_changed().expect("sender alive"),
+        "a roster-only change wakes watchers at the next publication"
+    );
 }
 
 /// A durable session outside the mob that a Resume-launch spawn adopts.
@@ -54671,14 +54932,50 @@ async fn slow_spawn_preparation_does_not_block_the_actor_loop() {
     );
 }
 
+async fn spawn_preparation_census_for_test(
+    handle: &MobHandle,
+    identity: &AgentIdentity,
+) -> super::actor::spawn_preparation::SpawnPreparationCensus {
+    let identity = identity.clone();
+    let reply = handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::SpawnPreparationProbe {
+            agent_identity: identity,
+            reply_tx,
+        })
+        .await
+        .expect("census probe enqueue");
+    tokio::time::timeout(Duration::from_secs(2), reply)
+        .await
+        .expect("the actor answers the census while preparations run")
+        .expect("census reply")
+}
+
+fn arm_spawn_preparation_gate_for_test(
+    identity: &AgentIdentity,
+    gate: super::actor::spawn_preparation::SpawnPreparationTestGate,
+) {
+    super::actor::spawn_preparation::SPAWN_PREPARATION_TEST_GATES
+        .lock()
+        .expect("spawn preparation gate")
+        .insert(identity.clone(), gate);
+}
+
 /// #1249: a lifecycle Stop fails an in-flight off-loop spawn preparation
-/// with a typed cancellation and settles its custody; the late completion is
-/// inert.
+/// with the typed `SpawnCanceled` and settles its custody without aborting
+/// the task; the task's late completion is processed and is inert.
 #[tokio::test]
 async fn stop_cancels_in_flight_spawn_preparation_with_typed_error() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let identity = AgentIdentity::from("cancelled-adopt");
     let session_id = standalone_resume_session_for_test(&service, &identity).await;
+    let settled = Arc::new(tokio::sync::Notify::new());
+    arm_spawn_preparation_gate_for_test(
+        &identity,
+        super::actor::spawn_preparation::SpawnPreparationTestGate {
+            settled: Some(Arc::clone(&settled)),
+            ..Default::default()
+        },
+    );
     let barrier = service
         .install_session_read_barrier(session_id.clone())
         .await;
@@ -54699,10 +54996,20 @@ async fn stop_cancels_in_flight_spawn_preparation_with_typed_error() {
         .expect("the cancelled spawn is answered")
         .expect("spawn task");
     assert!(
-        matches!(&result, Err(MobError::Internal(message)) if message.contains("spawn canceled")),
-        "an in-flight preparation fails with the lifecycle cancellation: {result:?}"
+        matches!(&result, Err(MobError::SpawnCanceled { member_id, .. }) if member_id == &identity),
+        "an in-flight preparation fails with the typed lifecycle cancellation: {result:?}"
     );
+
+    // The detached task was not aborted: releasing its read lets it finish
+    // and send its completion, which the actor then processes (FIFO behind
+    // the census probe) without seating anything.
     barrier.release_all();
+    tokio::time::timeout(Duration::from_secs(5), settled.notified())
+        .await
+        .expect("the preparation task runs to completion after cancellation");
+    let census = spawn_preparation_census_for_test(&handle, &identity).await;
+    assert_eq!(census.preparations_in_flight, 0);
+    assert!(!census.identity_materialization_in_flight);
     assert!(
         handle
             .get_member(&identity)
@@ -54712,6 +55019,173 @@ async fn stop_cancels_in_flight_spawn_preparation_with_typed_error() {
         "a cancelled preparation never seats its member"
     );
     assert_eq!(handle.status().await.expect("status"), MobState::Stopped);
+}
+
+/// #1249 finding: identity reconciliation's in-flight gate (the member
+/// observation and the backoff release) sees a spawn preparation that is
+/// still running off the loop, not only staged pending spawns, so reconcile
+/// cannot re-actuate an identity whose materialization it cannot see.
+#[tokio::test]
+async fn identity_reconcile_gate_sees_in_flight_spawn_preparation() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("reconcile-adopt");
+    let session_id = standalone_resume_session_for_test(&service, &identity).await;
+    let barrier = service
+        .install_session_read_barrier(session_id.clone())
+        .await;
+    assert!(
+        !spawn_preparation_census_for_test(&handle, &identity)
+            .await
+            .identity_materialization_in_flight
+    );
+    let spawn = tokio::spawn({
+        let handle = handle.clone();
+        let spec = resume_launch_spec_for_test(&identity, &session_id);
+        async move { handle.spawn_spec(spec).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), service.wait_for_session_read())
+        .await
+        .expect("the spawn is preparing off the loop");
+    let census = spawn_preparation_census_for_test(&handle, &identity).await;
+    assert_eq!(census.preparations_in_flight, 1);
+    assert!(
+        census.identity_materialization_in_flight,
+        "the reconcile gate must treat an off-loop preparation as in flight"
+    );
+    barrier.release_all();
+    tokio::time::timeout(Duration::from_secs(10), spawn)
+        .await
+        .expect("spawn completes")
+        .expect("spawn task")
+        .expect("spawn");
+    assert!(
+        !spawn_preparation_census_for_test(&handle, &identity)
+            .await
+            .identity_materialization_in_flight,
+        "a seated member is no longer an in-flight materialization"
+    );
+}
+
+/// #1249: at most `SPAWN_PREPARATION_CONCURRENCY` preparations run at once;
+/// the rest wait for a permit off the actor loop, and every one completes
+/// once released.
+#[tokio::test]
+async fn spawn_preparations_are_bounded_and_all_complete() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let bound = super::actor::spawn_preparation::SPAWN_PREPARATION_CONCURRENCY;
+    let total = bound + 2;
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut replies = Vec::new();
+    let identities: Vec<AgentIdentity> = (0..total)
+        .map(|index| AgentIdentity::from(format!("bounded-{index}")))
+        .collect();
+    for identity in &identities {
+        arm_spawn_preparation_gate_for_test(
+            identity,
+            super::actor::spawn_preparation::SpawnPreparationTestGate {
+                entered: Some(entered_tx.clone()),
+                release: Some(Arc::clone(&release)),
+                settled: None,
+            },
+        );
+        let spec = SpawnMemberSpec::new(ProfileName::from("worker"), identity.clone());
+        replies.push(
+            handle
+                .enqueue_actor_command_for_test(|reply_tx| MobCommand::Spawn {
+                    spec: Box::new(spec),
+                    spawn_source: super::handle::SpawnSource::Consumer,
+                    owner_bridge_session_id: None,
+                    ops_registry: None,
+                    reply_tx,
+                })
+                .await
+                .expect("spawn enqueue"),
+        );
+    }
+    // Exactly `bound` tasks acquire a permit and reach their gate.
+    for _ in 0..bound {
+        tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+            .await
+            .expect("a permitted preparation reaches its gate")
+            .expect("entered channel");
+    }
+    // FIFO: the census is answered after every Spawn above was dispatched.
+    let census = spawn_preparation_census_for_test(&handle, &identities[0]).await;
+    assert_eq!(census.preparations_in_flight, total);
+    assert_eq!(census.preparation_permits_in_use, bound);
+    assert!(
+        entered_rx.try_recv().is_err(),
+        "no preparation beyond the bound runs while the permitted ones hold"
+    );
+    tokio::time::timeout(Duration::from_secs(1), handle.status())
+        .await
+        .expect("the actor stays responsive while preparations wait")
+        .expect("status");
+
+    release.add_permits(total);
+    for reply in replies {
+        tokio::time::timeout(Duration::from_secs(20), reply)
+            .await
+            .expect("every bounded spawn completes")
+            .expect("spawn reply")
+            .expect("spawn");
+    }
+    for identity in &identities {
+        assert!(handle.get_member(identity).await.expect("roster").is_some());
+    }
+}
+
+/// #1249: a preparation that settles after actor state moved is re-admitted
+/// against CURRENT state. Here the lifecycle origin closes (a stop quiesce
+/// begins) while the preparation reads; the settled spawn is refused and
+/// seats nothing.
+#[tokio::test]
+async fn settled_spawn_preparation_is_readmitted_against_current_state() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("readmit-adopt");
+    let session_id = standalone_resume_session_for_test(&service, &identity).await;
+    let barrier = service
+        .install_session_read_barrier(session_id.clone())
+        .await;
+    let spawn = tokio::spawn({
+        let handle = handle.clone();
+        let spec = resume_launch_spec_for_test(&identity, &session_id);
+        async move { handle.spawn_spec(spec).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), service.wait_for_session_read())
+        .await
+        .expect("the spawn is preparing off the loop");
+    let quiesce = handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::BeginStopQuiesceForTest { reply_tx })
+        .await
+        .expect("quiesce enqueue");
+    tokio::time::timeout(Duration::from_secs(2), quiesce)
+        .await
+        .expect("quiesce answered")
+        .expect("quiesce reply")
+        .expect("close the lifecycle origin while the preparation runs");
+    barrier.release_all();
+    let result = tokio::time::timeout(Duration::from_secs(10), spawn)
+        .await
+        .expect("the settled spawn is answered")
+        .expect("spawn task");
+    assert!(
+        matches!(result, Err(MobError::InvalidTransition { .. })),
+        "re-admission refuses the settled spawn under the closed origin: {result:?}"
+    );
+    assert!(
+        handle
+            .get_member(&identity)
+            .await
+            .expect("roster")
+            .is_none()
+    );
+    assert!(
+        !spawn_preparation_census_for_test(&handle, &identity)
+            .await
+            .identity_materialization_in_flight
+    );
 }
 
 #[tokio::test]
@@ -75686,6 +76160,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             format!("session_unavailable_for_resume:{reason:?}")
         }
         MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
+        MobError::SpawnCanceled { .. } => "spawn_canceled".to_string(),
         MobError::MemberRoleMigrationRequired { .. } => {
             "member_role_migration_required".to_string()
         }

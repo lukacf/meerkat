@@ -37,8 +37,6 @@ them.
 
 ### Breaking
 
-
-
 - `meerkat_mob::MemberReloadDisposition` gains the variant `Reattached`
   (appended last, so existing discriminants do not move); exhaustive matches
   must handle it. `MobHandle::reload_member_registration` returns it when a
@@ -90,9 +88,25 @@ them.
   SAME session, and returns `Reattached` once a committed attachment exists.
   `NotCurrent` still means no registration for the session.
 
+- Behavior-only: preparing a unique local session materialization
+  (`MeerkatMachine::prepare_session_materialization` and the
+  `prepare_local_session_materialization*` family) for a session whose
+  pre-existing runtime registration already holds a materialization claim now
+  fails with `RuntimeBindingsError::RegistrationOwned` ("... has another
+  owner") instead of `RuntimeBindingsError::PrepareFailed` wrapping a
+  `StaleAuthority` "already has an active materialization owner" reason. The
+  refusal happens before the call reserves a claim, inserts a registration, or
+  installs handles; the new `RuntimeBindingsError::rejected_before_effect()`
+  reports that (#1251).
+- `MobError` gains the variant `MobError::SpawnCanceled { member_id, reason }`
+  (`MobError` is not `#[non_exhaustive]`, so exhaustive matches must add an
+  arm). Behavior-only: a spawn canceled by a lifecycle transition (stop,
+  complete, reset, destroy, shutdown, or retire of the member), whether still
+  preparing or staged and provisioning, now fails with
+  `MobError::SpawnCanceled` instead of `MobError::Internal("spawn canceled
+  for ...")` (#1249).
+
 ### Added
-
-
 
 - `meerkat_runtime::RuntimeSessionAttachmentState` (`Unregistered`,
   `Attached`, `ReloadRequired { registration, attachment }`,
@@ -113,23 +127,6 @@ them.
   (`NotFound`, `Retired`, `kind()`, `to_tool_error`). Target presence is read
   from the roster, and a durable retirement record from the mob's event log,
   before the ownership admission runs (#1234).
-- Behavior-only: preparing a unique local session materialization
-  (`MeerkatMachine::prepare_session_materialization` and the
-  `prepare_local_session_materialization*` family) for a session whose
-  pre-existing runtime registration already holds a materialization claim now
-  fails with `RuntimeBindingsError::RegistrationOwned` ("... has another
-  owner") instead of `RuntimeBindingsError::PrepareFailed` wrapping a
-  `StaleAuthority` "already has an active materialization owner" reason. The
-  refusal happens before the call reserves a claim, inserts a registration, or
-  installs handles; the new `RuntimeBindingsError::rejected_before_effect()`
-  reports that (#1251).
-- `MobError` gains the variant `MobError::SpawnCanceled { member_id, reason }`
-  (`MobError` is not `#[non_exhaustive]`, so exhaustive matches must add an
-  arm). Behavior-only: a spawn canceled by a lifecycle transition (stop,
-  complete, reset, destroy, shutdown, or retire of the member), whether still
-  preparing or staged and provisioning, now fails with
-  `MobError::SpawnCanceled` instead of `MobError::Internal("spawn canceled
-  for ...")` (#1249).
 
 ### Changed
 
@@ -140,9 +137,6 @@ them.
   (#1250). Consumers already treat a wake as "re-project now".
 
 ### Fixed
-
-
-
 
 - `MobHandle::subscribe_mob_events` returns only once the router is
   subscribed to every member it starts with (local session streams and

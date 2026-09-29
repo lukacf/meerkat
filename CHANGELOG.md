@@ -752,6 +752,17 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Fixed
 
+- The placed-member external-edge route inputs (`RecordExternalRouteInstall`,
+  `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`,
+  `RollbackExternalRouteInstall`) are now declared runtime-internal in the
+  MobMachine schema and in meerkat-mob's typed runtime-internal
+  classifications (reason `RouteInstallObligationAuthority`), exactly like
+  their member-route analogs: only the actor drives them while realizing an
+  edge on the member's host. As public inputs without an executable parity
+  probe they failed the main-only mob runtime parity lane (the probe
+  inventory, pair report and audit writer tests), and the parity field
+  evaluator lacked `pending_external_route_installs`. The generated MobMachine
+  contract moves the four inputs to its Runtime-Internal Inputs section.
 - The ripgrep tombstone scans (`legacy-surface-gate`,
   `session-control-gate`, `deprecated-backend-gate`) now run in pull-request
   CI's always-on fmt-governance lane, after installing ripgrep, which the

@@ -76912,7 +76912,10 @@ fn mob_runtime_parity_field_value(
         // state with no runtime producer yet (hosts bind in phase 2, placement
         // lands in phase 3) — evaluated at the initial empty values, the
         // kickoff/adaptive machine-only precedent above.
-        "mob_hosts" | "pending_remote_turn_outcomes" | "pending_route_installs" => {
+        "mob_hosts"
+        | "pending_remote_turn_outcomes"
+        | "pending_route_installs"
+        | "pending_external_route_installs" => {
             Some(MobRuntimeParityExprValue::Set(BTreeSet::new()))
         }
         "confirmed_host_binding_revocations" => Some(MobRuntimeParityExprValue::Set(

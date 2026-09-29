@@ -4300,6 +4300,13 @@ runtime_internal_inputs!(
         AuthorizeRouteRemovalBeforeUnwire,
         ResolveRouteInstall,
         RollbackRouteInstall,
+        // Placed-member external edges reuse the route-install obligation
+        // shape; the actor alone drives them while realizing the edge on
+        // the member's host.
+        RecordExternalRouteInstall,
+        AuthorizeExternalRouteRemovalBeforeUnwire,
+        ResolveExternalRouteInstall,
+        RollbackExternalRouteInstall,
         RecordRemoteTurnObligation,
         AbortRemoteTurnObligation,
         CommitRemoteTurnOutcome,

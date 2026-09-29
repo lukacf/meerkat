@@ -697,6 +697,12 @@ impl RosterEntry {
     pub fn transport_public_key(&self) -> Option<&str> {
         self.transport_public_key.as_deref()
     }
+
+    /// The descriptor of the external peer this member is wired to under
+    /// `name` (its `ExternalPeerWired` projection), when one is wired.
+    pub fn external_peer_descriptor(&self, name: &str) -> Option<&TrustedPeerDescriptor> {
+        self.external_peer_specs.get(&AgentIdentity::from(name))
+    }
 }
 
 #[cfg(test)]

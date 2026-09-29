@@ -3927,12 +3927,50 @@ pub async fn create_controlling_mob_with_builder(
     create_controlling_mob_composed(label, None, None, |_| {}, mutate_builder).await
 }
 
+/// A controlling mob whose LOCAL members run turns on `local_llm_client`
+/// (for example a stalling client that parks a live local run).
+pub async fn create_controlling_mob_with_local_llm_client(
+    label: &str,
+    local_llm_client: Arc<dyn meerkat_client::LlmClient>,
+) -> ControllingMob {
+    create_controlling_mob_composed_with_client(
+        label,
+        None,
+        None,
+        |_| {},
+        |builder| builder,
+        local_llm_client,
+    )
+    .await
+}
+
 async fn create_controlling_mob_composed(
     label: &str,
     customizer: Option<Arc<dyn meerkat_mob::runtime::SpawnMemberCustomizer>>,
     member_live_host: Option<Arc<dyn meerkat_runtime::member_live::MemberLiveHost>>,
     mutate_definition: impl FnOnce(&mut meerkat_mob::MobDefinition),
     mutate_builder: impl FnOnce(meerkat_mob::MobBuilder) -> meerkat_mob::MobBuilder,
+) -> ControllingMob {
+    create_controlling_mob_composed_with_client(
+        label,
+        customizer,
+        member_live_host,
+        mutate_definition,
+        mutate_builder,
+        Arc::new(meerkat_client::TestClient::for_provider(
+            meerkat_core::Provider::Anthropic,
+        )),
+    )
+    .await
+}
+
+async fn create_controlling_mob_composed_with_client(
+    label: &str,
+    customizer: Option<Arc<dyn meerkat_mob::runtime::SpawnMemberCustomizer>>,
+    member_live_host: Option<Arc<dyn meerkat_runtime::member_live::MemberLiveHost>>,
+    mutate_definition: impl FnOnce(&mut meerkat_mob::MobDefinition),
+    mutate_builder: impl FnOnce(meerkat_mob::MobBuilder) -> meerkat_mob::MobBuilder,
+    local_llm_client: Arc<dyn meerkat_client::LlmClient>,
 ) -> ControllingMob {
     let temp = tempfile::tempdir().expect("controlling mob temp dir");
     let paths = ControllingMobPaths::new(temp.path());
@@ -3944,9 +3982,7 @@ async fn create_controlling_mob_composed(
     let service = persistent_service_with_client_in_realm(
         &paths,
         Arc::clone(&runtime_store),
-        Arc::new(meerkat_client::TestClient::for_provider(
-            meerkat_core::Provider::Anthropic,
-        )),
+        local_llm_client,
         workgraph_realm.as_str(),
     );
     let metadata: Arc<dyn meerkat_mob::store::MobRuntimeMetadataStore> =

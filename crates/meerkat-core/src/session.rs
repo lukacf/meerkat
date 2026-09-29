@@ -1898,6 +1898,7 @@ impl Session {
     /// Decode one current Session envelope without a full-byte pre-hash or a
     /// process-global memo lookup.
     pub fn from_persisted_bytes(serialized: &[u8]) -> Result<Self, serde_json::Error> {
+        crate::digest_observability::record_whole_blob_decode(serialized.len() as u64);
         serde_json::from_slice(serialized)
     }
 

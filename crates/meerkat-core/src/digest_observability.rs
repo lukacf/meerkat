@@ -89,6 +89,46 @@ pub fn rewrite_record_body_decodes_on_this_thread() -> u64 {
     REWRITE_RECORD_BODY_DECODES_ON_THREAD.with(std::cell::Cell::get)
 }
 
+static GLOBAL_WHOLE_BLOB_DECODES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static GLOBAL_WHOLE_BLOB_DECODE_BYTES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static GLOBAL_TRANSCRIPT_GRAPH_VALIDATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn record_whole_blob_decode(bytes: u64) {
+    GLOBAL_WHOLE_BLOB_DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    GLOBAL_WHOLE_BLOB_DECODE_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Full session-document decodes (`Session::from_persisted_bytes`, which
+/// every WholeBlob body read and snapshot commit goes through) performed by
+/// this process. Each one parses the whole document and validates and
+/// replays its rewrite graph.
+#[doc(hidden)]
+#[must_use]
+pub fn global_whole_blob_decodes() -> u64 {
+    GLOBAL_WHOLE_BLOB_DECODES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Serialized bytes of every full session-document decode.
+#[doc(hidden)]
+#[must_use]
+pub fn global_whole_blob_decode_bytes() -> u64 {
+    GLOBAL_WHOLE_BLOB_DECODE_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn record_transcript_graph_validation() {
+    GLOBAL_TRANSCRIPT_GRAPH_VALIDATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Full transcript rewrite-graph validations performed by this process.
+#[doc(hidden)]
+#[must_use]
+pub fn global_transcript_graph_validations() -> u64 {
+    GLOBAL_TRANSCRIPT_GRAPH_VALIDATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) const DIGEST_SITE_COUNT: usize = 6;
 pub(crate) const DIGEST_SITE_OTHER: usize = 0;
 pub(crate) const DIGEST_SITE_DECODE: usize = 1;

@@ -207,6 +207,11 @@ pub struct JobManager {
     projections: Arc<Mutex<HashMap<JobId, JobProjection>>>,
     active_attempts: Arc<Mutex<HashMap<JobId, ActiveAttempt>>>,
     canonical_job_ops: Arc<std::sync::Mutex<HashMap<JobId, OperationId>>>,
+    /// Durable, incarnation-bound custody for foreground shell processes.
+    /// Bound by the host only after earlier-incarnation custody for the same
+    /// scope has been settled.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    process_custody: std::sync::OnceLock<Arc<super::custody::ProcessCustody>>,
 }
 
 impl std::fmt::Debug for JobManager {
@@ -237,7 +242,29 @@ impl JobManager {
             projections: Arc::new(Mutex::new(HashMap::new())),
             active_attempts: Arc::new(Mutex::new(HashMap::new())),
             canonical_job_ops: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            process_custody: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Bind durable process custody for foreground shell calls.
+    ///
+    /// A [`super::ProcessCustody`] exists only after
+    /// [`super::ProcessCustody::recover_and_open`] settled every earlier
+    /// incarnation's record for its scope, so binding it is the admission
+    /// fence for this job manager's shell processes. Returns the rejected
+    /// handle when custody is already bound.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn bind_process_custody(
+        &self,
+        custody: Arc<super::custody::ProcessCustody>,
+    ) -> Result<(), Arc<super::custody::ProcessCustody>> {
+        self.process_custody.set(custody)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn process_custody(&self) -> Option<&Arc<super::custody::ProcessCustody>> {
+        self.process_custody.get()
     }
 
     pub(crate) fn with_owner_bridge_session_id(mut self, session_id: SessionId) -> Self {

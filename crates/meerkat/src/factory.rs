@@ -5364,7 +5364,61 @@ impl AgentFactory {
             );
         }
 
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.bind_shell_process_custody(&composite, session_id.as_deref())
+            .await?;
+
         Ok(Arc::new(composite))
+    }
+
+    /// Settle shell tool processes left running by an earlier host
+    /// incarnation for this session, then bind durable custody for this
+    /// incarnation's shell calls.
+    ///
+    /// Runs before the dispatcher (and therefore the agent) exists, so no new
+    /// work for the session is admitted until every earlier-incarnation shell
+    /// process group is proven stopped. Custody needs a realm runtime root;
+    /// without one the shell keeps its in-process containment only.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn bind_shell_process_custody(
+        &self,
+        composite: &CompositeDispatcher,
+        session_id: Option<&str>,
+    ) -> Result<(), CompositeDispatcherError> {
+        use meerkat_tools::builtin::shell::{
+            PROCESS_CUSTODY_DIR, ProcessCustody, ProcessCustodyScope,
+        };
+
+        let (Some(job_manager), Some(runtime_root), Some(session_id)) = (
+            composite.shell_job_manager(),
+            self.runtime_root.as_ref(),
+            session_id.and_then(|id| SessionId::parse(id).ok()),
+        ) else {
+            return Ok(());
+        };
+        let custody_failed = |message: String| CompositeDispatcherError::ToolInitFailed {
+            name: "shell".to_string(),
+            message,
+        };
+        let (custody, report) = ProcessCustody::recover_and_open(
+            &runtime_root.join(PROCESS_CUSTODY_DIR),
+            ProcessCustodyScope::session(&session_id),
+        )
+        .await
+        .map_err(|error| custody_failed(error.to_string()))?;
+        for recovered in &report.recovered {
+            tracing::warn!(
+                %session_id,
+                entry_id = %recovered.entry_id,
+                prior_incarnation = %recovered.prior_incarnation,
+                tool_call_id = ?recovered.tool_call_id,
+                cessation = ?recovered.cessation,
+                "settled a shell tool process left by a prior host incarnation"
+            );
+        }
+        job_manager
+            .bind_process_custody(custody)
+            .map_err(|_| custody_failed("shell process custody is already bound".to_string()))
     }
 
     /// Build a fully-configured, type-erased agent ready to run.
@@ -16156,6 +16210,72 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions")).project_root(&explicit_root);
 
         assert_eq!(factory.shell_project_root(), explicit_root);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn build_shell_dispatcher_with_custody_record(
+        runtime_root: Option<&std::path::Path>,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("workspace");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let session_id = SessionId::new();
+        let custody_root = runtime_root
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| temp.path().join("realm"));
+        let scope_dir = custody_root
+            .join(meerkat_tools::builtin::shell::PROCESS_CUSTODY_DIR)
+            .join(session_id.to_string());
+        std::fs::create_dir_all(&scope_dir).unwrap();
+        // A record no recovery can interpret: custody must fail closed.
+        std::fs::write(
+            scope_dir.join(format!("{}.json", uuid::Uuid::new_v4())),
+            b"{not a custody record",
+        )
+        .unwrap();
+        let mut factory =
+            AgentFactory::new(temp.path().join("sessions")).project_root(&project_root);
+        if let Some(root) = runtime_root {
+            factory = factory.runtime_root(root);
+        }
+        let mut shell = ShellConfig::with_project_root(project_root.clone());
+        shell.enabled = true;
+        factory
+            .build_builtin_dispatcher(
+                Arc::new(meerkat_tools::builtin::MemoryTaskStore::new()),
+                BuiltinToolConfig::default(),
+                Some(project_root),
+                Some(shell),
+                None,
+                Some(session_id.to_string()),
+                None,
+            )
+            .await
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn shell_dispatcher_build_runs_process_custody_recovery_first() {
+        let realm = tempfile::tempdir().unwrap();
+        let error = build_shell_dispatcher_with_custody_record(Some(realm.path()))
+            .await
+            .err()
+            .expect("an unrecoverable prior custody record must block the build");
+        assert!(
+            matches!(
+                &error,
+                CompositeDispatcherError::ToolInitFailed { name, .. } if name == "shell"
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn shell_dispatcher_without_runtime_root_keeps_in_process_containment() {
+        build_shell_dispatcher_with_custody_record(None)
+            .await
+            .expect("custody is bound only under a realm runtime root");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

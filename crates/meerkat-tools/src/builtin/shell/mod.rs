@@ -22,6 +22,8 @@
 //! - [`ShellToolSet`] - Bundle of all shell tools with shared job manager
 
 mod config;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod custody;
 mod job_cancel_tool;
 mod job_manager;
 mod job_status_tool;
@@ -36,6 +38,12 @@ mod tool_set;
 mod types;
 
 pub use config::{ShellConfig, ShellError};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use custody::{
+    PROCESS_CUSTODY_DIR, ProcessCustody, ProcessCustodyError, ProcessCustodyRecoveryReport,
+    ProcessCustodyScope, ProcessIdentity, ProcessStartStamp, RecoveredToolProcess,
+    ToolProcessCessation,
+};
 pub use job_cancel_tool::ShellJobCancelTool;
 pub use job_manager::{
     CancelJobDisposition, DurableShellJobRuntime, JobManager, MonitorStartOptions,

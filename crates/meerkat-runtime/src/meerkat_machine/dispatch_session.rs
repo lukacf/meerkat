@@ -1610,7 +1610,38 @@ impl MeerkatMachine {
         >,
         reason: String,
     ) -> Result<bool, RuntimeDriverError> {
+        self.dispatch_user_interrupt_with_stop(
+            session_id,
+            expected_run_id,
+            expected_member,
+            reason,
+            None,
+        )
+        .await
+    }
+
+    /// Exact-run interrupt dispatch. With `stop`, the run-fenced compare
+    /// stages `StopCurrentRunForRun` instead of `InterruptCurrentRunForRun`
+    /// and, under the same session mutation gate, registers a completion
+    /// waiter for every contributor already staged for the run. The stop
+    /// refuses later joins, so that set is exactly the stopped run's
+    /// contributors.
+    async fn dispatch_user_interrupt_with_stop(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: Option<&meerkat_core::RunId>,
+        expected_member: Option<
+            &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+        >,
+        reason: String,
+        mut stop: Option<&mut user_interrupt::RunStopCapture>,
+    ) -> Result<bool, RuntimeDriverError> {
         let run_fenced = expected_run_id.is_some();
+        if stop.is_some() && !run_fenced {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "a run stop requires an exact expected run".to_string(),
+            });
+        }
         let member_lease = match expected_member {
             Some(expected_member) => Some(
                 self.acquire_member_effect_authority_lease(session_id, Some(expected_member))
@@ -1670,6 +1701,9 @@ impl MeerkatMachine {
                 crate::meerkat_machine::dsl_authority::current_run_id_from_authority(&authority),
             )
         };
+        if let Some(capture) = stop.as_deref_mut() {
+            capture.current_run_id = current_run_id.clone();
+        }
         if let Some(expected_run_id) = expected_run_id {
             if !matches!(phase, RuntimeState::Running | RuntimeState::Retired)
                 || current_run_id.as_ref() != Some(expected_run_id)
@@ -1689,7 +1723,15 @@ impl MeerkatMachine {
         };
 
         let expected_member = expected_member.cloned();
-        let (captured_gate, captured_authority, attachment_id, provisional_claim_id, handle) = {
+        let (
+            captured_gate,
+            captured_authority,
+            attachment_id,
+            provisional_claim_id,
+            handle,
+            captured_driver,
+            captured_completions,
+        ) = {
             let sessions = self.sessions.read().await;
             let Some(entry) = sessions.get(session_id) else {
                 return Ok(false);
@@ -1703,8 +1745,58 @@ impl MeerkatMachine {
                 entry.live_attachment_id(),
                 entry.provisional_materialization_claim_id,
                 handle,
+                entry.driver.clone(),
+                entry.completions.clone(),
             )
         };
+
+        if let Some(capture) = stop.as_deref_mut() {
+            // Linearize the stop before joining any in-flight interrupt
+            // dispatch: from here the run admits no durable join, and its
+            // unretained joins and failed-attempt contributors terminalize.
+            if Self::stage_dsl_transition_on_authority(
+                &captured_authority,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StopCurrentRunForRun {
+                    run_id: crate::meerkat_machine::dsl::RunId::from_domain(&expected_run_id),
+                },
+                "StopCurrentRunForRun",
+            )
+            .is_err()
+            {
+                let state = self
+                    .existing_session_runtime_state(session_id)
+                    .await
+                    .unwrap_or(RuntimeState::Destroyed);
+                if state == RuntimeState::Destroyed {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+                return Err(RuntimeDriverError::NotReady { state });
+            }
+            capture.staged = true;
+            let driver_guard = captured_driver.lock().await;
+            let contributor_ids = driver_guard
+                .as_driver()
+                .active_input_ids()
+                .into_iter()
+                .filter(|input_id| {
+                    driver_guard
+                        .as_driver()
+                        .stored_input_state(input_id)
+                        .is_some_and(|stored| {
+                            stored.seed.phase == crate::input_state::InputLifecycleState::Staged
+                                && stored.seed.last_run_id.as_ref() == Some(&expected_run_id)
+                        })
+                })
+                .collect::<Vec<_>>();
+            let mut completions = captured_completions.lock().await;
+            capture.contributors = contributor_ids
+                .into_iter()
+                .map(|input_id| {
+                    let waiter = completions.register(input_id.clone());
+                    (input_id, waiter)
+                })
+                .collect();
+        }
 
         let joined_result = {
             let sessions = self.sessions.read().await;
@@ -1728,7 +1820,10 @@ impl MeerkatMachine {
             return Self::await_user_interrupt_dispatch(result_rx, &expected_run_id).await;
         }
 
-        let staged_interrupt = if run_fenced {
+        let staged_interrupt = if stop.is_some() {
+            // `StopCurrentRunForRun` above already carried the interrupt.
+            Ok(())
+        } else if run_fenced {
             Self::stage_dsl_transition_on_authority(
                 &captured_authority,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::InterruptCurrentRunForRun {
@@ -1736,16 +1831,20 @@ impl MeerkatMachine {
                 },
                 "InterruptCurrentRunForRun",
             )
+            .map(|_| ())
+            .map_err(|_| ())
         } else {
             self.stage_session_runtime_internal_dsl_transition(
                 session_id,
                 crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput::InterruptCurrentRun,
             )
             .await
+            .map(|_| ())
+            .map_err(|_| ())
         };
         match staged_interrupt {
-            Ok(_) => {}
-            Err(_) => {
+            Ok(()) => {}
+            Err(()) => {
                 // The generated machine rejected `InterruptCurrentRun` for the
                 // current phase. Surface the terminal `Destroyed` truth as its
                 // own typed variant (DestroyedShapeInvariant) so callers that

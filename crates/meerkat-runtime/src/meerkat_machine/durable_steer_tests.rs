@@ -49,6 +49,9 @@ enum RunnerStep {
     FailDiscardingImage,
     /// Cancel the run.
     Cancel,
+    /// Cancel the run after the owning service reports the image discarded,
+    /// as the persistent service does for a cancelled, uncommitted run.
+    CancelDiscardingImage,
 }
 
 struct RunnerScript {
@@ -78,6 +81,12 @@ struct RunnerScript {
     /// runner recording it (milliseconds). Zero by default; a test sets it to
     /// force the record to lag the input's Staged phase.
     append_record_lag_ms: AtomicU64,
+    /// The run currently inside `apply`, for the exact-run interrupt handle.
+    active_run: std::sync::Mutex<Option<RunId>>,
+    /// The runner step an accepted exact-run hard interrupt injects, or
+    /// `None` to acknowledge the interrupt without ending the run yet.
+    interrupt_step: std::sync::Mutex<Option<RunnerStep>>,
+    interrupts: AtomicUsize,
 }
 
 impl RunnerScript {
@@ -99,6 +108,9 @@ impl RunnerScript {
             prepare_hold_released: AtomicBool::new(false),
             prepare_hold_reached: AtomicBool::new(false),
             append_record_lag_ms: AtomicU64::new(0),
+            active_run: std::sync::Mutex::new(None),
+            interrupt_step: std::sync::Mutex::new(Some(RunnerStep::CancelDiscardingImage)),
+            interrupts: AtomicUsize::new(0),
         })
     }
 
@@ -180,6 +192,30 @@ impl CoreExecutorBoundaryHandle for DurableSteerBoundaryHandle {
     }
 }
 
+/// Exact-run hard interrupt: compares the run inside `apply` and, when it
+/// matches, ends it with the configured runner step.
+struct DurableSteerInterruptHandle {
+    script: Arc<RunnerScript>,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorInterruptHandle for DurableSteerInterruptHandle {
+    async fn hard_cancel_run_if_current(
+        &self,
+        expected_run_id: &RunId,
+        _reason: String,
+    ) -> Result<bool, CoreExecutorError> {
+        if self.script.active_run.lock().unwrap().as_ref() != Some(expected_run_id) {
+            return Ok(false);
+        }
+        self.script.interrupts.fetch_add(1, Ordering::SeqCst);
+        if let Some(step) = *self.script.interrupt_step.lock().unwrap() {
+            self.script.step(step);
+        }
+        Ok(true)
+    }
+}
+
 struct DurableSteerExecutor {
     turn_state: Arc<dyn TurnStateHandle>,
     state: meerkat_core::TransientTurnContextStateHandle,
@@ -227,6 +263,14 @@ impl CoreExecutor for DurableSteerExecutor {
         }))
     }
 
+    fn interrupt_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>> {
+        Some(Arc::new(DurableSteerInterruptHandle {
+            script: Arc::clone(&self.script),
+        }))
+    }
+
     async fn apply(
         &mut self,
         run_id: RunId,
@@ -251,6 +295,7 @@ impl CoreExecutor for DurableSteerExecutor {
         self.turn_state
             .primitive_applied(run_id.clone())
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))?;
+        *self.script.active_run.lock().unwrap() = Some(run_id.clone());
         self.script.apply_started.notify_one();
         let mut steps = self.script.steps.lock().await;
         let outcome = loop {
@@ -292,7 +337,8 @@ impl CoreExecutor for DurableSteerExecutor {
                 RunnerStep::Finish
                 | RunnerStep::FailKeepingImage
                 | RunnerStep::FailDiscardingImage
-                | RunnerStep::Cancel => {}
+                | RunnerStep::Cancel
+                | RunnerStep::CancelDiscardingImage => {}
             }
             if !matches!(
                 step,
@@ -300,6 +346,7 @@ impl CoreExecutor for DurableSteerExecutor {
                     | RunnerStep::FailKeepingImage
                     | RunnerStep::FailDiscardingImage
                     | RunnerStep::Cancel
+                    | RunnerStep::CancelDiscardingImage
             ) {
                 self.script.steps_done.fetch_add(1, Ordering::SeqCst);
                 continue;
@@ -330,6 +377,10 @@ impl CoreExecutor for DurableSteerExecutor {
                     ));
                 }
                 RunnerStep::Cancel => break Err(CoreExecutorError::Cancelled),
+                RunnerStep::CancelDiscardingImage => {
+                    self.state.discard_uncommitted_durable_deliveries(&run_id);
+                    break Err(CoreExecutorError::Cancelled);
+                }
                 RunnerStep::BoundaryThenToolCalls
                 | RunnerStep::BoundaryThenStream
                 | RunnerStep::OpenNextBoundary
@@ -339,6 +390,7 @@ impl CoreExecutor for DurableSteerExecutor {
             }
         };
         drop(steps);
+        *self.script.active_run.lock().unwrap() = None;
         // The agent loop's run guard closes the run before `apply` returns.
         drop(run_guard);
         outcome
@@ -1402,4 +1454,407 @@ async fn boundary_discard_write_failure_emits_no_source_event() {
     connection
         .execute_batch("DROP TRIGGER fail_discard_requeue;")
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Run-fenced Stop (`MeerkatMachine::stop_run`)
+// ---------------------------------------------------------------------------
+
+fn cancelled_terminal() -> Option<crate::input_state::InputTerminalOutcome> {
+    Some(crate::input_state::InputTerminalOutcome::Abandoned {
+        reason: crate::input_state::InputAbandonReason::Cancelled,
+    })
+}
+
+fn queued_prompt(text: &str) -> Input {
+    Input::Prompt(crate::input::PromptInput::new(text, None))
+}
+
+fn stopped_contributors(
+    receipt: crate::run_stop::RunStopReceipt,
+    expected_run: &RunId,
+) -> Vec<crate::run_stop::RunStopContributor> {
+    match receipt {
+        crate::run_stop::RunStopReceipt::Stopped {
+            run_id,
+            contributors,
+        } => {
+            assert_eq!(&run_id, expected_run);
+            contributors
+        }
+        other => panic!("expected a Stopped receipt, got {other:?}"),
+    }
+}
+
+/// A stop that never returns is a failure, not a hang.
+async fn stop_bounded(
+    rig: &DurableSteerRig,
+    run_id: &RunId,
+    reason: &str,
+) -> Result<crate::run_stop::RunStopReceipt, RuntimeDriverError> {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        rig.adapter.stop_run(&rig.session_id, run_id, reason),
+    )
+    .await
+    .expect("stop_run returns once every contributor is terminal")
+}
+
+fn current_run(rig: &DurableSteerRig) -> RunId {
+    rig.script
+        .active_run
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a run is inside apply")
+}
+
+/// The reported sequence: A starts R, durable steer S joins R and is applied
+/// into R's image, the host stops R, and the owning service discards the
+/// cancelled image. S must be terminal with R, never requeued into a
+/// successor provider request.
+async fn stop_run_terminalizes_a_discarded_durable_join(
+    rig: &DurableSteerRig,
+) -> (InputId, InputId) {
+    let batch = rig.start_busy_turn().await;
+    let run_id = current_run(rig);
+    let steer = typed_steer("steer joins R", ConversationAppendRole::User);
+    let steer_id = steer.id().clone();
+    rig.admit(steer).await;
+    rig.wait_for_waiting_delivery().await;
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    rig.wait_for_phase(&steer_id, InputLifecycleState::Staged)
+        .await;
+    rig.wait_for_applied_durable(1).await;
+
+    let receipt = stop_bounded(&rig, &run_id, "host stopped the selected run")
+        .await
+        .expect("stop the selected run");
+    let contributors = stopped_contributors(receipt, &run_id);
+    let mut ids = contributors
+        .iter()
+        .map(|contributor| contributor.input_id.clone())
+        .collect::<Vec<_>>();
+    ids.sort_by_key(ToString::to_string);
+    let mut expected = vec![batch.clone(), steer_id.clone()];
+    expected.sort_by_key(ToString::to_string);
+    assert_eq!(ids, expected, "the receipt names exactly R's contributors");
+    for contributor in &contributors {
+        assert_eq!(
+            contributor.terminal,
+            cancelled_terminal(),
+            "{contributor:?} terminalizes as cancelled with the stopped run"
+        );
+    }
+    assert_eq!(
+        rig.phase(&steer_id).await,
+        Some(InputLifecycleState::Abandoned)
+    );
+    assert_eq!(
+        rig.phase(&batch).await,
+        Some(InputLifecycleState::Abandoned)
+    );
+    assert!(
+        rig.script.discarded.lock().unwrap().is_empty(),
+        "a stopped run's join is cancelled, not requeued as discarded"
+    );
+    assert_eq!(rig.script.interrupts.load(Ordering::SeqCst), 1);
+    (batch, steer_id)
+}
+
+#[tokio::test]
+async fn stop_run_terminalizes_a_discarded_durable_join_without_a_successor() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let (_batch, steer_id) = stop_run_terminalizes_a_discarded_durable_join(&rig).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        rig.script.apply_calls.load(Ordering::SeqCst),
+        1,
+        "no successor provider request after the stop"
+    );
+    assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
+    assert!(rig.steer_queue().await.is_empty());
+    assert!(rig.queue().await.is_empty());
+}
+
+#[tokio::test]
+async fn persistent_stop_run_terminalizes_a_discarded_durable_join_without_a_successor() {
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let rig = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let runtime_id = MeerkatMachine::logical_runtime_id(&rig.session_id);
+    let (batch, steer_id) = stop_run_terminalizes_a_discarded_durable_join(&rig).await;
+    for input_id in [&batch, &steer_id] {
+        let row = store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .expect("load stopped row")
+            .expect("stopped row persisted");
+        assert_eq!(row.seed.phase, InputLifecycleState::Abandoned);
+        assert_eq!(row.seed.terminal_outcome, cancelled_terminal());
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
+}
+
+/// Unrelated queued input B is not a contributor of the stopped run: it keeps
+/// its place and runs next, alone. A late Stop(R) then touches neither B nor
+/// the newer run.
+#[tokio::test]
+async fn stop_run_preserves_unrelated_queued_input_and_a_late_stop_is_harmless() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let batch = rig.start_busy_turn().await;
+    let stopped_run = current_run(&rig);
+    let steer = typed_steer("joins R", ConversationAppendRole::SystemNotice);
+    let steer_id = steer.id().clone();
+    rig.admit(steer).await;
+    rig.wait_for_waiting_delivery().await;
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    rig.wait_for_phase(&steer_id, InputLifecycleState::Staged)
+        .await;
+    rig.wait_for_applied_durable(1).await;
+    let unrelated = queued_prompt("unrelated queued work B");
+    let unrelated_id = unrelated.id().clone();
+    let unrelated_completion = rig.admit(unrelated).await.expect("B completion handle");
+    assert_eq!(
+        rig.phase(&unrelated_id).await,
+        Some(InputLifecycleState::Queued)
+    );
+
+    let contributors = stopped_contributors(
+        stop_bounded(&rig, &stopped_run, "stop R")
+            .await
+            .expect("stop R"),
+        &stopped_run,
+    );
+    assert!(
+        contributors
+            .iter()
+            .all(|contributor| contributor.input_id != unrelated_id),
+        "B is not a contributor of R"
+    );
+    assert!(
+        contributors
+            .iter()
+            .any(|contributor| contributor.input_id == batch)
+    );
+
+    // B runs next, alone.
+    rig.wait_for_apply_calls(2).await;
+    let newer_run = current_run(&rig);
+    assert_ne!(newer_run, stopped_run);
+    assert_eq!(rig.script.primitives()[1], vec![unrelated_id.clone()]);
+
+    // A late Stop(R) is a no-op for B and the newer run.
+    let late = stop_bounded(&rig, &stopped_run, "late stop R")
+        .await
+        .expect("late stop");
+    match late {
+        crate::run_stop::RunStopReceipt::NotCurrent {
+            run_id,
+            current_run_id,
+        } => {
+            assert_eq!(run_id, stopped_run);
+            assert_eq!(current_run_id, Some(newer_run.clone()));
+        }
+        other => panic!("late stop must be NotCurrent, got {other:?}"),
+    }
+    assert_eq!(
+        rig.script.interrupts.load(Ordering::SeqCst),
+        1,
+        "the late stop never interrupts the newer run"
+    );
+    rig.script.step(RunnerStep::Finish);
+    let outcome = tokio::time::timeout(Duration::from_secs(5), unrelated_completion.wait())
+        .await
+        .expect("B resolves")
+        .expect("B completion");
+    assert!(
+        !matches!(
+            outcome,
+            crate::completion::CompletionOutcome::Cancelled
+                | crate::completion::CompletionOutcome::RuntimeTerminated { .. }
+        ),
+        "{outcome:?}"
+    );
+    rig.wait_for_phase(&unrelated_id, InputLifecycleState::Consumed)
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
+}
+
+/// The stop is linearized before a racing steer reaches its boundary: the
+/// generated join refuses the stopped run, so S is never R's contributor. It
+/// stays ordinary queued work and runs exactly once after R.
+#[tokio::test]
+async fn steer_that_reaches_its_boundary_after_the_stop_never_joins_the_stopped_run() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let batch = rig.start_busy_turn().await;
+    let stopped_run = current_run(&rig);
+    // Hold the run open after the interrupt so the boundary can race it.
+    *rig.script.interrupt_step.lock().unwrap() = None;
+    let steer = typed_steer("races the stop", ConversationAppendRole::SystemNotice);
+    let steer_id = steer.id().clone();
+    rig.admit(steer).await;
+    rig.wait_for_waiting_delivery().await;
+
+    let adapter = Arc::clone(&rig.adapter);
+    let session_id = rig.session_id.clone();
+    let run_for_stop = stopped_run.clone();
+    let stop = tokio::spawn(async move {
+        adapter
+            .stop_run(&session_id, &run_for_stop, "stop before the join")
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while rig.script.interrupts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("stop dispatched its interrupt");
+
+    // The runner reaches the boundary after the stop: the join is refused.
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        rig.phase(&steer_id).await,
+        Some(InputLifecycleState::Queued),
+        "a stopped run admits no durable join"
+    );
+    assert!(rig.script.applied_durable().is_empty());
+
+    rig.script.step(RunnerStep::CancelDiscardingImage);
+    let contributors = stopped_contributors(
+        tokio::time::timeout(Duration::from_secs(5), stop)
+            .await
+            .expect("stop returns")
+            .expect("stop task")
+            .expect("stop"),
+        &stopped_run,
+    );
+    assert_eq!(
+        contributors
+            .iter()
+            .map(|contributor| contributor.input_id.clone())
+            .collect::<Vec<_>>(),
+        vec![batch]
+    );
+
+    rig.wait_for_apply_calls(2).await;
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_phase(&steer_id, InputLifecycleState::Consumed)
+        .await;
+    assert_eq!(
+        contributions(&rig.script.primitives(), &steer_id),
+        1,
+        "the unjoined steer is ordinary follow-up work, delivered exactly once"
+    );
+}
+
+/// Stop racing the join boundary itself: whichever the generated machine
+/// linearizes first decides, and S is either a terminal contributor of R or
+/// ordinary follow-up work delivered once, never both and never lost.
+#[tokio::test]
+async fn stop_racing_the_join_boundary_never_both_cancels_and_redelivers_the_steer() {
+    for _ in 0..8 {
+        let rig = DurableSteerRig::ephemeral().await;
+        rig.start_busy_turn().await;
+        let stopped_run = current_run(&rig);
+        *rig.script.interrupt_step.lock().unwrap() = None;
+        let steer = typed_steer("race", ConversationAppendRole::SystemNotice);
+        let steer_id = steer.id().clone();
+        rig.admit(steer).await;
+        rig.wait_for_waiting_delivery().await;
+
+        let adapter = Arc::clone(&rig.adapter);
+        let session_id = rig.session_id.clone();
+        let run_for_stop = stopped_run.clone();
+        let stop = tokio::spawn(async move {
+            adapter
+                .stop_run(&session_id, &run_for_stop, "racing stop")
+                .await
+        });
+        rig.script.step(RunnerStep::BoundaryThenToolCalls);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while rig.script.interrupts.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stop dispatched its interrupt");
+        rig.script.step(RunnerStep::CancelDiscardingImage);
+        let contributors = stopped_contributors(
+            tokio::time::timeout(Duration::from_secs(5), stop)
+                .await
+                .expect("stop returns")
+                .expect("stop task")
+                .expect("stop"),
+            &stopped_run,
+        );
+        let joined = contributors
+            .iter()
+            .find(|contributor| contributor.input_id == steer_id);
+        if let Some(joined) = joined {
+            assert_eq!(joined.terminal, cancelled_terminal());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(rig.script.apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(contributions(&rig.script.primitives(), &steer_id), 0);
+        } else {
+            rig.wait_for_apply_calls(2).await;
+            rig.script.step(RunnerStep::Finish);
+            rig.wait_for_phase(&steer_id, InputLifecycleState::Consumed)
+                .await;
+            assert_eq!(contributions(&rig.script.primitives(), &steer_id), 1);
+        }
+    }
+}
+
+/// A retryable failure racing the stop never replays the stopped batch: the
+/// generated staged-rollback resolution terminalizes it as cancelled.
+#[tokio::test]
+async fn stop_run_never_replays_the_batch_when_the_stopped_run_fails() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let batch = rig.start_busy_turn().await;
+    let stopped_run = current_run(&rig);
+    *rig.script.interrupt_step.lock().unwrap() = Some(RunnerStep::FailKeepingImage);
+    let contributors = stopped_contributors(
+        stop_bounded(&rig, &stopped_run, "stop R")
+            .await
+            .expect("stop R"),
+        &stopped_run,
+    );
+    assert_eq!(contributors.len(), 1);
+    assert_eq!(contributors[0].input_id, batch);
+    assert_eq!(contributors[0].terminal, cancelled_terminal());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        rig.script.apply_calls.load(Ordering::SeqCst),
+        1,
+        "the failed stopped run is not retried"
+    );
+}
+
+#[tokio::test]
+async fn stop_run_of_an_unknown_run_is_not_current() {
+    let rig = DurableSteerRig::ephemeral().await;
+    rig.start_busy_turn().await;
+    let current = current_run(&rig);
+    let unknown = RunId::new();
+    match stop_bounded(&rig, &unknown, "stale")
+        .await
+        .expect("stale stop")
+    {
+        crate::run_stop::RunStopReceipt::NotCurrent {
+            run_id,
+            current_run_id,
+        } => {
+            assert_eq!(run_id, unknown);
+            assert_eq!(current_run_id, Some(current));
+        }
+        other => panic!("expected NotCurrent, got {other:?}"),
+    }
+    assert_eq!(rig.script.interrupts.load(Ordering::SeqCst), 0);
 }

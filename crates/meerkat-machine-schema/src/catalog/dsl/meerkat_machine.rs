@@ -3781,6 +3781,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_live_boundary_delivery: Map<String, Enum<LiveBoundaryDelivery>>,
             input_live_boundary_join_run: Map<String, RunId>,
             input_live_boundary_join_phase: Map<String, Enum<LiveBoundaryJoinPhase>>,
+            // Run-fenced Stop intent. `StopCurrentRunForRun` records the exact
+            // current run it stops; from then on that run admits no durable
+            // join, every non-retained join it already holds terminalizes as
+            // `Cancelled` instead of re-entering its lane, and a failed
+            // attempt never replays its staged contributors. The value is only
+            // meaningful while it names the run being resolved: establishing a
+            // different run clears it, and every guard compares it with an
+            // exact run id, so a stale value can never touch a newer run.
+            run_stop_requested: Option<RunId>,
             recovered_admitted_lanes: Map<String, Enum<InputLane>>,
 
             // --- Ops lifecycle substate ---
@@ -4426,6 +4435,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             input_live_boundary_delivery = EmptyMap,
             input_live_boundary_join_run = EmptyMap,
             input_live_boundary_join_phase = EmptyMap,
+            run_stop_requested = None,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
@@ -4897,6 +4907,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             NotifyDrainExited { reason: Enum<DrainExitReason> },
             InterruptCurrentRun,
             InterruptCurrentRunForRun { run_id: RunId },
+            // Run-fenced Stop: interrupt the exact current run and terminalize
+            // every contributor bound to it instead of requeueing any of them.
+            StopCurrentRunForRun { run_id: RunId },
             ResolveUserInterruptPublicResult {
                 observation: Enum<UserInterruptObservationKind>,
                 target_present: bool,
@@ -12909,6 +12922,35 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit RequestCancellationAtBoundary
         }
 
+        // Run-fenced Stop. Same exact-run fence and interrupt effects as
+        // `InterruptCurrentRunForRun`, plus the durable intent that the run
+        // ends with every contributor terminal: no further durable join, no
+        // requeue of an unretained join, no replay of the staged batch. The
+        // stop is linearized here, under the session mutation gate, so a Steer
+        // racing it is either already an R contributor or never becomes one.
+        transition StopCurrentRunForRunRunning {
+            on input StopCurrentRunForRun { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
+            update {
+                self.run_stop_requested = Some(run_id);
+            }
+            to Running
+            emit WakeInterrupt
+            emit RequestCancellationAtBoundary
+        }
+        transition StopCurrentRunForRunRetired {
+            on input StopCurrentRunForRun { run_id }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
+            update {
+                self.run_stop_requested = Some(run_id);
+            }
+            to Retired
+            emit WakeInterrupt
+            emit RequestCancellationAtBoundary
+        }
+
         // ResolveUserInterruptPublicResult: generated public-result authority
         // for session interrupt surfaces. Runtime/surfaces provide typed
         // observations (accepted, noop state, destroyed/missing, or
@@ -18663,6 +18705,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.pre_run_phase = Some(PreRunPhase::Idle);
                 self.turn_terminal_run_id = None;
                 self.runtime_completion_result_run_id = None;
@@ -18681,6 +18726,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.pre_run_phase = Some(PreRunPhase::Idle);
                 self.turn_terminal_run_id = None;
             }
@@ -18697,6 +18745,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_terminal_run_id = None;
                 self.runtime_completion_result_run_id = None;
@@ -18715,6 +18766,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_terminal_run_id = None;
             }
@@ -18732,6 +18786,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.pre_run_phase = Some(PreRunPhase::Retired);
                 self.turn_terminal_run_id = None;
                 self.runtime_completion_result_run_id = None;
@@ -18749,6 +18806,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.pre_run_phase = Some(PreRunPhase::Retired);
                 self.turn_terminal_run_id = None;
             }
@@ -18774,6 +18834,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(primitive_kind);
@@ -18820,6 +18883,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(primitive_kind);
@@ -18866,6 +18932,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(primitive_kind);
@@ -18916,6 +18985,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(primitive_kind);
                 self.admitted_content_shape = Some(admitted_content_shape);
@@ -18957,6 +19029,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
@@ -18998,6 +19073,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
@@ -19043,6 +19121,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.current_run_id = Some(run_id);
+                if self.run_stop_requested != Some(run_id) {
+                    self.run_stop_requested = None;
+                }
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
                 self.admitted_content_shape = Some(ContentShape::ImmediateAppend);
@@ -21999,6 +22080,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_recovery_lanes.contains_key(input_id)
                 && self.input_recovery_lanes.get(input_id).get("value") == lane
             }
+            guard "run_not_stopped" {
+                self.run_stop_requested == None
+                || self.input_run_associations.get_cloned(input_id) != self.run_stop_requested
+            }
             guard "stage_attempts_remaining" {
                 self.input_attempt_counts.get(input_id).get("value") < self.max_stage_attempts
             }
@@ -22030,6 +22115,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_recovery_lanes.contains_key(input_id)
                 && self.input_recovery_lanes.get(input_id).get("value") == lane
             }
+            guard "run_not_stopped" {
+                self.run_stop_requested == None
+                || self.input_run_associations.get_cloned(input_id) != self.run_stop_requested
+            }
             guard "stage_attempts_exhausted" {
                 self.input_attempt_counts.get(input_id).get("value") >= self.max_stage_attempts
             }
@@ -22039,6 +22128,52 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_recovery_lanes.remove(input_id);
                 self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
                 self.input_abandon_reason.insert(input_id, InputAbandonReason::MaxAttemptsExhausted);
+                self.input_abandon_attempt_count.insert(
+                    input_id,
+                    self.input_attempt_counts.get(input_id).get("value")
+                );
+                self.input_superseded_by.remove(input_id);
+                self.input_aggregate_id.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
+                self.input_live_boundary_join_run.remove(input_id);
+                self.input_live_boundary_join_phase.remove(input_id);
+            }
+            to Idle
+            emit RecordTerminalOutcome
+        }
+
+        // A staged contributor of a run stopped by `StopCurrentRunForRun` is
+        // never replayed: whatever the failure, the stopped run's batch
+        // terminalizes as `Cancelled` instead of re-entering its lane, so a
+        // retryable failure racing the stop cannot start a successor. Its run
+        // attribution is kept as the terminal witness.
+        transition ResolveStagedRollbackRunStopped {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveStagedRollback { input_id, lane }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_not_live_boundary_joined" {
+                !self.input_live_boundary_join_run.contains_key(input_id)
+            }
+            guard "input_staged" {
+                self.input_phases.get(input_id).get("value") == InputPhase::Staged
+            }
+            guard "attempt_count_tracked" {
+                self.input_attempt_counts.contains_key(input_id)
+            }
+            guard "recovery_lane_matches" {
+                self.input_recovery_lanes.contains_key(input_id)
+                && self.input_recovery_lanes.get(input_id).get("value") == lane
+            }
+            guard "run_stopped" {
+                self.run_stop_requested != None
+                && self.input_run_associations.get_cloned(input_id) == self.run_stop_requested
+            }
+            update {
+                self.input_phases.insert(input_id, InputPhase::Abandoned);
+                self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
+                self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
+                self.input_abandon_reason.insert(input_id, InputAbandonReason::Cancelled);
                 self.input_abandon_attempt_count.insert(
                     input_id,
                     self.input_attempt_counts.get(input_id).get("value")
@@ -22283,6 +22418,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "current_run_matches" { self.current_run_id == Some(run_id) }
             guard "turn_at_model_boundary" { self.turn_phase == TurnPhase::CallingLlm }
             guard "no_cancel_after_boundary" { self.cancel_after_boundary == false }
+            guard "run_not_stopped" { self.run_stop_requested != Some(run_id) }
             guard "run_owned_by_runtime_loop" {
                 exists(owner_input_id in self.input_run_associations.keys(),
                     self.input_run_associations.get_cloned(owner_input_id) == Some(run_id)
@@ -22336,6 +22472,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.input_run_associations.get_cloned(input_id) == Some(run_id)
             }
             guard "recovery_lane_matches" { self.input_recovery_lanes.get_cloned(input_id) == Some(lane) }
+            guard "run_not_stopped" { self.run_stop_requested != Some(run_id) }
             guard "not_applied" { observation == LiveBoundaryJoinObservation::NotApplied }
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
@@ -22368,6 +22505,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.input_run_associations.get_cloned(input_id) == Some(run_id)
             }
             guard "recovery_lane_matches" { self.input_recovery_lanes.get_cloned(input_id) == Some(lane) }
+            guard "run_not_stopped" { self.run_stop_requested != Some(run_id) }
             guard "applied_then_discarded" { observation == LiveBoundaryJoinObservation::AppliedDiscarded }
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
@@ -22400,6 +22538,49 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit InputLifecycleNotice
+        }
+
+        // The run was stopped by `StopCurrentRunForRun`: an append that is not
+        // in the surviving image is a contributor of the stopped run, not
+        // follow-up work, so it terminalizes as `Cancelled` with the run and
+        // never starts a successor. Its run attribution is kept as the
+        // terminal witness. A retained append is still consumed with the run
+        // (the arm above), because its record is in the image the run keeps.
+        transition ResolveLiveBoundaryDurableAppendJoinRunStopped {
+            per_phase [Running]
+            on input ResolveLiveBoundaryDurableAppendJoin { run_id, input_id, lane, observation }
+            guard "current_run_matches" { self.current_run_id == Some(run_id) }
+            guard "joined_to_run" { self.input_live_boundary_join_run.get_cloned(input_id) == Some(run_id) }
+            guard "join_published" {
+                self.input_live_boundary_join_phase.get_cloned(input_id)
+                    == Some(LiveBoundaryJoinPhase::Published)
+            }
+            guard "input_staged_for_run" {
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Staged)
+                && self.input_run_associations.get_cloned(input_id) == Some(run_id)
+            }
+            guard "recovery_lane_matches" { self.input_recovery_lanes.get_cloned(input_id) == Some(lane) }
+            guard "run_stopped" { self.run_stop_requested == Some(run_id) }
+            guard "not_retained" { observation != LiveBoundaryJoinObservation::AppliedRetained }
+            guard "attempt_count_tracked" { self.input_attempt_counts.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, InputPhase::Abandoned);
+                self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
+                self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
+                self.input_abandon_reason.insert(input_id, InputAbandonReason::Cancelled);
+                self.input_abandon_attempt_count.insert(
+                    input_id,
+                    self.input_attempt_counts.get(input_id).get("value")
+                );
+                self.input_superseded_by.remove(input_id);
+                self.input_aggregate_id.remove(input_id);
+                self.input_live_boundary_delivery.remove(input_id);
+                self.input_live_boundary_join_run.remove(input_id);
+                self.input_live_boundary_join_phase.remove(input_id);
+            }
+            to Running
+            emit RecordTerminalOutcome
         }
 
         // ConsumeOnAccept: direct Accepted → Consumed (skip queue)

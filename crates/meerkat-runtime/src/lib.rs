@@ -98,6 +98,7 @@ pub mod protocol_supervisor_trust_publish;
 pub mod protocol_supervisor_trust_revoke;
 pub mod recovery;
 pub(crate) mod run_progress;
+pub mod run_stop;
 pub mod runtime_event;
 pub(crate) mod runtime_loop;
 pub mod runtime_state;
@@ -618,6 +619,7 @@ pub use ops_lifecycle::{
     OpsLifecycleConfig, OpsLifecyclePersistenceRequest, PersistedOpsSnapshot,
     RuntimeOpsLifecycleRegistry,
 };
+pub use run_stop::{RunStopContributor, RunStopReceipt};
 
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 #[doc(hidden)]

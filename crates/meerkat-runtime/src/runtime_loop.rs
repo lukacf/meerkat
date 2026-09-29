@@ -5873,6 +5873,57 @@ async fn consume_retained_live_boundary_joins_without_commit(
     Ok(())
 }
 
+/// Reason carried by the runtime-terminal completion of a durable join that
+/// a run-fenced Stop terminalized instead of requeueing.
+const STOPPED_RUN_JOIN_REASON: &str = "durable steer cancelled with its stopped run";
+
+/// A run stopped by `StopCurrentRunForRun` never hands an unretained durable
+/// join to a successor: the generated `RunStopped` arm terminalizes each one as
+/// `Cancelled` before the run's own terminal realization, with the same
+/// runless terminal carrier an exact queued-input cancellation commits, and its
+/// waiter resolves before the run terminal publishes.
+async fn cancel_stopped_live_boundary_joins(
+    driver: &crate::meerkat_machine::SharedDriver,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    run_id: &RunId,
+    stopped: &[InputId],
+) -> Result<(), crate::RuntimeDriverError> {
+    for input_id in stopped {
+        {
+            let mut driver = driver.lock().await;
+            let prepared = driver.prepare_runless_runtime_terminated_interaction_outboxes(
+                std::slice::from_ref(input_id),
+                STOPPED_RUN_JOIN_REASON.to_string(),
+            )?;
+            if prepared.candidate_owner_input_id().is_some() {
+                driver.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                return Err(crate::RuntimeDriverError::Internal(format!(
+                    "stopped durable live-boundary input {input_id} carries a directed interaction terminal"
+                )));
+            }
+            if let Err(error) = driver
+                .machine_realize_stopped_live_boundary_join_cancelled(run_id, input_id)
+                .await
+            {
+                driver.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                return Err(error);
+            }
+            let _ = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+        }
+        crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
+            driver,
+            completions,
+            None,
+            std::slice::from_ref(input_id),
+            None,
+            STOPPED_RUN_JOIN_REASON,
+            None,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn process_queue(
     driver: &crate::meerkat_machine::SharedDriver,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
@@ -6688,6 +6739,42 @@ async fn process_queue(
                                     .await;
                             }
                         };
+                        if let Err(error) = cancel_stopped_live_boundary_joins(
+                            driver,
+                            completions,
+                            &run_id,
+                            &join_resolution.stopped,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                %run_id,
+                                %error,
+                                "failed closed cancelling durable live-boundary joins of a stopped run before its commit"
+                            );
+                            if let Some(completions) = completions.as_ref() {
+                                let mut completions = completions.lock().await;
+                                fail_completion_waiters(
+                                    &mut completions,
+                                    &input_ids,
+                                    format!(
+                                        "runtime stopped-run durable join cancellation failed: {error}"
+                                    ),
+                                );
+                            }
+                            drop(terminal_authority_guard);
+                            return stop_runtime_loop_executor_from_dsl_effect(
+                                driver,
+                                completions,
+                                executor,
+                                format!(
+                                    "runtime stopped-run durable join cancellation failed for run {run_id}: {error}"
+                                ),
+                                handoff,
+                                turn_finalization_guard,
+                            )
+                            .await;
+                        }
                         receipt
                             .contributing_input_ids
                             .extend(join_resolution.retained.iter().cloned());
@@ -7225,6 +7312,32 @@ async fn process_queue(
                                 executor,
                                 format!(
                                     "runtime retained durable live-boundary consumption failed for run {run_id}: {error}"
+                                ),
+                                handoff,
+                                turn_finalization_guard,
+                            )
+                            .await;
+                        }
+                        if let Err(error) = cancel_stopped_live_boundary_joins(
+                            driver,
+                            completions,
+                            &run_id,
+                            &join_resolution.stopped,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                %run_id,
+                                %error,
+                                "failed closed cancelling durable live-boundary joins of a stopped run"
+                            );
+                            drop(terminal_authority_guard);
+                            return stop_runtime_loop_executor_from_dsl_effect(
+                                driver,
+                                completions,
+                                executor,
+                                format!(
+                                    "runtime stopped-run durable join cancellation failed for run {run_id}: {error}"
                                 ),
                                 handoff,
                                 turn_finalization_guard,

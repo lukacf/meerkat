@@ -813,6 +813,35 @@ its own boundary slot, so a request-only steer still lands in the running turn
 under the same rules as before. Durable steers are delivered one per boundary;
 a second durable steer admitted while the first waits takes the follow-up turn.
 
+### Stopping one run
+
+`MeerkatMachine::stop_run(session_id, expected_run_id, reason)` stops exactly
+one run and every input already bound to it. The exact-input
+`cancel_input_if_present` and the exact-run `hard_cancel_run_if_current` only
+interrupt the run, so a durable steer that joined it still follows the rules
+above and can take a follow-up turn.
+
+- Under the session mutation gate, the machine compares its current run with
+  `expected_run_id` and records the stop (`StopCurrentRunForRun`). It then
+  dispatches the exact-run hard interrupt.
+- From that point the run admits no durable join. A steer that reaches its
+  boundary later is not a contributor of the stopped run. It stays queued and
+  runs afterwards like any other queued input.
+- At the run terminal, a joined durable steer whose append is not in the
+  surviving image is abandoned as `Cancelled` instead of returning to its lane.
+  A retained append is consumed with the run. A failed attempt never replays
+  its staged batch.
+- The call returns `RunStopReceipt::Stopped { run_id, contributors }` once
+  every contributor staged at the stop has reached its canonical terminal. Each
+  entry carries the delivered completion and the committed input terminal.
+- A stop whose run is no longer current returns
+  `RunStopReceipt::NotCurrent { run_id, current_run_id }` and touches nothing.
+  Queued input and newer runs are never interrupted.
+
+The stop intent lives in machine state and is not recovered after a crash. A
+process that dies mid-stop recovers the run's staged inputs like any other
+interrupted run.
+
 ## See also
 
 - [Architecture](/reference/architecture)

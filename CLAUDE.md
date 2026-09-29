@@ -350,7 +350,9 @@ GitHub-hosted runners and sized to a 25-minute push-to-terminal budget:
   missing base, or global build configuration escalate to the workspace).
 - `fmt-governance` (always): fmt, docs-check, semver self-test, version
   parity, lock consistency, `make ci-lanes-selftest`,
-  `make path-classifier-selftest`.
+  `make path-classifier-selftest`, and the ripgrep tombstone scans
+  (`legacy-surface-gate`, `session-control-gate`, `deprecated-backend-gate`;
+  ripgrep is installed first, and each scan refuses to run without it).
 - `ratchets`: generated-contract freshness when contract paths changed;
   `machine-check-drift`/`protocol-check-drift` when machine authority changed;
   `verify-machine-poster-coverage` when machine authority or a poster input

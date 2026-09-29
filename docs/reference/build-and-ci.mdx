@@ -215,7 +215,7 @@ the release tag carry the rest):
 | Lane | `pull_request` | `push: main` | nightly | release tag |
 | --- | --- | --- | --- | --- |
 | `changes`: classify the diff with `scripts/ci-cargo-lanes.mjs` | yes | yes | - | - |
-| `fmt-governance`: fmt, docs, semver self-test, version parity, lock consistency, release config, lane and path classifier self-tests | yes | yes | - | - |
+| `fmt-governance`: fmt, docs, semver self-test, version parity, lock consistency, release config, lane and path classifier self-tests, ripgrep tombstone scans (legacy surface, session-control routes, deprecated backend) | yes | yes | - | - |
 | `ratchets`: schema/SDK/RPC/REST freshness when contract paths changed; machine and protocol drift when machine authority changed; machine poster coverage and freshness when machine authority or a poster input (`scripts/machine-posters-changed`) changed | yes | yes | - | - |
 | `clippy` per shard of every changed package: `--no-deps --all-targets --all-features -D warnings` | yes | yes | whole workspace (`make lint`) | Bazel clippy lanes |
 | `unit` per shard: `nextest --lib --bins --profile ci-pr` for changed packages outside the meerkat-mob compile chain | yes | - | `make test-unit` | Bazel unit lanes |

@@ -12,6 +12,13 @@ ALLOWLIST_FILE="$ROOT_DIR/scripts/m0_legacy_surface_allowlist.txt"
 OUTPUT_FILE="$ROOT_DIR/artifacts/m0_legacy_surface_inventory.txt"
 FAIL_ON_BLOCKED=true
 
+# Every scan below ends in `rg ... || true`, so a missing rg would read as
+# "no matches". Refuse instead of reporting a false green.
+if ! command -v rg >/dev/null 2>&1; then
+  echo "legacy surface scan requires ripgrep (rg); refusing a false-green scan" >&2
+  exit 2
+fi
+
 for arg in "$@"; do
   case "$arg" in
     --no-fail)

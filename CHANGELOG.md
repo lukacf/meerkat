@@ -747,6 +747,14 @@ them.
 
 ### Fixed
 
+- The ripgrep tombstone scans (`legacy-surface-gate`,
+  `session-control-gate`, `deprecated-backend-gate`) now run in pull-request
+  CI's always-on fmt-governance lane, after installing ripgrep, which the
+  hosted image does not ship. They previously ran only in `make ci` and the
+  uncalled `cargo.yml`, which let a retired route reach the release branch.
+  The legacy surface scan also passed without ripgrep (its searches end in
+  `|| true`, so a missing rg read as no matches); it now exits 2 like the
+  other two.
 - `MODULE.bazel.lock` recorded a stale hash for `crates/meerkat-runtime/Cargo.toml`
   after its self dev-dependency gained `live`; it is refreshed. The
   session-control and legacy-surface tombstone scans listed ten crates

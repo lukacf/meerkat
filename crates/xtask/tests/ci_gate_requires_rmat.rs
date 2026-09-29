@@ -100,6 +100,19 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         !ci.contains("github.actor"),
         "CI must not route by actor: one lane for everyone"
     );
+    // The ripgrep tombstone scans run on every pull request, with ripgrep
+    // installed first: each scan refuses to run without it.
+    for gate in [
+        "make legacy-surface-gate",
+        "make session-control-gate",
+        "make deprecated-backend-gate",
+    ] {
+        assert!(ci.contains(gate), "PR CI must run `{gate}`");
+    }
+    assert!(
+        ci.contains("sudo apt-get install -y ripgrep") && ci.contains("rg --version"),
+        "PR CI installs ripgrep and proves it is on PATH before the tombstone scans"
+    );
     assert!(ci.contains("name: Enforce push-to-terminal budget"));
     assert!(
         ci.contains("CI_MAX_SECONDS: \"1500\""),

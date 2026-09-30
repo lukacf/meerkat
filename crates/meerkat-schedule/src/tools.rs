@@ -1009,7 +1009,7 @@ fn calendar_field_schema(description: &'static str) -> Value {
 
 fn target_binding_schema() -> Value {
     json!({
-        "description": "Where the schedule delivers. Uses target_kind to select session, identity, or mob. Session targets: exact_session (deliver to a known session_id; fails if session is gone), resumable_session (deliver to a session_id that may be idle; runtime resumes it -- best for stable long-lived sessions), materialize_on_demand_session (create a new session on first fire using a \"create\" spec, then reuse it -- use when no session exists yet). Identity targets: resumable_identity (deliver to the current materialized session for a stable agent identity; host resolves at fire time). The identity string must be a form a schedule host on this surface can resolve, such as the mob-member form minted by the host; free-form strings are refused at create. Mob-member identity targets accept only prompt actions without session-only overrides (no system_prompt, skill_refs, or additional_instructions). Mob targets: member, flow, spawn_helper, fork_helper (deliver to a mob member or flow). Examples: schedule for yourself {\"target_kind\":\"session\",\"type\":\"current_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Check in\"}} | mob member {\"target_kind\":\"identity\",\"type\":\"resumable_identity\",\"identity\":\"mob_member:{\\\"schema\\\":\\\"meerkat.schedule.mob_member_identity.v2\\\",\\\"mob_id\\\":\\\"ops\\\",\\\"member\\\":\\\"watcher\\\"}\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Check in\"}} | {\"target_kind\":\"session\",\"type\":\"materialize_on_demand_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Run report\"},\"create\":{\"model\":\"claude-sonnet-4-6\"}}.",
+        "description": "Where the schedule delivers. Uses target_kind to select session, identity, mob, or host_runnable. Host-runnable targets invoke an already registered host runnable by its published name, with optional opaque JSON params. The host owns runnable availability and execution; this target does not create a runnable or grant permission. Session targets: exact_session (deliver to a known session_id; fails if session is gone), resumable_session (deliver to a session_id that may be idle; runtime resumes it -- best for stable long-lived sessions), materialize_on_demand_session (create a new session on first fire using a \"create\" spec, then reuse it -- use when no session exists yet). Identity targets: resumable_identity (deliver to the current materialized session for a stable agent identity; host resolves at fire time). The identity string must be a form a schedule host on this surface can resolve, such as the mob-member form minted by the host; free-form strings are refused at create. Mob-member identity targets accept only prompt actions without session-only overrides (no system_prompt, skill_refs, or additional_instructions). Mob targets: member, flow, spawn_helper, fork_helper (deliver to a mob member or flow). Examples: schedule for yourself {\"target_kind\":\"session\",\"type\":\"current_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Check in\"}} | mob member {\"target_kind\":\"identity\",\"type\":\"resumable_identity\",\"identity\":\"mob_member:{\\\"schema\\\":\\\"meerkat.schedule.mob_member_identity.v2\\\",\\\"mob_id\\\":\\\"ops\\\",\\\"member\\\":\\\"watcher\\\"}\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Check in\"}} | {\"target_kind\":\"session\",\"type\":\"materialize_on_demand_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Run report\"},\"create\":{\"model\":\"claude-sonnet-4-6\"}}.",
         "oneOf": [
             {
                 "type": "object",
@@ -1078,6 +1078,22 @@ fn target_binding_schema() -> Value {
                     "options": helper_options_schema()
                 },
                 "required": ["target_kind", "type", "mob_id"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "target_kind": { "const": "host_runnable" },
+                    "runnable": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Published name of a host-registered runnable; empty or whitespace-only names are invalid."
+                    },
+                    "params": {
+                        "description": "Optional opaque JSON payload passed to the runnable. Omit when no payload is needed."
+                    }
+                },
+                "required": ["target_kind", "runnable"],
                 "additionalProperties": false
             }
         ]
@@ -1661,6 +1677,127 @@ mod tests {
             variants[2]["properties"]["type"]["const"],
             json!("calendar")
         );
+    }
+
+    #[test]
+    fn host_runnable_target_is_advertised_by_create_update_and_session_wrapper() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let native = Arc::new(ScheduleToolDispatcher::new(service));
+        let scoped = CurrentSessionScheduleToolDispatcher::new(native.clone(), SessionId::new());
+        for tools in [native.tools(), scoped.tools()] {
+            for name in ["meerkat_schedule_create", "meerkat_schedule_update"] {
+                let tool = tools
+                    .iter()
+                    .find(|tool| tool.name == name)
+                    .expect("schedule tool");
+                let variants = tool.input_schema["properties"]["target"]["oneOf"]
+                    .as_array()
+                    .expect("target variants");
+                let host = variants
+                    .iter()
+                    .find(|variant| {
+                        variant["properties"]["target_kind"]["const"] == "host_runnable"
+                    })
+                    .expect("existing host target must be discoverable without another tool");
+                assert_eq!(host["required"], json!(["target_kind", "runnable"]));
+                assert_eq!(host["properties"]["runnable"]["type"], "string");
+                assert!(host["properties"].get("params").is_some());
+                assert!(
+                    host["properties"]["params"].get("type").is_none(),
+                    "host params must not be narrowed to object values"
+                );
+                assert_eq!(host["additionalProperties"], false);
+                for existing in ["session", "identity", "mob"] {
+                    assert!(variants.iter().any(|variant| {
+                        variant["properties"]["target_kind"]["const"] == existing
+                    }));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn host_runnable_target_round_trips_through_create_update_dispatch() -> Result<(), String>
+    {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let dispatcher = ScheduleToolDispatcher::new(service.clone());
+        for params in [
+            None,
+            Some(json!({"nested": [1, true]})),
+            Some(json!(["a", 3])),
+            Some(json!(7)),
+        ] {
+            let mut target =
+                json!({"target_kind": "host_runnable", "runnable": "published-report"});
+            if let Some(params) = params {
+                target["params"] = params;
+            }
+            let mut request =
+                serde_json::to_value(schedule_request()).map_err(|e| e.to_string())?;
+            request["target"] = target.clone();
+            let raw = RawValue::from_string(request.to_string()).map_err(|e| e.to_string())?;
+            let created = dispatcher
+                .dispatch(tool_call(
+                    "host-create",
+                    "meerkat_schedule_create",
+                    raw.as_ref(),
+                ))
+                .await
+                .map_err(|e| format!("{e:?}"))?;
+            let created: Value =
+                serde_json::from_str(&created.result.text_content()).map_err(|e| e.to_string())?;
+            assert_eq!(created["target"], target);
+            let schedule_id = created["schedule_id"]
+                .as_str()
+                .ok_or("missing schedule id")?;
+            target["runnable"] = json!("published-updated-report");
+            let raw = RawValue::from_string(
+                json!({"schedule_id": schedule_id, "target": target}).to_string(),
+            )
+            .map_err(|e| e.to_string())?;
+            let updated = dispatcher
+                .dispatch(tool_call(
+                    "host-update",
+                    "meerkat_schedule_update",
+                    raw.as_ref(),
+                ))
+                .await
+                .map_err(|e| format!("{e:?}"))?;
+            let updated: Value =
+                serde_json::from_str(&updated.result.text_content()).map_err(|e| e.to_string())?;
+            assert_eq!(updated["target"], target);
+            let stored = handle_schedule_tools_call(
+                &service,
+                "meerkat_schedule_get",
+                &json!({"schedule_id": schedule_id}),
+            )
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+            assert_eq!(stored["target"], target);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn host_runnable_target_still_refuses_missing_or_blank_names() {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        for target in [
+            json!({"target_kind": "host_runnable"}),
+            json!({"target_kind": "host_runnable", "runnable": ""}),
+            json!({"target_kind": "host_runnable", "runnable": "   "}),
+        ] {
+            let mut request = serde_json::to_value(schedule_request()).expect("valid request");
+            request["target"] = target;
+            assert!(
+                handle_schedule_tools_call(&service, "meerkat_schedule_create", &request)
+                    .await
+                    .is_err()
+            );
+        }
+        let listed = handle_schedule_tools_call(&service, "meerkat_schedule_list", &json!({}))
+            .await
+            .expect("list");
+        assert_eq!(listed["schedules"], json!([]));
     }
 
     /// Tool visibility is decided per tool name, so `meerkat_schedule_update`

@@ -49,46 +49,46 @@
     {
       "name": "history",
       "file": "historical-vault-query.wav",
-      "voice": "macos-say-samantha",
-      "text": "What was my historical vault phrase from the earlier text conversation? If that history is not available yet, say I don't know yet. Don't guess and don't ask a delegate.",
-      "sha256": "89049889ce23dbc26d78a94d4cb7daed633cf029752830a4ccd81f5683ded73e",
-      "duration_ms": 9464,
+      "voice": "alloy",
+      "text": "What was my historical vault phrase from the earlier text conversation? If that history is not available yet, say I don't know yet. Don't guess; answer from what you already know.",
+      "sha256": "9282d597da306c29d2a3dce44f789d143a6860c99277e46c9154e5619c60dd6e",
+      "duration_ms": 11252,
       "sample_rate_hz": 24000,
-      "trailing_silence_ms": 32,
-      "notes": "Historical fixture (macOS say, Samantha, 155 wpm; PCM16 mono 24 kHz, Apple FLLR filler chunk). Not re-mintable; voice inferred from the FLLR chunk and the documented `history` fixture. Offers an honest-unknown escape (S99 pre-acknowledgement question)."
+      "trailing_silence_ms": 1580,
+      "notes": "S99 pre-acknowledgement question; offers an honest-unknown escape. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor. The text states its constraint positively and never names a delegate: the earlier wording (\"do not ask a delegate\", \"do not delegate\") primed delegation, and the provider replayed a split \" delegate.\" fragment as its own user row (S99 attempt-1 miss, BuildBuddy 2026-09-30)."
     },
     {
       "name": "recall_history",
       "file": "recall-vault-phrase.wav",
       "voice": "alloy",
-      "text": "Now tell me my historical vault phrase from the earlier text conversation. Say the exact phrase, word for word. Do not guess and do not ask a delegate.",
-      "sha256": "f561d81ad77b0f863aadf8ffd8025e4c3dd97680a4b41537ebf21edacf8770df",
-      "duration_ms": 9850,
+      "text": "Now tell me my historical vault phrase from the earlier text conversation. Say the exact phrase, word for word, from what you already know. Do not guess.",
+      "sha256": "9c03a1801b71a8066ac8436eb6f37230fe56fc74aaa645e59570e3e482bd4920",
+      "duration_ms": 11318,
       "sample_rate_hz": 24000,
-      "trailing_silence_ms": 81,
-      "notes": "OpenAI gpt-4o-mini-tts, alloy (commit 2ad85adc7), minted before the manifest existed: no trailing-silence floor. Used after the summary is acknowledged; unlike `history` it offers no honest-unknown escape."
+      "trailing_silence_ms": 1548,
+      "notes": "S99 question after the summary is acknowledged; unlike `history` it offers no honest-unknown escape. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor. The text states its constraint positively and never names a delegate: the earlier wording (\"do not ask a delegate\", \"do not delegate\") primed delegation, and the provider replayed a split \" delegate.\" fragment as its own user row (S99 attempt-1 miss, BuildBuddy 2026-09-30)."
     },
     {
       "name": "correction",
       "file": "correct-code-word.wav",
-      "voice": "macos-say-samantha",
-      "text": "Correction: the current code word is Cobalt, replacing every older code word. Please acknowledge Cobalt briefly. Do not delegate.",
-      "sha256": "ce2b76ebe019e100fa3e3912bc7732cb106bec9e6da3f06a83a1e06d7a466769",
-      "duration_ms": 8022,
+      "voice": "alloy",
+      "text": "Correction: the current code word is Cobalt, replacing every older code word. Please just acknowledge Cobalt briefly.",
+      "sha256": "aaf3fe8e5d803ad821f4c297511391873e35f2094e5769ad87cc7a0569b752de",
+      "duration_ms": 8544,
       "sample_rate_hz": 24000,
-      "trailing_silence_ms": 30,
-      "notes": "Historical fixture (macOS say, Samantha, 155 wpm; PCM16 mono 24 kHz, Apple FLLR filler chunk). Not re-mintable; voice inferred from the FLLR chunk and the documented `history` fixture."
+      "trailing_silence_ms": 1592,
+      "notes": "S99 spoken correction (Cobalt replaces every older code word). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor. The text states its constraint positively and never names a delegate: the earlier wording (\"do not ask a delegate\", \"do not delegate\") primed delegation, and the provider replayed a split \" delegate.\" fragment as its own user row (S99 attempt-1 miss, BuildBuddy 2026-09-30)."
     },
     {
       "name": "current",
       "file": "current-context-query.wav",
-      "voice": "macos-say-samantha",
-      "text": "What are the current code word and my current favorite flower, according to the newest updates? Say both briefly, without delegating.",
-      "sha256": "2174633114cbed8f2193272b47857f83654bbd36b2803156904f593a801d96f2",
-      "duration_ms": 7467,
+      "voice": "alloy",
+      "text": "What are the current code word and my current favorite flower, according to the newest updates? Say both briefly, from what you already know.",
+      "sha256": "67a59de0ad1324a1c054b46b33297e74f06675a51b0230916f903d395261837d",
+      "duration_ms": 9913,
       "sample_rate_hz": 24000,
-      "trailing_silence_ms": 31,
-      "notes": "Historical fixture (macOS say, Samantha, 155 wpm; PCM16 mono 24 kHz, Apple FLLR filler chunk). Not re-mintable; voice inferred from the FLLR chunk and the documented `history` fixture."
+      "trailing_silence_ms": 1632,
+      "notes": "S99 current-facts question (Cobalt and Marigold). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor. The text states its constraint positively and never names a delegate: the earlier wording (\"do not ask a delegate\", \"do not delegate\") primed delegation, and the provider replayed a split \" delegate.\" fragment as its own user row (S99 attempt-1 miss, BuildBuddy 2026-09-30)."
     },
     {
       "name": "standup_notes",

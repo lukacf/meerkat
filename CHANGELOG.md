@@ -906,7 +906,10 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   assistant's own speech and runtime work output do not. Replayed rows the
   call already heard are framed as such (sent bare, the model answered each
   replayed turn again), and replayed runtime work output as background work
-  the model has not seen. A superseded typed row is delivered in one append
+  the model has not seen. The superseded-row framing states that only the
+  values later speech changed are replaced and everything else in the row
+  still holds (the model had dropped an unchanged typed fact as stale). A
+  superseded typed row is delivered in one append
   together with the heard speech that superseded it; those speech rows still
   replay on their own afterwards, so the model sees them twice by design.
 - The ripgrep tombstone scans (`legacy-surface-gate`,

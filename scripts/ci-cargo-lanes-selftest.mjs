@@ -352,6 +352,60 @@ for (const path of [
   assert.deepEqual(plan.main_unit_shards, [], "a CHANGELOG-only merge yields no main unit lanes");
 }
 
+// Feature-gated unit suites: the default-feature unit lanes cannot run a
+// test behind a non-default feature, so every Rust-relevant push to main
+// carries every suite as an extra main unit row, and a pull request carries
+// the suites of a changed package that runs its unit tests there.
+{
+  const featureFlags = /^-p (\S+) --features [a-z0-9-]+(,[a-z0-9-]+)*$/;
+  const facade = planFor(["crates/meerkat/src/experimental_gpt_live.rs"]);
+  assert.ok(facade.main_feature_unit_shards.length >= 2, "main carries the feature suites");
+  for (const suite of facade.main_feature_unit_shards) {
+    const match = featureFlags.exec(suite.package_flags);
+    assert.ok(match, `feature suite ${suite.name} flags: ${suite.package_flags}`);
+    assert.deepEqual(suite.packages, [match[1]], `${suite.name} runs exactly its package`);
+    assert.ok(suite.packages[0] in facade.package_model, `${suite.name} names a workspace package`);
+  }
+  const names = facade.main_feature_unit_shards.map((suite) => suite.name);
+  assert.equal(new Set(names).size, names.length, "feature suite names are unique (they name matrix rows and artifacts)");
+  assert.ok(
+    facade.main_feature_unit_shards.some((suite) => suite.packages[0] === "meerkat" && suite.features.includes("openai-live")),
+    "the facade's public GPT Live suite is on main",
+  );
+  // The facade runs its unit tests in the pull request, so its suites do too.
+  assert.deepEqual(
+    facade.unit_feature_shards.map((suite) => suite.packages[0]).filter((name) => name !== "meerkat"),
+    [],
+    "only the changed package's suites join the pull request",
+  );
+  assert.ok(facade.unit_feature_shards.some((suite) => suite.features.includes("openai-live")), "the facade touch runs its GPT Live suite in the pull request");
+  for (const suite of facade.unit_feature_shards) {
+    assert.ok(suite.estimated_minutes <= facade.pr_unit_budget_minutes, `${suite.name} fits the pull-request budget`);
+  }
+  const github = run(["--format", "github", "--", "crates/meerkat/src/experimental_gpt_live.rs"]);
+  assert.equal(github.status, 0, github.stderr);
+  const lines = Object.fromEntries(github.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  const unitRows = JSON.parse(lines.unit_shard_matrix).include;
+  const mainRows = JSON.parse(lines.main_unit_shard_matrix).include;
+  assert.equal(Number(lines.unit_shard_count), unitRows.length);
+  assert.equal(Number(lines.main_unit_shard_count), mainRows.length);
+  assert.equal(unitRows.length, facade.unit_shards.length + facade.unit_feature_shards.length);
+  assert.equal(mainRows.length, facade.main_unit_shards.length + facade.main_feature_unit_shards.length);
+  for (const suite of facade.main_feature_unit_shards) {
+    assert.ok(mainRows.some((row) => row.name === suite.name && row.packages === suite.package_flags), `main matrix row for ${suite.name}`);
+  }
+
+  // A heavy-chain package defers its suites with its unit tests.
+  const mob = planFor(["crates/meerkat-mob/src/lib.rs"]);
+  assert.deepEqual(mob.unit_feature_shards, [], "no pull-request feature suite may compile meerkat-mob");
+  assert.ok(mob.main_feature_unit_shards.some((suite) => suite.packages[0] === "meerkat-mob"), "mob's suite runs on main");
+  // An unrelated leaf change carries no pull-request suite; docs carry none anywhere.
+  assert.deepEqual(planFor(["crates/meerkat-sqlite/src/lib.rs"]).unit_feature_shards, []);
+  const docs = planFor(["docs/index.mdx"]);
+  assert.deepEqual(docs.unit_feature_shards, []);
+  assert.deepEqual(docs.main_feature_unit_shards, []);
+}
+
 // Bazel graph check selection: Bazel-relevant paths, any Cargo manifest, and
 // moved or deleted Rust files select it; documentation does not.
 {

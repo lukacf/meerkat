@@ -7300,16 +7300,27 @@ impl Session {
         }
         for message in &mut replacement {
             match message {
-                Message::User(user) => user.identity.realtime_origin = None,
+                Message::User(user) => {
+                    user.identity.realtime_origin = None;
+                    // Turn-input authorship is stamped at admission from the
+                    // turn's work attribution; a caller cannot author it.
+                    if provenance == RewriteReplacementProvenance::CallerAuthored {
+                        user.identity.turn_input = None;
+                    }
+                }
                 Message::BlockAssistant(assistant) => {
                     assistant.identity.realtime_origin = None;
                     match provenance {
                         // A caller-authored row is new content, not the
                         // occurrence that streamed: the replaced id stays
                         // readable only in the parent revision and is never
-                        // re-attached here.
+                        // re-attached here. Its turn-input authorship is
+                        // session-owned provenance like the realtime origin,
+                        // so a caller rewrite cannot claim runtime-authored
+                        // input either.
                         RewriteReplacementProvenance::CallerAuthored => {
                             assistant.assistant_message_id = None;
+                            assistant.identity.turn_input = None;
                         }
                         // A row core read from this session's retained
                         // history is the committed occurrence itself.
@@ -8625,6 +8636,36 @@ mod tests {
         crate::types::TurnUsage::host_declared(crate::Provider::Other, "session-test", usage)
     }
 
+    /// Turn-input authorship is session-owned provenance stamped at
+    /// admission: a caller-authored rewrite that claims runtime-authored
+    /// input on its replacement rows commits them with the claim cleared.
+    #[test]
+    fn caller_rewrite_clears_runtime_authored_turn_input() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("before".to_string())));
+        let mut user = UserMessage::text("rewritten request".to_string());
+        user.identity.turn_input = Some(crate::types::TranscriptTurnInput::RuntimeAuthored);
+        let mut assistant = BlockAssistantMessage::snapshot(vec![AssistantBlock::Text {
+            text: "rewritten reply".to_string(),
+            meta: None,
+        }]);
+        assistant.identity.turn_input = Some(crate::types::TranscriptTurnInput::RuntimeAuthored);
+        session.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(user), Message::BlockAssistant(assistant)],
+            TranscriptRewriteReason::new("unit-test"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+        let messages = session.messages();
+        assert!(matches!(&messages[0], Message::User(user)
+            if user.text_content() == "rewritten request" && user.identity.turn_input.is_none()));
+        assert!(matches!(&messages[1], Message::BlockAssistant(assistant)
+            if assistant.identity.turn_input.is_none()));
+        Ok(())
+    }
+
     #[test]
     fn audited_history_install_accepts_exact_live_revision_without_row_lineage()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9700,6 +9741,7 @@ mod tests {
                     interaction_id: None,
                     run_id: Some(crate::lifecycle::RunId::new()),
                     objective_id: None,
+                    turn_input: None,
                 },
                 created_at: base_time,
                 assistant_message_id: None,
@@ -9717,6 +9759,7 @@ mod tests {
                         interaction_id: None,
                         run_id: Some(crate::lifecycle::RunId::new()),
                         objective_id: None,
+                        turn_input: None,
                     };
                     assistant.created_at = base_time + chrono::Duration::hours(2);
                 }

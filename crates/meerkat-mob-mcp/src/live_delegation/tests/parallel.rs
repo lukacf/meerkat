@@ -26,12 +26,14 @@ impl Drop for Workspace {
 /// holds the committed spoken requests of every delegation on the channel,
 /// so `user_text` of one fork can name another delegation's request. The
 /// fork's own task is always the last user message; tests that must tell
-/// two forks apart read `task_text`.
+/// two forks apart read `task_text`. `conversational_text` holds only the
+/// conversational user rows (human input), not injected execution context.
 #[derive(Debug, Clone)]
 struct ObservedCall {
     index: usize,
     user_text: String,
     task_text: String,
+    conversational_text: String,
 }
 
 struct ScriptedClient {
@@ -114,6 +116,17 @@ impl meerkat_client::LlmClient for ScriptedClient {
             .collect::<Vec<_>>();
         let task_text = user_messages.last().cloned().unwrap_or_default();
         let user_text = user_messages.join("\n");
+        let conversational_text = request
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::User(user) if user.transcript_role.is_conversational() => {
+                    Some(user.text_content())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         let response = futures::stream::once(async move {
             let index = self.calls.fetch_add(1, Ordering::SeqCst);
             let mut call = InFlightCall {
@@ -125,6 +138,7 @@ impl meerkat_client::LlmClient for ScriptedClient {
                 index,
                 user_text,
                 task_text,
+                conversational_text,
             });
             self.gate(index)
                 .acquire()
@@ -169,6 +183,7 @@ struct Fixture {
     binding: LiveDelegationRuntimeBinding,
     provider_binding: ProviderWebrtcBinding,
     workgraph: Option<meerkat::WorkGraphService>,
+    service: Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
 }
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -238,6 +253,7 @@ async fn fixture_with_policy(
         Arc::new(meerkat_store::MemoryBlobStore::new()),
     ));
     let runtime = service.runtime_adapter().expect("runtime");
+    let session_service = service.clone();
     let mobs = Arc::new(
         crate::MobMcpState::new(service.clone(), meerkat_mob::MobControlPrincipal::Owner)
             .with_workgraph_service(host_workgraph.clone()),
@@ -306,6 +322,7 @@ async fn fixture_with_policy(
         binding,
         provider_binding,
         workgraph,
+        service: session_service,
     }
 }
 
@@ -1009,7 +1026,7 @@ async fn channel_close_cancels_only_queued_work_and_running_forks_merge_into_the
     fx.assert_nothing_cancelled();
 
     // Running forks finish after the close; each result merges into the
-    // source member as ordinary internal work instead of being dropped.
+    // source member as injected execution context instead of being dropped.
     for index in 0..4 {
         fx.client.release(index);
     }
@@ -1401,7 +1418,31 @@ async fn machine_close_before_the_transport_sweep_merges_a_pending_result_once()
         "{}",
         merge.user_text
     );
+    // Runtime-authored: the merge is injected execution context, never a
+    // conversational user row a reopened live channel would voice.
+    assert!(
+        !merge
+            .conversational_text
+            .contains("finished after the voice call ended"),
+        "{}",
+        merge.conversational_text
+    );
     fx.client.release(merge.index);
+    // The member's committed reply carries the turn's runtime authorship on
+    // its identity, which a live channel's mirror reads as runtime work.
+    wait_until(WAIT, || async {
+        fx.service
+            .export_realtime_refresh_session_snapshot(&fx.session_id)
+            .await
+            .is_ok_and(|session| {
+                session.messages().iter().any(|message| {
+                    matches!(message, meerkat_core::Message::BlockAssistant(reply)
+                        if reply.identity.turn_input
+                            == Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored))
+                })
+            })
+    })
+    .await;
 
     // The transport sweep runs after the task merged: nothing merges twice.
     fx.coordinator

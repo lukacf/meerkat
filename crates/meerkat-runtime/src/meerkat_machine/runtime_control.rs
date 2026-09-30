@@ -857,8 +857,9 @@ mod live_context_mirror_tests {
             6,
             "one canonical turn per source input"
         );
+        let session = Arc::new(session);
         let committed =
-            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(session.clone())
                 .expect("committed session");
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -905,6 +906,21 @@ mod live_context_mirror_tests {
             assert_eq!(records[0].1, "frozen historical prefix");
             assert!(records[1].1.contains("new typed correction"));
             assert!(!records[1].1.contains("old source"));
+            // The superseded typed row carries the speech that superseded
+            // it, after it, in one append.
+            let typed_at = records[1]
+                .1
+                .find("new typed correction")
+                .expect("typed row");
+            let heading_at = records[1]
+                .1
+                .find(crate::live_execution::LIVE_SUPERSEDING_SPEECH_HEADING)
+                .expect("superseding heading");
+            let spoken_at = records[1]
+                .1
+                .find("spoken correction while history is pending")
+                .expect("superseding speech rides with the typed row");
+            assert!(typed_at < heading_at && heading_at < spoken_at);
             assert!(
                 records[2]
                     .1
@@ -916,11 +932,15 @@ mod live_context_mirror_tests {
             assert!(records[4].1.contains("unmeasured companion"));
             assert!(records[4].1.contains("spoken_unmeasured"));
         }
+        // The typed correction waited behind the summary while the channel
+        // heard the newer spoken correction: voicing it now would make it
+        // the newest fact, so the generated edge sends it quietly, framed as
+        // a late typed row rather than as heard speech.
         assert_eq!(
             *host.append_kinds.lock().expect("append kinds"),
             [
                 crate::live_execution::LiveContextAppendKind::HistoryBootstrap,
-                crate::live_execution::LiveContextAppendKind::Ordinary,
+                crate::live_execution::LiveContextAppendKind::SupersededTypedRow,
                 crate::live_execution::LiveContextAppendKind::CausalReassertion,
                 crate::live_execution::LiveContextAppendKind::CausalReassertion,
                 crate::live_execution::LiveContextAppendKind::CausalReassertion,
@@ -933,6 +953,194 @@ mod live_context_mirror_tests {
                 .expect("state")
                 .live_context_cursor_by_channel[channel_id.as_str()],
             6
+        );
+        // A typed row committed after the drain, with nothing newer heard on
+        // the channel, is conversational input the provider has not heard:
+        // it stays voiced.
+        let mut session = (*session).clone();
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("fresh typed follow-up"),
+        ));
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("committed follow-up");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &committed, "store-tail")
+            .await
+            .expect("queue follow-up");
+        machine
+            .wait_live_context_ready_for_results(&session_id, &channel_id)
+            .await
+            .expect("follow-up delivered");
+        assert_eq!(
+            host.append_kinds.lock().expect("append kinds").last(),
+            Some(&crate::live_execution::LiveContextAppendKind::Ordinary)
+        );
+        assert!(
+            host.appends
+                .lock()
+                .expect("records")
+                .last()
+                .is_some_and(|record| record.1.contains("fresh typed follow-up"))
+        );
+    }
+
+    /// What the channel heard after a typed row that waits behind the late
+    /// summary.
+    enum HeardAfterTyped {
+        /// Only the assistant's own observed speech.
+        AssistantOnly,
+        /// The user said something aloud (any topic).
+        UserSpeech,
+    }
+
+    /// Drive one typed row (canonical row 2) behind a late summary that is
+    /// still being delivered, followed by one row the channel heard live
+    /// (row 3), and return the append kinds in delivery order.
+    async fn typed_row_append_kinds_after(
+        heard: HeardAfterTyped,
+    ) -> Vec<(crate::live_execution::LiveContextAppendKind, String)> {
+        let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        let lease = machine
+            .begin_live_context_preparation(&session_id, &channel_id, 1)
+            .await
+            .expect("reserve");
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("generate");
+        let barrier = Arc::new(MirrorAppendBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let host = Arc::new(RecordingMirrorHost {
+            runtime: Some(machine.clone()),
+            bootstrap_barrier: Some(barrier.clone()),
+            ..Default::default()
+        });
+        let delivery = tokio::spawn({
+            let machine = machine.clone();
+            let lease = lease.clone();
+            async move {
+                machine
+                    .deliver_live_context_preparation(&lease, "frozen historical prefix".into())
+                    .await
+            }
+        });
+        machine.set_live_context_mirror_host(host.clone());
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        user_turn_completes_on(&machine, &session_id, &channel_id).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            barrier.entered.notified(),
+        )
+        .await
+        .expect("append began");
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("old source"),
+        ));
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("typed request while history is pending"),
+        ));
+        let observation = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre-ACK admission")
+            .observation_id()
+            .clone();
+        let origin = serde_json::from_value(serde_json::json!({
+            "session_id": session_id,
+            "channel_id": channel_id,
+            "canonical_row_sequence": 3,
+            "context_observation_id": observation
+        }))
+        .expect("stored exact live origin");
+        match heard {
+            HeardAfterTyped::AssistantOnly => {
+                let mut assistant = meerkat_core::types::BlockAssistantMessage::snapshot(vec![
+                    meerkat_core::AssistantBlock::Transcript {
+                        text: "assistant speech while history is pending".into(),
+                        source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                        meta: None,
+                    },
+                ]);
+                assistant.identity.realtime_origin = Some(origin);
+                session.push(meerkat_core::Message::BlockAssistant(assistant));
+            }
+            HeardAfterTyped::UserSpeech => {
+                let mut spoken = meerkat_core::UserMessage::text("an unrelated remark said aloud");
+                spoken.identity.realtime_origin = Some(origin);
+                session.push(meerkat_core::Message::User(spoken));
+            }
+        }
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("committed session");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &committed, "store-tail")
+            .await
+            .expect("queue exact tail");
+        barrier.release.add_permits(1);
+        delivery.await.expect("delivery task").expect("ACK");
+        machine
+            .wait_live_context_ready_for_results(&session_id, &channel_id)
+            .await
+            .expect("summary + tail");
+        let kinds = host.append_kinds.lock().expect("append kinds").clone();
+        let texts: Vec<String> = host
+            .appends
+            .lock()
+            .expect("records")
+            .iter()
+            .map(|record| record.1.clone())
+            .collect();
+        kinds.into_iter().zip(texts).collect()
+    }
+
+    /// The assistant's own speech never supersedes a typed row the provider
+    /// has not received: the typed request is still voiced after the summary.
+    #[tokio::test]
+    async fn typed_row_followed_only_by_assistant_speech_stays_voiced() {
+        assert_eq!(
+            typed_row_append_kinds_after(HeardAfterTyped::AssistantOnly)
+                .await
+                .into_iter()
+                .map(|(kind, _)| kind)
+                .collect::<Vec<_>>(),
+            [
+                crate::live_execution::LiveContextAppendKind::HistoryBootstrap,
+                crate::live_execution::LiveContextAppendKind::Ordinary,
+                crate::live_execution::LiveContextAppendKind::CausalReassertion,
+            ]
+        );
+    }
+
+    /// Newer user speech on an unrelated topic supersedes a held typed row
+    /// too: the machine has no semantic test for a correction, and voiced
+    /// after the speech a typed row became the newest fact (S99). The typed
+    /// request itself still reaches the model as a SupersededTypedRow, whose
+    /// facade framing (`LIVE_SUPERSEDED_TYPED_PREFIX`) orders it before the
+    /// newer speech and says a request that speech did not replace still
+    /// needs a response, so the model decides; nothing is dropped.
+    #[tokio::test]
+    async fn typed_row_followed_by_unrelated_user_speech_still_reaches_the_model() {
+        let appends = typed_row_append_kinds_after(HeardAfterTyped::UserSpeech).await;
+        assert_eq!(
+            appends.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+            [
+                crate::live_execution::LiveContextAppendKind::HistoryBootstrap,
+                crate::live_execution::LiveContextAppendKind::SupersededTypedRow,
+                crate::live_execution::LiveContextAppendKind::CausalReassertion,
+            ]
+        );
+        assert!(
+            appends[1]
+                .1
+                .contains("typed request while history is pending"),
+            "the typed request is delivered, not dropped: {:?}",
+            appends[1].1
         );
     }
 
@@ -1738,6 +1946,109 @@ mod live_context_mirror_tests {
             )
             .await
             .expect("bind experimental live execution");
+    }
+
+    /// Runtime work output queued before the conversation waits for it, and
+    /// the user's turn start itself requests the drain that replays it on
+    /// the quiet lane during that turn (no later commit or turn end needed).
+    #[tokio::test]
+    async fn a_started_user_turn_drains_replayed_runtime_work_held_for_the_conversation() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        let mut merged = meerkat_core::UserMessage::text("Result of the voice request");
+        merged.transcript_role = meerkat_core::types::TranscriptUserRole::InjectedContext;
+        session.push(meerkat_core::Message::User(merged));
+        let mut reply = meerkat_core::types::BlockAssistantMessage::snapshot(vec![
+            meerkat_core::AssistantBlock::Text {
+                text: "Done, the file is written.".into(),
+                meta: None,
+            },
+        ]);
+        reply.identity.turn_input = Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored);
+        session.push(meerkat_core::Message::BlockAssistant(reply));
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("seal the merge turn");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &committed, "store-commit")
+            .await
+            .expect("enqueue the merge turn");
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+            .await
+            .expect("drain before the conversation");
+        assert!(
+            host.appends.lock().expect("appends").is_empty(),
+            "runtime work output is held until the conversation starts"
+        );
+        let key = (session_id.clone(), channel_id.clone());
+        let before = machine
+            .shared
+            .live_context_drain_tasks
+            .lock()
+            .expect("drain tasks")
+            .get(&key)
+            .cloned();
+        let queued = machine
+            .shared
+            .live_context_queued_rows
+            .lock()
+            .expect("queued")
+            .get(&(session_id.clone(), 2))
+            .expect("the held reply stays queued")
+            .clone();
+        assert!(queued.is_runtime_work_replay());
+        let binding = queued.binding();
+        let provider_binding = meerkat_live::ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(binding.generation()),
+            meerkat_live::LiveRuntimeBindingFence::new(binding.fence_token()),
+        );
+        let turn = meerkat_live::LiveSidebandTurnRef::__from_provider_observation(
+            &channel_id,
+            "first-user-turn".into(),
+            "private-first-user-turn".into(),
+        )
+        .expect("turn");
+        machine
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("the user's first turn starts");
+        let requested = machine
+            .shared
+            .live_context_drain_tasks
+            .lock()
+            .expect("drain tasks")
+            .get(&key)
+            .cloned()
+            .expect("the turn start requested a drain");
+        assert!(
+            before
+                .as_ref()
+                .is_none_or(|before| !Arc::ptr_eq(before, &requested)),
+            "a fresh drain, not the completed pre-conversation one"
+        );
+        requested
+            .wait()
+            .await
+            .expect("the turn-start drain completes");
+        let appends = host.appends.lock().expect("appends");
+        assert_eq!(appends.len(), 1, "{appends:?}");
+        assert!(appends[0].1.contains("Done, the file is written."));
+        assert_eq!(
+            host.append_kinds.lock().expect("kinds").as_slice(),
+            &[crate::live_execution::LiveContextAppendKind::RuntimeWorkReplay],
+            "replayed on the quiet lane during the user's turn"
+        );
     }
 
     async fn bound_experimental_live_machine(
@@ -7505,6 +7816,10 @@ impl MeerkatMachine {
                     && effect_turn == &provider_turn_ref
             )
         }) {
+            // A started user turn starts the conversation: quiet history held
+            // for it (guard `quiet_history_waits_for_the_conversation`) may
+            // now be replayed, during this turn.
+            self.request_live_context_drain(session_id, channel_id);
             Ok(LiveProviderTurnStartedAuthority {
                 binding: runtime_binding,
                 interaction_id,
@@ -10517,6 +10832,60 @@ impl MeerkatMachine {
                     continue;
                 }
             };
+            // A typed row superseded by newer heard speech (generated edge
+            // AuthorizeLiveContextAppendSuperseded) travels together with the
+            // speech rows that superseded it, in canonical order: sent alone,
+            // the model spoke its stale value before the correction's replay
+            // arrived (S99). The later rows still replay on their own edges.
+            let context = if authority.kind()
+                == crate::live_execution::LiveContextAppendKind::SupersededTypedRow
+            {
+                let queued_rows = self
+                    .shared
+                    .live_context_queued_rows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut superseding: Vec<(u64, String)> = queued_rows
+                    .iter()
+                    .filter(|((row_session, row_cursor), row)| {
+                        row_session == session_id
+                            && *row_cursor > next_cursor
+                            && row.is_heard_speech_replay()
+                    })
+                    .filter_map(|((_, row_cursor), row)| {
+                        row.provider_context()
+                            .map(|text| (*row_cursor, text.to_string()))
+                    })
+                    .collect();
+                drop(queued_rows);
+                superseding.sort_by_key(|(row_cursor, _)| *row_cursor);
+                // The generated edge guarantees a later queued heard-speech
+                // row; an empty set means runtime custody diverged from it.
+                // Fail closed rather than send the typed row without its
+                // correction (the S99 failure mode).
+                crate::live_execution::superseded_typed_row_context(
+                    &context,
+                    superseding.iter().map(|(_, text)| text.as_str()),
+                )
+                .ok_or_else(|| {
+                    debug_assert!(
+                        false,
+                        "superseded typed row authorized without a queued superseding speech row"
+                    );
+                    tracing::error!(
+                        session_id = %session_id,
+                        channel_id = %channel_id,
+                        cursor = next_cursor,
+                        "live context invariant breach: superseded typed row has no queued superseding speech row; not sending it bare"
+                    );
+                    RuntimeDriverError::Internal(
+                        "superseded typed row authorized without a queued superseding speech row"
+                            .to_string(),
+                    )
+                })?
+            } else {
+                context
+            };
             drop(projection_guard);
             let (returned_authority, outcome) = host
                 .append_context(authority, context)
@@ -10633,6 +11002,8 @@ impl MeerkatMachine {
                     commit_authority_token: row.store_commit_authority().to_string(),
                     disposition,
                     payload_availability: row.payload_availability(),
+                    row_source: row.source(),
+                    row_author: row.author(),
                     observation_id: row.observation_id().map(ToString::to_string),
                 },
                 "EnqueueLiveContextRow",

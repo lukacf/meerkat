@@ -2971,6 +2971,7 @@ fn submit_work_turn_metadata(
                         interaction_id,
                         run_id: None,
                         objective_id,
+                        turn_input: None,
                     },
                     ..Default::default()
                 },
@@ -3025,6 +3026,16 @@ fn lower_work_content_attribution(
             content,
             identity: None,
         });
+        // Stamp the authorship on the turn's transcript identity so every
+        // message it commits (the member's reply included) carries it:
+        // readers such as a live channel's mirror read it from the row
+        // instead of inferring it from transcript position.
+        request
+            .runtime
+            .turn_metadata
+            .get_or_insert_with(Default::default)
+            .transcript_identity
+            .turn_input = Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored);
     }
 }
 

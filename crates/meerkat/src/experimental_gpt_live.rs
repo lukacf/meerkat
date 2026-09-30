@@ -648,6 +648,32 @@ pub const LIVE_STARTUP_RECENT_TURNS: usize = 4;
 pub const LIVE_LATE_SUMMARY_PREFIX: &str =
     "Conversation history summary (context data, not a new user request):";
 
+/// Prefix of one causal-tail row replayed on the quiet thinking lane after
+/// a late summary. The row is speech this call already heard and answered;
+/// replayed bare (a role-tagged JSON row), gpt-live-1 treated it as a new
+/// user request and answered it again, measured 3/3 on 2026-09-29.
+pub const LIVE_CAUSAL_REPLAY_PREFIX: &str = "Earlier in this call, replayed after the summary to keep the order of facts \
+(already heard and answered; context data, not a new user request; do not respond to it):";
+
+/// Prefix of runtime work output replayed on the quiet thinking lane: the
+/// result of background work that finished while the model was away (a
+/// voice job that completed after its channel closed). It is new to the
+/// model, so it is never described as heard or answered.
+pub const LIVE_RUNTIME_WORK_PREFIX: &str = "Result of background work that finished while you were away \
+(context data, not a new request): use it when the user asks about that work, and do not read it out \
+unprompted.";
+
+/// Prefix of a text-chat row (the typed input or its text reply) the
+/// provider never received, delivered quietly because the user has since said
+/// something newer aloud. It does not claim the row was heard or answered.
+/// The machine cannot tell a correction from an unrelated remark, but the
+/// model can: the framing orders the row before the newer speech and leaves
+/// whether a typed request still needs a response to the model.
+pub const LIVE_SUPERSEDED_TYPED_PREFIX: &str = "From the text chat, typed before the spoken turns you have \
+already heard in this call and delivered late (context data): whatever the user has said aloud since supersedes it \
+where they conflict, so never restate a value it sets that later speech replaced as current. If it is a user request \
+that the later speech did not replace, it still needs a response.";
+
 /// Startup instructions with the history framing appended once, for the
 /// open whose summary rides the startup `input` as a developer item.
 fn with_history_framing(instructions: Option<String>) -> String {
@@ -5326,10 +5352,11 @@ impl ExperimentalGptLiveWebrtcTransport {
             .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
         let command = match kind {
             // A typed row is conversational input the provider has not heard.
-            // It is voiced as commentary: measured against gpt-live-1, the
-            // model keeps the user's later speech authoritative over a row
-            // it voiced itself, whereas the same row delivered as quiet
-            // knowledge became the newest user fact and displaced it.
+            // It is voiced as commentary. A typed row that waited behind a
+            // late summary while the channel heard newer speech arrives as a
+            // SupersededTypedRow instead (generated edge
+            // AuthorizeLiveContextAppendSuperseded): voiced after that speech,
+            // gpt-live-1 made it the newest fact, 3/3 on 2026-09-29 (S99).
             meerkat_runtime::live_execution::LiveContextAppendKind::Ordinary => {
                 LiveSidebandCommand::append_session_context(sideband, text)
             }
@@ -5338,9 +5365,33 @@ impl ExperimentalGptLiveWebrtcTransport {
                 // prepared is replayed quietly after the summary so the model
                 // keeps the live order of facts. Measured against gpt-live-1:
                 // the thinking lane injects promptly (its acknowledgement can
-                // wait for a turn boundary, which the close bound covers) and
-                // does not steer the model, unlike the instructions lane.
-                LiveSidebandCommand::append_thinking_context(sideband, text)
+                // wait for a turn boundary, which the close bound covers).
+                // A bare replayed row reads as a fresh request and the model
+                // answers it again, so every row carries the replay framing.
+                LiveSidebandCommand::append_thinking_context(
+                    sideband,
+                    format!("{LIVE_CAUSAL_REPLAY_PREFIX}\n{text}"),
+                )
+            }
+            meerkat_runtime::live_execution::LiveContextAppendKind::SupersededTypedRow => {
+                // A typed row that waited behind a late summary while the
+                // user said something newer aloud (generated edge
+                // AuthorizeLiveContextAppendSuperseded). Voiced after that
+                // speech, gpt-live-1 made it the newest fact (S99, 3/3), so
+                // it goes out quietly, ordered before the speech it predates.
+                LiveSidebandCommand::append_thinking_context(
+                    sideband,
+                    format!("{LIVE_SUPERSEDED_TYPED_PREFIX}\n{text}"),
+                )
+            }
+            meerkat_runtime::live_execution::LiveContextAppendKind::RuntimeWorkReplay => {
+                // Runtime work output the model has never seen (a job result
+                // merged while the call was down) rides the quiet lane framed
+                // as background work, not as speech already heard (S104).
+                LiveSidebandCommand::append_thinking_context(
+                    sideband,
+                    format!("{LIVE_RUNTIME_WORK_PREFIX}\n{text}"),
+                )
             }
             meerkat_runtime::live_execution::LiveContextAppendKind::HistoryBootstrap => {
                 return Err(ExperimentalGptLiveBridgeError::ContextAuthorityRejected);
@@ -8238,6 +8289,32 @@ fn map_broker_error(error: GptLiveBrokerError) -> ProviderWebrtcBrokerError {
 
 #[cfg(test)]
 mod tests {
+    /// A superseded text-chat row never claims to be heard or answered and
+    /// never tells the model to ignore it: a typed request the newer speech
+    /// did not replace (typed "book a table for 7", then spoken "what's the
+    /// weather?") must still get a response.
+    #[test]
+    fn superseded_typed_framing_leaves_the_response_decision_to_the_model() {
+        let framing = super::LIVE_SUPERSEDED_TYPED_PREFIX;
+        assert!(framing.contains("typed before the spoken turns"));
+        assert!(framing.contains("supersedes it where they conflict"));
+        assert!(framing.contains("still needs a response"));
+        // The spoken turns were heard; the row itself never claims to be.
+        for false_claim in [
+            "already heard and answered",
+            "do not respond",
+            "do not read",
+        ] {
+            assert!(
+                !framing.contains(false_claim),
+                "framing claims {false_claim:?}"
+            );
+        }
+        let runtime_work = super::LIVE_RUNTIME_WORK_PREFIX;
+        assert!(runtime_work.contains("background work"));
+        assert!(!runtime_work.contains("already heard"));
+    }
+
     #[test]
     fn public_session_instructions_keep_the_default_under_a_preface() {
         let composed =
@@ -19311,6 +19388,22 @@ mod tests {
                         if text.contains("Spoken code: Cyan.")
                     )),
                     "heard live correction is reasserted quietly after the historical prefix"
+                );
+                assert!(
+                    commands.iter().any(|command| matches!(
+                        command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                        if text.starts_with(LIVE_CAUSAL_REPLAY_PREFIX)
+                            && text.contains("Spoken code: Cyan.")
+                    )),
+                    "a replayed causal-tail row is framed as already answered context, not a new request"
+                );
+                assert!(
+                    commands.iter().any(|command| matches!(
+                        command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                        if text.starts_with(LIVE_SUPERSEDED_TYPED_PREFIX)
+                            && text.contains("Newer code: Amber.")
+                    )),
+                    "a typed row superseded by newer heard speech is framed as a late typed row, never as heard or answered"
                 );
                 let typed = commands
                     .iter()

@@ -85,8 +85,8 @@ mod schedule;
 
 use schedule::{
     LIVE_DELEGATION_CHANNEL_WORKER_CAP, VoiceWorkGraph, VoiceWorkItem, WorkItemDisposition,
-    fork_work_instructions, narration_text, narration_title, post_close_merge_text,
-    task_after_failed_blockers, task_with_waited_results,
+    completed_result_text, fork_work_instructions, narration_text, narration_title,
+    post_close_merge_text, task_after_failed_blockers, task_with_waited_results,
 };
 
 const LIVE_DELEGATION_RESULT_BYTES: usize = 16 * 1024;
@@ -3919,6 +3919,33 @@ impl ExperimentalLiveDelegationCoordinator {
             .await;
     }
 
+    /// Authorize a narration kind in the machine without sending its own
+    /// append: the caller delivers its sentence inside another item on the
+    /// held lane (the Completed sentence rides in the result commentary).
+    /// Lifecycle skips and machine refusals are not errors, as for
+    /// [`Self::narrate_on_held_lane`].
+    async fn authorize_narration_on_held_lane(
+        &self,
+        subject: &NarrationSubject,
+        kind: LiveDelegationNarrationKind,
+    ) {
+        if let Err(skip) = self
+            .runtime
+            .live_delegation_narration_eligibility(&subject.runtime_binding)
+            .await
+        {
+            tracing::debug!(%skip, ?kind, "live delegation narration skipped");
+            return;
+        }
+        if let Err(error) = self
+            .runtime
+            .authorize_live_delegation_narration(&subject.runtime_binding, &subject.operation, kind)
+            .await
+        {
+            tracing::debug!(%error, ?kind, "live delegation narration was not authorized");
+        }
+    }
+
     /// [`Self::narrate`] for a caller that already holds the channel's
     /// delegation append lane. The machine refuses kinds that do not match
     /// the item's schedule state and repeats of the last released kind; a
@@ -4762,11 +4789,18 @@ impl ExperimentalLiveDelegationCoordinator {
     ) -> Result<(), String> {
         let (reservation, reconciliation, result_text, existing_release, existing_delivery) = {
             let mut result = retained.result.lock().await;
-            let (Some(reconciliation), Some(result_text)) =
+            let (Some(reconciliation), Some(worker_result)) =
                 (result.reconciliation.clone(), result.result_text.clone())
             else {
                 return Ok(());
             };
+            // The Completed sentence and the result travel as ONE commentary
+            // item: delivered as two appends, the model could answer the
+            // Completed sentence ("the result follows") and end its response
+            // before the result arrived, then never voice it (S106, 1 in 82).
+            // The text is deterministic from the title, so a retried delivery
+            // authority binds the same digest.
+            let result_text = completed_result_text(&retained.title, &worker_result);
             let Some(reservation) = result.reserve_delivery() else {
                 return Ok(());
             };
@@ -4832,12 +4866,11 @@ impl ExperimentalLiveDelegationCoordinator {
             retained.result.lock().await.release_delivery(reservation);
             return Ok(());
         }
-        self.narrate_on_held_lane(
+        // The machine still records the Completed narration; its sentence
+        // rides inside the result item instead of a separate append.
+        self.authorize_narration_on_held_lane(
             &NarrationSubject::from_retained(retained),
             LiveDelegationNarrationKind::Completed,
-            0,
-            Vec::new(),
-            false,
         )
         .await;
         retained.result.lock().await.dispatch_crossed = true;
@@ -7261,13 +7294,23 @@ mod tests {
             .await
             .take()
             .expect("control plane received exact production projection");
-        assert_eq!(capture.result_text, exact_result);
+        assert_eq!(
+            capture.result_text,
+            completed_result_text("exact result projection", &exact_result),
+            "the Completed sentence leads the byte-exact worker result in one item"
+        );
+        assert!(capture.result_text.ends_with(exact_result.as_str()));
         assert!(capture.authority.authorizes_text(&capture.result_text));
         assert_eq!(capture.authority.operation(), &operation);
         assert!(capture.delegation_matches_authority);
+        // The delivery authority binds the delivered item: the Completed
+        // sentence and the result together.
         assert_eq!(
             capture.result_digest,
-            format!("sha256:{:x}", Sha256::digest(exact_result.as_bytes()))
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(capture.result_text.as_bytes())
+            )
         );
         assert_eq!(
             capture.delegation_ref_digest,

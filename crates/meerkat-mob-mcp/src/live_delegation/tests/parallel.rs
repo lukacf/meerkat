@@ -553,6 +553,20 @@ impl Fixture {
         self.control.narrations.lock().await.clone()
     }
 
+    /// Result items released to the provider whose text leads with the
+    /// Completed sentence: the Completed narration and its result travel as
+    /// one commentary item.
+    async fn completed_releases(&self) -> Vec<String> {
+        self.control
+            .releases
+            .lock()
+            .await
+            .iter()
+            .map(|(_, text)| text.clone())
+            .filter(|text| text.starts_with("Finished voice request: "))
+            .collect()
+    }
+
     async fn events(&self) -> Vec<ExactProjectionControlEvent> {
         self.control.events.lock().await.clone()
     }
@@ -719,56 +733,39 @@ async fn two_delegations_run_in_parallel_and_both_complete() {
     fx.wait_for_retired(2).await;
     fx.assert_nothing_cancelled();
 
-    // Each delegation was narrated as started and as finished.
-    wait_until(WAIT, || async {
-        fx.narrations()
-            .await
-            .iter()
-            .filter(|(kind, _)| *kind == LiveDelegationNarrationKind::Completed)
-            .count()
-            == 2
-    })
-    .await;
+    // Each delegation was narrated as started, and finished in its result
+    // item: the Completed sentence leads the one commentary item that
+    // carries the result, so nothing can land between them and the model
+    // cannot end its response before the result.
+    wait_until(WAIT, || async { fx.completed_releases().await.len() == 2 }).await;
     let narrations = fx.narrations().await;
     let claimed = narrations
         .iter()
         .filter(|(kind, _)| *kind == LiveDelegationNarrationKind::Claimed)
         .count();
-    let completed = narrations
-        .iter()
-        .filter(|(kind, _)| *kind == LiveDelegationNarrationKind::Completed)
-        .count();
-    assert_eq!((claimed, completed), (2, 2), "{narrations:?}");
+    assert_eq!(claimed, 2, "{narrations:?}");
     assert!(
-        narrations.iter().any(
-            |(kind, text)| *kind == LiveDelegationNarrationKind::Completed
-                && text.contains("find the fastest train to Oslo")
-        ),
-        "{narrations:?}"
+        !narrations
+            .iter()
+            .any(|(kind, _)| *kind == LiveDelegationNarrationKind::Completed),
+        "the Completed sentence is never a separate append: {narrations:?}"
     );
-
-    // The Completed sentence and the result it introduces are released under
-    // one hold of the channel's delegation append lane: nothing from the
-    // other worker lands between them.
-    let events = fx.events().await;
-    for (index, event) in events.iter().enumerate() {
-        if let ExactProjectionControlEvent::Narration(
-            LiveDelegationNarrationKind::Completed,
-            text,
-        ) = event
-        {
-            let key = if text.contains("find the fastest train to Oslo") {
-                "first-delegation"
-            } else {
-                "second-delegation"
-            };
-            assert_eq!(
-                events.get(index + 1),
-                Some(&ExactProjectionControlEvent::Release(key.to_string())),
-                "{events:?}"
-            );
-        }
-    }
+    assert!(
+        fx.completed_releases()
+            .await
+            .iter()
+            .any(|text| text.contains("find the fastest train to Oslo")),
+        "{:?}",
+        fx.completed_releases().await
+    );
+    assert!(
+        !fx.events().await.iter().any(|event| matches!(
+            event,
+            ExactProjectionControlEvent::Narration(LiveDelegationNarrationKind::Completed, _)
+        )),
+        "{:?}",
+        fx.events().await
+    );
 
     let items = fx.voice_items().await;
     assert_eq!(items.len(), 2);
@@ -953,15 +950,7 @@ async fn blocked_worker_is_retired_and_requeued_with_the_dependency_result() {
     fx.wait_for_completed(&[first.clone(), second.clone()])
         .await;
     fx.assert_nothing_cancelled();
-    wait_until(WAIT, || async {
-        fx.narrations()
-            .await
-            .iter()
-            .filter(|(kind, _)| *kind == LiveDelegationNarrationKind::Completed)
-            .count()
-            == 2
-    })
-    .await;
+    wait_until(WAIT, || async { fx.completed_releases().await.len() == 2 }).await;
     let second_narrations = fx
         .narrations()
         .await
@@ -974,9 +963,15 @@ async fn blocked_worker_is_retired_and_requeued_with_the_dependency_result() {
             LiveDelegationNarrationKind::Claimed,
             LiveDelegationNarrationKind::Blocked,
             LiveDelegationNarrationKind::Claimed,
-            LiveDelegationNarrationKind::Completed,
         ],
         "{second_narrations:?}"
+    );
+    assert!(
+        fx.completed_releases()
+            .await
+            .iter()
+            .any(|text| text.contains("write the summary from the numbers")),
+        "the Completed sentence leads the second result item"
     );
     let second_item = fx
         .voice_item_titled("write the summary from the numbers")
@@ -1282,10 +1277,10 @@ async fn blocked_worker_restarts_with_a_preface_when_its_blocker_fails() {
         evidence.kind == "superseded_voice_item" && evidence.id == second_item.id.to_string()
     }));
     wait_until(WAIT, || async {
-        fx.narrations().await.iter().any(|(kind, text)| {
-            *kind == LiveDelegationNarrationKind::Completed
-                && text.contains("write the summary from the numbers")
-        })
+        fx.completed_releases()
+            .await
+            .iter()
+            .any(|text| text.contains("write the summary from the numbers"))
     })
     .await;
     let narrations = fx.narrations().await;
@@ -1300,7 +1295,6 @@ async fn blocked_worker_restarts_with_a_preface_when_its_blocker_fails() {
             LiveDelegationNarrationKind::Claimed,
             LiveDelegationNarrationKind::Blocked,
             LiveDelegationNarrationKind::Claimed,
-            LiveDelegationNarrationKind::Completed,
         ],
         "{narrations:?}"
     );

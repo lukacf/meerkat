@@ -136,6 +136,15 @@ pub(super) fn narration_text(
     }
 }
 
+/// The single commentary item that delivers a finished request: the
+/// Completed sentence followed by the worker's result.
+pub(super) fn completed_result_text(title: &str, result: &str) -> String {
+    format!(
+        "{}\n{result}",
+        narration_text(LiveDelegationNarrationKind::Completed, title, 0, &[], false)
+    )
+}
+
 /// Briefing appended to a live delegation fork's instructions. It names the
 /// item the fork already holds and the exact tool calls for completion and
 /// for waiting on a sibling. No fork ever decides scheduling by reading
@@ -595,6 +604,12 @@ mod tests {
         assert_eq!(
             narration_text(LiveDelegationNarrationKind::Completed, title, 0, &[], false),
             "Finished voice request: \"book the \"late\" flight\". The result follows."
+        );
+        // Delivered as one commentary item with the result, so the model
+        // cannot end its response between the sentence and the result.
+        assert_eq!(
+            completed_result_text(title, "Booked for 19:40."),
+            "Finished voice request: \"book the \"late\" flight\". The result follows.\nBooked for 19:40."
         );
         assert_eq!(
             narration_text(

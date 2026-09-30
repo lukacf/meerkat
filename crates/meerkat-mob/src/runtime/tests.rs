@@ -155,6 +155,20 @@ fn is_retirement_in_progress(error: &MobError) -> bool {
     )
 }
 
+/// Retire a member to its terminal result. `retire` is bounded by the
+/// retirement budget and answers a still-running saga with a typed
+/// in-progress error; calling it again joins the same single-flight saga and
+/// waits on its result, so this settles on the saga's own terminal outcome
+/// instead of failing on a slow but healthy retirement.
+async fn retire_to_terminal(handle: &MobHandle, identity: &AgentIdentity) -> Result<(), MobError> {
+    loop {
+        match handle.retire(identity.clone()).await {
+            Err(error) if is_retirement_in_progress(&error) => {}
+            result => return result,
+        }
+    }
+}
+
 struct TestPeerProjectionAuthorityState {
     dsl: TestMeerkatMachineAuthority,
 }

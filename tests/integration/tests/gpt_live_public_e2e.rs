@@ -2918,6 +2918,54 @@ fn delegations_per_window(
         .collect()
 }
 
+/// The scenario's soft browser faults (journal and live peer), with overlap
+/// faults reconciled against the backchannel classifier
+/// (`evidence::classify_overlap`): an overlap made only of classified
+/// backchannels (short, no new content, no delegation, yielded to the user)
+/// within the fixture's bound is no fault. Every allowed backchannel is
+/// recorded as evidence.
+async fn scenario_browser_faults(
+    evidence: &Journal,
+    live: &mut PublicLiveHarness,
+    channel: u32,
+    scenario: &str,
+) -> Result<Vec<evidence::BrowserFault>, Box<dyn std::error::Error>> {
+    let mut faults = evidence.faults()?;
+    faults.extend(live.peer.faults().await?);
+    let (faults, allowed) = evidence::reconcile_overlap_faults(faults);
+    record_allowed_backchannels(evidence, channel, scenario, &allowed)?;
+    Ok(faults)
+}
+
+fn record_allowed_backchannels(
+    evidence: &Journal,
+    channel: u32,
+    scenario: &str,
+    allowed: &[(String, evidence::OverlapBurst)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (fixture, burst) in allowed {
+        let detail = format!(
+            "fixture={fixture} started_ms={} duration_ms={} overlap_ms={} text={:?}",
+            burst.started_ms,
+            burst.last_active_ms.saturating_sub(burst.started_ms),
+            burst.overlap_ms,
+            burst.text
+        );
+        println!("GPT_LIVE_{scenario}_BACKCHANNEL {detail}");
+        let mut never = Vec::new();
+        record_tolerant(
+            evidence,
+            channel,
+            scenario,
+            "allowed_backchannel",
+            true,
+            detail,
+            &mut never,
+        )?;
+    }
+    Ok(())
+}
+
 /// Assistant audio starts at or after `from_ms` that open a new assistant
 /// response with no input final or commentary append since the assistant
 /// was last audible (a duplicate readout).
@@ -4214,8 +4262,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             channel,
             entries: timeline.clone(),
         })?;
-        let mut faults = evidence.faults()?;
-        faults.extend(live.peer.faults().await?);
+        let faults = scenario_browser_faults(&evidence, &mut live, channel, "S100").await?;
         println!(
             "GPT_LIVE_S100_OK total_ms={} connected_ms={connected_ms} exchanges={exchanges} greeted={greeted} r1_ms={:?} r2_ms={:?} barge_in_ms={:?} r3_ms={:?} goodbye_ms={:?} median_ms={median:?} r1_commentary_ms={:?} r2_commentary_ms={:?} r3_commentary_ms={:?} executor_done_at_ms=[{}, {}, {}] overlap_ms={overlap_ms} close_ms={close_ms:?} tolerant_failures={tolerant_failures:?} faults={faults:?} history_messages={}",
             started.elapsed().as_millis(),
@@ -4516,8 +4563,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             channel,
             entries: timeline.clone(),
         })?;
-        let mut faults = evidence.faults()?;
-        faults.extend(live.peer.faults().await?);
+        let faults = scenario_browser_faults(&evidence, &mut live, channel, "S102").await?;
         if !faults.is_empty() {
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
@@ -4722,7 +4768,30 @@ async fn run_s103_interrupt_and_recover(
                 fixture_end_entry(t, monologue).cloned()
             })
             .await?;
-        let monologue_overlap_ms = monologue_end.detail_u64("overlap_ms").unwrap_or(0);
+        let monologue_bursts: Vec<evidence::OverlapBurst> = monologue_end
+            .detail
+            .get("bursts")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?
+            .unwrap_or_default();
+        let monologue_classification = evidence::classify_overlap(
+            monologue_end.detail_u64("overlap_ms").unwrap_or(0),
+            &monologue_bursts,
+        );
+        record_allowed_backchannels(
+            &evidence,
+            channel,
+            "S103",
+            &monologue_classification
+                .backchannels
+                .iter()
+                .map(|burst| ("interrupt_monologue".to_owned(), burst.clone()))
+                .collect::<Vec<_>>(),
+        )?;
+        // Classified backchannels ("mm-hm" yielded to the user) are allowed;
+        // any other speech over the monologue answered a pause.
+        let monologue_overlap_ms = monologue_classification.counted_ms;
         let delegation_created_ms = live
             .peer
             .wait_for_timeline(Duration::from_secs(60), "monologue delegation_created", |t| {
@@ -4944,8 +5013,7 @@ async fn run_s103_interrupt_and_recover(
             channel,
             entries: timeline.clone(),
         })?;
-        let mut faults = evidence.faults()?;
-        faults.extend(live.peer.faults().await?);
+        let faults = scenario_browser_faults(&evidence, &mut live, channel, "S103").await?;
         if !faults.is_empty() {
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
@@ -5267,8 +5335,7 @@ async fn run_s107_stuck_close_convergence(
             channel: channel2,
             entries: timeline2.clone(),
         })?;
-        let mut faults = evidence.faults()?;
-        faults.extend(live.peer.faults().await?);
+        let faults = scenario_browser_faults(&evidence, &mut live, channel, "S107").await?;
         if !faults.is_empty() {
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
@@ -5705,8 +5772,7 @@ async fn run_s104_handoff_voice_typed_voice(
             channel: channel2,
             entries: timeline2.clone(),
         })?;
-        let mut faults = evidence.faults()?;
-        faults.extend(live.peer.faults().await?);
+        let faults = scenario_browser_faults(&evidence, &mut live, channel, "S104").await?;
         if !faults.is_empty() {
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
@@ -6279,8 +6345,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             &mut tolerant_failures,
         )?;
         evidence.record(EvidenceRecord::Timeline { channel, entries: timeline3.clone() })?;
-        let mut faults = evidence.faults()?;
-        faults.extend(live.peer.faults().await?);
+        let faults = scenario_browser_faults(&evidence, &mut live, channel, "S106").await?;
         if !faults.is_empty() {
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
@@ -6625,8 +6690,7 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
             channel,
             entries: timeline.clone(),
         })?;
-        let mut faults = evidence.faults()?;
-        faults.extend(live.peer.faults().await?);
+        let faults = scenario_browser_faults(&evidence, &mut live, channel, "S101").await?;
         if !faults.is_empty() {
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
@@ -7034,8 +7098,7 @@ async fn run_s105_fork_and_merge_parallel(
             channel,
             entries: timeline.clone(),
         })?;
-        let mut faults = evidence.faults()?;
-        faults.extend(live.peer.faults().await?);
+        let faults = scenario_browser_faults(&evidence, &mut live, channel, "S105").await?;
         if !faults.is_empty() {
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }

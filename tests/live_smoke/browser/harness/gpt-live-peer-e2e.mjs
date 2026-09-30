@@ -227,6 +227,14 @@ async function prepare(command) {
       firstAudioPacketMs: null,
       lastFixtureStartMs: -1,
       response: { text: '', started_ms: null, index: 0 },
+      // Overlap classification facts (the scenario decides; see the Rust
+      // `classify_overlap`): assistant energy bursts with the overlap each
+      // contributed per playing fixture, each finished response's text and
+      // close time, and the arrival times of delegations and commentary.
+      bursts: [],
+      currentBurst: null,
+      responseLog: {},
+      actionTimes: [],
       playing: new Map(),
       scheduled: [],
       nextScheduleId: 1,
@@ -325,9 +333,10 @@ async function prepare(command) {
       const ended = new Promise((resolve) => {
         source.onended = () => {
           state.playing.delete(id);
-          state.pushTimeline('fixture_end', { id, name: fixtureName, overlap_ms: play.overlap_ms, overlap_bound_ms: play.overlap_bound_ms });
+          const bursts = state.overlapBursts(id);
+          state.pushTimeline('fixture_end', { id, name: fixtureName, overlap_ms: play.overlap_ms, overlap_bound_ms: play.overlap_bound_ms, bursts });
           if (play.overlap_ms > play.overlap_bound_ms) {
-            state.pushFault({ overlap: { ms: play.overlap_ms, fixture: fixtureName, bound_ms: play.overlap_bound_ms } });
+            state.pushFault({ overlap: { ms: play.overlap_ms, fixture: fixtureName, bound_ms: play.overlap_bound_ms, bursts } });
           }
           if (typeof meta.onEnded === 'function') meta.onEnded(play);
           resolve(play);
@@ -336,6 +345,27 @@ async function prepare(command) {
       source.start();
       return waitForEnd ? ended : Promise.resolve(play);
     };
+    // The assistant bursts that overlapped one fixture, with the facts the
+    // scenario's overlap classifier needs: duration, the text of the response
+    // the burst belongs to and when that response closed (null while it is
+    // still open), and whether a delegation or commentary arrived during it.
+    state.overlapBursts = (playId) => state.bursts
+      .filter((burst) => (burst.overlap[playId] ?? 0) > 0)
+      .map((burst) => {
+        const response = state.responseLog[burst.response] ?? null;
+        const until = response ? response.closed_ms : nowMs();
+        return {
+          started_ms: burst.started_ms,
+          last_active_ms: burst.last_active_ms,
+          ended: burst.ended,
+          overlap_ms: burst.overlap[playId],
+          response: burst.response,
+          text: response ? response.text : null,
+          response_closed_ms: response ? response.closed_ms : null,
+          flushed: response ? response.flushed : false,
+          acted: state.actionTimes.some((at) => at >= burst.started_ms && at <= until),
+        };
+      });
     // ---- responses and duplicate readouts ------------------------------
     const normalizeSentence = (text) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
     state.finishResponse = ({ flushed = false } = {}) => {
@@ -355,6 +385,7 @@ async function prepare(command) {
       // The text travels with the entry so scenarios can check a readout for
       // repeated lines (short brief lines fall under the 5-word floor above).
       state.pushTimeline('response_end', { index: state.response.index, chars: text.length, text: text.slice(0, 8000), flushed });
+      state.responseLog[state.response.index] = { text: text.slice(0, 2000), closed_ms: nowMs(), flushed };
       state.response = { text: '', started_ms: null, index: state.response.index + 1 };
     };
     // Close the open utterance now (`reason`: 'delegation' when
@@ -484,15 +515,23 @@ async function prepare(command) {
           energy.first_assistant_audio_ms.push(t);
           if (state.response.started_ms === null) state.response.started_ms = t;
           state.pushTimeline('assistant_audio_start', { response: state.response.index });
+          state.currentBurst = { started_ms: t, last_active_ms: t, ended: false, response: state.response.index, overlap: {} };
+          if (state.bursts.length < 2000) state.bursts.push(state.currentBurst);
         }
+        if (state.currentBurst) state.currentBurst.last_active_ms = t;
         for (const play of state.playing.values()) {
           if (t - play.started_ms <= play.speech_ms) {
             play.overlap_ms += energy.window_ms;
             energy.overlap_ms += energy.window_ms;
+            if (state.currentBurst) {
+              state.currentBurst.overlap[play.id] = (state.currentBurst.overlap[play.id] ?? 0) + energy.window_ms;
+            }
           }
         }
       } else if (energy.assistant_active && t - energy.last_active_ms >= energyConfig.end_hysteresis_ms) {
         energy.assistant_active = false;
+        if (state.currentBurst) state.currentBurst.ended = true;
+        state.currentBurst = null;
         state.pushTimeline('assistant_audio_end', { last_active_ms: energy.last_active_ms, started_ms: energy.active_since_ms, response: state.response.index });
       }
       state.checkScheduled(t);
@@ -586,6 +625,7 @@ async function prepare(command) {
         if (state.response.text.length < 20000) state.response.text += delta;
       }
       if (parsed?.type === 'session.delegation.created') {
+        if (state.actionTimes.length < 2000) state.actionTimes.push(t);
         // Join by arrival: the runtime's executor input is every user delta
         // received before this event.
         state.closeUtterance(t, 'delegation');
@@ -621,6 +661,7 @@ async function prepare(command) {
       }
       if (parsed?.type === 'session.commentary.appended') {
         state.pushTimeline('commentary_appended', { event_index: state.events.length - 1 });
+        if (state.actionTimes.length < 2000) state.actionTimes.push(t);
       }
       // Alternation by arrival: the response's first output transcript
       // delta closes the open user utterance of a plain turn.

@@ -197,12 +197,158 @@ pub enum BrowserFault {
         ms: u64,
         fixture: String,
         bound_ms: u64,
+        /// The assistant bursts behind the overlap, with the facts the
+        /// scenario's backchannel classifier needs (`classify_overlap`).
+        #[serde(default)]
+        bursts: Vec<OverlapBurst>,
     },
     /// The same assistant sentence was delivered twice within one response.
     DuplicateReadout {
         text: String,
         response: u32,
     },
+}
+
+/// One assistant energy burst that overlapped a playing user fixture, as the
+/// browser peer observed it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OverlapBurst {
+    pub started_ms: u64,
+    pub last_active_ms: u64,
+    /// The burst ended (the assistant went quiet) before the fixture ended.
+    #[serde(default)]
+    pub ended: bool,
+    /// Overlap this burst contributed to the fixture.
+    pub overlap_ms: u64,
+    /// The peer response index the burst belongs to.
+    pub response: u64,
+    /// That response's output transcript, once it closed; `None` while open.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// When the response closed: the user resumed speaking (or a flush).
+    #[serde(default)]
+    pub response_closed_ms: Option<u64>,
+    /// The response was closed by a scenario flush, not by the user.
+    #[serde(default)]
+    pub flushed: bool,
+    /// A delegation or commentary arrived while the burst's response was open.
+    #[serde(default)]
+    pub acted: bool,
+}
+
+/// Longest assistant burst that can still be a backchannel.
+pub const BACKCHANNEL_MAX_MS: u64 = 1200;
+
+/// Acknowledgement tokens with no new content, normalized (lowercase,
+/// punctuation as spaces).
+pub const BACKCHANNEL_LEXICON: &[&str] = &[
+    "mm hm",
+    "mm hmm",
+    "mhm",
+    "mm",
+    "hmm",
+    "uh huh",
+    "okay",
+    "ok",
+    "got it",
+    "right",
+    "sure",
+    "yeah",
+    "yes",
+    "i see",
+    "alright",
+    "all right",
+];
+
+fn backchannel_words(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A backchannel: a short burst whose response carries no new content (empty
+/// or only lexicon tokens), opened no delegation or commentary, and was
+/// closed by the user resuming speech rather than continued by the model.
+pub fn is_backchannel(burst: &OverlapBurst) -> bool {
+    let short =
+        burst.ended && burst.last_active_ms.saturating_sub(burst.started_ms) <= BACKCHANNEL_MAX_MS;
+    let yielded = burst.response_closed_ms.is_some() && !burst.flushed;
+    let no_content = burst.text.as_deref().is_some_and(|text| {
+        text.split([',', '.', '!', '?', ';'])
+            .map(backchannel_words)
+            .filter(|segment| !segment.is_empty())
+            .all(|segment| BACKCHANNEL_LEXICON.contains(&segment.as_str()))
+    });
+    short && yielded && no_content && !burst.acted
+}
+
+/// Overlap of one fixture split into what counts and the backchannels that
+/// are allowed. Everything that is not a classified backchannel counts.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OverlapClassification {
+    pub counted_ms: u64,
+    pub backchannels: Vec<OverlapBurst>,
+}
+
+pub fn classify_overlap(total_ms: u64, bursts: &[OverlapBurst]) -> OverlapClassification {
+    let backchannels: Vec<OverlapBurst> = bursts
+        .iter()
+        .filter(|burst| is_backchannel(burst))
+        .cloned()
+        .collect();
+    let allowed_ms: u64 = backchannels.iter().map(|burst| burst.overlap_ms).sum();
+    OverlapClassification {
+        counted_ms: total_ms.saturating_sub(allowed_ms),
+        backchannels,
+    }
+}
+
+/// Drop the Overlap faults whose overlap beyond the classified backchannels
+/// is within the fixture's bound; return the remaining faults and the allowed
+/// backchannels (fixture name, burst) for evidence.
+pub fn reconcile_overlap_faults(
+    faults: Vec<BrowserFault>,
+) -> (Vec<BrowserFault>, Vec<(String, OverlapBurst)>) {
+    let mut remaining = Vec::new();
+    let mut allowed = Vec::new();
+    for fault in faults {
+        match &fault {
+            BrowserFault::Overlap {
+                ms,
+                fixture,
+                bound_ms,
+                bursts,
+            } => {
+                let classification = classify_overlap(*ms, bursts);
+                if classification.counted_ms <= *bound_ms && !classification.backchannels.is_empty()
+                {
+                    for burst in classification.backchannels {
+                        if !allowed
+                            .iter()
+                            .any(|(name, known): &(String, OverlapBurst)| {
+                                name == fixture && known == &burst
+                            })
+                        {
+                            allowed.push((fixture.clone(), burst));
+                        }
+                    }
+                } else {
+                    remaining.push(fault);
+                }
+            }
+            _ => remaining.push(fault),
+        }
+    }
+    (remaining, allowed)
 }
 
 impl BrowserFault {
@@ -1663,5 +1809,80 @@ mod tests {
         assert!(text.contains("amber otter copper"));
         assert!(text.contains("sk-synthetic-fact"));
         assert_eq!(text.matches("[REDACTED_CREDENTIAL]").count(), 3);
+    }
+
+    fn burst(text: Option<&str>, duration_ms: u64, acted: bool) -> OverlapBurst {
+        OverlapBurst {
+            started_ms: 21_900,
+            last_active_ms: 21_900 + duration_ms,
+            ended: true,
+            overlap_ms: 400,
+            response: 1,
+            text: text.map(str::to_owned),
+            response_closed_ms: Some(22_600),
+            flushed: false,
+            acted,
+        }
+    }
+
+    fn overlap(bursts: Vec<OverlapBurst>) -> BrowserFault {
+        BrowserFault::Overlap {
+            ms: 400,
+            fixture: "interrupt_monologue".into(),
+            bound_ms: 300,
+            bursts,
+        }
+    }
+
+    /// A short "mm-hm" in the user's pause, closed when the user resumed:
+    /// an allowed backchannel, recorded, and no fault.
+    #[test]
+    fn backchannel_in_a_pause_is_allowed_and_recorded() {
+        let (faults, allowed) =
+            reconcile_overlap_faults(vec![overlap(vec![burst(Some("Mm-hm."), 300, false)])]);
+        assert!(faults.is_empty(), "{faults:?}");
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].0, "interrupt_monologue");
+        assert_eq!(
+            classify_overlap(400, &[burst(Some("Okay, got it."), 500, false)]).counted_ms,
+            0
+        );
+    }
+
+    /// A reply that carries content ("got it, Tuesday afternoon") in a pause
+    /// is not a backchannel: the overlap counts and the fault stays.
+    #[test]
+    fn content_bearing_reply_in_a_pause_fails() {
+        let (faults, allowed) = reconcile_overlap_faults(vec![overlap(vec![burst(
+            Some("Got it, Tuesday afternoon."),
+            600,
+            false,
+        )])]);
+        assert_eq!(faults.len(), 1);
+        assert!(allowed.is_empty());
+        // Too long to be a backchannel even with lexicon text.
+        assert_eq!(
+            classify_overlap(
+                400,
+                &[burst(Some("Okay."), BACKCHANNEL_MAX_MS + 100, false)]
+            )
+            .counted_ms,
+            400
+        );
+        // A response the model kept speaking (still open) counts.
+        let mut open = burst(Some("Mm-hm."), 300, false);
+        open.response_closed_ms = None;
+        open.text = None;
+        assert_eq!(classify_overlap(400, &[open]).counted_ms, 400);
+    }
+
+    /// A delegation opened in the pause acts on a partial request: never a
+    /// backchannel, whatever was said.
+    #[test]
+    fn delegation_opened_in_a_pause_fails() {
+        let (faults, allowed) =
+            reconcile_overlap_faults(vec![overlap(vec![burst(Some("Okay."), 300, true)])]);
+        assert_eq!(faults.len(), 1);
+        assert!(allowed.is_empty());
     }
 }

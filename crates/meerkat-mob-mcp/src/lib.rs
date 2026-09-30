@@ -8051,7 +8051,13 @@ mod tests {
                 sleep(Duration::from_millis(delay_ms)).await;
             }
             // Block only for keep-alive sessions (notifier registered at create time).
-            if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            // The notifier is cloned out in its own statement so the map's read
+            // guard is released before the turn parks: an `if let` scrutinee
+            // guard lives for the whole block, and a keep-alive turn parks until
+            // interrupt, so holding it blocked every writer (the next member's
+            // create) forever.
+            let keep_alive_notifier = self.keep_alive_notifiers.read().await.get(id).cloned();
+            if let Some(notifier) = keep_alive_notifier {
                 notifier.notified().await;
             }
             Ok(RunResult {
@@ -10473,6 +10479,67 @@ mod tests {
 
         assert_eq!(lead_mode, Some("autonomous_host"));
         assert_eq!(worker_mode, Some("turn_driven"));
+    }
+
+    /// A parked keep-alive turn must not hold the mock's keep-alive notifier
+    /// map. `test_mob_spawn_many_dispatches_batch` hung in about 1% of loaded
+    /// runs: the first autonomous member's host turn parked inside an `if let`
+    /// whose scrutinee read guard stayed alive, and the second member's create
+    /// then waited forever for that map's write lock. Deterministic: the turn
+    /// is polled once (it takes the map and parks), and the next keep-alive
+    /// create must then complete on its first poll.
+    #[tokio::test]
+    async fn mock_keep_alive_turn_parks_without_holding_the_notifier_map() {
+        use futures::FutureExt;
+
+        let svc = MockSessionSvc::new();
+        let keep_alive = || CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            system_prompt: meerkat::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                keep_alive: true,
+                ..Default::default()
+            }),
+            labels: None,
+        };
+        let first = svc
+            .create_session(keep_alive())
+            .await
+            .expect("create the first keep-alive session");
+        let mut turn = std::pin::pin!(svc.start_turn(
+            &first.session_id,
+            StartTurnRequest {
+                injected_context: Vec::new(),
+                prompt: "host loop".to_string().into(),
+                system_prompt: None,
+                event_tx: None,
+                runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                    HandlingMode::Queue,
+                    None,
+                    None,
+                ),
+            },
+        ));
+        assert!(
+            futures::poll!(&mut turn).is_pending(),
+            "a keep-alive turn parks until it is interrupted"
+        );
+        let second = svc
+            .create_session(keep_alive())
+            .now_or_never()
+            .expect("a parked keep-alive turn must not block the next keep-alive create")
+            .expect("create the second keep-alive session");
+        assert_ne!(second.session_id, first.session_id);
+        svc.interrupt(&first.session_id)
+            .await
+            .expect("interrupt the parked turn");
+        turn.await.expect("the interrupted keep-alive turn returns");
     }
 
     #[tokio::test]

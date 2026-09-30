@@ -7846,6 +7846,7 @@ mod config_tests {
         let brief = "Client: Marigold account.\nKickoff: Tuesday afternoon.\nVenue: Copenhagen office downstairs.\nDeck codename: Pelican.";
         let entries = timeline(&[
             (53790, "fixture_start", json!({"id": 2})),
+            (60922, "input_final", json!({"index": 1})),
             (61287, "assistant_audio_start", json!({"response": 2})),
             (
                 66287,

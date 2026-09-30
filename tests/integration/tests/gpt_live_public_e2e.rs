@@ -1728,9 +1728,18 @@ fn same_transcript_words(title: &str, window: &str) -> bool {
     compact(title) == compact(window)
 }
 
+/// Output-transcript quiet that bounds an assistant turn on the public Live
+/// API, which sends no assistant completion event (the transcript-quiet rule
+/// the public Live adapter applies to assistant turns).
+const S99_ASSISTANT_TURN_QUIET_MS: f64 = 1_500.0;
+
 /// S99's reply to the exchange that began at `start`: every assistant
 /// transcript delta whose provider `start_ms` is no earlier than the
-/// question's first input delta.
+/// question's first input delta, minus a response already streaming at the
+/// onset. That in-flight response is the chain of deltas that began before
+/// the question plus every delta continuing it within the assistant-turn
+/// quiet bound; speech after a longer gap is a new turn and answers the
+/// question, even when it starts at a pause before the fixture's last words.
 fn s99_answer_text(events: &[Value], start: usize) -> String {
     let Some(question_start) = events[start..]
         .iter()
@@ -1739,23 +1748,34 @@ fn s99_answer_text(events: &[Value], start: usize) -> String {
     else {
         return String::new();
     };
-    events[start..]
+    let mut deltas: Vec<(f64, &str)> = events[start..]
         .iter()
         .filter(|event| event["type"] == "session.output_transcript.delta")
-        .filter(|event| {
-            event["start_ms"]
-                .as_f64()
-                .is_some_and(|value| value >= question_start)
+        .filter_map(|event| {
+            let start_ms = event["start_ms"].as_f64()?;
+            let text = event["delta"].as_str().or_else(|| event["text"].as_str())?;
+            Some((start_ms, text))
         })
-        .filter_map(|event| event["delta"].as_str().or_else(|| event["text"].as_str()))
-        .collect::<Vec<_>>()
-        .join("")
+        .collect();
+    deltas.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let mut in_flight_until: Option<f64> = None;
+    let mut answer = String::new();
+    for (start_ms, text) in deltas {
+        let continues_in_flight = start_ms < question_start
+            || in_flight_until.is_some_and(|last| start_ms - last < S99_ASSISTANT_TURN_QUIET_MS);
+        if continues_in_flight {
+            in_flight_until = Some(start_ms);
+        } else {
+            in_flight_until = None;
+            answer.push_str(text);
+        }
+    }
+    answer
 }
 
 /// Assistant transcript of the exchange at `start` that began before the
-/// question's first input delta: a response already streaming at the onset.
-/// Its later deltas could carry `start_ms` values inside the answer window,
-/// so S99 then anchors the answer on the user's last words instead.
+/// question's first input delta: a response already streaming at the onset,
+/// recorded as evidence (`s99_answer_text` excludes it and its continuation).
 fn s99_in_flight_at_onset(events: &[Value], start: usize) -> Option<String> {
     let question_start = events[start..]
         .iter()
@@ -2252,15 +2272,11 @@ async fn s99_native_exchange(
         // this question.
         // Speech that began before the question's first words (the provider
         // started talking as the fixture began) must not satisfy the match:
-        // with it in flight the answer is anchored on the user's last words,
-        // so only speech after the question counts, and the overlap is
-        // recorded as evidence.
+        // `s99_answer_text` excludes that in-flight response and its
+        // continuation, and the overlap is recorded as evidence.
         let in_flight = s99_in_flight_at_onset(&events, start);
         let text = user_start
-            .map(|_| match &in_flight {
-                None => s99_answer_text(&events, start),
-                Some(_) => answer_transcript_text(&events, start),
-            })
+            .map(|_| s99_answer_text(&events, start))
             .unwrap_or_default();
         let audio = live.peer.audio_evidence().await?;
         if matches_text(&text.to_lowercase()) && audio.has_decoded_speech_since(baseline) {
@@ -2275,10 +2291,7 @@ async fn s99_native_exchange(
                 println!("GPT_LIVE_S99_IN_FLIGHT_AT_ONSET fixture={fixture} speech={in_flight:?}");
             }
             let events = live.peer.events().await?;
-            return Ok(match in_flight {
-                None => s99_answer_text(&events, start),
-                Some(_) => answer_transcript_text(&events, start),
-            });
+            return Ok(s99_answer_text(&events, start));
         }
         if Instant::now() >= deadline {
             s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
@@ -3178,8 +3191,7 @@ const ASSISTANT_CONTEXT_HEADING_START: &str = "assistant already generated on th
 /// the first user utterance (facade `LIVE_LATE_SUMMARY_PREFIX`, summary
 /// seeding redesign). A summary ready before the open rides `session.input`
 /// instead and uses no append lane at all.
-const LATE_SUMMARY_PREFIX: &str =
-    "Conversation history summary (context data, not a new user request):";
+const LATE_SUMMARY_PREFIX: &str = "Conversation history summary (context data, not a new user request; answer questions about these facts yourself, directly):";
 
 /// Recent turns the host seeds verbatim next to a ready summary (facade
 /// `LIVE_STARTUP_RECENT_TURNS`).

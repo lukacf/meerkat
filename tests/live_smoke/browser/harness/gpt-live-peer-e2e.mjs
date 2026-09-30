@@ -234,6 +234,8 @@ async function prepare(command) {
       bursts: [],
       currentBurst: null,
       outputLog: [],
+      // Arrival of each response's first output delta, by response index.
+      responseTextStarts: [],
       inputTimes: [],
       delegationTimes: [],
       playing: new Map(),
@@ -347,18 +349,30 @@ async function prepare(command) {
       return waitForEnd ? ended : Promise.resolve(play);
     };
     // Raw facts for the scenario's overlap classifier (Rust
-    // `evidence::overlap_bursts` joins them): every assistant energy burst
-    // from shortly before the fixture started, with the overlap it added to
-    // this fixture, and the arrival times of output transcript deltas, user
-    // input deltas and delegations in the same span.
+    // `evidence::overlap_bursts` joins them): the assistant energy bursts
+    // with the overlap each added to this fixture, and the arrival times of
+    // output transcript deltas, user input deltas and delegations. Bursts and
+    // deltas share one cut: the start of the earliest response with a burst
+    // over the fixture, reaching back two responses, because a response's
+    // tail can still play after the user resumed and the peer moved on.
     state.overlapFacts = (playId, playStartedMs) => {
-      const since = Math.max(0, playStartedMs - 30000);
-      const now = nowMs();
+      const overlapping = state.bursts.filter((burst) => (burst.overlap[playId] ?? 0) > 0);
+      let since = Math.max(0, playStartedMs - 30000);
+      if (overlapping.length > 0) {
+        const earliest = Math.min(...overlapping.map((burst) => burst.response));
+        const starts = [];
+        for (let index = Math.max(0, earliest - 2); index <= earliest; index += 1) {
+          if (state.responseTextStarts[index] !== undefined) starts.push(state.responseTextStarts[index]);
+          const first = state.bursts.find((burst) => burst.response === index);
+          if (first) starts.push(first.started_ms);
+        }
+        if (starts.length > 0) since = Math.min(...starts);
+      }
       return {
-        now_ms: now,
+        now_ms: nowMs(),
         hysteresis_ms: energyConfig.end_hysteresis_ms,
         bursts: state.bursts
-          .filter((burst) => burst.last_active_ms >= since)
+          .filter((burst) => burst.started_ms >= since)
           .map((burst) => ({
             started_ms: burst.started_ms,
             last_active_ms: burst.last_active_ms,
@@ -370,6 +384,7 @@ async function prepare(command) {
         delegations: state.delegationTimes.filter((at) => at >= since),
       };
     };
+
     // ---- responses and duplicate readouts ------------------------------
     const normalizeSentence = (text) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
     state.finishResponse = ({ flushed = false } = {}) => {
@@ -626,6 +641,7 @@ async function prepare(command) {
         : (parsed?.type === 'turn.created' && parsed?.turn?.role === 'assistant');
       if (isOutputDelta) {
         const delta = typeof parsed.delta === 'string' ? parsed.delta : typeof parsed.text === 'string' ? parsed.text : '';
+        if (state.responseTextStarts[state.response.index] === undefined) state.responseTextStarts[state.response.index] = t;
         if (state.response.text.length < 20000) state.response.text += delta;
         if (state.outputLog.length < 20000) state.outputLog.push({ t, text: delta });
       }

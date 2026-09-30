@@ -250,9 +250,15 @@ pub struct OverlapBurst {
     pub ended: bool,
     /// Overlap this burst contributed to the fixture.
     pub overlap_ms: u64,
-    /// The transcript words this burst voiced.
+    /// The transcript words the voicing queue assigns to this burst:
+    /// evidence of what it said.
     #[serde(default)]
     pub text: String,
+    /// Every output transcript that arrived in the burst's decision window
+    /// (from the previous yield point through its end plus
+    /// `TRANSCRIPT_LAG_MS`), whichever burst voiced it.
+    #[serde(default)]
+    pub window_text: String,
     /// The user resumed speaking after the burst, before the assistant spoke
     /// again.
     #[serde(default)]
@@ -262,27 +268,32 @@ pub struct OverlapBurst {
     pub acted: bool,
 }
 
-/// Upper bound on the words one second of assistant audio can voice.
-/// Assistant speech runs near three words a second; the bound errs toward a
-/// burst voicing more, so words carried to the next burst are words the
-/// earlier audio could not have held.
+/// Upper bound on the words one second of assistant audio can voice, for
+/// the evidence queue only; the allow decision does not rest on it.
 pub const SPOKEN_WORDS_PER_SECOND: u64 = 4;
+
+/// How long after a burst's end its transcript may still arrive and count
+/// toward the burst's decision window.
+pub const TRANSCRIPT_LAG_MS: u64 = 1000;
 
 /// Join the peer's facts into the bursts that overlapped the fixture.
 ///
-/// A transcript leads its audio, and the peer's response index advances on
-/// user input, not on audio, so neither arrival windows nor response indices
-/// alone say what a burst voiced. Audio is played in order, so the join is a
-/// queue: the output words, in arrival order, are voiced by the bursts in
-/// order, each burst voicing the words that had arrived by its end, up to
-/// what its duration can hold (`SPOKEN_WORDS_PER_SECOND`). Words a burst
-/// could not hold are voiced by the next one: the tail of an earlier
-/// response that plays after the user resumed carries that response's words,
-/// whatever the new response's own transcript says.
+/// Evidence text (`text`): audio plays in order, so the output words, in
+/// arrival order, are voiced by the bursts as a queue, each burst voicing
+/// the words that had arrived by its end, up to what its duration can hold
+/// (`SPOKEN_WORDS_PER_SECOND`); words a burst could not hold carry to the
+/// next. The tail of an earlier response that plays after the user resumed
+/// so carries that response's words, whatever the new response's own
+/// transcript says.
+///
+/// Decision window (`window_text`, `acted`): from the previous yield point
+/// (the earlier of the last user input delta before the burst and the
+/// previous burst's end) through the burst's end plus the hysteresis and
+/// `TRANSCRIPT_LAG_MS`. Every output delta that arrived in it is included,
+/// whichever burst the queue gave it to.
 ///
 /// A burst yielded when an input delta arrived after it went quiet and
-/// before the next burst (or the facts) began; it acted when a delegation
-/// arrived after the previous burst's end and up to its own end.
+/// before the next burst (or the facts) began.
 pub fn overlap_bursts(facts: &OverlapFacts) -> Vec<OverlapBurst> {
     // Words in arrival order, each stamped with the arrival of the delta that
     // completed it (deltas split words: "Mm-h" + " mm.").
@@ -314,9 +325,6 @@ pub fn overlap_bursts(facts: &OverlapFacts) -> Vec<OverlapBurst> {
         } else {
             facts.now_ms
         };
-        let window_start = index
-            .checked_sub(1)
-            .map(|previous| bursts[previous].last_active_ms + facts.hysteresis_ms);
         let arrived = words[next_word..]
             .iter()
             .take_while(|(t_ms, _)| *t_ms <= window_end)
@@ -339,6 +347,30 @@ pub fn overlap_bursts(facts: &OverlapFacts) -> Vec<OverlapBurst> {
             .collect::<Vec<_>>()
             .join(" ");
         next_word += voiced;
+
+        let previous_end = index
+            .checked_sub(1)
+            .map(|previous| bursts[previous].last_active_ms);
+        let last_input = facts
+            .inputs
+            .iter()
+            .copied()
+            .filter(|t_ms| *t_ms <= burst.started_ms)
+            .max();
+        let decision_start = match (previous_end, last_input) {
+            (Some(end), Some(input)) => Some(end.min(input)),
+            (end, input) => end.or(input),
+        };
+        let decision_end = window_end + TRANSCRIPT_LAG_MS;
+        let in_decision =
+            |t_ms: u64| decision_start.is_none_or(|start| t_ms > start) && t_ms <= decision_end;
+        let window_text = facts
+            .output
+            .iter()
+            .filter(|delta| in_decision(delta.t_ms))
+            .map(|delta| delta.text.as_str())
+            .collect::<String>();
+        let acted = facts.delegations.iter().any(|t_ms| in_decision(*t_ms));
         let quiet_until = bursts
             .get(index + 1)
             .map_or(facts.now_ms, |next| next.started_ms);
@@ -347,10 +379,6 @@ pub fn overlap_bursts(facts: &OverlapFacts) -> Vec<OverlapBurst> {
                 .inputs
                 .iter()
                 .any(|t_ms| *t_ms > burst.last_active_ms && *t_ms <= quiet_until);
-        let acted = facts
-            .delegations
-            .iter()
-            .any(|t_ms| window_start.is_none_or(|start| *t_ms > start) && *t_ms <= window_end);
         if burst.overlap_ms > 0 {
             joined.push(OverlapBurst {
                 started_ms: burst.started_ms,
@@ -358,6 +386,7 @@ pub fn overlap_bursts(facts: &OverlapFacts) -> Vec<OverlapBurst> {
                 ended: burst.ended,
                 overlap_ms: burst.overlap_ms,
                 text,
+                window_text,
                 yielded,
                 acted,
             });
@@ -369,18 +398,36 @@ pub fn overlap_bursts(facts: &OverlapFacts) -> Vec<OverlapBurst> {
 /// Longest assistant burst that can still be a backchannel.
 pub const BACKCHANNEL_MAX_MS: u64 = 1200;
 
-/// Acknowledgement words with no new content, normalized (lowercase,
-/// punctuation and hyphens as spaces, so "Mm-hm" is "mm hm" and a split
-/// "Mm-h mm." is "mm h mm"). A backchannel's transcript uses only these:
-/// mm-hm, uh-huh, mm, hmm, okay, got it, I see, alright, go ahead, go on.
-/// Answers ("yes", "sure", "yeah", "right") are not acknowledgements: said in
-/// a pause they reply to a request the user has not finished.
-pub const BACKCHANNEL_LEXICON: &[&str] = &[
-    "mm", "hm", "hmm", "mhm", "mmhm", "h", "uh", "huh", "okay", "ok", "got", "it", "i", "see",
-    "alright", "go", "ahead", "on",
+/// Backchannel phrases, normalized (lowercase, punctuation and hyphens as
+/// spaces, so "Mm-hm" is "mm hm" and a split "Mm-h mm." is "mm h mm"):
+/// acknowledgements (mm-hm, uh-huh, mm, hmm, okay, got it, I see, alright,
+/// go ahead, go on) and continuers ("sure", "yeah", "yes", "right": said
+/// into a pause they invite the user to go on). Phrases announcing an action
+/// ("on it", "I'll ...", "will do") are not here.
+pub const BACKCHANNEL_PHRASES: &[&str] = &[
+    "mm h mm",
+    "mm hm",
+    "uh huh",
+    "got it",
+    "i see",
+    "go ahead",
+    "go on",
+    "all right",
+    "mhm",
+    "mmhm",
+    "mm",
+    "hm",
+    "hmm",
+    "okay",
+    "ok",
+    "alright",
+    "sure",
+    "yeah",
+    "yes",
+    "right",
 ];
 
-fn backchannel_words(text: &str) -> String {
+fn backchannel_words(text: &str) -> Vec<String> {
     text.chars()
         .map(|c| {
             if c.is_alphanumeric() {
@@ -391,21 +438,51 @@ fn backchannel_words(text: &str) -> String {
         })
         .collect::<String>()
         .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+        .map(str::to_owned)
+        .collect()
 }
 
-/// A backchannel: a short burst that carries no new content (no transcript or
-/// only lexicon tokens), opened no delegation, and yielded to the user, who
-/// resumed speaking before the assistant spoke again.
+/// The text tokenizes, greedily and longest phrase first, into backchannel
+/// phrases with no word left over. Empty text tokenizes trivially.
+fn only_backchannel_phrases(text: &str) -> bool {
+    let words = backchannel_words(text);
+    let mut phrases: Vec<Vec<&str>> = BACKCHANNEL_PHRASES
+        .iter()
+        .map(|phrase| phrase.split(' ').collect())
+        .collect();
+    phrases.sort_by_key(|phrase| std::cmp::Reverse(phrase.len()));
+    let mut at = 0;
+    while at < words.len() {
+        let Some(phrase) = phrases.iter().find(|phrase| {
+            words.len() - at >= phrase.len()
+                && phrase
+                    .iter()
+                    .zip(&words[at..])
+                    .all(|(expected, word)| expected == word)
+        }) else {
+            return false;
+        };
+        at += phrase.len();
+    }
+    true
+}
+
+/// A backchannel, decided fail-closed: a short burst that yielded to the
+/// user (who resumed before the assistant spoke again), opened no
+/// delegation in its decision window, has non-empty evidence of what it said
+/// made only of backchannel phrases, and every output that arrived in its
+/// decision window is backchannel phrases too. Empty evidence (a late or
+/// missing transcript) or any other word counts.
 pub fn is_backchannel(burst: &OverlapBurst) -> bool {
     let short =
         burst.ended && burst.last_active_ms.saturating_sub(burst.started_ms) <= BACKCHANNEL_MAX_MS;
-    let no_content = backchannel_words(&burst.text)
-        .split(' ')
-        .filter(|word| !word.is_empty())
-        .all(|word| BACKCHANNEL_LEXICON.contains(&word));
-    short && burst.yielded && no_content && !burst.acted
+    let evidence =
+        !backchannel_words(&burst.text).is_empty() && only_backchannel_phrases(&burst.text);
+    short
+        && burst.yielded
+        && !burst.acted
+        && evidence
+        && only_backchannel_phrases(&burst.window_text)
 }
 
 /// Overlap of one fixture split into what counts and the backchannels that
@@ -1936,14 +2013,15 @@ mod tests {
             ended: true,
             overlap_ms: 400,
             text: text.to_owned(),
+            window_text: text.to_owned(),
             yielded: true,
             acted,
         }
     }
 
-    /// Peer facts for one burst in the user's pause: its transcript arrives
-    /// as it starts, the user resumes after it, and a delegation arrives in
-    /// its window when `acted`.
+    /// Peer facts for one burst in the user's pause: the user's last delta
+    /// before it, its transcript arriving as it starts, the user resuming
+    /// after it, and a delegation in its window when `acted`.
     fn pause_facts(text: &str, duration_ms: u64, acted: bool) -> OverlapFacts {
         let last_active_ms = 21_900 + duration_ms;
         OverlapFacts {
@@ -1959,7 +2037,7 @@ mod tests {
                 t_ms: 21_850,
                 text: text.to_owned(),
             }],
-            inputs: vec![last_active_ms + 700],
+            inputs: vec![21_000, last_active_ms + 700],
             delegations: if acted { vec![22_000] } else { Vec::new() },
         }
     }
@@ -1971,6 +2049,16 @@ mod tests {
             bound_ms: 300,
             facts: Some(facts),
         }
+    }
+
+    fn allowed(facts: OverlapFacts) -> bool {
+        let (faults, allowed) = reconcile_overlap_faults(vec![overlap(facts)]);
+        assert_eq!(
+            faults.is_empty(),
+            !allowed.is_empty(),
+            "{faults:?} {allowed:?}"
+        );
+        !allowed.is_empty()
     }
 
     /// A short "mm-hm" in the user's pause, after which the user resumed:
@@ -1989,11 +2077,14 @@ mod tests {
         );
     }
 
-    /// Acknowledgements seen live: BuildBuddy S103's "Go ahead." and a split
-    /// "Mm-h mm." (two deltas joined into one word stream).
+    /// Acknowledgements and continuers seen live: BuildBuddy S100's "Sure."
+    /// (said into the pause, then the user went on and the model acted only
+    /// after the full request), S103's "Go ahead.", and a split "Mm-h mm."
+    /// (two deltas joined into one word stream).
     #[test]
     fn backchannels_seen_live_are_allowed() {
-        assert!(is_backchannel(&burst(" Go ahead.", 400, false)));
+        assert!(allowed(pause_facts(" Sure.", 300, false)));
+        assert!(allowed(pause_facts(" Go ahead.", 400, false)));
         let mut split = pause_facts(" Mm-h", 300, false);
         split.output.push(OutputDeltaFact {
             t_ms: 21_900,
@@ -2001,24 +2092,22 @@ mod tests {
         });
         let bursts = overlap_bursts(&split);
         assert_eq!(bursts[0].text, "Mm-h mm.");
-        assert!(is_backchannel(&bursts[0]));
+        assert!(allowed(split));
     }
 
-    /// "Sure." (seen live in BuildBuddy S100) answers the request the user
-    /// has not finished: in a pause it counts as talk-over, as do "yes",
-    /// "yeah" and "right".
+    /// Phrases are matched whole: "On it." is made of words that appear in
+    /// allowed phrases ("go on", "got it") but announces an action, so it
+    /// counts, as does a continuer followed by an announced action.
     #[test]
-    fn answer_in_a_pause_is_counted_not_allowed() {
-        let (faults, allowed) =
-            reconcile_overlap_faults(vec![overlap(pause_facts(" Sure.", 300, false))]);
-        assert_eq!(faults.len(), 1, "{faults:?}");
-        assert!(allowed.is_empty());
-        for answer in ["Yes.", "Yeah.", "Right.", "Sure, go ahead."] {
-            assert_eq!(
-                classify_overlap(400, &[burst(answer, 300, false)]).counted_ms,
-                400,
-                "{answer}"
-            );
+    fn announced_action_in_a_pause_counts() {
+        for text in [
+            "On it.",
+            "Okay, on it.",
+            "Got it, on it.",
+            "Sure, I'll book it.",
+            "Will do.",
+        ] {
+            assert!(!allowed(pause_facts(text, 300, false)), "{text}");
         }
     }
 
@@ -2026,13 +2115,11 @@ mod tests {
     /// is not a backchannel: the overlap counts and the fault stays.
     #[test]
     fn content_bearing_reply_in_a_pause_fails() {
-        let (faults, allowed) = reconcile_overlap_faults(vec![overlap(pause_facts(
+        assert!(!allowed(pause_facts(
             "Got it, Tuesday afternoon.",
             900,
-            false,
-        ))]);
-        assert_eq!(faults.len(), 1);
-        assert!(allowed.is_empty());
+            false
+        )));
         // Too long to be a backchannel even with lexicon text.
         assert_eq!(
             classify_overlap(400, &[burst("Okay.", BACKCHANNEL_MAX_MS + 100, false)]).counted_ms,
@@ -2041,20 +2128,79 @@ mod tests {
         // A burst the model kept speaking after, without the user resuming,
         // did not yield and counts.
         let mut kept = pause_facts("Mm-hm.", 300, false);
-        kept.inputs.clear();
+        kept.inputs.retain(|t_ms| *t_ms < 21_900);
         assert!(!overlap_bursts(&kept)[0].yielded);
-        let (faults, _) = reconcile_overlap_faults(vec![overlap(kept)]);
-        assert_eq!(faults.len(), 1);
+        assert!(!allowed(kept));
     }
 
     /// A delegation opened in the pause acts on a partial request: never a
     /// backchannel, whatever was said.
     #[test]
     fn delegation_opened_in_a_pause_fails() {
-        let (faults, allowed) =
-            reconcile_overlap_faults(vec![overlap(pause_facts("Okay.", 300, true))]);
-        assert_eq!(faults.len(), 1);
-        assert!(allowed.is_empty());
+        assert!(!allowed(pause_facts("Okay.", 300, true)));
+    }
+
+    /// A transcript that has not arrived by the burst's window end leaves no
+    /// evidence of what the burst said: it counts.
+    #[test]
+    fn late_transcript_counts() {
+        let mut late = pause_facts("Tuesday afternoon, noted.", 300, false);
+        late.output[0].t_ms = 21_900 + 300 + 600 + 1;
+        assert_eq!(overlap_bursts(&late)[0].text, "");
+        assert!(!allowed(late));
+        let mut missing = pause_facts("", 300, false);
+        missing.output.clear();
+        assert!(!allowed(missing));
+    }
+
+    /// Over-absorption: burst A (3 s, before the fixture) is still within its
+    /// window when B's transcript "Tuesday afternoon, noted" arrives, so the
+    /// voicing queue gives those words to A and B's own evidence is empty or
+    /// lexicon-only. The decision window still holds them: B counts.
+    #[test]
+    fn earlier_burst_absorbing_a_later_bursts_words_counts() {
+        let facts = OverlapFacts {
+            now_ms: 30_000,
+            hysteresis_ms: 600,
+            bursts: vec![
+                BurstFact {
+                    started_ms: 18_000,
+                    last_active_ms: 21_000,
+                    ended: true,
+                    overlap_ms: 0,
+                },
+                BurstFact {
+                    started_ms: 22_400,
+                    last_active_ms: 23_200,
+                    ended: true,
+                    overlap_ms: 400,
+                },
+            ],
+            output: vec![
+                OutputDeltaFact {
+                    t_ms: 17_900,
+                    text: "Here is the plan.".into(),
+                },
+                OutputDeltaFact {
+                    t_ms: 21_300,
+                    text: " Tuesday afternoon, noted.".into(),
+                },
+                OutputDeltaFact {
+                    t_ms: 22_300,
+                    text: " Mm-hm.".into(),
+                },
+            ],
+            inputs: vec![20_500, 21_200, 24_000],
+            delegations: Vec::new(),
+        };
+        let bursts = overlap_bursts(&facts);
+        assert_eq!(bursts.len(), 1);
+        assert!(
+            !bursts[0].text.contains("Tuesday"),
+            "the queue gave A the words: {bursts:?}"
+        );
+        assert!(bursts[0].window_text.contains("Tuesday"), "{bursts:?}");
+        assert!(!allowed(facts));
     }
 
     /// The leak case. Response N-1's transcript arrives ahead of its audio
@@ -2104,12 +2250,9 @@ mod tests {
         };
         let bursts = overlap_bursts(&facts);
         assert_eq!(bursts.len(), 1, "only B overlapped: {bursts:?}");
-        assert_ne!(bursts[0].text, "Mm-hm.");
         assert_eq!(bursts[0].text, "login test and the", "{bursts:?}");
         assert!(!is_backchannel(&bursts[0]));
-        let (faults, allowed) = reconcile_overlap_faults(vec![overlap(facts.clone())]);
-        assert_eq!(faults.len(), 1);
-        assert!(allowed.is_empty());
+        assert!(!allowed(facts.clone()));
 
         // The same B after A voiced all of N-1 (A long enough for every
         // word): B voices only "Mm-hm." and is an allowed backchannel.
@@ -2118,7 +2261,7 @@ mod tests {
         voiced.bursts[0].started_ms = 19_000;
         let bursts = overlap_bursts(&voiced);
         assert_eq!(bursts[0].text, "Mm-hm.");
-        assert!(is_backchannel(&bursts[0]));
+        assert!(allowed(voiced));
     }
 
     /// The recorded payload shape the peer emits (`fixture_end.detail.facts`)
@@ -2130,7 +2273,7 @@ mod tests {
             "hysteresis_ms": 600,
             "bursts": [{"started_ms": 21_900, "last_active_ms": 22_200, "ended": true, "overlap_ms": 400}],
             "output": [{"t_ms": 21_850, "text": " Go ahead."}],
-            "inputs": [22_900],
+            "inputs": [21_000, 22_900],
             "delegations": []
         }))
         .unwrap();

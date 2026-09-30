@@ -3824,11 +3824,48 @@ pub struct LiveContextAppendAuthority {
     provider_dispatch_consumed: Arc<AtomicBool>,
 }
 
+/// Heading between a superseded typed row and the user speech that
+/// superseded it, carried in the same append so the model never holds the
+/// stale value without its correction.
+pub const LIVE_SUPERSEDING_SPEECH_HEADING: &str =
+    "Said aloud later in this call, superseding it where they conflict:";
+
+/// Payload of a superseded typed row: the row, then every later heard user
+/// speech row still queued behind it, in canonical order. `None` when no
+/// superseding row is given: the generated edge only supersedes a row with at
+/// least one later heard-speech row queued, and sending the typed row without
+/// its correction is the failure this bundling exists to prevent (S99), so a
+/// caller must fail closed instead of sending it bare.
+#[must_use]
+pub fn superseded_typed_row_context<'a>(
+    typed: &str,
+    superseding_speech: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let mut speech = superseding_speech.into_iter().peekable();
+    speech.peek()?;
+    let mut context = typed.to_string();
+    context.push('\n');
+    context.push_str(LIVE_SUPERSEDING_SPEECH_HEADING);
+    for row in speech {
+        context.push('\n');
+        context.push_str(row);
+    }
+    Some(context)
+}
+
 /// Generated purpose of an append, never a caller-selected provider role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveContextAppendKind {
     Ordinary,
     CausalReassertion,
+    /// A typed row the provider never received, held behind the late summary
+    /// while the user said something newer aloud: delivered quietly, never
+    /// described as heard or answered.
+    SupersededTypedRow,
+    /// Runtime work output the model has never seen (a job result merged
+    /// while the call was down): delivered quietly as background context,
+    /// never described as heard or answered.
+    RuntimeWorkReplay,
     HistoryBootstrap,
 }
 
@@ -4122,15 +4159,36 @@ impl LiveContextQueuedRow {
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::AssistantObservation => LiveContextRowDisposition::AssistantObservation,
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::ExcludedFromLiveContext => LiveContextRowDisposition::ExcludedFromLiveContext,
         };
-        let reasserted = *disposition == LiveContextRowDisposition::ReassertCausalTail
-            && row.payload_availability()
-                == crate::meerkat_machine::dsl::LiveContextPayloadAvailability::Materializable;
+        let materializable = row.payload_availability()
+            == crate::meerkat_machine::dsl::LiveContextPayloadAvailability::Materializable;
+        // Heard user speech replays as ReassertCausalTail, the assistant's own
+        // speech as ReassertAssistantOutput, runtime work output as
+        // ReplayRuntimeWork.
+        let user_authored = row.author() == crate::meerkat_machine::dsl::LiveContextRowAuthor::User;
+        let reasserted_speech = *disposition == LiveContextRowDisposition::ReassertCausalTail
+            && materializable
+            && user_authored;
+        let reasserted_output =
+            *disposition == LiveContextRowDisposition::ReassertAssistantOutput && materializable;
         let disposition_matches = match expected_disposition {
             LiveContextRowDisposition::AssistantObservation => {
-                *disposition == LiveContextRowDisposition::ExcludedFromLiveContext || reasserted
+                *disposition == LiveContextRowDisposition::ExcludedFromLiveContext
+                    || reasserted_output
             }
+            // A live transcript row is present whoever spoke it; heard user
+            // speech replays as ReassertCausalTail, the assistant's own as
+            // ReassertAssistantOutput.
             LiveContextRowDisposition::AlreadyPresentInLiveChannel => {
-                *disposition == LiveContextRowDisposition::AlreadyPresentInLiveChannel || reasserted
+                *disposition == LiveContextRowDisposition::AlreadyPresentInLiveChannel
+                    || reasserted_speech
+                    || (reasserted_output && !user_authored)
+            }
+            // Runtime work output is replayed quietly instead of voiced.
+            LiveContextRowDisposition::MirrorParentText => {
+                *disposition == LiveContextRowDisposition::MirrorParentText
+                    || (*disposition == LiveContextRowDisposition::ReplayRuntimeWork
+                        && row.source()
+                            == crate::meerkat_machine::dsl::LiveContextRowSource::RuntimeWork)
             }
             _ => disposition == &expected_disposition,
         };
@@ -4170,16 +4228,38 @@ impl LiveContextQueuedRow {
     pub fn provider_context(&self) -> Option<&str> {
         match self.disposition {
             LiveContextRowDisposition::MirrorParentText => self.row.provider_context(),
-            LiveContextRowDisposition::ReassertCausalTail => self.row.causal_context(),
+            LiveContextRowDisposition::ReassertCausalTail
+            | LiveContextRowDisposition::ReassertAssistantOutput
+            | LiveContextRowDisposition::ReplayRuntimeWork => self.row.causal_context(),
             LiveContextRowDisposition::AlreadyPresentInLiveChannel
             | LiveContextRowDisposition::AssistantObservation
             | LiveContextRowDisposition::ExcludedFromLiveContext => None,
         }
     }
 
+    /// A quiet replay of speech this call already heard (the user's or the
+    /// assistant's own).
     #[must_use]
     pub fn is_causal_reassertion(&self) -> bool {
+        matches!(
+            self.disposition,
+            LiveContextRowDisposition::ReassertCausalTail
+                | LiveContextRowDisposition::ReassertAssistantOutput
+        )
+    }
+
+    /// A quiet replay of user speech this call heard live: the rows that can
+    /// supersede a typed row held behind a late summary.
+    #[must_use]
+    pub fn is_heard_speech_replay(&self) -> bool {
         self.disposition == LiveContextRowDisposition::ReassertCausalTail
+    }
+
+    /// A quiet replay of runtime work output the model has never seen, such
+    /// as the reply to a job result merged while the call was down.
+    #[must_use]
+    pub fn is_runtime_work_replay(&self) -> bool {
+        self.disposition == LiveContextRowDisposition::ReplayRuntimeWork
     }
 }
 
@@ -4383,7 +4463,19 @@ impl LiveContextAppendAuthority {
         )
         .map(|authority| {
             authority.map(|mut authority| {
-                authority.kind = if queued.is_causal_reassertion() {
+                // The generated edge reports a voiced typed row whose channel
+                // already heard newer user speech; it travels quietly with its
+                // own framing, distinct from replayed heard speech.
+                authority.kind = if authority.kind == LiveContextAppendKind::SupersededTypedRow {
+                    debug_assert_eq!(
+                        queued.row().disposition(),
+                        meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::MirrorParentText,
+                        "only a voiced parent text row can be superseded"
+                    );
+                    LiveContextAppendKind::SupersededTypedRow
+                } else if queued.is_runtime_work_replay() {
+                    LiveContextAppendKind::RuntimeWorkReplay
+                } else if queued.is_causal_reassertion() {
                     LiveContextAppendKind::CausalReassertion
                 } else {
                     LiveContextAppendKind::Ordinary
@@ -4406,6 +4498,7 @@ impl LiveContextAppendAuthority {
             append_id: effect_append_id,
             previous_cursor: effect_previous_cursor,
             next_cursor: effect_next_cursor,
+            superseded_by_heard_speech,
         } = effect
         else {
             return Ok(None);
@@ -4423,7 +4516,11 @@ impl LiveContextAppendAuthority {
             append_id: append_id.to_string(),
             previous_cursor,
             next_cursor,
-            kind: LiveContextAppendKind::Ordinary,
+            kind: if *superseded_by_heard_speech {
+                LiveContextAppendKind::SupersededTypedRow
+            } else {
+                LiveContextAppendKind::Ordinary
+            },
             provider_dispatch_consumed: Arc::new(AtomicBool::new(false)),
         }))
     }
@@ -5120,6 +5217,26 @@ impl LiveDelegationResultDeliveryReceipt {
 
 #[cfg(test)]
 mod tests {
+    /// A superseded typed row is never composed without its correction: the
+    /// empty set is typed as `None` so the drain fails closed.
+    #[test]
+    fn superseded_typed_row_context_requires_superseding_speech() {
+        assert_eq!(
+            super::superseded_typed_row_context("typed", std::iter::empty()),
+            None
+        );
+        let composed =
+            super::superseded_typed_row_context("typed", ["first spoken", "second spoken"])
+                .expect("superseding speech present");
+        let typed_at = composed.find("typed").expect("typed row");
+        let heading_at = composed
+            .find(super::LIVE_SUPERSEDING_SPEECH_HEADING)
+            .expect("heading");
+        let first_at = composed.find("first spoken").expect("first");
+        let second_at = composed.find("second spoken").expect("second");
+        assert!(typed_at < heading_at && heading_at < first_at && first_at < second_at);
+    }
+
     use super::*;
     use meerkat_core::ops::OperationId;
     use meerkat_core::{
@@ -5183,6 +5300,7 @@ mod tests {
             append_id: append_id.to_string(),
             previous_cursor,
             next_cursor,
+            superseded_by_heard_speech: false,
         }
     }
 

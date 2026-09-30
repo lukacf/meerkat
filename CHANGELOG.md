@@ -162,6 +162,31 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   discriminants move). `MeerkatMachineState` and the kernel `State` gain the
   field `run_stop_requested: Option<RunId>`, so struct-literal users must add
   it.
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`): the effect
+  `MeerkatMachineEffect::LiveContextAppendAuthorized` (in both meerkat-runtime
+  and meerkat-machine-schema) and the kernel payload
+  `effects::LiveContextAppendAuthorized` gain the field
+  `superseded_by_heard_speech: bool`, so struct-literal users and exhaustive
+  field patterns must add it. The transitions
+  `AuthorizeLiveContextAppendSupersededIdle`,
+  `AuthorizeLiveContextAppendSupersededAttached` and
+  `AuthorizeLiveContextAppendSupersededRunning` are added
+  (`TransitionId::*` discriminants move).
+- Generated `MeerkatMachine`: `LiveContextRowDisposition` (meerkat-runtime
+  `meerkat_machine::dsl`, meerkat-machine-schema and the kernel enum) gains
+  the runtime-minted variant `ReassertAssistantOutput`
+  (`LiveContextRowDisposition::*`): the assistant's own observed or live
+  speech now replays under it, and `ReassertCausalTail` is heard user speech
+  only. The input `MeerkatMachineInput::EnqueueLiveContextRow`
+  and the kernel payload `inputs::EnqueueLiveContextRow` gain the field
+  `row_author: LiveContextRowAuthor`, with the new catalog enum
+  `LiveContextRowAuthor { User, Assistant, Runtime }` (re-exported from
+  `meerkat_runtime::meerkat_machine::dsl`). Struct-literal users must add it.
+- `meerkat_runtime::live_execution::LiveContextAppendKind` gains the variants
+  `SupersededTypedRow` and `RuntimeWorkReplay` (`LiveContextAppendKind::*`);
+  exhaustive matches must handle them. The meerkat facade sends both on the
+  quiet thinking lane.
 - Behaviour-only (not measured by the gate): the `RuntimeEvent`
   `InputLifecycleEvent::Abandoned` emitted by a staged-rollback abandonment
   now carries the reason the generated arm chose. Before, it was always
@@ -411,9 +436,36 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   literals must add it; `..Default::default()` literals are unaffected (the
   default is `SessionBuildIntent::Resume`, which is what every existing
   `resume_session` setter meant unless it pre-assigns a mint).
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`): the input `EnqueueLiveContextRow`
+  (`MeerkatMachineInput::EnqueueLiveContextRow`, kernel
+  `inputs::EnqueueLiveContextRow`) gains the field
+  `row_source: LiveContextRowSource`, and the enum `LiveContextRowSource`
+  (`Conversation`, `RuntimeWork`) is added. Struct-literal and
+  exhaustive-pattern users must add the field. `LiveContextRowDisposition`
+  gains the variant `ReplayRuntimeWork` (exhaustive matches must handle it).
+  The transitions
+  `AuthorizeLiveContextAppendDeferredByConversationIdle`,
+  `AuthorizeLiveContextAppendDeferredByConversationAttached` and
+  `AuthorizeLiveContextAppendDeferredByConversationRunning` are added (kernel
+  `TransitionId::*` discriminants move).
+- `meerkat_core::types::TranscriptMessageIdentity` gains the public field
+  `turn_input: Option<TranscriptTurnInput>`, and the `#[non_exhaustive]` enum
+  `meerkat_core::types::TranscriptTurnInput` (`RuntimeAuthored`) is added.
+  Struct literals must add the field (`None` for conversational turns). The
+  field is serde-additive (absent on old rows) and appears in the emitted
+  wire schemas.
 
 ### Added
 
+- `meerkat_mob::MobHandle::start_injected_context_work_for_identity_bounded`
+  queues runtime-authored content on a member as injected execution context
+  (exact runtime-input custody, no synthesized conversational user row).
+- `meerkat::experimental_gpt_live::LIVE_CAUSAL_REPLAY_PREFIX`,
+  `LIVE_SUPERSEDED_TYPED_PREFIX` and `LIVE_RUNTIME_WORK_PREFIX` frame quiet
+  live-context appends: a replayed row the call already heard, a text-chat
+  row delivered after newer speech, and runtime work output (a job result
+  merged while the call was down) the model has never seen.
 - Session event subscriptions replay from a typed cursor (#1236).
   `SessionService::subscribe_session_events_from(id, SessionEventCursor)` and
   `EphemeralSessionService`/`PersistentSessionService`
@@ -807,6 +859,27 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   inventory, pair report and audit writer tests), and the parity field
   evaluator lacked `pending_external_route_installs`. The generated MobMachine
   contract moves the four inputs to its Runtime-Internal Inputs section.
+- A reopened GPT Live channel no longer reads a finished job's result aloud
+  before the user speaks. A voice job that finishes after its channel closed
+  merges into the source member; that merge turn could commit after the
+  reopen's pre-open summary boundary, and its rows were then queued on the new
+  channel as rows the channel will voice, which started the conversation
+  (`SpokenCanonicalRow`) and released the late summary and the result into
+  silence. The merge is now runtime-authored injected execution context (no
+  conversational user row), and the member's reply to it is runtime work
+  output: the mob stamps `TranscriptTurnInput::RuntimeAuthored` on the turn's
+  transcript identity from its work attribution, the live mirror reads it
+  from the committed reply (never from transcript position), and
+  `EnqueueLiveContextRow` carries it as `row_source`. It is queued as
+  `ReplayRuntimeWork` and replayed on the quiet thinking lane once the
+  conversation has started, after the late summary, and never starts the
+  conversation itself. Typed and peer rows are voiced as before
+  (lukacf/meerkat-mobkit#474). The replay is not held behind the user phase
+  of a provider turn (no assistant turn started for the turn's interaction),
+  so the result reaches the model while the user's first utterance is still
+  in flight, before it answers; once an assistant turn has started it waits
+  like every other row, and voiced rows and reassertions of live speech
+  still wait for the turn boundary.
 - Model fallback from GPT-6 no longer skips every target as
   `request_unsupported`. Since the GPT-6 rows gained the prompt-cache
   capabilities, their build-derived cache defaults (mode, TTL and a
@@ -822,6 +895,20 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   after the model searched) sent an orphaned `server_tool_use`, which
   Anthropic refuses. The stored block keeps its `type`, and results recorded
   by earlier versions are recognised and replayed too.
+- GPT Live (public Live) no longer voices a typed row that waited behind a
+  late context summary while the user said something newer aloud. Such a row
+  now goes out quietly in canonical order (generated edge
+  `AuthorizeLiveContextAppendSuperseded`), because voiced after the newer
+  speech the model took it as the newest fact (S99 answered "Violet" after
+  the user said "cobalt", 3/3). Its framing orders it before that speech and
+  leaves to the model whether a typed request the speech did not replace
+  still needs a response. Only newer user speech supersedes it; the
+  assistant's own speech and runtime work output do not. Replayed rows the
+  call already heard are framed as such (sent bare, the model answered each
+  replayed turn again), and replayed runtime work output as background work
+  the model has not seen. A superseded typed row is delivered in one append
+  together with the heard speech that superseded it; those speech rows still
+  replay on their own afterwards, so the model sees them twice by design.
 - The ripgrep tombstone scans (`legacy-surface-gate`,
   `session-control-gate`, `deprecated-backend-gate`) now run in pull-request
   CI's always-on fmt-governance lane, after installing ripgrep, which the

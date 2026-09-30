@@ -4946,6 +4946,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeLiveContextAppendRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendSupersededIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendSupersededAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendSupersededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeLiveContextAppendPendingReplayIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4962,6 +4971,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeLiveContextAppendDeferredByTurnRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByConversationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByConversationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByConversationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeLiveContextAppendDeferredByCloseIdle`

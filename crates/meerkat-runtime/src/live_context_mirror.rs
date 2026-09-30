@@ -182,6 +182,10 @@ pub struct CommittedLiveContextRow {
     content_digest: String,
     store_commit_authority: String,
     disposition: LiveContextCommittedRowDisposition,
+    #[cfg(feature = "live")]
+    source: crate::meerkat_machine::dsl::LiveContextRowSource,
+    #[cfg(feature = "live")]
+    author: crate::meerkat_machine::dsl::LiveContextRowAuthor,
     provider_context: Option<String>,
     causal_context: Option<String>,
     #[cfg(feature = "live")]
@@ -288,6 +292,8 @@ impl CommittedLiveContextRow {
             content_digest,
             store_commit_authority: store_commit_authority.to_string(),
             disposition,
+            source: crate::meerkat_machine::dsl::LiveContextRowSource::Conversation,
+            author: row_author(message),
             provider_context,
             causal_context,
             observation_id,
@@ -346,9 +352,37 @@ impl CommittedLiveContextRow {
         }
     }
 
+    /// Who authored this row (user input, assistant output, runtime context).
+    #[cfg(feature = "live")]
+    pub(crate) const fn author(&self) -> crate::meerkat_machine::dsl::LiveContextRowAuthor {
+        self.author
+    }
+
+    /// What drove the turn that committed this row (see
+    /// [`classify_committed_boundary_rows_after`]).
+    #[cfg(feature = "live")]
+    pub(crate) fn source(&self) -> crate::meerkat_machine::dsl::LiveContextRowSource {
+        self.source
+    }
+
     #[cfg(feature = "live")]
     pub(crate) fn observation_id(&self) -> Option<&meerkat_core::LiveContextObservationId> {
         self.observation_id.as_ref()
+    }
+}
+
+/// Author of a committed row as the live-context authority sees it: only a
+/// conversational user row is the user's own input. Injected context and a
+/// compaction summary ride a user message but are runtime-authored.
+#[cfg(feature = "live")]
+fn row_author(message: &Message) -> crate::meerkat_machine::dsl::LiveContextRowAuthor {
+    use crate::meerkat_machine::dsl::LiveContextRowAuthor;
+    match message {
+        Message::User(user) if user.transcript_role.is_conversational() => {
+            LiveContextRowAuthor::User
+        }
+        Message::BlockAssistant(_) => LiveContextRowAuthor::Assistant,
+        _ => LiveContextRowAuthor::Runtime,
     }
 }
 
@@ -405,6 +439,7 @@ pub(crate) fn classify_committed_boundary_rows_after(
     raw_rows
         .into_iter()
         .map(|(sequence, message, serialized)| {
+            let source = row_source(&message);
             let origin = match &message {
                 Message::User(user) => user.identity.realtime_origin.as_ref(),
                 Message::BlockAssistant(assistant) => assistant.identity.realtime_origin.as_ref(),
@@ -429,8 +464,31 @@ pub(crate) fn classify_committed_boundary_rows_after(
                 provenance,
                 store_commit_authority,
             )
+            .map(|row| CommittedLiveContextRow { source, ..row })
         })
         .collect()
+}
+
+/// What drove the turn that committed a row. The member's reply to
+/// runtime-authored injected execution context (such as a post-close result
+/// merge) carries `TranscriptTurnInput::RuntimeAuthored` on its identity,
+/// stamped at admission from the turn's work attribution; it is runtime work
+/// output, replayed quietly instead of voiced. Every other row is
+/// conversation. Transcript position is never consulted: a mid-turn steer can
+/// follow a typed row, and a reply can commit in a later boundary than its
+/// input.
+#[cfg(feature = "live")]
+fn row_source(message: &Message) -> crate::meerkat_machine::dsl::LiveContextRowSource {
+    use crate::meerkat_machine::dsl::LiveContextRowSource;
+    match message {
+        Message::BlockAssistant(assistant)
+            if assistant.identity.turn_input
+                == Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored) =>
+        {
+            LiveContextRowSource::RuntimeWork
+        }
+        _ => LiveContextRowSource::Conversation,
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -571,6 +629,63 @@ mod tests {
         assert_eq!(
             row.provider_context(),
             Some(r#"{"role":"user","text":"committed parent text"}"#)
+        );
+    }
+
+    /// The source is read from the reply's stamped turn authorship, never
+    /// from transcript position.
+    #[test]
+    fn row_source_reads_the_stamped_turn_authorship() {
+        use crate::meerkat_machine::dsl::LiveContextRowSource::{Conversation, RuntimeWork};
+        let reply = |text: &str, runtime_authored: bool| {
+            let mut message =
+                meerkat_core::types::BlockAssistantMessage::snapshot(vec![AssistantBlock::Text {
+                    text: text.into(),
+                    meta: None,
+                }]);
+            if runtime_authored {
+                message.identity.turn_input =
+                    Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored);
+            }
+            Message::BlockAssistant(message)
+        };
+        let mut steer = UserMessage::text("a durable mid-turn steer");
+        steer.transcript_role = meerkat_core::types::TranscriptUserRole::InjectedContext;
+
+        // (a) A typed turn followed by a durable mid-turn steer (injected
+        // context) and the reply: the reply stays conversation.
+        let typed_with_steer = [
+            Message::User(UserMessage::text("typed turn")),
+            Message::User(steer.clone()),
+            reply("Noted.", false),
+        ];
+        assert_eq!(
+            typed_with_steer.iter().map(row_source).collect::<Vec<_>>(),
+            vec![Conversation, Conversation, Conversation]
+        );
+
+        // (b) A merge reply committed alone, in a later boundary than its
+        // injected input, stays runtime work.
+        assert_eq!(
+            row_source(&reply("Done, the file is written.", true)),
+            RuntimeWork
+        );
+
+        let merged = classify(
+            &reply("Done, the file is written.", true),
+            LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+        );
+        assert_eq!(
+            merged.disposition(),
+            LiveContextCommittedRowDisposition::MirrorParentText
+        );
+        assert_eq!(
+            classify(
+                &Message::User(steer),
+                LiveContextCommittedTextProvenance::ParentSessionServiceTurn
+            )
+            .disposition(),
+            LiveContextCommittedRowDisposition::ExcludedFromLiveContext
         );
     }
 

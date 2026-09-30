@@ -638,6 +638,10 @@ impl PublicLiveHarness {
         }
         let (shared, exact) = self.shared()?;
         let started = Instant::now();
+        // The 5 s ceiling is this harness's latency expectation, tighter
+        // than the product's own confirmation bound (the owner retires an
+        // unconfirmed transport locally at LIVE_CLOSE_CONFIRMATION_BOUND).
+        // Crossing it names the step instead of surfacing a bare `Elapsed`.
         let result = timeout(
             Duration::from_secs(5),
             shared.member_host.close_experimental_live_active_channel(
@@ -646,7 +650,14 @@ impl PublicLiveHarness {
                 &exact.activation_receipt,
             ),
         )
-        .await??;
+        .await
+        .map_err(|_| {
+            format!(
+                "exact live close exceeded the 5000 ms harness ceiling (product bound {} ms): the provider did not confirm closure of channel {}",
+                meerkat::experimental_gpt_live::LIVE_CLOSE_CONFIRMATION_BOUND.as_millis(),
+                exact.id.as_str()
+            )
+        })??;
         assert_eq!(result, LiveCloseStatus::Closed);
         println!(
             "GPT_LIVE_PUBLIC_EXACT_CLOSE elapsed_ms={} ceiling_ms=5000",
@@ -1708,6 +1719,61 @@ fn answer_transcript_text(events: &[Value], start: usize) -> String {
         .join("")
 }
 
+/// A WorkGraph title and a delegation window carry the same transcript when
+/// they match with whitespace removed. The product joins a window's finals
+/// with a space; the peer concatenates raw deltas, so a word the provider
+/// split across two finals ("thetext" + "irst") differs only in spacing.
+fn same_transcript_words(title: &str, window: &str) -> bool {
+    let compact = |text: &str| text.split_whitespace().collect::<String>();
+    compact(title) == compact(window)
+}
+
+/// S99's reply to the exchange that began at `start`: every assistant
+/// transcript delta whose provider `start_ms` is no earlier than the
+/// question's first input delta.
+fn s99_answer_text(events: &[Value], start: usize) -> String {
+    let Some(question_start) = events[start..]
+        .iter()
+        .filter(|event| is_user_input(event))
+        .find_map(|event| event["start_ms"].as_f64())
+    else {
+        return String::new();
+    };
+    events[start..]
+        .iter()
+        .filter(|event| event["type"] == "session.output_transcript.delta")
+        .filter(|event| {
+            event["start_ms"]
+                .as_f64()
+                .is_some_and(|value| value >= question_start)
+        })
+        .filter_map(|event| event["delta"].as_str().or_else(|| event["text"].as_str()))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Assistant transcript of the exchange at `start` that began before the
+/// question's first input delta: a response already streaming at the onset.
+/// Its later deltas could carry `start_ms` values inside the answer window,
+/// so S99 then anchors the answer on the user's last words instead.
+fn s99_in_flight_at_onset(events: &[Value], start: usize) -> Option<String> {
+    let question_start = events[start..]
+        .iter()
+        .filter(|event| is_user_input(event))
+        .find_map(|event| event["start_ms"].as_f64())?;
+    let in_flight = events[start..]
+        .iter()
+        .filter(|event| event["type"] == "session.output_transcript.delta")
+        .filter(|event| {
+            event["start_ms"]
+                .as_f64()
+                .is_some_and(|value| value < question_start)
+        })
+        .filter_map(|event| event["delta"].as_str().or_else(|| event["text"].as_str()))
+        .collect::<String>();
+    (!in_flight.trim().is_empty()).then_some(in_flight)
+}
+
 fn output_transcript_text(events: &[Value], start: usize) -> String {
     events[start..]
         .iter()
@@ -2178,12 +2244,23 @@ async fn s99_native_exchange(
             !events[start..].iter().any(is_client_delegation),
             "history and correction exchanges must use native voice, not delegated text or TTS"
         );
-        // The answer is what the assistant says after the question. Queued
-        // context rows drained after the summary acknowledgement may be
-        // spoken while the question is still playing; that speech answers
-        // older rows, not this question, so it is excluded.
+        // The answer is what the assistant says from the question's onset.
+        // Every S99 question follows assistant quiet, and rows that waited
+        // behind the summary while newer speech was heard go out as quiet
+        // replays, so speech that starts at a pause inside the question
+        // (the provider may answer before the fixture's last words) answers
+        // this question.
+        // Speech that began before the question's first words (the provider
+        // started talking as the fixture began) must not satisfy the match:
+        // with it in flight the answer is anchored on the user's last words,
+        // so only speech after the question counts, and the overlap is
+        // recorded as evidence.
+        let in_flight = s99_in_flight_at_onset(&events, start);
         let text = user_start
-            .map(|_| answer_transcript_text(&events, start))
+            .map(|_| match &in_flight {
+                None => s99_answer_text(&events, start),
+                Some(_) => answer_transcript_text(&events, start),
+            })
             .unwrap_or_default();
         let audio = live.peer.audio_evidence().await?;
         if matches_text(&text.to_lowercase()) && audio.has_decoded_speech_since(baseline) {
@@ -2194,7 +2271,14 @@ async fn s99_native_exchange(
                 audio,
             })?;
             println!("GPT_LIVE_PUBLIC_CONCURRENT_AUDIO fixture={fixture} evidence={audio:?}");
-            return Ok(answer_transcript_text(&live.peer.events().await?, start));
+            if let Some(in_flight) = &in_flight {
+                println!("GPT_LIVE_S99_IN_FLIGHT_AT_ONSET fixture={fixture} speech={in_flight:?}");
+            }
+            let events = live.peer.events().await?;
+            return Ok(match in_flight {
+                None => s99_answer_text(&events, start),
+                Some(_) => answer_transcript_text(&events, start),
+            });
         }
         if Instant::now() >= deadline {
             s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
@@ -2203,7 +2287,7 @@ async fn s99_native_exchange(
                 audio,
             })?;
             return Err(format!(
-                "S99 native exchange lacked fresh matching transcript/decoded speech; fixture={fixture} audio={audio:?}; {}",
+                "S99 native exchange lacked fresh matching transcript/decoded speech; fixture={fixture} answer={text:?} audio={audio:?}; {}",
                 live.peer.event_summary(&events[start..])
             ).into());
         }
@@ -2874,8 +2958,16 @@ async fn native_question(
             Duration::from_secs(60),
             &format!("{label} input_final, then assistant_audio_start and assistant_audio_end"),
             |t| {
-                let input_final = timeline_find(t, TimelineKind::InputFinal, fixture_start_ms)?;
-                let start = timeline_find(t, TimelineKind::AssistantAudioStart, input_final.t_ms)?;
+                timeline_find(t, TimelineKind::InputFinal, fixture_start_ms)?;
+                // The answer's audio is the first assistant audio after the
+                // question's speech ended (as in `SpokenTurn`), not after the
+                // final's entry: the final closes when the answer's first
+                // transcript delta arrives on the data channel, and the
+                // answer's audio can arrive on the media track a few
+                // milliseconds before it.
+                let speech_end_ms = fixture_start_entry(t, schedule_id)
+                    .map(|start| start.t_ms + start.detail_u64("speech_ms").unwrap_or(0))?;
+                let start = timeline_find(t, TimelineKind::AssistantAudioStart, speech_end_ms)?;
                 timeline_find(t, TimelineKind::AssistantAudioEnd, start.t_ms).map(|_| t.to_vec())
             },
         )
@@ -4215,7 +4307,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             let titles: Vec<String> = items.iter().map(|item| normalize_words(&item.title)).collect();
             println!("GPT_LIVE_S100_WORKGRAPH_TITLES {titles:?}");
             for (index, window) in spoken_inputs.iter().enumerate() {
-                if !titles.iter().any(|title| title == window) {
+                if !titles.iter().any(|title| same_transcript_words(title, window)) {
                     deterministic_failures.push(format!(
                         "no WorkGraph item title equals request {} window {window:?}; titles: {titles:?}",
                         index + 1
@@ -6959,9 +7051,13 @@ async fn run_s105_fork_and_merge_parallel(
                 "no second file holds twice number.txt before the correction: number={number:?} others={others:?}"
             ));
         }
-        // Each delegation's WorkGraph item title equals the arrival-anchored
-        // user final (the executor input equals the transcript).
-        let finals = live.peer.energy().await?.input_finals;
+        // Each delegation's WorkGraph item title equals its delegation
+        // window's user transcript: every user delta since the previous
+        // `session.delegation.created`, regardless of assistant output in
+        // between (the S100 title rule). The provider may close a window
+        // over two finals when the assistant answered the first one, so the
+        // delegation-closed final alone is not the executor input.
+        let delegation_inputs = live.peer.energy().await?.delegation_inputs;
         let service = live
             .mobs
             .workgraph_service_for_mob(&meerkat_mob::MobId::from(live.mob_id.as_str()))?
@@ -6973,22 +7069,21 @@ async fn run_s105_fork_and_merge_parallel(
             })
             .await?;
         let titles: Vec<String> = items.iter().map(|item| normalize_words(&item.title)).collect();
-        let delegated_finals: Vec<String> = finals
+        let delegated_windows: Vec<String> = delegation_inputs
             .iter()
-            .filter(|f| f.closed_by.as_deref() == Some("delegation"))
-            .map(|f| normalize_words(&f.text))
+            .map(|input| normalize_words(&input.text))
             .collect();
-        println!("GPT_LIVE_S105_INPUTS delegated_finals={delegated_finals:?} workgraph_titles={titles:?}");
-        for final_text in &delegated_finals {
-            if !titles.iter().any(|title| title == final_text) {
+        println!("GPT_LIVE_S105_INPUTS delegated_windows={delegated_windows:?} workgraph_titles={titles:?}");
+        for window in &delegated_windows {
+            if !titles.iter().any(|title| same_transcript_words(title, window)) {
                 deterministic_failures.push(format!(
-                    "no WorkGraph item title equals the user's final transcript {final_text:?}; titles: {titles:?}"
+                    "no WorkGraph item title equals the delegation window transcript {window:?}; titles: {titles:?}"
                 ));
             }
         }
-        if delegated_finals.len() < 2 {
+        if delegated_windows.len() < 2 {
             deterministic_failures.push(format!(
-                "expected two delegation-closed user finals, got {delegated_finals:?}"
+                "expected two client delegation windows, got {delegated_windows:?}"
             ));
         }
         // Both forks retired after their delegations closed.

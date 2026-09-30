@@ -2871,11 +2871,14 @@ pub enum LiveContextRowDisposition {
     AssistantObservation,
     ExcludedFromLiveContext,
     ReassertCausalTail,
+    ReplayRuntimeWork,
+    ReassertAssistantOutput,
 }
 
 pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
     LiveContextDeliveryReadiness, LiveContextPayloadAvailability, LiveContextPreparationFailure,
-    LiveContextPreparationPhase, LiveConversationStartCause,
+    LiveContextPreparationPhase, LiveContextRowAuthor, LiveContextRowSource,
+    LiveConversationStartCause,
 };
 
 /// Bridging copy of the catalog-owned delegation result disposition.

@@ -744,7 +744,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveLiveContextBootstrapAppend`(session_id: String, channel_id: String, lease_id: String, append_id: String, content_digest: String, reserved_cursor: u64, observation: LiveContextAppendObservation, retained_sessions: Map<String, String>, retained_cursors: Map<String, u64>, retained_digests: Map<String, String>, retained_commits: Map<String, String>, retained_dispositions: Map<String, LiveContextRowDisposition>, retained_append_by_cursor: Map<u64, String>)
 - `FailLiveContextPreparation`(session_id: String, channel_id: String, lease_id: String, reason: LiveContextPreparationFailure)
 - `AuthorizeLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64)
-- `EnqueueLiveContextRow`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_cursor: u64, content_digest: String, commit_authority_token: String, disposition: LiveContextRowDisposition, payload_availability: LiveContextPayloadAvailability, observation_id: Option<String>)
+- `EnqueueLiveContextRow`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_cursor: u64, content_digest: String, commit_authority_token: String, disposition: LiveContextRowDisposition, payload_availability: LiveContextPayloadAvailability, row_source: LiveContextRowSource, row_author: LiveContextRowAuthor, observation_id: Option<String>)
 - `AdvanceLiveContextCanonicalCoverage`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
 - `ResolveLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, replacement_channel_id: String, canonical_seed_cursor: u64, observation: LiveContextAppendObservation)
 - `BindLiveContextRecoveryChannel`(activation_receipt: String, session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_seed_cursor: u64)
@@ -1045,7 +1045,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveContextBootstrapAckCutRecorded`(session_id: String, channel_id: String, lease_id: String, append_id: String, cut: u64)
 - `LiveContextDeliveryReadinessObserved`(session_id: String, channel_id: String, readiness: LiveContextDeliveryReadiness)
 - `LiveContextBootstrapAppendAuthorized`(session_id: String, channel_id: String, lease_id: String, append_id: String, content_digest: String, reserved_cursor: u64)
-- `LiveContextAppendAuthorized`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
+- `LiveContextAppendAuthorized`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64, superseded_by_heard_speech: Bool)
 - `LiveContextAppendDeferred`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
 - `LiveContextAppendAlreadyCovered`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
 - `LiveContextRowQueued`(session_id: String, channel_id: String, append_id: String, canonical_cursor: u64, disposition: LiveContextRowDisposition)
@@ -17543,7 +17543,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `EnqueueLiveContextRowIdle`
 - From: `Idle`
-- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability, observation_id)
+- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability, row_source, row_author, observation_id)
 - Guards:
   - `append_present`
   - `commit_evidence_present`
@@ -17561,7 +17561,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `EnqueueLiveContextRowAttached`
 - From: `Attached`
-- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability, observation_id)
+- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability, row_source, row_author, observation_id)
 - Guards:
   - `append_present`
   - `commit_evidence_present`
@@ -17579,7 +17579,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `EnqueueLiveContextRowRunning`
 - From: `Running`
-- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability, observation_id)
+- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability, row_source, row_author, observation_id)
 - Guards:
   - `append_present`
   - `commit_evidence_present`
@@ -17645,9 +17645,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `cursor_edge_is_next`
   - `exact_canonical_outbox_head`
+  - `not_superseded_by_heard_speech`
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
+  - `quiet_history_waits_for_the_conversation`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
 - Emits: `LiveContextAppendAuthorized`
@@ -17664,9 +17666,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `cursor_edge_is_next`
   - `exact_canonical_outbox_head`
+  - `not_superseded_by_heard_speech`
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
+  - `quiet_history_waits_for_the_conversation`
   - `channel_has_no_recovery_obligation`
   - `append_identity_is_fresh`
 - Emits: `LiveContextAppendAuthorized`
@@ -17683,6 +17687,68 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `cursor_edge_is_next`
   - `exact_canonical_outbox_head`
+  - `not_superseded_by_heard_speech`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
+  - `quiet_history_waits_for_the_conversation`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Running`
+
+### `AuthorizeLiveContextAppendSupersededIdle`
+- From: `Idle`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `cursor_edge_is_next`
+  - `exact_canonical_outbox_head`
+  - `superseded_by_heard_speech`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveContextAppendSupersededAttached`
+- From: `Attached`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `cursor_edge_is_next`
+  - `exact_canonical_outbox_head`
+  - `superseded_by_heard_speech`
+  - `channel_has_no_pending_append`
+  - `channel_accepts_context_delivery`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveContextAppendSupersededRunning`
+- From: `Running`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `append_present`
+  - `bootstrap_is_acknowledged`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `cursor_edge_is_next`
+  - `exact_canonical_outbox_head`
+  - `superseded_by_heard_speech`
   - `channel_has_no_pending_append`
   - `channel_accepts_context_delivery`
   - `safe_provider_turn_boundary`
@@ -17745,6 +17811,36 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_binding`
   - `exact_queued_edge`
   - `provider_turn_owns_boundary`
+- Emits: `LiveContextAppendDeferred`
+- To: `Running`
+
+### `AuthorizeLiveContextAppendDeferredByConversationIdle`
+- From: `Idle`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `conversation_not_started`
+- Emits: `LiveContextAppendDeferred`
+- To: `Idle`
+
+### `AuthorizeLiveContextAppendDeferredByConversationAttached`
+- From: `Attached`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `conversation_not_started`
+- Emits: `LiveContextAppendDeferred`
+- To: `Attached`
+
+### `AuthorizeLiveContextAppendDeferredByConversationRunning`
+- From: `Running`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `exact_binding`
+  - `exact_queued_edge`
+  - `conversation_not_started`
 - Emits: `LiveContextAppendDeferred`
 - To: `Running`
 

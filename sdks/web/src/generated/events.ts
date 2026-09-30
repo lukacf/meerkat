@@ -882,6 +882,7 @@ export type TranscriptMessageIdentity = {
   objective_id?: ObjectiveId | null;
   realtime_origin?: RealtimeMessageOrigin | null;
   run_id?: RunId | null;
+  turn_input?: TranscriptTurnInput | null;
 };
 
 export type TranscriptRevisionBody = {
@@ -939,6 +940,8 @@ export type TranscriptRewriteSelection = {
   range: CompactionRewriteRange;
   type: "compaction_message_range";
 };
+
+export type TranscriptTurnInput = "runtime_authored";
 
 export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
 

@@ -42,6 +42,24 @@ pub struct TranscriptMessageIdentity {
     /// Session-owned provenance; not accepted by transcript rewrite wire inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realtime_origin: Option<RealtimeMessageOrigin>,
+    /// Who authored the input of the turn that produced this message, when it
+    /// was not conversational input: stamped at admission from the turn's
+    /// work attribution, never inferred from transcript position. Absent for
+    /// conversational turns (typed, spoken or peer input).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_input: Option<TranscriptTurnInput>,
+}
+
+/// Non-conversational authorship of a turn's input (see
+/// [`TranscriptMessageIdentity::turn_input`]).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TranscriptTurnInput {
+    /// Runtime-authored injected execution context, such as a voice job's
+    /// result merged into its source member after the voice channel closed.
+    RuntimeAuthored,
 }
 
 /// Session-scoped identity of one committed assistant message occurrence.
@@ -215,6 +233,7 @@ impl TranscriptMessageIdentity {
             && self.run_id.is_none()
             && self.objective_id.is_none()
             && self.realtime_origin.is_none()
+            && self.turn_input.is_none()
     }
 
     pub fn with_run_id(&self, run_id: crate::lifecycle::RunId) -> Self {
@@ -223,6 +242,7 @@ impl TranscriptMessageIdentity {
             run_id: Some(run_id),
             objective_id: self.objective_id,
             realtime_origin: self.realtime_origin.clone(),
+            turn_input: self.turn_input,
         }
     }
 }

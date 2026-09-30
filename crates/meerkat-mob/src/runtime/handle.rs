@@ -2755,6 +2755,7 @@ impl MemberTurnOptions {
                 interaction_id: self.interaction_id,
                 objective_id: self.objective_id,
                 run_id: None,
+                turn_input: None,
             },
             ..Default::default()
         }
@@ -12035,6 +12036,38 @@ impl MobHandle {
             Some(result_spec),
             crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
             crate::mob_machine::WorkContentAttribution::Conversational,
+        )
+        .await
+    }
+
+    /// Queue runtime-authored content on one identity as injected execution
+    /// context: the member reads it as a typed injected-context message, and
+    /// no conversational user row is synthesized, so nothing downstream (a
+    /// live channel's mirror, a transcript view) mistakes it for human input.
+    /// Exact runtime-input custody like [`Self::start_runtime_work_with_delivery_identity_bounded`];
+    /// retry only with the SAME delivery identity.
+    #[cfg(feature = "runtime-adapter")]
+    pub async fn start_injected_context_work_for_identity_bounded(
+        &self,
+        identity: AgentIdentity,
+        spec: WorkSpec,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        result_spec: BoundedResultSpec,
+    ) -> Result<WorkTurnHandle, MobError> {
+        let (runtime_id, fence_token) = self
+            .resolve_submit_work_runtime_binding(
+                &identity,
+                WorkOrigin::Internal,
+                "start_injected_context_work_for_identity_bounded",
+            )
+            .await?;
+        self.start_runtime_work_with_delivery_identity_bounded(
+            runtime_id,
+            fence_token,
+            spec,
+            delivery_identity,
+            result_spec,
+            crate::mob_machine::WorkContentAttribution::InjectedExecutionContext,
         )
         .await
     }

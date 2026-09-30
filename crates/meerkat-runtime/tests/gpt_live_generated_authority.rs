@@ -626,6 +626,20 @@ fn enqueue_mirror_row(
     append_id: &str,
     canonical_cursor: u64,
 ) {
+    enqueue_sourced_mirror_row(
+        authority,
+        append_id,
+        canonical_cursor,
+        mm::LiveContextRowSource::Conversation,
+    );
+}
+
+fn enqueue_sourced_mirror_row(
+    authority: &mut mm::MeerkatMachineAuthority,
+    append_id: &str,
+    canonical_cursor: u64,
+    row_source: mm::LiveContextRowSource,
+) {
     apply(
         authority,
         mm::MeerkatMachineInput::EnqueueLiveContextRow {
@@ -639,6 +653,14 @@ fn enqueue_mirror_row(
             commit_authority_token: format!("commit-{append_id}"),
             disposition: mm::LiveContextRowDisposition::MirrorParentText,
             payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+            row_source,
+            // Runtime work output is the assistant's reply to injected
+            // context; a conversational mirror row here is the user's text.
+            row_author: if row_source == mm::LiveContextRowSource::RuntimeWork {
+                mm::LiveContextRowAuthor::Assistant
+            } else {
+                mm::LiveContextRowAuthor::User
+            },
             observation_id: None,
         },
     )
@@ -1106,6 +1128,8 @@ fn bootstrap_ack_does_not_reassert_fresh_already_heard_live_output() {
             commit_authority_token: "post-bootstrap-commit".into(),
             disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
             payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+            row_source: mm::LiveContextRowSource::Conversation,
+            row_author: mm::LiveContextRowAuthor::User,
             observation_id: None,
         },
     )
@@ -1156,10 +1180,236 @@ fn enqueue_observed_row(
             commit_authority_token: format!("commit-{append}"),
             disposition,
             payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+            row_source: mm::LiveContextRowSource::Conversation,
+            // Assistant observations are the assistant's; the rows these
+            // tests enqueue as already present are heard user speech.
+            row_author: if disposition == mm::LiveContextRowDisposition::AssistantObservation {
+                mm::LiveContextRowAuthor::Assistant
+            } else {
+                mm::LiveContextRowAuthor::User
+            },
             observation_id: observation_id.map(str::to_string),
         },
     )
     .expect("enqueue observed canonical row");
+}
+
+/// Acknowledged late summary (cursor 3) with two sources heard while it was
+/// pending: user speech `heard-user` and assistant speech `heard-assistant`.
+fn acknowledged_summary_with_heard_sources() -> mm::MeerkatMachineAuthority {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 3);
+    activate_bootstrap(&mut authority);
+    record_source(&mut authority, CHANNEL, "bootstrap-job", "heard-user");
+    record_source(&mut authority, CHANNEL, "bootstrap-job", "heard-assistant");
+    authorize_bootstrap(&mut authority, 3);
+    record_bootstrap_cut(
+        &mut authority,
+        CHANNEL,
+        "bootstrap-job",
+        "bootstrap-append",
+        "exact-summary-digest",
+        3,
+    )
+    .expect("native ACK cut");
+    resolve_bootstrap(
+        &mut authority,
+        3,
+        mm::LiveContextAppendObservation::Delivered,
+    )
+    .expect("summary ACK");
+    authority
+}
+
+/// Authorize the queued row at `next_cursor` and report the edge's
+/// `superseded_by_heard_speech` flag.
+fn authorize_superseded_flag(
+    authority: &mut mm::MeerkatMachineAuthority,
+    append_id: &str,
+    next_cursor: u64,
+) -> bool {
+    let authorized = apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: append_id.into(),
+            previous_cursor: next_cursor - 1,
+            next_cursor,
+        },
+    )
+    .expect("queued outbox head is authorized");
+    authorized
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            mm::MeerkatMachineEffect::LiveContextAppendAuthorized {
+                append_id: authorized_append,
+                superseded_by_heard_speech,
+                ..
+            } if authorized_append == append_id => Some(*superseded_by_heard_speech),
+            _ => None,
+        })
+        .expect("authorized edge reports supersession")
+}
+
+fn resolve_delivered(authority: &mut mm::MeerkatMachineAuthority, append_id: &str, cursor: u64) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ResolveLiveContextAppend {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: append_id.into(),
+            previous_cursor: cursor - 1,
+            next_cursor: cursor,
+            replacement_channel_id: String::new(),
+            canonical_seed_cursor: 0,
+            observation: mm::LiveContextAppendObservation::Delivered,
+        },
+    )
+    .expect("exact append ACK");
+}
+
+/// A typed row followed by user speech heard while the summary was pending
+/// is authorized by the superseded edge; its complement edge reports false.
+#[test]
+fn later_heard_user_speech_supersedes_a_held_typed_row() {
+    let mut authority = acknowledged_summary_with_heard_sources();
+    enqueue_mirror_row(&mut authority, "typed", 4);
+    enqueue_observed_row(
+        &mut authority,
+        "spoken",
+        5,
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        Some("heard-user"),
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["spoken"],
+        mm::LiveContextRowDisposition::ReassertCausalTail
+    );
+    assert!(authorize_superseded_flag(&mut authority, "typed", 4));
+    resolve_delivered(&mut authority, "typed", 4);
+    assert!(
+        !authorize_superseded_flag(&mut authority, "spoken", 5),
+        "a replayed heard row is never itself superseded"
+    );
+}
+
+/// Replayed heard speech waits for the provider turn boundary: a burst of
+/// replays while the model talks made it react to each (S99). Only replayed
+/// runtime work output is admitted mid-turn.
+#[test]
+fn replayed_heard_speech_is_deferred_during_a_provider_turn() {
+    let mut authority = acknowledged_summary_with_heard_sources();
+    enqueue_observed_row(
+        &mut authority,
+        "spoken",
+        4,
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        Some("heard-user"),
+    );
+    // The user's turn has started and is still open on the provider.
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: "open-user-interaction".into(),
+            provider_turn_ref: "open-user-turn".into(),
+        },
+    )
+    .expect("the user's turn starts");
+    let deferred = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "spoken".into(),
+            previous_cursor: 3,
+            next_cursor: 4,
+        },
+    )
+    .expect("an in-turn replay is deferred, not refused");
+    assert!(deferred.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveContextAppendDeferred { append_id, .. } if append_id == "spoken"
+    )));
+}
+
+/// The assistant's own observed speech replays as ReassertAssistantOutput and
+/// never supersedes a typed row.
+#[test]
+fn later_assistant_output_does_not_supersede_a_typed_row() {
+    let mut authority = acknowledged_summary_with_heard_sources();
+    enqueue_mirror_row(&mut authority, "typed", 4);
+    enqueue_observed_row(
+        &mut authority,
+        "assistant",
+        5,
+        mm::LiveContextRowDisposition::AssistantObservation,
+        Some("heard-assistant"),
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["assistant"],
+        mm::LiveContextRowDisposition::ReassertAssistantOutput
+    );
+    assert!(!authorize_superseded_flag(&mut authority, "typed", 4));
+}
+
+/// A runtime work reply (a job result merged while the call was down)
+/// replays as ReplayRuntimeWork and never supersedes a typed row.
+#[test]
+fn later_runtime_work_reply_does_not_supersede_a_typed_row() {
+    let mut authority = acknowledged_summary_with_heard_sources();
+    enqueue_mirror_row(&mut authority, "typed", 4);
+    enqueue_sourced_mirror_row(
+        &mut authority,
+        "merged-result-reply",
+        5,
+        mm::LiveContextRowSource::RuntimeWork,
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["merged-result-reply"],
+        mm::LiveContextRowDisposition::ReplayRuntimeWork
+    );
+    assert!(!authorize_superseded_flag(&mut authority, "typed", 4));
+}
+
+/// A later voiced row does not supersede an earlier one; both are voiced in
+/// canonical order.
+#[test]
+fn later_voiced_row_does_not_supersede_a_typed_row() {
+    let mut authority = acknowledged_summary_with_heard_sources();
+    enqueue_mirror_row(&mut authority, "typed", 4);
+    enqueue_mirror_row(&mut authority, "typed-follow-up", 5);
+    assert!(!authorize_superseded_flag(&mut authority, "typed", 4));
+}
+
+/// User speech at a lower cursor than the typed row is older and does not
+/// supersede it. (An equal cursor cannot occur: guard
+/// `canonical_cursor_is_unique`.)
+#[test]
+fn earlier_heard_user_speech_does_not_supersede_a_typed_row() {
+    let mut authority = acknowledged_summary_with_heard_sources();
+    enqueue_observed_row(
+        &mut authority,
+        "spoken",
+        4,
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        Some("heard-user"),
+    );
+    enqueue_mirror_row(&mut authority, "typed", 5);
+    assert!(!authorize_superseded_flag(&mut authority, "spoken", 4));
+    resolve_delivered(&mut authority, "spoken", 4);
+    assert!(!authorize_superseded_flag(&mut authority, "typed", 5));
 }
 
 #[test]
@@ -1245,7 +1495,7 @@ fn bootstrap_ack_cut_linearizes_before_resolution_and_preserves_delayed_sources(
     );
     assert_eq!(
         authority.state().live_context_queued_disposition_by_append["delayed-assistant"],
-        mm::LiveContextRowDisposition::ReassertCausalTail
+        mm::LiveContextRowDisposition::ReassertAssistantOutput
     );
     assert_eq!(
         authority.state().live_context_ack_cut_by_channel[CHANNEL],
@@ -1419,6 +1669,8 @@ fn bootstrap_causal_live_tail_is_reasserted_and_results_wait_for_ordered_tail() 
             commit_authority_token: "exact-row-4".into(),
             disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
             payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+            row_source: mm::LiveContextRowSource::Conversation,
+            row_author: mm::LiveContextRowAuthor::User,
             observation_id: Some(observation_id),
         },
     )
@@ -1631,6 +1883,8 @@ fn assistant_observation_is_quiet_only_for_concurrent_bootstrap() {
                 commit_authority_token: "exact-commit".into(),
                 disposition: mm::LiveContextRowDisposition::AssistantObservation,
                 payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+                row_source: mm::LiveContextRowSource::Conversation,
+                row_author: mm::LiveContextRowAuthor::User,
                 observation_id,
             },
         )
@@ -1638,7 +1892,7 @@ fn assistant_observation_is_quiet_only_for_concurrent_bootstrap() {
         assert_eq!(
             authority.state().live_context_queued_disposition_by_append["assistant-observation"],
             if concurrent {
-                mm::LiveContextRowDisposition::ReassertCausalTail
+                mm::LiveContextRowDisposition::ReassertAssistantOutput
             } else {
                 mm::LiveContextRowDisposition::ExcludedFromLiveContext
             }
@@ -1685,6 +1939,8 @@ fn non_materializable_live_row_keeps_no_send_coverage_after_summary_ack() {
                 commit_authority_token: "exact-non-text".into(),
                 disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
                 payload_availability: mm::LiveContextPayloadAvailability::NoPayload,
+                row_source: mm::LiveContextRowSource::Conversation,
+                row_author: mm::LiveContextRowAuthor::User,
                 observation_id: None,
             },
         )
@@ -1861,7 +2117,7 @@ fn quiet_present_and_excluded_rows_do_not_start_the_conversation() {
     );
     assert_eq!(
         authority.state().live_context_queued_disposition_by_append["assistant-output"],
-        mm::LiveContextRowDisposition::ReassertCausalTail
+        mm::LiveContextRowDisposition::ReassertAssistantOutput
     );
     enqueue_observed_row(
         &mut authority,
@@ -1890,6 +2146,8 @@ fn quiet_present_and_excluded_rows_do_not_start_the_conversation() {
             commit_authority_token: "exact-non-text".into(),
             disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
             payload_availability: mm::LiveContextPayloadAvailability::NoPayload,
+            row_source: mm::LiveContextRowSource::Conversation,
+            row_author: mm::LiveContextRowAuthor::User,
             observation_id: None,
         },
     )
@@ -1920,6 +2178,8 @@ fn quiet_present_and_excluded_rows_do_not_start_the_conversation() {
                     commit_authority_token: format!("commit-{append_id}"),
                     disposition,
                     payload_availability,
+                    row_source: mm::LiveContextRowSource::Conversation,
+                    row_author: mm::LiveContextRowAuthor::User,
                     observation_id: None,
                 },
             )
@@ -1938,6 +2198,279 @@ fn quiet_present_and_excluded_rows_do_not_start_the_conversation() {
         Some(mm::LiveConversationStartCause::UserTurn)
     );
     apply(&mut authority, bootstrap_append_input(0)).expect("the user's speech releases it");
+}
+
+fn start_user_turn(authority: &mut mm::MeerkatMachineAuthority, turn: &str) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: format!("{turn}-interaction"),
+            provider_turn_ref: turn.to_string(),
+        },
+    )
+    .expect("the user's first turn starts on the active channel");
+}
+
+fn authorize_row(
+    authority: &mut mm::MeerkatMachineAuthority,
+    append_id: &str,
+    previous_cursor: u64,
+) -> Result<Vec<mm::MeerkatMachineEffect>, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: append_id.into(),
+            previous_cursor,
+            next_cursor: previous_cursor + 1,
+        },
+    )
+    .map(|transition| transition.effects().to_vec())
+}
+
+fn deferred(effects: &[mm::MeerkatMachineEffect], append_id: &str) -> bool {
+    effects.iter().any(|effect| {
+        matches!(
+            effect,
+            mm::MeerkatMachineEffect::LiveContextAppendDeferred { append_id: deferred, .. }
+                if deferred == append_id
+        )
+    })
+}
+
+fn authorized(effects: &[mm::MeerkatMachineEffect], append_id: &str) -> bool {
+    effects.iter().any(|effect| {
+        matches!(
+            effect,
+            mm::MeerkatMachineEffect::LiveContextAppendAuthorized { append_id: authorized, .. }
+                if authorized == append_id
+        )
+    })
+}
+
+/// Runtime work output (the source member's reply to a post-close result
+/// merge committed after a reopen's summary boundary) is history, not the
+/// conversation: voiced into silence it was read aloud unprompted. It becomes
+/// a quiet reassertion behind the held summary; the user's first turn starts
+/// the conversation and releases the summary, and the row is replayed during
+/// that same turn, before the model answers.
+#[test]
+fn runtime_work_output_replays_quietly_during_the_first_turn() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 3);
+    activate_bootstrap(&mut authority);
+    generate_bootstrap(&mut authority);
+    enqueue_sourced_mirror_row(
+        &mut authority,
+        "merged-result-reply",
+        4,
+        mm::LiveContextRowSource::RuntimeWork,
+    );
+    assert_eq!(conversation_start(&authority), None);
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["merged-result-reply"],
+        mm::LiveContextRowDisposition::ReplayRuntimeWork
+    );
+    assert!(
+        apply(&mut authority, bootstrap_append_input(3)).is_err(),
+        "runtime work output does not release the summary into silence"
+    );
+    start_user_turn(&mut authority, "first-user-turn");
+    assert_eq!(
+        conversation_start(&authority),
+        Some(mm::LiveConversationStartCause::UserTurn)
+    );
+    apply(&mut authority, bootstrap_append_input(3)).expect("the user's speech releases it");
+    resolve_bootstrap(
+        &mut authority,
+        3,
+        mm::LiveContextAppendObservation::Delivered,
+    )
+    .expect("exact summary ACK");
+    let effects = authorize_row(&mut authority, "merged-result-reply", 3)
+        .expect("the quiet row is admitted while the user's turn is active");
+    assert!(authorized(&effects, "merged-result-reply"));
+}
+
+/// Without a held summary the same runtime work output still waits for the
+/// conversation: quiet history appended into silence is a cue to speak.
+#[test]
+fn quiet_history_waits_for_the_conversation_without_a_bootstrap() {
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    enqueue_sourced_mirror_row(
+        &mut authority,
+        "merged-result-reply",
+        1,
+        mm::LiveContextRowSource::RuntimeWork,
+    );
+    let effects = authorize_row(&mut authority, "merged-result-reply", 0).expect("typed deferral");
+    assert!(deferred(&effects, "merged-result-reply"));
+    assert_eq!(authority.state().live_context_cursor_by_channel[CHANNEL], 0);
+    start_user_turn(&mut authority, "first-user-turn");
+    let effects = authorize_row(&mut authority, "merged-result-reply", 0)
+        .expect("the conversation started; the quiet row is admitted mid-turn");
+    assert!(authorized(&effects, "merged-result-reply"));
+}
+
+/// Replayed runtime work output is admitted during the user phase of a
+/// provider turn only: once an assistant turn is attributed to the turn's
+/// interaction it waits for the turn boundary like every other row, so it can
+/// never interleave with an in-flight response. That state is reachable
+/// through real inputs before the user's TurnFinished lands: a delegation
+/// result delivered while the provider turn is still active re-arms the
+/// awaiting interaction, and the model's response is attributed to it.
+#[test]
+fn replayed_runtime_work_after_the_assistant_turn_started_stays_deferred() {
+    const RESULT_DIGEST: &str = "result-before-turn-finished-digest";
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    admit_provider_turn_delegation(&mut authority);
+    prepare_confirmed_completed_worker(&mut authority);
+    let release = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultRelease {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("a completed result is released while the provider turn is still active");
+    let disposition = release
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            mm::MeerkatMachineEffect::LiveDelegationResultReleaseAuthorized {
+                disposition, ..
+            } => Some(*disposition),
+            _ => None,
+        })
+        .expect("release authority carries its disposition");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultDelivery {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+            result_digest: RESULT_DIGEST.to_string(),
+            disposition,
+        },
+    )
+    .expect("released result receives delivery authority");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationResultDelivery {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            operation_id: operation_id(),
+            result_digest: RESULT_DIGEST.to_string(),
+            replacement_channel_id: String::new(),
+            canonical_seed_cursor: 0,
+            observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
+        },
+    )
+    .expect("the result is delivered before the user's TurnFinished arrives");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            assistant_turn_ref: "assistant-answers-the-result".to_string(),
+            candidate_interaction_id: "unused-candidate".to_string(),
+        },
+    )
+    .expect("the model's response is attributed through the re-armed awaiting interaction");
+    assert!(
+        authority
+            .state()
+            .live_provider_turn_by_channel
+            .contains_key(CHANNEL),
+        "the user's provider turn is still active"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_assistant_interaction_by_turn
+            .get("assistant-answers-the-result"),
+        authority
+            .state()
+            .live_active_interaction_by_channel
+            .get(CHANNEL),
+        "the assistant turn belongs to the active provider turn's interaction"
+    );
+    enqueue_sourced_mirror_row(
+        &mut authority,
+        "merged-result-reply",
+        1,
+        mm::LiveContextRowSource::RuntimeWork,
+    );
+    let effects = authorize_row(&mut authority, "merged-result-reply", 0).expect("typed deferral");
+    assert!(
+        deferred(&effects, "merged-result-reply"),
+        "no quiet replay during an in-flight response: {effects:?}"
+    );
+}
+
+/// A voiced row and a quiet reassertion of live speech still wait for the
+/// provider turn boundary; only replayed runtime work output is admitted
+/// mid-turn.
+#[test]
+fn voiced_row_and_live_speech_reassertion_are_still_deferred_by_a_provider_turn() {
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    start_user_turn(&mut authority, "user-turn");
+    enqueue_mirror_row(&mut authority, "typed-mid-turn", 1);
+    let effects = authorize_row(&mut authority, "typed-mid-turn", 0).expect("typed deferral");
+    assert!(deferred(&effects, "typed-mid-turn"));
+
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 0);
+    activate_bootstrap(&mut authority);
+    generate_bootstrap(&mut authority);
+    let heard = record_source(&mut authority, CHANNEL, "bootstrap-job", "heard-speech");
+    enqueue_observed_row(
+        &mut authority,
+        "heard-speech",
+        1,
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        Some(&heard),
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["heard-speech"],
+        mm::LiveContextRowDisposition::ReassertCausalTail
+    );
+    start_user_turn(&mut authority, "first-user-turn");
+    apply(&mut authority, bootstrap_append_input(0)).expect("the user's speech releases it");
+    resolve_bootstrap(
+        &mut authority,
+        0,
+        mm::LiveContextAppendObservation::Delivered,
+    )
+    .expect("exact summary ACK");
+    let effects = authorize_row(&mut authority, "heard-speech", 0).expect("typed deferral");
+    assert!(
+        deferred(&effects, "heard-speech"),
+        "live speech is replayed only at the turn boundary"
+    );
 }
 
 /// A client delegation admitted on an interaction that no user provider turn
@@ -3944,6 +4477,8 @@ fn assert_ambiguity_recovery_answer_and_seed_binding(concurrent: bool, covered_t
                 commit_authority_token: "causal-commit".into(),
                 disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
                 payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+                row_source: mm::LiveContextRowSource::Conversation,
+                row_author: mm::LiveContextRowAuthor::User,
                 observation_id: Some(observation_id),
             },
         )
@@ -4102,6 +4637,8 @@ fn assert_ambiguity_recovery_answer_and_seed_binding(concurrent: bool, covered_t
                     commit_authority_token: "new-tail-commit".into(),
                     disposition: mm::LiveContextRowDisposition::MirrorParentText,
                     payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+                    row_source: mm::LiveContextRowSource::Conversation,
+                    row_author: mm::LiveContextRowAuthor::User,
                     observation_id: None,
                 },
             )

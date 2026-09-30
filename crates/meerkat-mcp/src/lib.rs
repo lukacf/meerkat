@@ -14,7 +14,7 @@ mod transport;
 pub use adapter::McpRouterAdapter;
 pub use adapter::{McpNotReady, McpReloadFailure, McpReloadReport};
 pub use connection::{McpAuthResolver, McpConnection};
-pub use error::McpError;
+pub use error::{McpError, ToolDiscoveryLimit};
 pub use meerkat_core::{ExternalToolDelta, ExternalToolDeltaPhase};
 pub use protocol::McpProtocol;
 pub use router::{

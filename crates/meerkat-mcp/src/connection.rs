@@ -259,6 +259,15 @@ impl McpConnection {
     /// Default connection timeout in seconds.
     pub const DEFAULT_CONNECT_TIMEOUT_SECS: u32 = 10;
 
+    /// Most `tools/list` pages one tool discovery follows. A server that still
+    /// reports a next page after this many is refused with
+    /// [`McpError::ToolDiscoveryLimitExceeded`] rather than followed forever.
+    pub const MAX_TOOL_DISCOVERY_PAGES: usize = 100;
+
+    /// Most tools one tool discovery accepts across all pages. A server that
+    /// lists more is refused with [`McpError::ToolDiscoveryLimitExceeded`].
+    pub const MAX_DISCOVERED_TOOLS: usize = 10_000;
+
     /// Connect to an MCP server, perform handshake, and enumerate tools in a
     /// single timeout-bounded operation.
     ///

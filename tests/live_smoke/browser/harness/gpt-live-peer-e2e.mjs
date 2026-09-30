@@ -227,6 +227,17 @@ async function prepare(command) {
       firstAudioPacketMs: null,
       lastFixtureStartMs: -1,
       response: { text: '', started_ms: null, index: 0 },
+      // Overlap classification facts (the scenario decides; see the Rust
+      // `classify_overlap`): assistant energy bursts with the overlap each
+      // contributed per playing fixture, each finished response's text and
+      // close time, and the arrival times of delegations and commentary.
+      bursts: [],
+      currentBurst: null,
+      outputLog: [],
+      // Arrival of each response's first output delta, by response index.
+      responseTextStarts: [],
+      inputTimes: [],
+      delegationTimes: [],
       playing: new Map(),
       scheduled: [],
       nextScheduleId: 1,
@@ -325,9 +336,10 @@ async function prepare(command) {
       const ended = new Promise((resolve) => {
         source.onended = () => {
           state.playing.delete(id);
-          state.pushTimeline('fixture_end', { id, name: fixtureName, overlap_ms: play.overlap_ms, overlap_bound_ms: play.overlap_bound_ms });
+          const facts = play.overlap_ms > 0 ? state.overlapFacts(id, play.started_ms) : null;
+          state.pushTimeline('fixture_end', { id, name: fixtureName, overlap_ms: play.overlap_ms, overlap_bound_ms: play.overlap_bound_ms, facts });
           if (play.overlap_ms > play.overlap_bound_ms) {
-            state.pushFault({ overlap: { ms: play.overlap_ms, fixture: fixtureName, bound_ms: play.overlap_bound_ms } });
+            state.pushFault({ overlap: { ms: play.overlap_ms, fixture: fixtureName, bound_ms: play.overlap_bound_ms, facts } });
           }
           if (typeof meta.onEnded === 'function') meta.onEnded(play);
           resolve(play);
@@ -336,6 +348,43 @@ async function prepare(command) {
       source.start();
       return waitForEnd ? ended : Promise.resolve(play);
     };
+    // Raw facts for the scenario's overlap classifier (Rust
+    // `evidence::overlap_bursts` joins them): the assistant energy bursts
+    // with the overlap each added to this fixture, and the arrival times of
+    // output transcript deltas, user input deltas and delegations. Bursts and
+    // deltas share one cut: the start of the earliest response with a burst
+    // over the fixture, reaching back two responses, because a response's
+    // tail can still play after the user resumed and the peer moved on.
+    state.overlapFacts = (playId, playStartedMs) => {
+      const overlapping = state.bursts.filter((burst) => (burst.overlap[playId] ?? 0) > 0);
+      let since = Math.max(0, playStartedMs - 30000);
+      if (overlapping.length > 0) {
+        const earliest = Math.min(...overlapping.map((burst) => burst.response));
+        const starts = [];
+        for (let index = Math.max(0, earliest - 2); index <= earliest; index += 1) {
+          if (state.responseTextStarts[index] !== undefined) starts.push(state.responseTextStarts[index]);
+          const first = state.bursts.find((burst) => burst.response === index);
+          if (first) starts.push(first.started_ms);
+        }
+        if (starts.length > 0) since = Math.min(...starts);
+      }
+      return {
+        now_ms: nowMs(),
+        hysteresis_ms: energyConfig.end_hysteresis_ms,
+        bursts: state.bursts
+          .filter((burst) => burst.started_ms >= since)
+          .map((burst) => ({
+            started_ms: burst.started_ms,
+            last_active_ms: burst.last_active_ms,
+            ended: burst.ended,
+            overlap_ms: burst.overlap[playId] ?? 0,
+          })),
+        output: state.outputLog.filter((entry) => entry.t >= since).map((entry) => ({ t_ms: entry.t, text: entry.text })),
+        inputs: state.inputTimes.filter((at) => at >= since),
+        delegations: state.delegationTimes.filter((at) => at >= since),
+      };
+    };
+
     // ---- responses and duplicate readouts ------------------------------
     const normalizeSentence = (text) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
     state.finishResponse = ({ flushed = false } = {}) => {
@@ -484,15 +533,23 @@ async function prepare(command) {
           energy.first_assistant_audio_ms.push(t);
           if (state.response.started_ms === null) state.response.started_ms = t;
           state.pushTimeline('assistant_audio_start', { response: state.response.index });
+          state.currentBurst = { started_ms: t, last_active_ms: t, ended: false, response: state.response.index, overlap: {} };
+          if (state.bursts.length < 2000) state.bursts.push(state.currentBurst);
         }
+        if (state.currentBurst) state.currentBurst.last_active_ms = t;
         for (const play of state.playing.values()) {
           if (t - play.started_ms <= play.speech_ms) {
             play.overlap_ms += energy.window_ms;
             energy.overlap_ms += energy.window_ms;
+            if (state.currentBurst) {
+              state.currentBurst.overlap[play.id] = (state.currentBurst.overlap[play.id] ?? 0) + energy.window_ms;
+            }
           }
         }
       } else if (energy.assistant_active && t - energy.last_active_ms >= energyConfig.end_hysteresis_ms) {
         energy.assistant_active = false;
+        if (state.currentBurst) state.currentBurst.ended = true;
+        state.currentBurst = null;
         state.pushTimeline('assistant_audio_end', { last_active_ms: energy.last_active_ms, started_ms: energy.active_since_ms, response: state.response.index });
       }
       state.checkScheduled(t);
@@ -555,6 +612,7 @@ async function prepare(command) {
           });
         }
       }
+      if (isInputDelta && state.inputTimes.length < 20000) state.inputTimes.push(t);
       if (isInputDelta) {
         if (state.inputTranscript.first_delta_ms === null) {
           state.inputTranscript.first_delta_ms = t;
@@ -583,9 +641,12 @@ async function prepare(command) {
         : (parsed?.type === 'turn.created' && parsed?.turn?.role === 'assistant');
       if (isOutputDelta) {
         const delta = typeof parsed.delta === 'string' ? parsed.delta : typeof parsed.text === 'string' ? parsed.text : '';
+        if (state.responseTextStarts[state.response.index] === undefined) state.responseTextStarts[state.response.index] = t;
         if (state.response.text.length < 20000) state.response.text += delta;
+        if (state.outputLog.length < 20000) state.outputLog.push({ t, text: delta });
       }
       if (parsed?.type === 'session.delegation.created') {
+        if (state.delegationTimes.length < 2000) state.delegationTimes.push(t);
         // Join by arrival: the runtime's executor input is every user delta
         // received before this event.
         state.closeUtterance(t, 'delegation');

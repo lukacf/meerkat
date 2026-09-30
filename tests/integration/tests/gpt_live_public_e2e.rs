@@ -2874,8 +2874,16 @@ async fn native_question(
             Duration::from_secs(60),
             &format!("{label} input_final, then assistant_audio_start and assistant_audio_end"),
             |t| {
-                let input_final = timeline_find(t, TimelineKind::InputFinal, fixture_start_ms)?;
-                let start = timeline_find(t, TimelineKind::AssistantAudioStart, input_final.t_ms)?;
+                timeline_find(t, TimelineKind::InputFinal, fixture_start_ms)?;
+                // The answer's audio is the first assistant audio after the
+                // question's speech ended (as in `SpokenTurn`), not after the
+                // final's entry: the final closes when the answer's first
+                // transcript delta arrives on the data channel, and the
+                // answer's audio can arrive on the media track a few
+                // milliseconds before it.
+                let speech_end_ms = fixture_start_entry(t, schedule_id)
+                    .map(|start| start.t_ms + start.detail_u64("speech_ms").unwrap_or(0))?;
+                let start = timeline_find(t, TimelineKind::AssistantAudioStart, speech_end_ms)?;
                 timeline_find(t, TimelineKind::AssistantAudioEnd, start.t_ms).map(|_| t.to_vec())
             },
         )

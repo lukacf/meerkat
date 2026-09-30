@@ -37,13 +37,14 @@ them.
 
 ### Breaking
 
-- `meerkat_workgraph::WorkGraphError` and
-  `meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkGraphErrorKind`
+- `meerkat_workgraph::WorkGraphError`,
+  `meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkGraphErrorKind`,
+  and `meerkat_machine_kernels::generated::work_graph_lifecycle::WorkGraphErrorKind`
   gain `BackingStoreUnavailable`. Exhaustive matches must handle the new
   variant; existing variant ordering is preserved. The canonical public
   error classification remains `StoreError`.
-- Behaviour-only (not measured by the gate): `SqliteWorkGraphStore` read
-  operations require an existing current-schema database. They no longer
+- Behaviour-only (not measured by the gate): `SqliteWorkGraphStore` read and
+  write operations require an existing current-schema database. They no longer
   create a missing database, initialize an empty replacement or migrate an
   older schema. Explicit store open remains the initialization/migration path.
 
@@ -51,7 +52,10 @@ them.
 
 - WorkGraph observations, including execution recovery, distinguish an
   unavailable backing store from an absent record and preserve one read-only
-  snapshot across schema validation and data queries.
+  snapshot across schema validation and data queries. Ordinary writes also
+  refuse a missing or non-current store, so a failed read cannot be followed by
+  silent recreation on the next write. Unavailable-store errors use the public
+  backend label `sqlite`; host paths and full open failures remain in tracing.
 
 ## [0.8.49] - 2026-09-30
 

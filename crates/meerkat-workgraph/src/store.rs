@@ -2230,8 +2230,22 @@ impl SqliteWorkGraphStore {
                 tables: legacy_tables,
             });
         }
-        // Probe open: `with_connection` brings the schema domain up to date.
-        store.with_connection(|_| Ok(()))?;
+        // Only explicit open may create a database or migrate its domain.
+        {
+            let _guard = meerkat_sqlite::OperationGuard::for_database(&store.path)
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            let mut conn = meerkat_sqlite::open_with(
+                &store.path,
+                meerkat_sqlite::ConnectionProfile::PRIMARY,
+                meerkat_sqlite::OpenOptions {
+                    schema_preflight: &[&WORKGRAPH_DOMAIN],
+                    ..Default::default()
+                },
+            )
+            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+            meerkat_sqlite::apply_domain_migrations(&mut conn, &WORKGRAPH_DOMAIN)
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        }
         Ok(store)
     }
 
@@ -2290,12 +2304,8 @@ impl SqliteWorkGraphStore {
         let _guard = meerkat_sqlite::OperationGuard::for_database(&self.path)
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
         let mut conn =
-            meerkat_sqlite::open(&self.path, meerkat_sqlite::ConnectionProfile::ReadOnly).map_err(
-                |err| WorkGraphError::BackingStoreUnavailable {
-                    backend: self.path.display().to_string(),
-                    reason: err.to_string(),
-                },
-            )?;
+            meerkat_sqlite::open(&self.path, meerkat_sqlite::ConnectionProfile::ReadOnly)
+                .map_err(|err| self.backing_store_unavailable(err))?;
         let tx = conn
             .transaction()
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
@@ -2315,6 +2325,20 @@ impl SqliteWorkGraphStore {
         Ok(result)
     }
 
+    fn backing_store_unavailable(&self, error: meerkat_sqlite::SqliteStoreError) -> WorkGraphError {
+        // SQLite's open errors can include the host path in their Display.
+        // Keep the complete diagnostic out of the agent-facing error payload.
+        tracing::warn!(
+            path = %self.path.display(),
+            error = %error,
+            "workgraph backing store could not be opened"
+        );
+        WorkGraphError::BackingStoreUnavailable {
+            backend: "sqlite".to_string(),
+            reason: "database could not be opened; inspect host diagnostics".to_string(),
+        }
+    }
+
     fn with_connection<T>(
         &self,
         f: impl FnOnce(&mut Connection) -> Result<T, WorkGraphError>,
@@ -2325,15 +2349,21 @@ impl SqliteWorkGraphStore {
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
         let mut conn = meerkat_sqlite::open_with(
             &self.path,
-            meerkat_sqlite::ConnectionProfile::PRIMARY,
+            meerkat_sqlite::ConnectionProfile::Primary { create: false },
             meerkat_sqlite::OpenOptions {
                 schema_preflight: &[&WORKGRAPH_DOMAIN],
                 ..Default::default()
             },
         )
-        .map_err(|err| WorkGraphError::Store(err.to_string()))?;
-        meerkat_sqlite::apply_domain_migrations(&mut conn, &WORKGRAPH_DOMAIN)
+        .map_err(|err| self.backing_store_unavailable(err))?;
+        let version = meerkat_sqlite::domain_version(&conn, WORKGRAPH_DOMAIN.name)
             .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        if version != Some(WORKGRAPH_DOMAIN.supported_version()) {
+            return Err(WorkGraphError::Store(format!(
+                "workgraph mutation requires current schema version {}; found {version:?}; open the store explicitly to initialize or migrate it",
+                WORKGRAPH_DOMAIN.supported_version(),
+            )));
+        }
         f(&mut conn)
     }
 }
@@ -5573,6 +5603,258 @@ mod tests {
         assert!(
             matches!(error, WorkGraphError::Conflict(_)),
             "duplicate attention insert must map to Conflict, got: {error:?}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_existing_store_write_refuses_missing_file_without_recreating_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let retained = dir.path().join("retained.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let item = service
+            .create(CreateWorkItemRequest {
+                title: "committed before rename".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("initial write");
+        std::fs::rename(&path, &retained).expect("retain database");
+        let retained_bytes = std::fs::read(&retained).expect("retained bytes");
+
+        let result = service
+            .create(CreateWorkItemRequest {
+                title: "must not recreate the backing store".to_string(),
+                ..Default::default()
+            })
+            .await;
+        assert!(!path.exists(), "ordinary write recreated the database");
+        let error = result.expect_err("write must refuse missing backing state");
+        assert!(matches!(
+            &error,
+            WorkGraphError::BackingStoreUnavailable { backend, .. } if backend == "sqlite"
+        ));
+        assert_eq!(
+            std::fs::read(&retained).expect("after write"),
+            retained_bytes
+        );
+        assert!(matches!(
+            store
+                .get_item("realm", &WorkNamespace::default(), &item.id)
+                .await,
+            Err(WorkGraphError::BackingStoreUnavailable { .. })
+        ));
+        assert!(!path.exists(), "following read recreated the database");
+
+        // An explicit open is still the operation that may create a new store.
+        let replacement = crate::SqliteWorkGraphStore::open(&path).expect("explicit reopen");
+        assert!(
+            replacement
+                .list_items(Default::default())
+                .await
+                .expect("new store")
+                .is_empty()
+        );
+        assert!(path.is_file());
+        let retained_store = crate::SqliteWorkGraphStore::open(&retained).expect("retained store");
+        assert_eq!(
+            retained_store
+                .get_item("realm", &WorkNamespace::default(), &item.id)
+                .await
+                .expect("retained read")
+                .expect("retained item")
+                .title,
+            item.title
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_existing_store_unavailable_errors_keep_paths_out_of_public_payloads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("private-household-workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        std::fs::rename(&path, dir.path().join("retained.sqlite3")).expect("retain database");
+        let error = store
+            .list_items(Default::default())
+            .await
+            .expect_err("missing database");
+        let private_path = path.to_string_lossy();
+        for public_text in [error.to_string(), format!("{error:?}")] {
+            assert!(
+                !public_text.contains(private_path.as_ref()),
+                "{public_text}"
+            );
+            assert!(
+                !public_text.contains("private-household-workgraph.sqlite3"),
+                "{public_text}"
+            );
+        }
+        assert!(matches!(
+            &error,
+            WorkGraphError::BackingStoreUnavailable { backend, .. } if backend == "sqlite"
+        ));
+        for (name, arguments) in [
+            ("workgraph_list", json!({})),
+            ("workgraph_create", json!({"title": "must not be written"})),
+        ] {
+            let error = crate::handle_unscoped_workgraph_tools_call(&service, name, &arguments)
+                .await
+                .expect_err("tool must preserve the store refusal");
+            assert_eq!(error.code, crate::WorkGraphToolErrorCode::StoreError);
+            let wire = serde_json::to_value(&error).expect("tool error wire");
+            assert_eq!(wire["code"], "store_error");
+            assert!(error.message.contains("'sqlite'"));
+            let public_text = wire.to_string();
+            assert!(
+                !public_text.contains(private_path.as_ref()),
+                "{public_text}"
+            );
+            assert!(
+                !public_text.contains("private-household-workgraph.sqlite3"),
+                "{public_text}"
+            );
+        }
+        assert!(!path.exists());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_existing_store_write_refuses_old_schema_until_explicit_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service = WorkGraphService::with_scope(store, "realm", WorkNamespace::default());
+        std::fs::rename(&path, dir.path().join("retained.sqlite3")).expect("retain database");
+        {
+            let mut conn = rusqlite::Connection::open(&path).expect("replacement");
+            let tx = conn.transaction().expect("transaction");
+            super::build_released_0_8_15_workgraph_schema(&tx).expect("released schema");
+            tx.execute_batch(
+                "CREATE TABLE meerkat_schema (domain TEXT PRIMARY KEY, version INTEGER NOT NULL);",
+            )
+            .expect("ledger");
+            tx.execute(
+                "INSERT INTO meerkat_schema VALUES (?1, 2)",
+                [super::WORKGRAPH_DOMAIN.name],
+            )
+            .expect("version");
+            tx.commit().expect("commit");
+        }
+        let catalog = || {
+            let conn = rusqlite::Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("inspect existing database");
+            let version = meerkat_sqlite::domain_version(&conn, super::WORKGRAPH_DOMAIN.name)
+                .expect("read schema version");
+            let mut stmt = conn
+                .prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")
+                .expect("catalog query");
+            let objects = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .expect("catalog rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("catalog");
+            let items: i64 = conn
+                .query_row("SELECT COUNT(*) FROM workgraph_items", [], |row| row.get(0))
+                .expect("item count");
+            (version, objects, items)
+        };
+        let before = catalog();
+        assert_eq!(before.0, Some(2));
+        let result = service
+            .create(CreateWorkItemRequest {
+                title: "must not migrate during a write".to_string(),
+                ..Default::default()
+            })
+            .await;
+        let after = catalog();
+        assert_eq!(
+            after, before,
+            "write changed the old logical schema, ledger, or items"
+        );
+        let error = result.expect_err("ordinary write must refuse the released predecessor");
+        assert!(matches!(&error, WorkGraphError::Store(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("mutation requires current schema")
+        );
+
+        // Writer policy may contact WAL or journal pragmas. The refusal above
+        // promises no schema migration or item mutation, not identical bytes.
+        let migrated = std::sync::Arc::new(
+            crate::SqliteWorkGraphStore::open(&path)
+                .expect("explicit open migrates the released predecessor"),
+        );
+        assert_eq!(
+            catalog().0,
+            Some(super::WORKGRAPH_DOMAIN.supported_version())
+        );
+        let migrated_service =
+            WorkGraphService::with_scope(migrated, "realm", WorkNamespace::default());
+        migrated_service
+            .create(CreateWorkItemRequest {
+                title: "write after explicit migration".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("current schema write");
+        assert_eq!(catalog().2, 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_existing_store_write_does_not_initialize_an_empty_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service = WorkGraphService::with_scope(store, "realm", WorkNamespace::default());
+        std::fs::rename(&path, dir.path().join("retained.sqlite3")).expect("retain database");
+        std::fs::write(&path, []).expect("empty replacement");
+        let result = service
+            .create(CreateWorkItemRequest {
+                title: "must not initialize during a write".to_string(),
+                ..Default::default()
+            })
+            .await;
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("inspect replacement");
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, super::WORKGRAPH_DOMAIN.name).expect("ledger"),
+            None
+        );
+        let owned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'workgraph_%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("owned schema");
+        assert_eq!(owned, 0);
+        let error = result.expect_err("ordinary write must refuse an uninitialized file");
+        assert!(matches!(&error, WorkGraphError::Store(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("mutation requires current schema")
         );
     }
 

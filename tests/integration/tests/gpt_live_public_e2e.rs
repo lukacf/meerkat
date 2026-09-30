@@ -4253,6 +4253,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
 
         // (d) Goodbye, graceful client disconnect, host close convergence.
         evidence.stage(EvidenceStage::StandupFarewell)?;
+        let events_before_goodbye = live.peer.events().await?.len();
         let goodbye = live
             .peer
             .play_at(
@@ -4267,25 +4268,86 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                 fixture_start_entry(t, goodbye).map(|e| e.t_ms)
             })
             .await?;
-        let timeline = live
-            .peer
-            .wait_for_timeline(
-                Duration::from_secs(45),
-                "goodbye input_final then assistant_audio_start and assistant_audio_end",
-                |t| {
-                    let input_final = timeline_find(t, TimelineKind::InputFinal, goodbye_start)?;
-                    let start = timeline_find(t, TimelineKind::AssistantAudioStart, input_final.t_ms)?;
-                    timeline_find(t, TimelineKind::AssistantAudioEnd, start.t_ms).map(|_| t.to_vec())
-                },
-            )
-            .await?;
-        let goodbye_timing = SpokenTurn::from_timeline(&timeline, goodbye).ok_or("goodbye timing")?;
-        evidence.record(goodbye_timing.latency_record(channel, 5, None))?;
+        // The spoken reply to the goodbye is evidence, not a claim: the model
+        // may stay silent after a closing remark (seen live: the provider
+        // streamed the goodbye's input and never finished the user turn).
+        // The scenario's claims are the graceful disconnect, host close
+        // convergence and the canonical rows below.
+        let reply_wait_started = Instant::now();
+        let reply_deadline = reply_wait_started + Duration::from_secs(45);
+        let goodbye_reply = loop {
+            let timeline = live.peer.timeline().await?;
+            let reply = timeline_find(&timeline, TimelineKind::InputFinal, goodbye_start)
+                .and_then(|input_final| {
+                    timeline_find(&timeline, TimelineKind::AssistantAudioStart, input_final.t_ms)
+                })
+                .and_then(|start| timeline_find(&timeline, TimelineKind::AssistantAudioEnd, start.t_ms))
+                .is_some();
+            if reply || Instant::now() >= reply_deadline {
+                break reply.then_some(timeline);
+            }
+            sleep(Duration::from_millis(100)).await;
+        };
         let events = live.peer.events().await?;
+        let goodbye_input: String = events
+            .get(events_before_goodbye..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| is_user_input(e))
+            .filter_map(|e| e["delta"].as_str().or_else(|| e["text"].as_str()))
+            .collect();
+        let goodbye_timing = goodbye_reply
+            .as_ref()
+            .and_then(|timeline| SpokenTurn::from_timeline(timeline, goodbye));
+        if let Some(timing) = &goodbye_timing {
+            evidence.record(timing.latency_record(channel, 5, None))?;
+        }
+        let goodbye_input_final = timeline_find(
+            &live.peer.timeline().await?,
+            TimelineKind::InputFinal,
+            goodbye_start,
+        )
+        .is_some();
+        record_tolerant(
+            &evidence,
+            channel,
+            "S100",
+            "goodbye_input_final",
+            goodbye_input_final,
+            format!("heard={goodbye_input:?}"),
+            &mut tolerant_failures,
+        )?;
+        record_tolerant(
+            &evidence,
+            channel,
+            "S100",
+            "goodbye_reply",
+            goodbye_timing.is_some(),
+            format!(
+                "input_final_to_audio_ms={:?} heard={goodbye_input:?}",
+                goodbye_timing.as_ref().and_then(SpokenTurn::input_final_to_audio_ms)
+            ),
+            &mut tolerant_failures,
+        )?;
+        if goodbye_timing.is_none() {
+            // Same fields as S99's line, so one grep gives a cross-scenario
+            // rate; extras at the end.
+            let last_input_start_ms = events
+                .get(events_before_goodbye..)
+                .unwrap_or_default()
+                .iter()
+                .rev()
+                .filter(|e| is_user_input(e))
+                .find_map(|e| e["start_ms"].as_f64());
+            println!(
+                "GPT_LIVE_MODEL_SILENT_AFTER_INPUT scenario=S100 exchange=standup_close last_input_start_ms={} waited_ms={} input_final={goodbye_input_final} heard={goodbye_input:?}",
+                last_input_start_ms.map_or_else(|| "none".to_owned(), |ms| ms.to_string()),
+                reply_wait_started.elapsed().as_millis()
+            );
+        }
         println!(
-            "GPT_LIVE_S100_GOODBYE input_final_to_audio_ms={:?} heard={:?} goodbye={:?}",
-            goodbye_timing.input_final_to_audio_ms(),
-            goodbye_timing.input_text,
+            "GPT_LIVE_S100_GOODBYE input_final_to_audio_ms={:?} heard={goodbye_input:?} goodbye={:?}",
+            goodbye_timing.as_ref().and_then(SpokenTurn::input_final_to_audio_ms),
             answer_transcript_text(&events, request3.events_before).trim()
         );
 
@@ -4400,7 +4462,25 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                 )),
             }
         }
-        if rows.spoken.len() != exchanges {
+        // A goodbye the provider never finished has no browser input final
+        // (no response or delegation closed it), so it is not an exchange;
+        // its canonical row, if the host committed the open utterance at
+        // close, must be exactly the goodbye's input deltas.
+        let stalled_goodbye_row = goodbye_timing.is_none()
+            && !goodbye_input_final
+            && rows.spoken.len() == exchanges + 1
+            && rows
+                .spoken
+                .last()
+                .is_some_and(|row| same_transcript_words(row, &normalize_words(&goodbye_input)))
+            && !normalize_words(&goodbye_input).is_empty();
+        if stalled_goodbye_row {
+            println!(
+                "GPT_LIVE_S100_STALLED_GOODBYE_ROW row={:?}",
+                rows.spoken.last()
+            );
+        }
+        if rows.spoken.len() != exchanges && !stalled_goodbye_row {
             deterministic_failures.push(format!(
                 "canonical spoken user rows at close ({}) differ from the exchange count ({exchanges}: typed seed + {user_alternations} user role alternations); spoken rows: {:?}",
                 rows.spoken.len(),
@@ -4469,7 +4549,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             request2.timing.input_final_to_audio_ms(),
             barge_in_timing.input_final_to_audio_ms(),
             request3.timing.input_final_to_audio_ms(),
-            goodbye_timing.input_final_to_audio_ms(),
+            goodbye_timing.as_ref().and_then(SpokenTurn::input_final_to_audio_ms),
         ]
         .into_iter()
         .flatten()
@@ -4504,7 +4584,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             request2.timing.input_final_to_audio_ms(),
             barge_in_timing.input_final_to_audio_ms(),
             request3.timing.input_final_to_audio_ms(),
-            goodbye_timing.input_final_to_audio_ms(),
+            goodbye_timing.as_ref().and_then(SpokenTurn::input_final_to_audio_ms),
             request1.timing.input_final_ms.map(|f| request1.commentary_audio_ms as i64 - f as i64),
             request2.timing.input_final_ms.map(|f| request2.commentary_audio_ms as i64 - f as i64),
             request3.timing.input_final_ms.map(|f| request3.commentary_audio_ms as i64 - f as i64),

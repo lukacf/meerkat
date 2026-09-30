@@ -50,6 +50,14 @@ them.
 
 ### Fixed
 
+- The `meerkat_schedule_create` and `meerkat_schedule_update` tool schemas
+  advertise the existing `host_runnable` target (`target_kind`
+  `"host_runnable"`, a required non-empty `runnable` name and optional opaque
+  JSON `params`), on both the native dispatcher and the current-session
+  wrapper (#1331). Agents could already persist that target, but the schema
+  the model saw only listed session, identity and mob targets, so it was
+  undiscoverable. The target invokes an already registered host runnable;
+  it does not register one or grant permission.
 - WorkGraph observations, including execution recovery, distinguish an
   unavailable backing store from an absent record and preserve one read-only
   snapshot across schema validation and data queries. Ordinary writes also

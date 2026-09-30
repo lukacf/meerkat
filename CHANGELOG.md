@@ -460,6 +460,12 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Added
 
+- OpenAI `gpt-6.1-sol` (GPT-6.1 Sol) is cataloged as a Supported OpenAI
+  model: 1.05M context with a separate 922K input ceiling, 128K output,
+  text/image input, the Astra effort ladder (`low` through `max`, no `none`),
+  and the GPT-6 Responses prompt-cache defaults. The OpenAI default stays
+  `gpt-6-astra`.
+
 - `meerkat_mob::MobHandle::start_injected_context_work_for_identity_bounded`
   queues runtime-authored content on a member as injected execution context
   (exact runtime-input custody, no synthesized conversational user row).

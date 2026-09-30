@@ -7705,6 +7705,39 @@ impl SidebandCorrelations {
     }
 }
 
+/// Test support: the public Live `client_event_id` of each released result
+/// append, keyed by the provider delegation id. Narration shares the
+/// delegation lane, so this is how a test tells the result's
+/// `session.commentary.appended` from the narration around it.
+#[cfg(feature = "test-realtime-fixtures")]
+static RELEASED_RESULT_APPENDS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+#[cfg(feature = "test-realtime-fixtures")]
+fn record_released_result_append(provider_delegation_id: &str, token: GptLiveAppendToken) {
+    RELEASED_RESULT_APPENDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            provider_delegation_id.to_owned(),
+            meerkat_openai::public_live::__commentary_client_event_id(token),
+        );
+}
+
+/// Test support: the public Live `client_event_id` of the result append
+/// released for one provider delegation (the `delegation.id` of its
+/// `session.delegation.created`), once it was sent.
+#[cfg(feature = "test-realtime-fixtures")]
+#[doc(hidden)]
+#[must_use]
+pub fn __released_result_client_event_id(provider_delegation_id: &str) -> Option<String> {
+    RELEASED_RESULT_APPENDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(provider_delegation_id)
+        .cloned()
+}
+
 struct ExperimentalGptLiveSideband {
     binding: ProviderWebrtcBinding,
     session: Arc<dyn ExperimentalGptLiveBrokerSession>,
@@ -7816,6 +7849,13 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                     .session
                     .append_delegation_context(&provider_delegation, text)
                     .await;
+                #[cfg(feature = "test-realtime-fixtures")]
+                if let Ok(token) = &result {
+                    record_released_result_append(
+                        provider_delegation.__opaque_provider_id(),
+                        *token,
+                    );
+                }
                 self.lower_append_delivery(reservation, result).await
             }
             LiveSidebandProviderCommand::NarrateDelegationContext {

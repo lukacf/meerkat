@@ -1891,6 +1891,15 @@ fn pending_event_id(token: GptLiveAppendToken) -> String {
     format!("meerkat-append-{}", token.0)
 }
 
+/// Test support: the `client_event_id` a public Live commentary append with
+/// this token carries, which `session.commentary.appended` echoes.
+#[cfg(feature = "test-realtime-fixtures")]
+#[doc(hidden)]
+#[must_use]
+pub fn __commentary_client_event_id(token: GptLiveAppendToken) -> String {
+    pending_event_id(token)
+}
+
 fn thinking_event_id(token: GptLiveAppendToken, index: usize) -> String {
     format!("meerkat-thinking-{}-{index}", token.0)
 }

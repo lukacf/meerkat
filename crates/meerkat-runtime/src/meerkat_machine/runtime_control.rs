@@ -6766,7 +6766,7 @@ impl MeerkatMachine {
                         crate::live_execution::LiveDelegationWorkerTerminalKind::Blocked
                     }
                 });
-            snapshots.push(crate::live_execution::LiveDelegationRecoverySnapshot::new(
+            let snapshot = crate::live_execution::LiveDelegationRecoverySnapshot::new(
                 session_id.clone(),
                 meerkat_core::LiveChannelId::new(channel_id),
                 operation_id,
@@ -6788,8 +6788,10 @@ impl MeerkatMachine {
                 state
                     .live_delegation_result_eligible_operations
                     .contains(dsl_operation_id),
-            )
-            .with_result_delivery(
+            );
+            #[cfg(any(test, feature = "test-support"))]
+            let snapshot = snapshot
+                .with_result_delivery(
                 state
                     .live_result_delivery_observation_by_operation
                     .get(dsl_operation_id)
@@ -6807,8 +6809,8 @@ impl MeerkatMachine {
                         crate::meerkat_machine::dsl::LiveDelegationResultDeliveryObservation::InterruptedByClose => {
                             crate::live_execution::LiveDelegationResultDeliveryObservation::InterruptedByClose
                         }
-                    }),
-            ));
+                    }),);
+            snapshots.push(snapshot);
         }
         snapshots.sort_by(|left, right| {
             left.operation_id()

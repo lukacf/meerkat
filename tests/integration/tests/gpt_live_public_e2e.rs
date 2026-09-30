@@ -3574,14 +3574,14 @@ async fn wait_executor_turn(
 
 /// Wait until the runtime records the delegated result's provider
 /// acknowledgement (`Delivered`), then return the peer's arrival time of the
-/// result's commentary.
+/// result's `session.commentary.appended`.
 ///
 /// Narration (claimed, completed) shares the delegation lane and is appended
 /// before the result, and the result reaches the model only after its
 /// summary, so the first commentary after a delegation is not the result.
-/// The provider acknowledges the result append to the runtime and to the peer
-/// alike, and the runtime records it only after resolving the delivery, so
-/// the peer's latest commentary_appended at that point is the result's.
+/// The result append's `client_event_id` (keyed by the provider delegation
+/// id of this request's `session.delegation.created`) is echoed by its
+/// `session.commentary.appended`, which selects the peer's copy exactly.
 async fn wait_result_commentary(
     live: &mut PublicLiveHarness,
     label: &str,
@@ -3620,18 +3620,74 @@ async fn wait_result_commentary(
         sleep(Duration::from_millis(200)).await;
     }
     let timeline = live.peer.timeline().await?;
-    timeline
+    let events = live.peer.events().await?;
+    let delegation_event = timeline
         .iter()
-        .rev()
-        .find(|e| e.kind == TimelineKind::CommentaryAppended && e.t_ms >= delegation_created_ms)
-        .map(|e| e.t_ms)
+        .find(|e| e.kind == TimelineKind::DelegationCreated && e.t_ms == delegation_created_ms)
+        .and_then(|e| e.detail_u64("event_index"))
+        .and_then(|index| events.get(usize::try_from(index).ok()?))
         .ok_or_else(|| {
-            format!(
-                "{label}: the result was delivered but the peer saw no commentary_appended; timeline:\n{}",
-                format_timeline(&timeline)
+            format!("{label}: no raw session.delegation.created at {delegation_created_ms} ms")
+        })?;
+    let provider_delegation_id = delegation_event["delegation"]["id"]
+        .as_str()
+        .ok_or_else(|| format!("{label}: session.delegation.created carries no delegation.id"))?;
+    let client_event_id =
+        meerkat::experimental_gpt_live::__released_result_client_event_id(provider_delegation_id)
+            .ok_or_else(|| format!("{label}: delivered result has no recorded client_event_id"))?;
+    let result_commentary = |timeline: &[TimelineEntry], events: &[Value]| {
+        timeline
+            .iter()
+            .filter(|e| {
+                e.kind == TimelineKind::CommentaryAppended && e.t_ms >= delegation_created_ms
+            })
+            .find(|e| {
+                e.detail_u64("event_index")
+                    .and_then(|index| events.get(usize::try_from(index).ok()?))
+                    .is_some_and(|event| {
+                        event["client_event_id"].as_str() == Some(client_event_id.as_str())
+                    })
+            })
+            .map(|e| e.t_ms)
+    };
+    if let Some(t_ms) = result_commentary(&timeline, &events) {
+        return Ok(t_ms);
+    }
+    // The runtime and the peer each receive the provider's acknowledgement;
+    // wait for the peer's copy.
+    let peer_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        sleep(Duration::from_millis(200)).await;
+        let timeline = live.peer.timeline().await?;
+        let events = live.peer.events().await?;
+        if let Some(t_ms) = result_commentary(&timeline, &events) {
+            return Ok(t_ms);
+        }
+        if Instant::now() >= peer_deadline {
+            let commentary_events: Vec<String> = timeline
+                .iter()
+                .filter(|e| {
+                    e.kind == TimelineKind::CommentaryAppended && e.t_ms >= delegation_created_ms
+                })
+                .filter_map(|e| e.detail_u64("event_index"))
+                .filter_map(|index| events.get(usize::try_from(index).ok()?))
+                .map(|event| {
+                    let keys: Vec<&str> = event
+                        .as_object()
+                        .map(|o| o.keys().map(String::as_str).collect())
+                        .unwrap_or_default();
+                    format!(
+                        "keys={keys:?} client_event_id={:?}",
+                        event["client_event_id"]
+                    )
+                })
+                .collect();
+            return Err(format!(
+                "{label}: the peer saw no session.commentary.appended with the result's client_event_id {client_event_id:?}; commentary since the delegation: {commentary_events:?}"
             )
-            .into()
-        })
+            .into());
+        }
+    }
 }
 
 /// First assistant energy window at or after `since_ms`. The model may

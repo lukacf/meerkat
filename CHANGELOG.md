@@ -817,6 +817,13 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Fixed
 
+- meerkat-mob compiles with `--no-default-features` again: the run-fenced
+  Stop trait methods named `CoreRunId`, whose import was gated on
+  `runtime-adapter` (#1323).
+- The placed-member external-edge restart test holds a live member event
+  subscription, which is what drives the demand-driven event pump that
+  records comms reachability; without it readiness was never observed (#1325).
+
 - Two Release Turbo S flakes are deterministic. The live-adapter smokes
   (scenarios 71 and 72) read their spoken inputs from committed, verified
   fixtures (`tests/integration/fixtures/live_adapter_tts`, minted by

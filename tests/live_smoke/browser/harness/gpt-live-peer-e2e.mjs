@@ -233,8 +233,9 @@ async function prepare(command) {
       // close time, and the arrival times of delegations and commentary.
       bursts: [],
       currentBurst: null,
-      responseLog: {},
-      actionTimes: [],
+      outputLog: [],
+      inputTimes: [],
+      delegationTimes: [],
       playing: new Map(),
       scheduled: [],
       nextScheduleId: 1,
@@ -349,35 +350,33 @@ async function prepare(command) {
     // scenario's overlap classifier needs: duration, the text of the response
     // the burst belongs to and when that response closed (null while it is
     // still open), and whether a delegation or commentary arrived during it.
-    // A response's transcript can arrive, and the user's next delta close
-    // it, before its audio plays; that audio then starts under the next
-    // response index. So a burst's text also takes every earlier response
-    // that closed without audio of its own.
+    // The assistant bursts that overlapped one fixture, with the facts the
+    // scenario's overlap classifier needs, all read by arrival time around
+    // the burst (a transcript leads its audio, so response indices are no
+    // guide): the output transcript that arrived after the previous burst
+    // and up to this burst's end, whether the user resumed speaking after it
+    // before the assistant spoke again (it yielded), and whether a delegation
+    // arrived in that window (it acted).
     state.overlapBursts = (playId) => {
-      const voiced = new Set(state.bursts.map((burst) => burst.response));
+      const now = nowMs();
+      const hysteresis = energyConfig.end_hysteresis_ms;
       return state.bursts
-        .filter((burst) => (burst.overlap[playId] ?? 0) > 0)
-        .map((burst) => {
-          let first = burst.response;
-          while (first > 0 && !voiced.has(first - 1) && state.responseLog[first - 1]) first -= 1;
-          const response = state.responseLog[burst.response] ?? null;
-          const since = first > 0 && state.responseLog[first - 1] ? state.responseLog[first - 1].closed_ms : burst.started_ms;
-          const until = response ? response.closed_ms : nowMs();
-          const texts = [];
-          for (let index = first; index <= burst.response; index += 1) {
-            const logged = state.responseLog[index];
-            if (logged) texts.push(logged.text);
-          }
+        .map((burst, index) => ({ burst, index }))
+        .filter(({ burst }) => (burst.overlap[playId] ?? 0) > 0)
+        .map(({ burst, index }) => {
+          const previous = index > 0 ? state.bursts[index - 1] : null;
+          const next = index + 1 < state.bursts.length ? state.bursts[index + 1] : null;
+          const since = previous ? previous.last_active_ms + hysteresis : 0;
+          const until = burst.ended ? burst.last_active_ms + hysteresis : now;
+          const nextSpeech = next ? next.started_ms : now;
           return {
             started_ms: burst.started_ms,
             last_active_ms: burst.last_active_ms,
             ended: burst.ended,
             overlap_ms: burst.overlap[playId],
-            response: burst.response,
-            text: response ? texts.join(' ') : null,
-            response_closed_ms: response ? response.closed_ms : null,
-            flushed: response ? response.flushed : false,
-            acted: state.actionTimes.some((at) => at >= Math.min(since, burst.started_ms) && at <= until),
+            text: state.outputLog.filter((entry) => entry.t > since && entry.t <= until).map((entry) => entry.text).join(''),
+            yielded: burst.ended && state.inputTimes.some((at) => at > burst.last_active_ms && at < nextSpeech),
+            acted: state.delegationTimes.some((at) => at > since && at <= until),
           };
         });
     };
@@ -400,7 +399,6 @@ async function prepare(command) {
       // The text travels with the entry so scenarios can check a readout for
       // repeated lines (short brief lines fall under the 5-word floor above).
       state.pushTimeline('response_end', { index: state.response.index, chars: text.length, text: text.slice(0, 8000), flushed });
-      state.responseLog[state.response.index] = { text: text.slice(0, 2000), closed_ms: nowMs(), flushed };
       state.response = { text: '', started_ms: null, index: state.response.index + 1 };
     };
     // Close the open utterance now (`reason`: 'delegation' when
@@ -609,6 +607,7 @@ async function prepare(command) {
           });
         }
       }
+      if (isInputDelta && state.inputTimes.length < 20000) state.inputTimes.push(t);
       if (isInputDelta) {
         if (state.inputTranscript.first_delta_ms === null) {
           state.inputTranscript.first_delta_ms = t;
@@ -638,9 +637,10 @@ async function prepare(command) {
       if (isOutputDelta) {
         const delta = typeof parsed.delta === 'string' ? parsed.delta : typeof parsed.text === 'string' ? parsed.text : '';
         if (state.response.text.length < 20000) state.response.text += delta;
+        if (state.outputLog.length < 20000) state.outputLog.push({ t, text: delta });
       }
       if (parsed?.type === 'session.delegation.created') {
-        if (state.actionTimes.length < 2000) state.actionTimes.push(t);
+        if (state.delegationTimes.length < 2000) state.delegationTimes.push(t);
         // Join by arrival: the runtime's executor input is every user delta
         // received before this event.
         state.closeUtterance(t, 'delegation');
@@ -676,7 +676,6 @@ async function prepare(command) {
       }
       if (parsed?.type === 'session.commentary.appended') {
         state.pushTimeline('commentary_appended', { event_index: state.events.length - 1 });
-        if (state.actionTimes.length < 2000) state.actionTimes.push(t);
       }
       // Alternation by arrival: the response's first output transcript
       // delta closes the open user utterance of a plain turn.

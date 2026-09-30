@@ -103,11 +103,16 @@ async fn route_installs_at_rest(controlling: &ControllingMob) -> bool {
     installs.complete && installs.outstanding.is_empty()
 }
 
+/// Public readiness of a placed member. `comms_reachability` is recorded by
+/// the member event pump, which polls only while a consumer holds it, so the
+/// caller must hold the member's public event subscription (`_consumer`) for
+/// readiness to be observable at all.
 async fn public_remote_member_ready(
     controlling: &ControllingMob,
     member: &str,
     host_id: &str,
     session_id: &str,
+    _consumer: &meerkat_core::comms::EventStream,
 ) -> bool {
     let Ok(snapshot) = controlling.handle.member_status(&identity(member)).await else {
         return false;
@@ -361,13 +366,20 @@ async fn host_restart_reinstalls_wired_peer_trust_without_manual_drive() {
     // Keep the public placed-member event subscription alive across the
     // restart. This is the real consumer that drives PollMemberEvents and
     // therefore the fast boot-incarnation barrier under test.
-    let _b2_events = controlling
+    let b2_events = controlling
         .handle
         .subscribe_agent_events(&identity("b2"))
         .await
         .expect("subscribe to b2 events through the public API");
     wait_until("initial public remote-member readiness", || async {
-        public_remote_member_ready(&controlling, "b2", &report.host_id, &b2_before.session_id).await
+        public_remote_member_ready(
+            &controlling,
+            "b2",
+            &report.host_id,
+            &b2_before.session_id,
+            &b2_events,
+        )
+        .await
     })
     .await;
     let a1_session = controlling.member_session_id(&identity("a1")).await;
@@ -411,8 +423,14 @@ async fn host_restart_reinstalls_wired_peer_trust_without_manual_drive() {
     wait_until(
         "public remote-member readiness after host restart",
         || async {
-            public_remote_member_ready(&controlling, "b2", &report.host_id, &b2_after.session_id)
-                .await
+            public_remote_member_ready(
+                &controlling,
+                "b2",
+                &report.host_id,
+                &b2_after.session_id,
+                &b2_events,
+            )
+            .await
         },
     )
     .await;
@@ -1928,12 +1946,24 @@ async fn placed_member_external_edge_is_reestablished_after_member_host_restart(
         external_runtime,
         b2_session,
     } = scenario;
+    // Public readiness includes comms reachability, a member event-pump
+    // observation, and that pump is demand-driven: it polls, and records
+    // reachability, only while a consumer holds it. Without one, readiness
+    // was never signalled and this row timed out on every run. Keep the
+    // public placed-member event subscription alive across the restart, the
+    // same real consumer host_restart_reinstalls_wired_peer_trust_without_manual_drive
+    // holds.
+    let b2_events = controlling
+        .handle
+        .subscribe_agent_events(&identity("b2"))
+        .await
+        .expect("subscribe to b2 events through the public API");
     // The revived member holds no volatile trust rows: the new host
     // incarnation re-derives and reinstalls the external route without a
     // manual drive.
     let fixture = fixture.partition().await.restore().await;
     wait_until("public readiness after the member-host restart", || async {
-        public_remote_member_ready(&controlling, "b2", &host_id, &b2_session).await
+        public_remote_member_ready(&controlling, "b2", &host_id, &b2_session, &b2_events).await
     })
     .await;
     wait_until(

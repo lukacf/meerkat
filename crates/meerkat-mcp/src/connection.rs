@@ -10,7 +10,7 @@ use meerkat_auth_core::{McpAuthMode, McpOAuthError, McpServerIdentity};
 use meerkat_core::McpServerConfig;
 use meerkat_core::ToolDef;
 use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
-use meerkat_core::types::{ContentBlock, ToolProvenance, ToolSourceKind};
+use meerkat_core::types::ContentBlock;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{
@@ -315,36 +315,7 @@ impl McpConnection {
 
     /// List available tools
     pub async fn list_tools(&self, server_name: &str) -> Result<Vec<ToolDef>, McpError> {
-        let response =
-            self.service
-                .list_tools(None)
-                .await
-                .map_err(|e| McpError::ProtocolError {
-                    message: format!("Failed to list tools: {e}"),
-                })?;
-
-        // Convert MCP tools to our ToolDef format
-        let tools = response
-            .tools
-            .into_iter()
-            .map(|t| {
-                // Convert Arc<Map<String, Value>> to Value::Object
-                // Use Arc::unwrap_or_clone to avoid clone if we have the only reference
-                let inner_map = std::sync::Arc::unwrap_or_clone(t.input_schema);
-                let schema = Value::Object(inner_map);
-                ToolDef {
-                    name: t.name.to_string().into(),
-                    description: t.description.unwrap_or_default().to_string(),
-                    input_schema: schema,
-                    provenance: Some(ToolProvenance {
-                        kind: ToolSourceKind::Mcp,
-                        source_id: server_name.into(),
-                    }),
-                }
-            })
-            .collect();
-
-        Ok(tools)
+        crate::protocol::list_all_tools(&self.service, server_name).await
     }
 
     /// Call a tool, returning multimodal content blocks.
@@ -1137,3 +1108,7 @@ pub mod tests {
         conn.close().await.expect("Failed to close connection");
     }
 }
+
+#[cfg(test)]
+#[path = "pagination_tests.rs"]
+mod pagination_tests;

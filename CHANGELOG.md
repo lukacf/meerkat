@@ -61,6 +61,9 @@ them.
   "storage is under offline maintenance") instead of a `Store` error whose
   message carried the host database path. The public classification stays
   `StoreError`; the path is logged in tracing only.
+- MCP tool discovery now follows all `tools/list` pages in both connection
+  wrappers, preserving tool order and metadata. Later-page errors reject the
+  discovery result, and repeated or cycling cursors fail instead of looping.
 
 ## [0.8.49] - 2026-09-30
 

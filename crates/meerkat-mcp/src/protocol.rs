@@ -28,35 +28,7 @@ impl McpProtocol {
     }
 
     pub async fn list_tools(&self, server_name: &str) -> Result<Vec<ToolDef>, McpError> {
-        let response =
-            self.service
-                .list_tools(None)
-                .await
-                .map_err(|e| McpError::ProtocolError {
-                    message: format!("Failed to list tools: {e}"),
-                })?;
-
-        let tools = response
-            .tools
-            .into_iter()
-            .map(|tool| {
-                // Convert Arc<Map<String, Value>> to Value::Object
-                // Use Arc::unwrap_or_clone to avoid clone if we have the only reference
-                let inner_map = Arc::unwrap_or_clone(tool.input_schema);
-                let schema = Value::Object(inner_map);
-                ToolDef {
-                    name: tool.name.to_string().into(),
-                    description: tool.description.unwrap_or_default().to_string(),
-                    input_schema: schema,
-                    provenance: Some(ToolProvenance {
-                        kind: ToolSourceKind::Mcp,
-                        source_id: server_name.into(),
-                    }),
-                }
-            })
-            .collect();
-
-        Ok(tools)
+        list_all_tools(&self.service, server_name).await
     }
 
     /// Call a tool, returning multimodal content blocks.
@@ -130,6 +102,48 @@ impl McpProtocol {
                 reason: format!("Failed to close connection: {e:?}"),
             })?;
         Ok(())
+    }
+}
+
+/// Enumerate every page through the same live service. Later-page failures
+/// refuse the whole observation rather than publishing a partial tool list.
+/// Cursors are opaque; repeated cursors are a protocol error, not completion.
+pub(crate) async fn list_all_tools(
+    service: &RunningService<RoleClient, ()>,
+    server_name: &str,
+) -> Result<Vec<ToolDef>, McpError> {
+    let mut request = None;
+    let mut seen_cursors = std::collections::HashSet::new();
+    let mut tools = Vec::new();
+    loop {
+        let response =
+            service
+                .list_tools(request)
+                .await
+                .map_err(|error| McpError::ProtocolError {
+                    message: format!("Failed to list tools: {error}"),
+                })?;
+        tools.extend(response.tools.into_iter().map(|tool| {
+            let schema = Value::Object(Arc::unwrap_or_clone(tool.input_schema));
+            ToolDef {
+                name: tool.name.to_string().into(),
+                description: tool.description.unwrap_or_default().to_string(),
+                input_schema: schema,
+                provenance: Some(ToolProvenance {
+                    kind: ToolSourceKind::Mcp,
+                    source_id: server_name.into(),
+                }),
+            }
+        }));
+        let Some(cursor) = response.next_cursor else {
+            return Ok(tools);
+        };
+        if !seen_cursors.insert(cursor.clone()) {
+            return Err(McpError::ProtocolError {
+                message: "Failed to list tools: repeated pagination cursor".to_string(),
+            });
+        }
+        request = Some(rmcp::model::PaginatedRequestParams::default().with_cursor(Some(cursor)));
     }
 }
 

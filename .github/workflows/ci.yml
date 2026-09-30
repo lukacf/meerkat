@@ -20,7 +20,9 @@ name: CI
 #                     clippy --no-deps --all-targets --all-features
 #   unit (xN)       - pull request: one lane per shard of the directly
 #                     changed packages OUTSIDE the meerkat-mob compile chain:
-#                     nextest --lib --bins --profile ci-pr (ci-pr = fast)
+#                     nextest --lib --bins --profile ci-pr (ci-pr = fast),
+#                     plus the feature-gated suites of those packages
+#                     (FEATURE_UNIT_SUITES in scripts/ci-cargo-lanes.mjs)
 #   closure-check   - cargo check (lib and bin targets) over the
 #                     reverse-dependency closure of the changed packages
 #   example-web     - sdks/web wasm runtime build plus the example 031, 032
@@ -41,7 +43,10 @@ name: CI
 #                     unit tests run: mob, mob-mcp, mob-pack, rpc, rest,
 #                     mcp-server, rkat, web-runtime, integration-tests,
 #                     machine-codegen, machine-dsl-tests, xtask; their lanes
-#                     compile mob's 442k lines and cannot fit the budget)
+#                     compile mob's 442k lines and cannot fit the budget),
+#                     plus one lane per feature-gated suite: the default
+#                     feature lanes cannot reach a test behind a non-default
+#                     feature (FEATURE_UNIT_SUITES in ci-cargo-lanes.mjs)
 #   wasm-check      - wasm32 check of meerkat-web-runtime
 #   sdk-host        - Python + TypeScript SDK suites
 #
@@ -559,9 +564,15 @@ jobs:
         shell: bash
         env:
           PACKAGES: ${{ matrix.packages }}
+          # Set only on feature-suite rows whose tests need a deeper test-thread
+          # stack than the 8 MiB .cargo/config.toml default (see FEATURE_UNIT_SUITES).
+          MIN_STACK: ${{ matrix.rust_min_stack }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a unit lane"; exit 1; }
+          # An empty RUST_MIN_STACK would drop tests to Rust's 2 MiB default, so it
+          # is exported only when the row sets one.
+          if [[ -n "${MIN_STACK}" ]]; then export RUST_MIN_STACK="${MIN_STACK}"; fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile ci-pr \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -627,9 +638,15 @@ jobs:
         shell: bash
         env:
           PACKAGES: ${{ matrix.packages }}
+          # Set only on feature-suite rows whose tests need a deeper test-thread
+          # stack than the 8 MiB .cargo/config.toml default (see FEATURE_UNIT_SUITES).
+          MIN_STACK: ${{ matrix.rust_min_stack }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a main unit lane"; exit 1; }
+          # An empty RUST_MIN_STACK would drop tests to Rust's 2 MiB default, so it
+          # is exported only when the row sets one.
+          if [[ -n "${MIN_STACK}" ]]; then export RUST_MIN_STACK="${MIN_STACK}"; fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile ci-pr \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail

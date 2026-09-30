@@ -68,6 +68,40 @@ const LANE_SETUP_MINUTES = 1;
 export const PR_UNIT_BUDGET_MINUTES = 16;
 const HEAVY_ANCHOR = "meerkat-mob";
 
+// Feature-gated unit suites. Every unit lane builds its packages with their
+// default features, so a lib or bin test behind a non-default feature ran in
+// no lane at all: measured on 58023fbd, 342 lib/bin tests exist only under
+// --all-features, and main CI stayed green while #1304 broke one of the
+// facade's GPT Live tests. Each suite below is one more lane,
+//   nextest run -p <package> --features <features> --lib --bins
+// on every push to main, and in the pull request when <package> itself
+// changed and is outside the meerkat-mob compile chain. Feature names are
+// checked against cargo metadata, so a renamed feature fails the plan
+// instead of silently dropping the suite.
+//
+// 22 of the facade's GPT Live tests overflow the 8 MiB test-thread stack that
+// .cargo/config.toml gives every lane (debug build, measured on 82fddfc33);
+// they pass at the 32 MiB the pre-push hook and the BuildBuddy unit lane use.
+// Their rows carry that stack until the frames fit 8 MiB.
+const GPT_LIVE_TEST_STACK = 32 * 1024 * 1024;
+export const FEATURE_UNIT_SUITES = [
+  // The shipping public GPT Live path (experimental_gpt_live::tests,
+  // session_runtime::live_summary, service_factory) plus the realtime
+  // credential and projection tests of the facade.
+  { package: "meerkat", id: "openai-live", features: ["openai-live", "openai-realtime", "memory-store", "test-realtime-fixtures"], rustMinStack: GPT_LIVE_TEST_STACK },
+  // The deprecated private broker adds its admission and broker tests.
+  { package: "meerkat", id: "experimental-gpt-live", features: ["experimental-gpt-live", "openai-realtime", "memory-store", "test-realtime-fixtures"], rustMinStack: GPT_LIVE_TEST_STACK },
+  { package: "meerkat-openai", id: "live", features: ["live", "experimental-gpt-live-gate0-harness", "test-realtime-fixtures"] },
+  { package: "meerkat-live", id: "webrtc", features: ["webrtc"] },
+  { package: "meerkat-session", id: "live", features: ["live", "session-store"] },
+  { package: "meerkat-auth-core", id: "cloud", features: ["aws-sigv4", "gcp-auth", "azure-ad"] },
+  { package: "meerkat-anthropic", id: "cloud", features: ["bedrock", "vertex", "foundry"] },
+  { package: "meerkat-mob", id: "openai-live", features: ["experimental-gpt-live", "schema"] },
+  { package: "meerkat-mob-mcp", id: "openai-live", features: ["experimental-gpt-live-gate0-harness"] },
+  { package: "meerkat-rpc", id: "openai-live", features: ["experimental-gpt-live"] },
+  { package: "xtask", id: "machine-authority", features: ["machine-authority"] },
+];
+
 function estimatedMinutes(cost) {
   return Math.round((LANE_SETUP_MINUTES + cost / COST_UNITS_PER_MINUTE) * 10) / 10;
 }
@@ -527,6 +561,23 @@ function plan(args) {
     }]),
   );
   result.pr_unit_budget_minutes = PR_UNIT_BUDGET_MINUTES;
+  const featureSuites = FEATURE_UNIT_SUITES.map((suite) => {
+    const pkg = byName.get(suite.package);
+    if (!pkg) throw new Error(`feature unit suite names unknown package ${suite.package}`);
+    for (const feature of suite.features) {
+      if (!Object.hasOwn(pkg.features, feature)) {
+        throw new Error(`feature unit suite ${suite.package}[${suite.id}] names unknown feature ${feature}`);
+      }
+    }
+    return {
+      name: `${shortName(suite.package)}[${suite.id}]`,
+      packages: [suite.package],
+      features: [...suite.features],
+      package_flags: `-p ${suite.package} --features ${suite.features.join(",")}`,
+      estimated_minutes: estimatedMinutes(weights.get(suite.package)),
+      ...(suite.rustMinStack ? { rust_min_stack: suite.rustMinStack } : {}),
+    };
+  });
 
   if (workspaceReason) {
     result.rust_changed = true;
@@ -593,11 +644,25 @@ function plan(args) {
     }
     // Push-to-main unit lanes: the whole workspace, no budget.
     result.main_unit_shards = packShards(allNames, weights, args.workspaceShards, model);
+    // Feature-gated suites: all of them on main; in the pull request those of
+    // a changed package that runs its unit tests there (the heavy chain's
+    // suites are deferred with the package).
+    result.main_feature_unit_shards = featureSuites;
+    result.unit_feature_shards = featureSuites.filter((suite) => result.unit_packages.includes(suite.packages[0]));
+    for (const suite of result.unit_feature_shards) {
+      if (suite.estimated_minutes > PR_UNIT_BUDGET_MINUTES) {
+        throw new Error(
+          `internal error: pull-request feature suite ${suite.name} models ${suite.estimated_minutes} min, over the ${PR_UNIT_BUDGET_MINUTES} min budget`,
+        );
+      }
+    }
   } else {
     result.unit_deferred = [];
     result.unit_packages = [];
     result.unit_shards = [];
     result.main_unit_shards = [];
+    result.main_feature_unit_shards = [];
+    result.unit_feature_shards = [];
   }
 
   result.closure_flags = result.closure.map((name) => `-p ${name}`).join(" ");
@@ -625,7 +690,11 @@ function packWithinBudget(pkgs, weights, maxShards, model) {
 // push-to-main unit lanes, which are skipped outright for a plan with no
 // Rust-relevant change; run 35939276400 failed a "none" shard there).
 function matrixOf(shards, { placeholder = true } = {}) {
-  const include = shards.map((shard) => ({ name: shard.name, packages: shard.package_flags }));
+  const include = shards.map((shard) => ({
+    name: shard.name,
+    packages: shard.package_flags,
+    ...(shard.rust_min_stack ? { rust_min_stack: String(shard.rust_min_stack) } : {}),
+  }));
   if (include.length === 0 && placeholder) include.push({ name: "none", packages: "" });
   return JSON.stringify({ include });
 }
@@ -653,12 +722,15 @@ function githubOutput(result) {
   // placeholder so `fromJSON` stays well-formed and the consumer job's `if:`
   // decides whether it runs.
   scalar("shard_matrix", matrixOf(result.shards));
-  scalar("unit_shard_count", String(result.unit_shards.length));
-  scalar("unit_shard_matrix", matrixOf(result.unit_shards));
+  // The feature-gated suites run in the same unit jobs as extra matrix rows.
+  const unitLanes = [...result.unit_shards, ...result.unit_feature_shards];
+  const mainUnitLanes = [...result.main_unit_shards, ...result.main_feature_unit_shards];
+  scalar("unit_shard_count", String(unitLanes.length));
+  scalar("unit_shard_matrix", matrixOf(unitLanes));
   scalar("unit_deferred", result.unit_deferred.join(" "));
   scalar("unit_deferred_count", String(result.unit_deferred.length));
-  scalar("main_unit_shard_count", String(result.main_unit_shards.length));
-  scalar("main_unit_shard_matrix", matrixOf(result.main_unit_shards, { placeholder: false }));
+  scalar("main_unit_shard_count", String(mainUnitLanes.length));
+  scalar("main_unit_shard_matrix", matrixOf(mainUnitLanes, { placeholder: false }));
   return `${lines.join("\n")}\n`;
 }
 
@@ -671,7 +743,7 @@ function main() {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   }
   process.stderr.write(
-    `ci-cargo-lanes: mode=${result.mode} packages=${result.packages.length} closure=${result.closure.length} clippy_shards=${result.shards.length} unit_shards=${result.unit_shards.length} unit_deferred=${result.unit_deferred.length} (${result.reason})\n`,
+    `ci-cargo-lanes: mode=${result.mode} packages=${result.packages.length} closure=${result.closure.length} clippy_shards=${result.shards.length} unit_shards=${result.unit_shards.length} feature_suites=${result.unit_feature_shards.length}/${result.main_feature_unit_shards.length} unit_deferred=${result.unit_deferred.length} (${result.reason})\n`,
   );
 }
 

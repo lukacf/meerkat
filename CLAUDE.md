@@ -366,6 +366,12 @@ GitHub-hosted runners and sized to a 25-minute push-to-terminal budget:
   rkat, web-runtime, integration-tests, machine-codegen, machine-dsl-tests,
   xtask; computed from metadata) defer their unit tests to `push: main`
   because their lanes need 17-22 min on 4 vCPU.
+- Feature-gated unit suites (`FEATURE_UNIT_SUITES` in
+  `scripts/ci-cargo-lanes.mjs`): the unit lanes build default features only,
+  so each suite adds a `nextest -p <package> --features <list>` row to
+  `main-unit` on every Rust-relevant main push, and to `unit` when that
+  package changed outside the meerkat-mob chain. A new test behind a
+  non-default feature needs a suite, or no lane runs it.
 - `closure-check`: `cargo check --all-features` (lib and bin targets) over
   the reverse-dependency closure of the changed packages.
 - `push: main` only (no budget): `main-unit` over the whole workspace in

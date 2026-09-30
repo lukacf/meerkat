@@ -1141,6 +1141,12 @@ pub enum LiveSidebandObservationKind {
         /// natively), never merged into the request. Empty when the
         /// assistant said nothing in the window.
         assistant_context: String,
+        /// User rows the live transcript already committed that this
+        /// delegation re-presents, in order: the provider finished those user
+        /// turns (the model spoke first) before the delegation arrived. When
+        /// non-empty, `final_transcript` is their joined text and the canonical
+        /// commit verifies these rows instead of appending a new one.
+        represented_user_rows: Vec<meerkat_core::RepresentedLiveUserRow>,
     },
     /// A client-context delegation whose provider payload cannot establish a
     /// normalized prose handoff. This is not a Responses function call and

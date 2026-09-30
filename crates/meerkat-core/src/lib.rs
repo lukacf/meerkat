@@ -313,6 +313,7 @@ pub use live_execution::{
     LiveExecutionMode, LiveHandoffInputProvenance, LiveHandoffReconciliation,
     LiveResultDisposition, LiveUserTurnCorrelation, MeerkatExecutionTerminal,
     NormalizedLiveUserInputDigest, OpaqueProviderCorrelation, ProvisionalLiveHandoff,
+    RepresentedLiveUserRow,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use memory::{

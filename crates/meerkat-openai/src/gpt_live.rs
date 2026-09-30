@@ -881,6 +881,7 @@ impl GptLiveBrokerSessionState {
                 // so the joined turn is the whole request.
                 request_transcript: transcript.clone(),
                 assistant_context: String::new(),
+                represented_turns: Vec::new(),
                 transcript,
             });
     }

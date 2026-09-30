@@ -285,6 +285,9 @@ struct PendingDelegation {
     /// This is the canonical user row and the provisional handoff; it never
     /// carries the composed executor text.
     final_transcript: String,
+    /// Committed user rows the delegation re-presents (no user turn was open
+    /// when it arrived); the commit verifies them instead of appending.
+    represented_user_rows: Vec<meerkat_core::RepresentedLiveUserRow>,
     /// The provider window behind the delegation: `request_transcript` (the
     /// user-only window text) names the WorkGraph item and every narration;
     /// the composed `delegation_request_text` output is the fork's task.
@@ -2803,6 +2806,7 @@ impl ExperimentalLiveDelegationCoordinator {
                         final_transcript,
                         request_transcript,
                         assistant_context,
+                        represented_user_rows,
                     } = observation.kind()
                         && let Err(error) = self
                             .start_client_context_delegation(
@@ -2811,6 +2815,7 @@ impl ExperimentalLiveDelegationCoordinator {
                                 turn.clone(),
                                 delegation.clone(),
                                 final_transcript.clone(),
+                                represented_user_rows.clone(),
                                 LiveDelegationExecutorInput {
                                     request_transcript: request_transcript.clone(),
                                     assistant_context: assistant_context.clone(),
@@ -3174,6 +3179,10 @@ impl ExperimentalLiveDelegationCoordinator {
     /// provisional until the canonical session owner commits it and runtime
     /// reconciliation confirms the exact digest. No executor model or tool
     /// work starts before that boundary.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the delegation join carries provider identity, the final transcript and its represented rows, and the executor window"
+    )]
     async fn start_client_context_delegation(
         &self,
         provider_binding: &ProviderWebrtcBinding,
@@ -3181,6 +3190,7 @@ impl ExperimentalLiveDelegationCoordinator {
         turn: LiveSidebandTurnRef,
         delegation: LiveSidebandDelegationRef,
         final_transcript: String,
+        represented_user_rows: Vec<meerkat_core::RepresentedLiveUserRow>,
         executor_input: LiveDelegationExecutorInput,
     ) -> Result<(), String> {
         tracing::debug!("client-context control received an exact delegation join");
@@ -3240,6 +3250,7 @@ impl ExperimentalLiveDelegationCoordinator {
             delegation,
             turn,
             final_transcript,
+            represented_user_rows,
             executor_input,
         )
         .await;
@@ -3304,6 +3315,7 @@ impl ExperimentalLiveDelegationCoordinator {
         delegation: LiveSidebandDelegationRef,
         turn: LiveSidebandTurnRef,
         final_transcript: String,
+        represented_user_rows: Vec<meerkat_core::RepresentedLiveUserRow>,
         executor_input: LiveDelegationExecutorInput,
     ) {
         let title = narration_title(&executor_input.request_transcript);
@@ -3342,6 +3354,7 @@ impl ExperimentalLiveDelegationCoordinator {
             delegation,
             turn,
             final_transcript,
+            represented_user_rows,
             executor_input,
             transcript: None,
             workgraph,
@@ -3782,18 +3795,33 @@ impl ExperimentalLiveDelegationCoordinator {
             content_index: 0,
             text: pending.final_transcript.clone(),
         };
-        let committed = self
-            .mobs
-            .session_service()
-            .commit_live_delegation_final_transcript_at_turn_boundary(
-                &self.runtime,
-                session_id,
-                pending.provisional.clone(),
-                final_event,
-                DelegationExecutionService::SOURCE_TURN_BOUNDARY_WAIT,
-            )
-            .await
-            .map_err(|error| ScheduledStartFailure::Failed(error.to_string()))?;
+        // A delegation that re-presents committed rows (no user turn was open
+        // when it arrived) is confirmed against them; none is appended.
+        let committed = if pending.represented_user_rows.is_empty() {
+            self.mobs
+                .session_service()
+                .commit_live_delegation_final_transcript_at_turn_boundary(
+                    &self.runtime,
+                    session_id,
+                    pending.provisional.clone(),
+                    final_event,
+                    DelegationExecutionService::SOURCE_TURN_BOUNDARY_WAIT,
+                )
+                .await
+        } else {
+            self.mobs
+                .session_service()
+                .commit_live_delegation_represented_transcript_at_turn_boundary(
+                    &self.runtime,
+                    session_id,
+                    pending.provisional.clone(),
+                    final_event,
+                    pending.represented_user_rows.clone(),
+                    DelegationExecutionService::SOURCE_TURN_BOUNDARY_WAIT,
+                )
+                .await
+        }
+        .map_err(|error| ScheduledStartFailure::Failed(error.to_string()))?;
         let final_evidence = match committed {
             meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::Committed(evidence) => evidence,
             meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::SourceBusy { waited } => {

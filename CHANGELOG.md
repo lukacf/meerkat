@@ -66,6 +66,16 @@ them.
   structured value, or is not JSON, is kept. `McpConnection::call_tool_text`
   and a failing result's `ToolCallFailed` reason therefore carry that JSON
   once.
+- `meerkat_live::LiveSidebandObservationKind::DelegationRequested` gains the
+  field `represented_user_rows: Vec<meerkat_core::RepresentedLiveUserRow>`,
+  and `meerkat_openai::gpt_live_broker::GptLiveBrokerObservation::ClientDelegationFinal`
+  gains `represented_turns: Vec<GptLiveRepresentedUserTurn>`. Constructors
+  and exhaustive patterns must name the new field. New public items:
+  `meerkat_core::RepresentedLiveUserRow`,
+  `meerkat_openai::gpt_live_broker::GptLiveRepresentedUserTurn`,
+  `PersistentSessionService::commit_live_user_transcript_represented_with_machine_at_turn_boundary`,
+  `EphemeralSessionService::commit_live_user_transcript_represented`, and the
+  defaulted `MobSessionService::commit_live_delegation_represented_transcript_at_turn_boundary`.
 
 ### Added
 
@@ -87,6 +97,15 @@ them.
   every queued input through its exact input cancellation (the input is
   abandoned `Cancelled` and its waiter resolves typed) before it acquires the
   boundary.
+- A client delegation that arrives after the model already spoke (so no user
+  turn is open) no longer commits the user's words twice. Public Live turns
+  are synthesized from speaker changes, so those words were already committed
+  as finished user turns; the delegation used to re-present the last one under
+  a fresh turn and commit it again as a new row (seen as a duplicated
+  "'s saved" in S106). The delegation now re-presents every user turn finished
+  since the previous delegation by committed item id; the canonical commit
+  verifies each row is committed with its exact text, confirms against the
+  joined digest and appends none, and fails closed on any mismatch.
 - The `meerkat_schedule_create` and `meerkat_schedule_update` tool schemas
   advertise the existing `host_runnable` target (`target_kind`
   `"host_runnable"`, a required non-empty `runnable` name and optional opaque

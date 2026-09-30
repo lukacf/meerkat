@@ -30,8 +30,9 @@ use tokio::sync::Mutex;
 use crate::OpenAiBackendKind;
 use crate::gpt_live_broker::{
     GptLiveAppendToken, GptLiveBrokerError, GptLiveBrokerObservation, GptLiveBrokerTerminalClass,
-    GptLiveDelegationRef, GptLiveDelegationTarget, GptLiveTranscriptItemRef, GptLiveTurnRef,
-    GptLiveTurnRole, protocol_error, require_context, summarize_unknown_provider_event,
+    GptLiveDelegationRef, GptLiveDelegationTarget, GptLiveRepresentedUserTurn,
+    GptLiveTranscriptItemRef, GptLiveTurnRef, GptLiveTurnRole, protocol_error, require_context,
+    summarize_unknown_provider_event,
 };
 
 pub use crate::runtime::GPT_LIVE_MODEL_FAMILY;
@@ -1334,7 +1335,10 @@ fn join_window_chunks<'a>(chunks: impl IntoIterator<Item = &'a str>) -> String {
 }
 
 struct FinishedUserTurn {
-    transcript: String,
+    /// The committed user rows behind this utterance, in order: the turn
+    /// itself when a `TurnFinished` or an open-turn delegation committed it,
+    /// or the rows a detached delegation re-presented.
+    rows: Vec<GptLiveRepresentedUserTurn>,
 }
 
 /// Transcript received since the previous `session.delegation.created` (or
@@ -1370,6 +1374,10 @@ struct SessionState {
     next_transcript_item: u64,
     open_turn: Option<OpenTurn>,
     last_user_turn: Option<FinishedUserTurn>,
+    /// User turns finished (by a speaker change) since the previous client
+    /// delegation: what a delegation that finds no open user turn
+    /// re-presents.
+    window_finished_user_turns: Vec<GptLiveRepresentedUserTurn>,
     /// The previous delegation's executor request, re-presented when a
     /// delegation arrives without any new user transcript in its window.
     last_request: Option<String>,
@@ -1391,6 +1399,7 @@ impl Default for SessionState {
             next_transcript_item: 0,
             open_turn: None,
             last_user_turn: None,
+            window_finished_user_turns: Vec::new(),
             last_request: None,
             window: DelegationWindow::default(),
             seen_delegation_ids: HashSet::new(),
@@ -1767,9 +1776,12 @@ impl SessionState {
         let transcript = join_segments(&open.segments);
         self.window.push(open.role, open.window_transcript());
         if open.role == GptLiveTurnRole::User {
-            self.last_user_turn = Some(FinishedUserTurn {
+            let row = GptLiveRepresentedUserTurn {
+                turn: GptLiveTurnRef(open.provider_ref.clone()),
                 transcript: transcript.clone(),
-            });
+            };
+            self.window_finished_user_turns.push(row.clone());
+            self.last_user_turn = Some(FinishedUserTurn { rows: vec![row] });
         }
         self.queued_observations
             .push_back(GptLiveBrokerObservation::TurnFinished {
@@ -1845,26 +1857,56 @@ impl SessionState {
         // reach the durable transcript and the next delegation's window.
         // The public protocol carries no per-utterance completion, item
         // lifecycle, or speech start/stop event that could say otherwise.
-        let (turn_ref, transcript) = match self.open_turn.take() {
+        //
+        // A detached delegation's user words are already canonical: the
+        // speaker change that finished those turns reported them with
+        // `TurnFinished`, and the transcript committed them. The fresh turn
+        // exists only for lifecycle pairing; the delegation re-presents every
+        // user turn finished since the previous delegation (or, with none,
+        // the rows behind the last user utterance), so the canonical commit
+        // verifies those rows and appends none.
+        let finished_in_window = std::mem::take(&mut self.window_finished_user_turns);
+        let (turn_ref, transcript, represented_turns) = match self.open_turn.take() {
             Some(open) if open.role == GptLiveTurnRole::User => {
                 let transcript = join_segments(&open.segments);
-                (open.provider_ref, transcript)
+                (open.provider_ref, transcript, Vec::new())
             }
             other => {
                 self.open_turn = other;
-                let transcript = self.last_user_turn.as_ref().map_or_else(
-                    || request_transcript.clone(),
-                    |last| last.transcript.clone(),
-                );
-                (self.mint_turn(GptLiveTurnRole::User).0, transcript)
+                let represented = if finished_in_window.is_empty() {
+                    self.last_user_turn
+                        .as_ref()
+                        .map(|last| last.rows.clone())
+                        .unwrap_or_default()
+                } else {
+                    finished_in_window
+                };
+                let transcript = if represented.is_empty() {
+                    request_transcript.clone()
+                } else {
+                    join_window_chunks(represented.iter().map(|row| row.transcript.as_str()))
+                };
+                (
+                    self.mint_turn(GptLiveTurnRole::User).0,
+                    transcript,
+                    represented,
+                )
             }
         };
         tracing::debug!(
             offset_ms,
+            represented_turns = represented_turns.len(),
             "public Live client delegation joined its user turn"
         );
         self.last_user_turn = Some(FinishedUserTurn {
-            transcript: transcript.clone(),
+            rows: if represented_turns.is_empty() {
+                vec![GptLiveRepresentedUserTurn {
+                    turn: GptLiveTurnRef(turn_ref.clone()),
+                    transcript: transcript.clone(),
+                }]
+            } else {
+                represented_turns.clone()
+            },
         });
         self.last_request = Some(request_transcript.clone());
         self.queued_observations
@@ -1875,6 +1917,7 @@ impl SessionState {
                 transcript,
                 request_transcript,
                 assistant_context,
+                represented_turns,
             });
         Ok(())
     }
@@ -2703,9 +2746,10 @@ mod tests {
         assert_eq!(joined.len(), 1, "the join is the sole terminal observation");
         assert!(matches!(
             &joined[0],
-            GptLiveBrokerObservation::ClientDelegationFinal { delegation, target: GptLiveDelegationTarget::Client, turn, transcript, request_transcript, assistant_context }
+            GptLiveBrokerObservation::ClientDelegationFinal { delegation, target: GptLiveDelegationTarget::Client, turn, transcript, request_transcript, assistant_context, represented_turns }
                 if delegation.__opaque_provider_id() == "dlg_1" && turn == user_turn && transcript == "book a table"
                     && request_transcript == "book a table" && assistant_context.is_empty()
+                    && represented_turns.is_empty()
         ));
         // The assistant reply starts a new turn without a second user finish.
         state.apply_frame(frame(output_delta("sure"))).unwrap();
@@ -2725,6 +2769,14 @@ mod tests {
         state
             .apply_frame(frame(input_delta("what time is it")))
             .unwrap();
+        let started = drain(&mut state);
+        let GptLiveBrokerObservation::TurnStarted {
+            turn: user_turn, ..
+        } = &started[0]
+        else {
+            panic!("user turn start");
+        };
+        let user_turn = user_turn.clone();
         state
             .apply_frame(frame(output_delta("let me check")))
             .unwrap();
@@ -2741,10 +2793,15 @@ mod tests {
         else {
             panic!("detached user turn must be announced first: {observations:?}");
         };
+        // The finished user turn is already canonical: the detached turn
+        // re-presents it rather than carrying its words as a new row.
         assert!(matches!(
             &observations[1],
-            GptLiveBrokerObservation::ClientDelegationFinal { turn, transcript, .. }
+            GptLiveBrokerObservation::ClientDelegationFinal { turn, transcript, represented_turns, .. }
                 if turn == minted && transcript == "what time is it"
+                    && represented_turns.len() == 1
+                    && represented_turns[0].turn == user_turn
+                    && represented_turns[0].transcript == "what time is it"
         ));
         // The assistant turn stayed open and continues under its own ref.
         state.apply_frame(frame(output_delta(" now"))).unwrap();
@@ -2758,6 +2815,82 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, GptLiveBrokerObservation::TurnStarted { .. }))
         );
+    }
+
+    /// BuildBuddy 2e218ad5 (S106): the model spoke after "...once it", the
+    /// provider's late tail "'s saved" opened its own user turn, the model
+    /// spoke again, then `session.delegation.created` arrived with no user
+    /// turn open. The delegation re-presents both finished user turns, in
+    /// order, with their joined text; nothing new is left to commit.
+    #[test]
+    fn detached_delegation_re_presents_every_user_turn_finished_in_its_window() {
+        let mut state = SessionState::default();
+        let mut user_turns = Vec::new();
+        for (input, output) in [
+            ("just tell me the word count once it", "Okay,"),
+            ("'s saved", " on it."),
+        ] {
+            state.apply_frame(frame(input_delta(input))).unwrap();
+            state.apply_frame(frame(output_delta(output))).unwrap();
+            for observation in drain(&mut state) {
+                if let GptLiveBrokerObservation::TurnStarted {
+                    turn,
+                    role: GptLiveTurnRole::User,
+                } = observation
+                {
+                    user_turns.push(turn);
+                }
+            }
+        }
+        assert_eq!(
+            user_turns.len(),
+            2,
+            "the late tail opened its own user turn"
+        );
+        state
+            .apply_frame(frame(delegation_created("dlg_split", "client")))
+            .unwrap();
+        let observations = drain(&mut state);
+        let Some(GptLiveBrokerObservation::ClientDelegationFinal {
+            transcript,
+            request_transcript,
+            represented_turns,
+            ..
+        }) = observations.last()
+        else {
+            panic!("delegation final: {observations:?}");
+        };
+        let represented: Vec<_> = represented_turns
+            .iter()
+            .map(|row| (row.turn.clone(), row.transcript.clone()))
+            .collect();
+        assert_eq!(
+            represented,
+            vec![
+                (
+                    user_turns[0].clone(),
+                    "just tell me the word count once it".to_owned()
+                ),
+                (user_turns[1].clone(), "'s saved".to_owned()),
+            ]
+        );
+        assert_eq!(transcript, "just tell me the word count once it 's saved");
+        assert_eq!(
+            request_transcript,
+            "just tell me the word count once it 's saved"
+        );
+
+        // A second delegation with no new user speech re-presents the same
+        // committed rows, not the joined text as a new row.
+        state
+            .apply_frame(frame(delegation_created("dlg_again", "client")))
+            .unwrap();
+        let again = drain(&mut state);
+        assert!(matches!(
+            again.last(),
+            Some(GptLiveBrokerObservation::ClientDelegationFinal { represented_turns, .. })
+                if represented_turns.len() == 2 && represented_turns[1].turn == user_turns[1]
+        ));
     }
 
     #[test]
@@ -2850,10 +2983,18 @@ mod tests {
             GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::User, transcript, .. }
                 if transcript == " named it"
         ));
-        // A following detached delegation takes the latest user turn.
+        // A following detached delegation re-presents that committed turn
+        // (the only user turn finished in its window) instead of carrying
+        // its words as a new row.
         state
             .apply_frame(frame(delegation_created_at("dlg_again", "client", 11000.0)))
             .unwrap();
+        let GptLiveBrokerObservation::TurnStarted {
+            turn: tail_turn, ..
+        } = &late[0]
+        else {
+            panic!("tail turn start");
+        };
         assert!(matches!(
             drain(&mut state).as_slice(),
             [
@@ -2861,8 +3002,11 @@ mod tests {
                     role: GptLiveTurnRole::User,
                     ..
                 },
-                GptLiveBrokerObservation::ClientDelegationFinal { transcript, .. },
-            ] if transcript == " named it"
+                GptLiveBrokerObservation::ClientDelegationFinal { transcript, represented_turns, .. },
+            ] if transcript == "named it"
+                && represented_turns.len() == 1
+                && &represented_turns[0].turn == tail_turn
+                && represented_turns[0].transcript == " named it"
         ));
     }
 

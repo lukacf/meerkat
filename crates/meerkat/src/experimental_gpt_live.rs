@@ -4538,10 +4538,7 @@ impl ExperimentalGptLiveDeferredAdapter {
                         .or(context_observation_id);
                     Some(with_live_context_observation(
                         LiveAdapterObservation::UserTranscriptFinal {
-                            provider_item_id: Some(format!(
-                                "experimental-gpt-live-user-item:{}",
-                                turn.adapter_key()
-                            )),
+                            provider_item_id: Some(live_user_transcript_item_id(&turn)),
                             previous_item_id: None,
                             content_index: Some(0),
                             text: transcript,
@@ -7501,6 +7498,11 @@ struct SidebandCorrelations {
     next_turn_ref: u64,
     delegations: HashMap<String, GptLiveDelegationRef>,
     turns: HashMap<String, LiveSidebandTurnRef>,
+    /// Provider user turn id -> the item id its canonical user row was
+    /// committed under (a `TurnFinished` or an open-turn delegation), for the
+    /// rows a later detached delegation re-presents. Pruned at every client
+    /// delegation to the rows that delegation references.
+    committed_user_items: HashMap<String, String>,
     appends: SidebandAppendCorrelations<GptLiveAppendToken>,
 }
 
@@ -8214,8 +8216,16 @@ impl ExperimentalGptLiveSideband {
                 role,
                 transcript,
             } => {
+                let provider_turn_id = turn.__opaque_provider_id().to_string();
                 let turn = self.lower_turn_ref(turn, true).await?;
                 let role = lower_turn_role(role);
+                if role == LiveSidebandTurnRole::User {
+                    self.correlations
+                        .lock()
+                        .await
+                        .committed_user_items
+                        .insert(provider_turn_id, live_user_transcript_item_id(&turn));
+                }
                 LiveSidebandObservationKind::TurnFinished {
                     turn,
                     role,
@@ -8229,9 +8239,41 @@ impl ExperimentalGptLiveSideband {
                 transcript,
                 request_transcript,
                 assistant_context,
+                represented_turns,
             } => {
+                let provider_turn_id = turn.__opaque_provider_id().to_string();
                 let turn = self.lower_turn_ref(turn, true).await?;
                 let mut correlations = self.correlations.lock().await;
+                // The rows a detached delegation re-presents, under the exact
+                // item ids their commits used; an unknown row is drift.
+                let represented_user_rows = represented_turns
+                    .iter()
+                    .map(|row| {
+                        correlations
+                            .committed_user_items
+                            .get(row.turn.__opaque_provider_id())
+                            .map(|item_id| meerkat_core::RepresentedLiveUserRow {
+                                item_id: item_id.clone(),
+                                text: row.transcript.clone(),
+                            })
+                            .ok_or(ProviderWebrtcBrokerError::ProtocolDrift)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut retained: HashMap<String, String> = represented_turns
+                    .iter()
+                    .filter_map(|row| {
+                        let id = row.turn.__opaque_provider_id();
+                        correlations
+                            .committed_user_items
+                            .get(id)
+                            .map(|item_id| (id.to_string(), item_id.clone()))
+                    })
+                    .collect();
+                if represented_user_rows.is_empty() {
+                    // This delegation commits its own user row under the turn.
+                    retained.insert(provider_turn_id, turn.adapter_key().to_string());
+                }
+                correlations.committed_user_items = retained;
                 correlations.next_delegation_ref =
                     correlations.next_delegation_ref.saturating_add(1);
                 let local = format!("delegation:{}", correlations.next_delegation_ref);
@@ -8247,6 +8289,7 @@ impl ExperimentalGptLiveSideband {
                     final_transcript: transcript,
                     request_transcript,
                     assistant_context,
+                    represented_user_rows,
                 }
             }
             GptLiveBrokerObservation::DelegationActionableInputUnsupported { delegation } => {
@@ -8301,6 +8344,12 @@ impl ExperimentalGptLiveSideband {
             terminal,
         )
     }
+}
+
+/// The item id the live transcript commits a finished user turn's canonical
+/// row under.
+fn live_user_transcript_item_id(turn: &LiveSidebandTurnRef) -> String {
+    format!("experimental-gpt-live-user-item:{}", turn.adapter_key())
 }
 
 fn lower_turn_role(role: GptLiveTurnRole) -> LiveSidebandTurnRole {
@@ -10973,6 +11022,8 @@ mod tests {
         pub(super) const USER_TRANSCRIPT_HEAD: &str = "book a";
         pub(super) const USER_TRANSCRIPT_TAIL: &str = " table";
         pub(super) const ASSISTANT_TRANSCRIPT: &str = "one moment";
+        pub(super) const SPLIT_HEAD: &str = "just tell me the word count once it";
+        pub(super) const SPLIT_TAIL: &str = "'s saved";
         pub(super) const DELEGATION_ID: &str = "dlg_public";
         pub(super) const ANSWER_SDP: &str = "v=0\r\nPUBLIC_ANSWER_SDP";
 
@@ -10980,6 +11031,10 @@ mod tests {
         pub(super) struct Capture {
             /// Serve the delegation before the last input transcript delta.
             pub(super) late_tail: bool,
+            /// BuildBuddy 2e218ad5's order: the model speaks after the head,
+            /// the late tail opens its own user turn, the model speaks again,
+            /// then the delegation arrives with no user turn open.
+            pub(super) split_before_delegation: bool,
             pub(super) create_body: Option<Value>,
             pub(super) create_authorization: Option<String>,
             pub(super) attach_authorization: Option<String>,
@@ -11087,6 +11142,24 @@ mod tests {
             )
             .await;
             let late_tail = capture.lock().expect("capture lock").late_tail;
+            let split = capture
+                .lock()
+                .expect("capture lock")
+                .split_before_delegation;
+            if split {
+                send_json(&mut socket, input_delta_span(SPLIT_HEAD, 0.0, 500.0)).await;
+                send_json(&mut socket, output_delta_span("Okay,", 600.0, 900.0)).await;
+                send_json(&mut socket, input_delta_span(SPLIT_TAIL, 700.0, 800.0)).await;
+                send_json(&mut socket, output_delta_span(" on it.", 1000.0, 1200.0)).await;
+                send_json(
+                    &mut socket,
+                    delegation_created_at(DELEGATION_ID, "client", 1100.0),
+                )
+                .await;
+                // Hold the sideband open until the client leaves.
+                while let Some(Ok(_)) = socket.recv().await {}
+                return;
+            }
             if late_tail {
                 // The transcriber delivers the tail of the utterance after the
                 // delegation and after the assistant acknowledgement started,
@@ -11135,10 +11208,17 @@ mod tests {
         pub(super) async fn local_server_with(
             late_tail: bool,
         ) -> (String, SharedCapture, tokio::task::JoinHandle<()>) {
-            let capture = Arc::new(std::sync::Mutex::new(Capture {
+            local_server_capturing(Capture {
                 late_tail,
                 ..Capture::default()
-            }));
+            })
+            .await
+        }
+
+        pub(super) async fn local_server_capturing(
+            capture: Capture,
+        ) -> (String, SharedCapture, tokio::task::JoinHandle<()>) {
+            let capture = Arc::new(std::sync::Mutex::new(capture));
             let app = Router::new()
                 .route("/v1/live/sessions", post(create_session))
                 .route("/v1/live/sessions/{session_id}/attach", get(attach))
@@ -11289,6 +11369,125 @@ mod tests {
             );
             Ok("Earlier discussion covered the project.".into())
         }
+    }
+
+    /// BuildBuddy 2e218ad5 (S106): the model spoke after "...once it", the
+    /// late tail "'s saved" opened its own user turn, the model spoke again,
+    /// and `session.delegation.created` arrived with no user turn open. Both
+    /// finished user turns were reported (and are committed by the transcript
+    /// adapter under their user item ids); the delegation re-presents exactly
+    /// those rows, so its canonical commit appends none.
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[tokio::test]
+    async fn detached_delegation_represents_the_committed_split_user_turns() {
+        let (base_url, _capture, server) =
+            public_wire::local_server_capturing(public_wire::Capture {
+                split_before_delegation: true,
+                ..public_wire::Capture::default()
+            })
+            .await;
+        let realm = meerkat_core::RealmId::parse("voice").expect("realm");
+        let target = public_fixture_target(&realm);
+        let identity = target.identity().clone();
+        let session_id = meerkat_core::SessionId::new();
+        let execution_profile =
+            meerkat_runtime::live_execution::LiveExecutionProfileSelection::from_public_profile(
+                GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
+                meerkat_core::LiveExecutionMode::ClientContext,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: false,
+                    client_context: true,
+                },
+            )
+            .expect("public client-context profile");
+        let pending = ExperimentalGptLivePendingChannel::__from_public_target_with_base_url(
+            target,
+            execution_profile,
+            session_id.clone(),
+            "marin",
+            Some("Catalog guidance.".to_string()),
+            &base_url,
+        )
+        .expect("public pending channel");
+        let open_config = seed_open_config(identity, Vec::new());
+        pending
+            .open_live_adapter(&open_config)
+            .await
+            .expect("public pending factory opens the deferred adapter");
+        let channel_id = meerkat_live::LiveChannelId::new("public-live-split");
+        let offer = LiveWebrtcAdmittedOffer::from_machine_admission(
+            channel_id.clone(),
+            session_id.clone(),
+            Some(meerkat_live::LiveWebrtcRuntimeBinding {
+                generation: 1,
+                fence: 1,
+            }),
+            "v=0\r\nOFFER_SDP".to_string(),
+            meerkat_live::LiveWebrtcAnswerAdmissionSeal::__from_generated_admission(
+                channel_id.clone(),
+                session_id.clone(),
+            ),
+        )
+        .into_provider_offer()
+        .expect("admitted offer lowers to the provider offer");
+        let binding = offer.binding().clone();
+        let broker = Arc::clone(&pending.registration.broker);
+        let (_answer_sdp, sideband, pending_bound_ready) = broker
+            .answer(offer)
+            .await
+            .expect("public broker answers the offer")
+            .into_parts();
+        let receipt = pending_bound_ready
+            .__resolve_after_answer_delivery()
+            .await
+            .expect("startup receipt released after answer delivery");
+        receipt
+            .__consume_for_generated_bind(&binding)
+            .expect("receipt binds the exact answered channel");
+
+        let mut finished_user_items = Vec::new();
+        let represented = loop {
+            let observation = sideband
+                .next_observation()
+                .await
+                .expect("provider observation")
+                .expect("provider observation present");
+            match observation.into_kind() {
+                LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: LiveSidebandTurnRole::User,
+                    transcript,
+                } => finished_user_items.push((live_user_transcript_item_id(&turn), transcript)),
+                LiveSidebandObservationKind::DelegationRequested {
+                    final_transcript,
+                    request_transcript,
+                    represented_user_rows,
+                    ..
+                } => {
+                    assert_eq!(
+                        final_transcript,
+                        format!("{} {}", public_wire::SPLIT_HEAD, public_wire::SPLIT_TAIL)
+                    );
+                    assert_eq!(request_transcript, final_transcript);
+                    break represented_user_rows;
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(
+            finished_user_items.len(),
+            2,
+            "head and tail were finished turns"
+        );
+        assert_eq!(
+            represented
+                .iter()
+                .map(|row| (row.item_id.clone(), row.text.clone()))
+                .collect::<Vec<_>>(),
+            finished_user_items,
+            "the delegation re-presents exactly the committed rows, in order"
+        );
+        server.abort();
     }
 
     #[cfg(feature = "test-realtime-fixtures")]
@@ -11512,8 +11711,13 @@ mod tests {
                 final_transcript,
                 request_transcript,
                 assistant_context,
+                represented_user_rows,
             } => {
                 assert_eq!(turn, user_turn, "the join terminates the one user turn");
+                assert!(
+                    represented_user_rows.is_empty(),
+                    "an open-turn join commits its own row"
+                );
                 assert_eq!(final_transcript, head);
                 assert_eq!(
                     request_transcript,
@@ -16336,6 +16540,7 @@ mod tests {
                             final_transcript: format!("continuous user {group}"),
                             request_transcript: format!("continuous user {group}"),
                             assistant_context: format!("observed assistant {group}"),
+                            represented_user_rows: Vec::new(),
                         });
                         kinds.push(LiveSidebandObservationKind::TurnSnapshotDelta {
                             turn: assistant.clone(),
@@ -16654,6 +16859,7 @@ mod tests {
                             final_transcript: format!("matrix user {ordinal}"),
                             request_transcript: format!("matrix user {ordinal}"),
                             assistant_context: "First spoken checkpoint.".to_string(),
+                            represented_user_rows: Vec::new(),
                         },
                     ));
                     wait_for_unmeasured_seal(&adapter).await;
@@ -16869,6 +17075,7 @@ mod tests {
                         final_transcript: format!("matrix user {ordinal}"),
                         request_transcript: format!("matrix user {ordinal}"),
                         assistant_context: "First spoken checkpoint.".to_string(),
+                        represented_user_rows: Vec::new(),
                     },
                 ));
                 // The boundary sealed the segment; with the member turn

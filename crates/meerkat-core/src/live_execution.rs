@@ -449,6 +449,27 @@ pub enum LiveHandoffInputProvenance {
     ProvisionalTranscriptSnapshot,
 }
 
+/// A user row the live transcript already committed that a client delegation
+/// re-presents: the provider finished that user turn (the model spoke first)
+/// before `session.delegation.created` arrived, so the delegation carries the
+/// committed row's identity instead of committing its words again.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RepresentedLiveUserRow {
+    /// The committed row's provider item id.
+    pub item_id: String,
+    /// The committed row's exact text.
+    pub text: String,
+}
+
+impl std::fmt::Debug for RepresentedLiveUserRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepresentedLiveUserRow")
+            .field("item_id", &self.item_id)
+            .field("text", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Actionable input staged before provider-final user admission.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProvisionalLiveHandoff {

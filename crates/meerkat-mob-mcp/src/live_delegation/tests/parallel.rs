@@ -389,6 +389,7 @@ impl Fixture {
                 turn,
                 delegation,
                 transcript.to_string(),
+                Vec::new(),
                 LiveDelegationExecutorInput {
                     request_transcript: transcript.to_string(),
                     assistant_context: String::new(),

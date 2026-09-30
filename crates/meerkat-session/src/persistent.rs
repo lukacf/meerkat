@@ -7759,6 +7759,47 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::Committed(evidence))
     }
 
+    /// [`Self::commit_live_user_transcript_final_with_machine_at_turn_boundary`]
+    /// for a client delegation that re-presents user rows the live transcript
+    /// already committed (the provider finished those turns before the
+    /// delegation arrived). The rows are verified in the session actor and
+    /// none is appended; the reconciled evidence is released like a commit.
+    #[cfg(feature = "live")]
+    pub async fn commit_live_user_transcript_represented_with_machine_at_turn_boundary(
+        &self,
+        machine: &MeerkatMachine,
+        id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        represented: Vec<meerkat_core::RepresentedLiveUserRow>,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        let started = std::time::Instant::now();
+        let Ok(turn_finalization_guard) =
+            tokio::time::timeout(bound, self.acquire_runtime_turn_finalization_guard(id)).await
+        else {
+            return Ok(
+                meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::SourceBusy {
+                    waited: started.elapsed(),
+                },
+            );
+        };
+        let mutation_guard = self
+            .realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+            .await?;
+        let evidence = self
+            .inner
+            .commit_live_user_transcript_represented(id, provisional, final_event, represented)
+            .await?;
+        let (committed, token) = self.committed_realtime_projection_guarded(id).await?;
+        drop(mutation_guard);
+        machine
+            .enqueue_committed_live_transcript_boundary(id, &committed, &token)
+            .await
+            .map_err(runtime_driver_error_to_session_error)?;
+        Ok(meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::Committed(evidence))
+    }
+
     pub async fn commit_live_user_transcript_final(
         &self,
         id: &SessionId,

@@ -10137,7 +10137,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let session_id = meerkat_core::SessionId::parse("018f2f0d-7b1d-7a34-8c09-0a1b2c3d4e5f")
             .expect("fixed session id");
-        for model in ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+        for model in ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
             let identity = SessionLlmIdentity {
                 model: model.to_string(),
                 provider: Provider::OpenAI,

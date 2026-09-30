@@ -311,7 +311,11 @@ fn claude_sonnet_5_5_capability_row_matches_the_official_model_page() {
 
 #[test]
 fn gpt_6_sol_and_luna_are_cataloged_without_changing_the_openai_default() {
-    for (id, name) in [("gpt-6-sol", "GPT-6 Sol"), ("gpt-6-luna", "GPT-6 Luna")] {
+    for (id, name) in [
+        ("gpt-6-sol", "GPT-6 Sol"),
+        ("gpt-6.1-sol", "GPT-6.1 Sol"),
+        ("gpt-6-luna", "GPT-6 Luna"),
+    ] {
         let entry = entry_for(Provider::OpenAI, id)
             .unwrap_or_else(|| panic!("{id} must be in the catalog"));
         assert_eq!(entry.provider, "openai");
@@ -1356,4 +1360,21 @@ mod schema {
             }
         }
     }
+}
+
+#[test]
+fn gpt_6_1_sol_uses_the_astra_effort_ladder() {
+    let caps = capabilities_for(Provider::OpenAI, "gpt-6.1-sol").expect("gpt-6.1-sol capabilities");
+    assert_eq!(
+        caps.effort_levels,
+        &[
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::Xhigh,
+            EffortLevel::Max,
+        ]
+    );
+    assert_eq!(caps.max_input_tokens, Some(922_000));
+    assert!(caps.openai_responses_params.is_some());
 }

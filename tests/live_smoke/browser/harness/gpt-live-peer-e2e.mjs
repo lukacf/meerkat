@@ -334,10 +334,10 @@ async function prepare(command) {
       const ended = new Promise((resolve) => {
         source.onended = () => {
           state.playing.delete(id);
-          const bursts = state.overlapBursts(id);
-          state.pushTimeline('fixture_end', { id, name: fixtureName, overlap_ms: play.overlap_ms, overlap_bound_ms: play.overlap_bound_ms, bursts });
+          const facts = play.overlap_ms > 0 ? state.overlapFacts(id, play.started_ms) : null;
+          state.pushTimeline('fixture_end', { id, name: fixtureName, overlap_ms: play.overlap_ms, overlap_bound_ms: play.overlap_bound_ms, facts });
           if (play.overlap_ms > play.overlap_bound_ms) {
-            state.pushFault({ overlap: { ms: play.overlap_ms, fixture: fixtureName, bound_ms: play.overlap_bound_ms, bursts } });
+            state.pushFault({ overlap: { ms: play.overlap_ms, fixture: fixtureName, bound_ms: play.overlap_bound_ms, facts } });
           }
           if (typeof meta.onEnded === 'function') meta.onEnded(play);
           resolve(play);
@@ -346,39 +346,29 @@ async function prepare(command) {
       source.start();
       return waitForEnd ? ended : Promise.resolve(play);
     };
-    // The assistant bursts that overlapped one fixture, with the facts the
-    // scenario's overlap classifier needs: duration, the text of the response
-    // the burst belongs to and when that response closed (null while it is
-    // still open), and whether a delegation or commentary arrived during it.
-    // The assistant bursts that overlapped one fixture, with the facts the
-    // scenario's overlap classifier needs, all read by arrival time around
-    // the burst (a transcript leads its audio, so response indices are no
-    // guide): the output transcript that arrived after the previous burst
-    // and up to this burst's end, whether the user resumed speaking after it
-    // before the assistant spoke again (it yielded), and whether a delegation
-    // arrived in that window (it acted).
-    state.overlapBursts = (playId) => {
+    // Raw facts for the scenario's overlap classifier (Rust
+    // `evidence::overlap_bursts` joins them): every assistant energy burst
+    // from shortly before the fixture started, with the overlap it added to
+    // this fixture, and the arrival times of output transcript deltas, user
+    // input deltas and delegations in the same span.
+    state.overlapFacts = (playId, playStartedMs) => {
+      const since = Math.max(0, playStartedMs - 30000);
       const now = nowMs();
-      const hysteresis = energyConfig.end_hysteresis_ms;
-      return state.bursts
-        .map((burst, index) => ({ burst, index }))
-        .filter(({ burst }) => (burst.overlap[playId] ?? 0) > 0)
-        .map(({ burst, index }) => {
-          const previous = index > 0 ? state.bursts[index - 1] : null;
-          const next = index + 1 < state.bursts.length ? state.bursts[index + 1] : null;
-          const since = previous ? previous.last_active_ms + hysteresis : 0;
-          const until = burst.ended ? burst.last_active_ms + hysteresis : now;
-          const nextSpeech = next ? next.started_ms : now;
-          return {
+      return {
+        now_ms: now,
+        hysteresis_ms: energyConfig.end_hysteresis_ms,
+        bursts: state.bursts
+          .filter((burst) => burst.last_active_ms >= since)
+          .map((burst) => ({
             started_ms: burst.started_ms,
             last_active_ms: burst.last_active_ms,
             ended: burst.ended,
-            overlap_ms: burst.overlap[playId],
-            text: state.outputLog.filter((entry) => entry.t > since && entry.t <= until).map((entry) => entry.text).join(''),
-            yielded: burst.ended && state.inputTimes.some((at) => at > burst.last_active_ms && at < nextSpeech),
-            acted: state.delegationTimes.some((at) => at > since && at <= until),
-          };
-        });
+            overlap_ms: burst.overlap[playId] ?? 0,
+          })),
+        output: state.outputLog.filter((entry) => entry.t >= since).map((entry) => ({ t_ms: entry.t, text: entry.text })),
+        inputs: state.inputTimes.filter((at) => at >= since),
+        delegations: state.delegationTimes.filter((at) => at >= since),
+      };
     };
     // ---- responses and duplicate readouts ------------------------------
     const normalizeSentence = (text) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();

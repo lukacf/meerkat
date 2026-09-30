@@ -4860,12 +4860,14 @@ async fn run_s103_interrupt_and_recover(
                 fixture_end_entry(t, monologue).cloned()
             })
             .await?;
-        let monologue_bursts: Vec<evidence::OverlapBurst> = monologue_end
+        let monologue_bursts = monologue_end
             .detail
-            .get("bursts")
+            .get("facts")
+            .filter(|facts| !facts.is_null())
             .cloned()
-            .map(serde_json::from_value)
+            .map(serde_json::from_value::<evidence::OverlapFacts>)
             .transpose()?
+            .map(|facts| evidence::overlap_bursts(&facts))
             .unwrap_or_default();
         let monologue_classification = evidence::classify_overlap(
             monologue_end.detail_u64("overlap_ms").unwrap_or(0),
@@ -5427,7 +5429,7 @@ async fn run_s107_stuck_close_convergence(
             channel: channel2,
             entries: timeline2.clone(),
         })?;
-        let faults = scenario_browser_faults(&evidence, &mut live, channel, "S107").await?;
+        let faults = scenario_browser_faults(&evidence, &mut live, channel2, "S107").await?;
         if !faults.is_empty() {
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
@@ -5864,7 +5866,7 @@ async fn run_s104_handoff_voice_typed_voice(
             channel: channel2,
             entries: timeline2.clone(),
         })?;
-        let faults = scenario_browser_faults(&evidence, &mut live, channel, "S104").await?;
+        let faults = scenario_browser_faults(&evidence, &mut live, channel2, "S104").await?;
         if !faults.is_empty() {
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }

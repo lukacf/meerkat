@@ -79,6 +79,18 @@ them.
 - MCP tool discovery now follows all `tools/list` pages in both connection
   wrappers, preserving tool order and metadata. Later-page errors reject the
   discovery result, and repeated or cycling cursors fail instead of looping.
+- A cold mob actor no longer fail-stops at startup when a stopped member's
+  previous session runtime has already reached Stopped. Its cleanup-delivery
+  recovery re-registers that session, which clears the member binding, and
+  the runtime then refuses the unbound composition endpoint (typed,
+  pre-effect `RegistrationOwned`) while the previous attachment's retained
+  cleanup tail still owns the registration. Startup mapped that refusal to
+  an internal error and exited before admitting a command, so every command
+  on the handle returned `ActorCommandChannelClosed`. Delivery custody now
+  stays with the registration's owner at that seam and startup continues;
+  the lifecycle operation that later retires or reloads the member takes it
+  over. The operation-binding restore used for running members keeps
+  failing closed on the same refusal.
 
 ## [0.8.49] - 2026-09-30
 

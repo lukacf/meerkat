@@ -1287,6 +1287,14 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   `max_run` passes during that read. The Bazel production `meerkat_mob`
   library no longer compiles the `test-support` hooks; its test variant keeps
   them.
+- A GPT Live open whose pre-open summary was ready but failed its projection
+  check no longer fails the whole open. The seeded path took the open
+  projection lease from the body-free config before its fallible steps (tool
+  listing, re-projection, `validate_projection`); when one failed, the open
+  fell back to the late summary path with a config whose lease was gone, and
+  the adapter refused it with "experimental live canonical seed custody was
+  already consumed". The lease now moves only once the re-projected config
+  validates, so the fallback opens late as intended.
 
 ## [0.8.48] - 2026-09-28
 

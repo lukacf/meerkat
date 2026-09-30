@@ -1459,9 +1459,8 @@ mod tests {
             summary.adopt_seeded_projection(session.id(), &body_free, mismatched),
             Err(LiveContextSummaryError::ConflictingProjection)
         ));
-        let late = body_free.clone();
         assert!(
-            late.take_open_projection_lease().is_some(),
+            body_free.take_open_projection_lease().is_some(),
             "the late open still holds the projection lease"
         );
 

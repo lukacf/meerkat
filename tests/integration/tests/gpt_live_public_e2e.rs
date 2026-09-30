@@ -3494,6 +3494,9 @@ struct DelegatedRequest {
     fixture_start_ms: u64,
     delegation_created_ms: u64,
     commentary_audio_ms: u64,
+    /// Peer arrival of the executor result's commentary (after the
+    /// narration that precedes it on the delegation lane).
+    result_commentary_ms: u64,
     executor_done_at_ms: u128,
     timing: SpokenTurn,
     events_before: usize,
@@ -3569,10 +3572,105 @@ async fn wait_executor_turn(
     }
 }
 
+/// Wait until the runtime records the delegated result's provider
+/// acknowledgement (`Delivered`), then return the peer's arrival time of the
+/// result's commentary.
+///
+/// Narration (claimed, completed) shares the delegation lane and is appended
+/// before the result, and the result reaches the model only after its
+/// summary, so the first commentary after a delegation is not the result.
+/// The provider acknowledges the result append to the runtime and to the peer
+/// alike, and the runtime records it only after resolving the delivery, so
+/// the peer's latest commentary_appended at that point is the result's.
+async fn wait_result_commentary(
+    live: &mut PublicLiveHarness,
+    label: &str,
+    operation_id: &str,
+    delegation_created_ms: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    use meerkat_runtime::live_execution::LiveDelegationResultDeliveryObservation;
+    let runtime = live.shared()?.0.runtime.clone();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let snapshots = runtime
+            .live_delegation_recovery_snapshots(&live.session_id)
+            .await?;
+        match snapshots
+            .iter()
+            .find(|snapshot| snapshot.operation_id().to_string() == operation_id)
+            .and_then(|snapshot| snapshot.result_delivery())
+        {
+            Some(LiveDelegationResultDeliveryObservation::Delivered) => break,
+            Some(observation) => {
+                return Err(format!(
+                    "{label}: the executor result was not delivered: {observation:?}"
+                )
+                .into());
+            }
+            None => {}
+        }
+        if Instant::now() >= deadline {
+            let timeline = live.peer.timeline().await?;
+            return Err(format!(
+                "{label}: the executor result was not delivered within 90 s of terminality; timeline:\n{}",
+                format_timeline(&timeline)
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+    let timeline = live.peer.timeline().await?;
+    timeline
+        .iter()
+        .rev()
+        .find(|e| e.kind == TimelineKind::CommentaryAppended && e.t_ms >= delegation_created_ms)
+        .map(|e| e.t_ms)
+        .ok_or_else(|| {
+            format!(
+                "{label}: the result was delivered but the peer saw no commentary_appended; timeline:\n{}",
+                format_timeline(&timeline)
+            )
+            .into()
+        })
+}
+
+/// First assistant energy window at or after `since_ms`. The model may
+/// already be speaking (an acknowledgement or filler) when a commentary
+/// arrives, so this is an energy-window fact, not a fresh
+/// assistant_audio_start.
+async fn first_assistant_energy_since(
+    live: &mut PublicLiveHarness,
+    label: &str,
+    since_ms: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let report = live.peer.energy().await?;
+        if let Some(window) = report
+            .energy
+            .windows
+            .iter()
+            .find(|w| w.t_ms >= since_ms && w.rms >= report.energy.threshold)
+        {
+            return Ok(window.t_ms);
+        }
+        if Instant::now() >= deadline {
+            let timeline = live.peer.timeline().await?;
+            return Err(format!(
+                "{label}: no assistant audio within 45 s of {since_ms} ms; timeline:\n{}",
+                format_timeline(&timeline)
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Speak one request that needs the backing member: schedule the fixture,
 /// require a client delegation, wait for the executor's realized
-/// terminality, the commentary append, and the commentary readout's first
-/// audio. `barge_in` is armed the moment the commentary lands.
+/// terminality, the first commentary append and its readout's first audio,
+/// then the result's delivery. `barge_in` is armed the moment the first
+/// commentary lands.
 async fn delegated_request(
     live: &mut PublicLiveHarness,
     started: Instant,
@@ -3640,7 +3738,13 @@ async fn delegated_request(
             .into());
         }
     };
+    let seen_before = seen_executor_turns.clone();
     let executor_done_at_ms = wait_executor_turn(live, seen_executor_turns, started).await?;
+    let operation_id = seen_executor_turns
+        .difference(&seen_before)
+        .next()
+        .cloned()
+        .ok_or("the executor turn was not recorded")?;
     let commentary_ms = live
         .peer
         .wait_for_timeline(
@@ -3656,31 +3760,10 @@ async fn delegated_request(
         Some(spec) => Some(live.peer.play_at(&spec).await?),
         None => None,
     };
-    // First assistant energy at or after the commentary landed. The model
-    // may already be speaking (an acknowledgement or filler) when the
-    // commentary arrives, so this is an energy-window fact, not a fresh
-    // assistant_audio_start.
-    let deadline = Instant::now() + Duration::from_secs(45);
-    let commentary_audio_ms = loop {
-        let report = live.peer.energy().await?;
-        if let Some(window) = report
-            .energy
-            .windows
-            .iter()
-            .find(|w| w.t_ms >= commentary_ms && w.rms >= report.energy.threshold)
-        {
-            break window.t_ms;
-        }
-        if Instant::now() >= deadline {
-            let timeline = live.peer.timeline().await?;
-            return Err(format!(
-                "{label}: no assistant audio within 45 s of commentary_appended at {commentary_ms} ms; timeline:\n{}",
-                format_timeline(&timeline)
-            )
-            .into());
-        }
-        sleep(Duration::from_millis(100)).await;
-    };
+    let commentary_audio_ms =
+        first_assistant_energy_since(live, &format!("{label} commentary"), commentary_ms).await?;
+    let result_commentary_ms =
+        wait_result_commentary(live, label, &operation_id, delegation_created_ms).await?;
     let timing = live
         .peer
         .wait_for_timeline(Duration::from_secs(5), &format!("{label} timing"), |t| {
@@ -3688,7 +3771,7 @@ async fn delegated_request(
         })
         .await?;
     println!(
-        "GPT_LIVE_{scenario}_REQUEST label={label} fixture_start_ms={fixture_start_ms} input_final_to_ack_audio_ms={:?} input_final_to_delegation_ms={:?} input_final_to_commentary_event_ms={:?} input_final_to_commentary_audio_ms={:?} executor_done_at_ms={executor_done_at_ms} heard={:?}",
+        "GPT_LIVE_{scenario}_REQUEST label={label} fixture_start_ms={fixture_start_ms} input_final_to_ack_audio_ms={:?} input_final_to_delegation_ms={:?} input_final_to_commentary_event_ms={:?} input_final_to_commentary_audio_ms={:?} input_final_to_result_commentary_ms={:?} executor_done_at_ms={executor_done_at_ms} heard={:?}",
         timing.input_final_to_audio_ms(),
         timing
             .input_final_ms
@@ -3699,12 +3782,16 @@ async fn delegated_request(
         timing
             .input_final_ms
             .map(|f| commentary_audio_ms as i64 - f as i64),
+        timing
+            .input_final_ms
+            .map(|f| result_commentary_ms as i64 - f as i64),
         timing.input_text
     );
     Ok(DelegatedRequest {
         fixture_start_ms,
         delegation_created_ms,
         commentary_audio_ms,
+        result_commentary_ms,
         executor_done_at_ms,
         timing,
         events_before,
@@ -3712,25 +3799,24 @@ async fn delegated_request(
     })
 }
 
-/// Wait for the assistant to fall quiet after the commentary readout began,
+/// Wait for the assistant to fall quiet after the result readout began,
 /// then return the answer window's transcript for this request.
 async fn answer_window(
     live: &mut PublicLiveHarness,
     label: &str,
     request: &DelegatedRequest,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let result_audio_ms = first_assistant_energy_since(
+        live,
+        &format!("{label} result readout"),
+        request.result_commentary_ms,
+    )
+    .await?;
     live.peer
         .wait_for_timeline(
             Duration::from_secs(60),
-            &format!("{label} assistant_audio_end after the commentary readout"),
-            |t| {
-                timeline_find(
-                    t,
-                    TimelineKind::AssistantAudioEnd,
-                    request.commentary_audio_ms,
-                )
-                .map(|_| ())
-            },
+            &format!("{label} assistant_audio_end after the result readout"),
+            |t| timeline_find(t, TimelineKind::AssistantAudioEnd, result_audio_ms).map(|_| ()),
         )
         .await?;
     let events = live.peer.events().await?;

@@ -6788,6 +6788,26 @@ impl MeerkatMachine {
                 state
                     .live_delegation_result_eligible_operations
                     .contains(dsl_operation_id),
+            )
+            .with_result_delivery(
+                state
+                    .live_result_delivery_observation_by_operation
+                    .get(dsl_operation_id)
+                    .copied()
+                    .map(|observation| match observation {
+                        crate::meerkat_machine::dsl::LiveDelegationResultDeliveryObservation::Delivered => {
+                            crate::live_execution::LiveDelegationResultDeliveryObservation::Delivered
+                        }
+                        crate::meerkat_machine::dsl::LiveDelegationResultDeliveryObservation::Rejected => {
+                            crate::live_execution::LiveDelegationResultDeliveryObservation::Rejected
+                        }
+                        crate::meerkat_machine::dsl::LiveDelegationResultDeliveryObservation::Ambiguous => {
+                            crate::live_execution::LiveDelegationResultDeliveryObservation::Ambiguous
+                        }
+                        crate::meerkat_machine::dsl::LiveDelegationResultDeliveryObservation::InterruptedByClose => {
+                            crate::live_execution::LiveDelegationResultDeliveryObservation::InterruptedByClose
+                        }
+                    }),
             ));
         }
         snapshots.sort_by(|left, right| {

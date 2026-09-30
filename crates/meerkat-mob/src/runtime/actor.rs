@@ -44947,6 +44947,9 @@ impl MobActor {
         }
         roster.remove_member(&ctx.agent_identity);
         drop(roster);
+        // Disposal publishes its machine transition before this removal, so
+        // wake machine-state watchers for the roster mutation itself.
+        self.publish_machine_state_projection();
         // Disposal ends the member's lifetime: drop the retained per-spawn
         // overlay so host dispatchers are released and a later spawn of the
         // same identity cannot revive with a stale tool surface.

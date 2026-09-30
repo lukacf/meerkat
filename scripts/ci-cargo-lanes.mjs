@@ -102,6 +102,16 @@ export const FEATURE_UNIT_SUITES = [
   { package: "xtask", id: "machine-authority", features: ["machine-authority"] },
 ];
 
+// Packages whose own lib-test binary dominates their push-to-main lane. On
+// the hosted 4-vCPU runners meerkat-mob's lanes took 12.5-20 min: 7.7-14.5
+// min of cargo compile (one rustc unit, sccache-dependent) plus 4-5 min of
+// nextest (measured on 6b2095989 and fe7fc7295). A single crate's compile
+// cannot be split and nextest partitions that each rebuild it all miss the
+// cache at once, so these packages build a nextest archive once (per
+// default-feature lane and per feature suite) and fan the run out over
+// `partitions` jobs that execute the archive with `--partition hash:k/n`.
+export const ARCHIVED_UNIT_LANES = [{ package: "meerkat-mob", partitions: 2 }];
+
 function estimatedMinutes(cost) {
   return Math.round((LANE_SETUP_MINUTES + cost / COST_UNITS_PER_MINUTE) * 10) / 10;
 }
@@ -579,6 +589,18 @@ function plan(args) {
     };
   });
 
+  const archivedPackages = new Map(
+    ARCHIVED_UNIT_LANES.map((lane) => {
+      if (!byName.has(lane.package)) {
+        throw new Error(`archived unit lane names unknown package ${lane.package}`);
+      }
+      if (!Number.isInteger(lane.partitions) || lane.partitions < 2) {
+        throw new Error(`archived unit lane ${lane.package} needs at least two partitions`);
+      }
+      return [lane.package, lane];
+    }),
+  );
+
   if (workspaceReason) {
     result.rust_changed = true;
     result.mode = "workspace";
@@ -642,12 +664,24 @@ function plan(args) {
         );
       }
     }
-    // Push-to-main unit lanes: the whole workspace, no budget.
-    result.main_unit_shards = packShards(allNames, weights, args.workspaceShards, model);
-    // Feature-gated suites: all of them on main; in the pull request those of
-    // a changed package that runs its unit tests there (the heavy chain's
-    // suites are deferred with the package).
-    result.main_feature_unit_shards = featureSuites;
+    // Push-to-main unit lanes: the whole workspace, no budget. Archived
+    // packages leave the packed shards for their build-once lanes.
+    result.main_unit_shards = packShards(
+      allNames.filter((name) => !archivedPackages.has(name)),
+      weights,
+      args.workspaceShards,
+      model,
+    );
+    const archived = archivedLanes(archivedPackages, featureSuites);
+    result.main_archive_builds = archived.builds;
+    result.main_archive_runs = archived.runs;
+    // Feature-gated suites: all of them on main (an archived package's
+    // suites run as archived lanes); in the pull request those of a changed
+    // package that runs its unit tests there (the heavy chain's suites are
+    // deferred with the package).
+    result.main_feature_unit_shards = featureSuites.filter(
+      (suite) => !archivedPackages.has(suite.packages[0]),
+    );
     result.unit_feature_shards = featureSuites.filter((suite) => result.unit_packages.includes(suite.packages[0]));
     for (const suite of result.unit_feature_shards) {
       if (suite.estimated_minutes > PR_UNIT_BUDGET_MINUTES) {
@@ -663,11 +697,52 @@ function plan(args) {
     result.main_unit_shards = [];
     result.main_feature_unit_shards = [];
     result.unit_feature_shards = [];
+    result.main_archive_builds = [];
+    result.main_archive_runs = [];
   }
 
   result.closure_flags = result.closure.map((name) => `-p ${name}`).join(" ");
   result.closure_beyond_packages = result.closure.filter((name) => !result.packages.includes(name));
   return result;
+}
+
+// Build-once lanes for ARCHIVED_UNIT_LANES: one archive build per package
+// default-feature lane and per feature suite of that package, and
+// `partitions` run rows per archive that execute it with
+// `--partition hash:k/n`.
+function archivedLanes(archivedPackages, featureSuites) {
+  const builds = [];
+  const runs = [];
+  const add = (archive, name, packageFlags, partitions, rustMinStack) => {
+    builds.push({
+      name,
+      archive,
+      package_flags: packageFlags,
+      partitions,
+      ...(rustMinStack ? { rust_min_stack: rustMinStack } : {}),
+    });
+    for (let index = 1; index <= partitions; index += 1) {
+      runs.push({
+        name: `${name} ${index}/${partitions}`,
+        archive,
+        partition: `hash:${index}/${partitions}`,
+        ...(rustMinStack ? { rust_min_stack: rustMinStack } : {}),
+      });
+    }
+  };
+  for (const [pkg, lane] of [...archivedPackages].sort(([a], [b]) => a.localeCompare(b))) {
+    add(shortName(pkg), shortName(pkg), `-p ${pkg}`, lane.partitions, null);
+    for (const suite of featureSuites.filter((candidate) => candidate.packages[0] === pkg)) {
+      add(
+        suite.name.replaceAll(/[^A-Za-z0-9_-]+/g, "-").replace(/-+$/, ""),
+        suite.name,
+        suite.package_flags,
+        lane.partitions,
+        suite.rust_min_stack,
+      );
+    }
+  }
+  return { builds, runs };
 }
 
 // Pack, then widen the shard count until every shard models under the
@@ -689,6 +764,18 @@ function packWithinBudget(pkgs, weights, maxShards, model) {
 // reject an empty matrix on a job that still runs (never for the
 // push-to-main unit lanes, which are skipped outright for a plan with no
 // Rust-relevant change; run 35939276400 failed a "none" shard there).
+function archiveMatrixOf(rows) {
+  return JSON.stringify({
+    include: rows.map((row) => ({
+      name: row.name,
+      archive: row.archive,
+      ...(row.package_flags ? { packages: row.package_flags } : {}),
+      ...(row.partition ? { partition: row.partition } : {}),
+      ...(row.rust_min_stack ? { rust_min_stack: String(row.rust_min_stack) } : {}),
+    })),
+  });
+}
+
 function matrixOf(shards, { placeholder = true } = {}) {
   const include = shards.map((shard) => ({
     name: shard.name,
@@ -731,6 +818,10 @@ function githubOutput(result) {
   scalar("unit_deferred_count", String(result.unit_deferred.length));
   scalar("main_unit_shard_count", String(mainUnitLanes.length));
   scalar("main_unit_shard_matrix", matrixOf(mainUnitLanes, { placeholder: false }));
+  scalar("main_archive_build_count", String(result.main_archive_builds.length));
+  scalar("main_archive_build_matrix", archiveMatrixOf(result.main_archive_builds));
+  scalar("main_archive_run_count", String(result.main_archive_runs.length));
+  scalar("main_archive_run_matrix", archiveMatrixOf(result.main_archive_runs));
   return `${lines.join("\n")}\n`;
 }
 

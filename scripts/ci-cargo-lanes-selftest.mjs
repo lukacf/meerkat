@@ -62,9 +62,45 @@ function assertLanes(plan, label) {
       assert.equal(plan.package_model[name].heavy_chain, false, `${label}: ${name} must not run its unit tests in the pull request`);
     }
   }
-  // The push-to-main plan covers the whole workspace.
-  const mainCovered = plan.main_unit_shards.flatMap((shard) => shard.packages).sort();
-  assert.deepEqual(mainCovered, Object.keys(plan.package_model).sort(), `${label}: main unit shards cover every workspace package`);
+  // The push-to-main plan covers the whole workspace: the packed shards
+  // plus the archived (build once, partitioned run) lanes, never both.
+  const archivedPackages = plan.main_archive_builds
+    .filter((build) => !build.package_flags.includes("--features"))
+    .map((build) => build.package_flags.replace(/^-p /, ""));
+  const packed = plan.main_unit_shards.flatMap((shard) => shard.packages);
+  for (const name of archivedPackages) {
+    assert.ok(!packed.includes(name), `${label}: archived package ${name} is not also packed`);
+  }
+  assert.deepEqual(
+    [...packed, ...archivedPackages].sort(),
+    Object.keys(plan.package_model).sort(),
+    `${label}: main unit shards and archived lanes cover every workspace package`,
+  );
+  assertArchivedLanes(plan, label);
+}
+
+// Every archive build is executed by exactly its partitions, 1..n of n, and
+// names unique archives (they name matrix rows and artifacts).
+function assertArchivedLanes(plan, label) {
+  const archives = plan.main_archive_builds.map((build) => build.archive);
+  assert.equal(new Set(archives).size, archives.length, `${label}: archive names are unique`);
+  for (const build of plan.main_archive_builds) {
+    assert.match(build.archive, /^[A-Za-z0-9_-]+$/, `${label}: archive ${build.archive} is artifact-safe`);
+    assert.ok(build.partitions >= 2, `${label}: ${build.name} fans out`);
+    const partitions = plan.main_archive_runs
+      .filter((run) => run.archive === build.archive)
+      .map((run) => run.partition);
+    assert.deepEqual(
+      partitions,
+      Array.from({ length: build.partitions }, (_, index) => `hash:${index + 1}/${build.partitions}`),
+      `${label}: ${build.name} runs every partition exactly once`,
+    );
+  }
+  assert.equal(
+    plan.main_archive_runs.length,
+    plan.main_archive_builds.reduce((sum, build) => sum + build.partitions, 0),
+    `${label}: no partition run without its archive build`,
+  );
 }
 
 // Core touch: the direct lane is meerkat-core alone; the closure is nearly
@@ -350,6 +386,8 @@ for (const path of [
   const plan = planFor(["CHANGELOG.md"]);
   assert.equal(plan.rust_changed, false);
   assert.deepEqual(plan.main_unit_shards, [], "a CHANGELOG-only merge yields no main unit lanes");
+  assert.deepEqual(plan.main_archive_builds, [], "a CHANGELOG-only merge yields no archived lanes");
+  assert.deepEqual(plan.main_archive_runs, []);
 }
 
 // Feature-gated unit suites: the default-feature unit lanes cannot run a
@@ -398,7 +436,22 @@ for (const path of [
   // A heavy-chain package defers its suites with its unit tests.
   const mob = planFor(["crates/meerkat-mob/src/lib.rs"]);
   assert.deepEqual(mob.unit_feature_shards, [], "no pull-request feature suite may compile meerkat-mob");
-  assert.ok(mob.main_feature_unit_shards.some((suite) => suite.packages[0] === "meerkat-mob"), "mob's suite runs on main");
+  // meerkat-mob's default lane and its feature suite run as archived lanes:
+  // built once, executed in partitions.
+  assert.ok(
+    !mob.main_feature_unit_shards.some((suite) => suite.packages[0] === "meerkat-mob"),
+    "mob's suite leaves the packed feature rows",
+  );
+  assert.deepEqual(
+    mob.main_archive_builds.map((build) => build.package_flags),
+    ["-p meerkat-mob", "-p meerkat-mob --features experimental-gpt-live,schema"],
+    "mob's default lane and feature suite build archives on main",
+  );
+  const mobGithub = run(["--format", "github", "--", "crates/meerkat-mob/src/lib.rs"]);
+  assert.equal(mobGithub.status, 0, mobGithub.stderr);
+  const mobLines = Object.fromEntries(mobGithub.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  assert.equal(Number(mobLines.main_archive_build_count), JSON.parse(mobLines.main_archive_build_matrix).include.length);
+  assert.equal(Number(mobLines.main_archive_run_count), JSON.parse(mobLines.main_archive_run_matrix).include.length);
   // An unrelated leaf change carries no pull-request suite; docs carry none anywhere.
   assert.deepEqual(planFor(["crates/meerkat-sqlite/src/lib.rs"]).unit_feature_shards, []);
   const docs = planFor(["docs/index.mdx"]);

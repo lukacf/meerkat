@@ -50,6 +50,12 @@ pub enum WorkGraphError {
         required_realm_id: String,
         realm_id: String,
     },
+    /// The existing backing store could not be opened for an operation. This
+    /// must not be interpreted as an absent item or permission to repeat a
+    /// mutation. SQLite keeps host paths and open diagnostics in tracing;
+    /// the public backend label is `sqlite`.
+    #[error("work graph backing store '{backend}' is unavailable: {reason}")]
+    BackingStoreUnavailable { backend: String, reason: String },
 }
 
 impl WorkGraphError {

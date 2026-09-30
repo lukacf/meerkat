@@ -1378,6 +1378,9 @@ fn work_graph_error_kind(error: &WorkGraphError) -> wg_dsl::WorkGraphErrorKind {
             wg_dsl::WorkGraphErrorKind::InvalidTimestampMillis
         }
         WorkGraphError::Store(_) => wg_dsl::WorkGraphErrorKind::Store,
+        WorkGraphError::BackingStoreUnavailable { .. } => {
+            wg_dsl::WorkGraphErrorKind::BackingStoreUnavailable
+        }
         WorkGraphError::NamespaceAssignmentRequired { .. } => {
             wg_dsl::WorkGraphErrorKind::NamespaceAssignmentRequired
         }
@@ -2649,6 +2652,13 @@ mod tests {
             ),
             (
                 WorkGraphError::Store("store".to_string()),
+                WorkGraphPublicErrorClass::StoreError,
+            ),
+            (
+                WorkGraphError::BackingStoreUnavailable {
+                    backend: "sqlite".to_string(),
+                    reason: "missing backing file".to_string(),
+                },
                 WorkGraphPublicErrorClass::StoreError,
             ),
             (

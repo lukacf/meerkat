@@ -4083,7 +4083,8 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         // streamed the goodbye's input and never finished the user turn).
         // The scenario's claims are the graceful disconnect, host close
         // convergence and the canonical rows below.
-        let reply_deadline = Instant::now() + Duration::from_secs(45);
+        let reply_wait_started = Instant::now();
+        let reply_deadline = reply_wait_started + Duration::from_secs(45);
         let goodbye_reply = loop {
             let timeline = live.peer.timeline().await?;
             let reply = timeline_find(&timeline, TimelineKind::InputFinal, goodbye_start)
@@ -4139,8 +4140,19 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             &mut tolerant_failures,
         )?;
         if goodbye_timing.is_none() {
+            // Same fields as S99's line, so one grep gives a cross-scenario
+            // rate; extras at the end.
+            let last_input_start_ms = events
+                .get(events_before_goodbye..)
+                .unwrap_or_default()
+                .iter()
+                .rev()
+                .filter(|e| is_user_input(e))
+                .find_map(|e| e["start_ms"].as_f64());
             println!(
-                "GPT_LIVE_MODEL_SILENT_AFTER_INPUT scenario=S100 fixture=standup_close input_final={goodbye_input_final} heard={goodbye_input:?}"
+                "GPT_LIVE_MODEL_SILENT_AFTER_INPUT scenario=S100 exchange=standup_close last_input_start_ms={} waited_ms={} input_final={goodbye_input_final} heard={goodbye_input:?}",
+                last_input_start_ms.map_or_else(|| "none".to_owned(), |ms| ms.to_string()),
+                reply_wait_started.elapsed().as_millis()
             );
         }
         println!(
@@ -4267,7 +4279,10 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         let stalled_goodbye_row = goodbye_timing.is_none()
             && !goodbye_input_final
             && rows.spoken.len() == exchanges + 1
-            && rows.spoken.last().map(String::as_str) == Some(normalize_words(&goodbye_input).as_str())
+            && rows
+                .spoken
+                .last()
+                .is_some_and(|row| same_transcript_words(row, &normalize_words(&goodbye_input)))
             && !normalize_words(&goodbye_input).is_empty();
         if stalled_goodbye_row {
             println!(

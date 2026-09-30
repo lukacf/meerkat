@@ -349,23 +349,38 @@ async function prepare(command) {
     // scenario's overlap classifier needs: duration, the text of the response
     // the burst belongs to and when that response closed (null while it is
     // still open), and whether a delegation or commentary arrived during it.
-    state.overlapBursts = (playId) => state.bursts
-      .filter((burst) => (burst.overlap[playId] ?? 0) > 0)
-      .map((burst) => {
-        const response = state.responseLog[burst.response] ?? null;
-        const until = response ? response.closed_ms : nowMs();
-        return {
-          started_ms: burst.started_ms,
-          last_active_ms: burst.last_active_ms,
-          ended: burst.ended,
-          overlap_ms: burst.overlap[playId],
-          response: burst.response,
-          text: response ? response.text : null,
-          response_closed_ms: response ? response.closed_ms : null,
-          flushed: response ? response.flushed : false,
-          acted: state.actionTimes.some((at) => at >= burst.started_ms && at <= until),
-        };
-      });
+    // A response's transcript can arrive, and the user's next delta close
+    // it, before its audio plays; that audio then starts under the next
+    // response index. So a burst's text also takes every earlier response
+    // that closed without audio of its own.
+    state.overlapBursts = (playId) => {
+      const voiced = new Set(state.bursts.map((burst) => burst.response));
+      return state.bursts
+        .filter((burst) => (burst.overlap[playId] ?? 0) > 0)
+        .map((burst) => {
+          let first = burst.response;
+          while (first > 0 && !voiced.has(first - 1) && state.responseLog[first - 1]) first -= 1;
+          const response = state.responseLog[burst.response] ?? null;
+          const since = first > 0 && state.responseLog[first - 1] ? state.responseLog[first - 1].closed_ms : burst.started_ms;
+          const until = response ? response.closed_ms : nowMs();
+          const texts = [];
+          for (let index = first; index <= burst.response; index += 1) {
+            const logged = state.responseLog[index];
+            if (logged) texts.push(logged.text);
+          }
+          return {
+            started_ms: burst.started_ms,
+            last_active_ms: burst.last_active_ms,
+            ended: burst.ended,
+            overlap_ms: burst.overlap[playId],
+            response: burst.response,
+            text: response ? texts.join(' ') : null,
+            response_closed_ms: response ? response.closed_ms : null,
+            flushed: response ? response.flushed : false,
+            acted: state.actionTimes.some((at) => at >= Math.min(since, burst.started_ms) && at <= until),
+          };
+        });
+    };
     // ---- responses and duplicate readouts ------------------------------
     const normalizeSentence = (text) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
     state.finishResponse = ({ flushed = false } = {}) => {

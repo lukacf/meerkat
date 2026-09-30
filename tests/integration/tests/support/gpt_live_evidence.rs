@@ -222,7 +222,8 @@ pub struct OverlapBurst {
     pub overlap_ms: u64,
     /// The peer response index the burst belongs to.
     pub response: u64,
-    /// That response's output transcript, once it closed; `None` while open.
+    /// That response's output transcript once it closed (with any earlier
+    /// response that closed without audio of its own); `None` while open.
     #[serde(default)]
     pub text: Option<String>,
     /// When the response closed: the user resumed speaking (or a flush).
@@ -258,6 +259,8 @@ pub const BACKCHANNEL_LEXICON: &[&str] = &[
     "i see",
     "alright",
     "all right",
+    "go ahead",
+    "go on",
 ];
 
 fn backchannel_words(text: &str) -> String {
@@ -1847,6 +1850,13 @@ mod tests {
             classify_overlap(400, &[burst(Some("Okay, got it."), 500, false)]).counted_ms,
             0
         );
+    }
+
+    /// BuildBuddy S103: "Go ahead" whose transcript closed before its audio,
+    /// so the burst's own response held only "."; the peer joins the two.
+    #[test]
+    fn go_ahead_backchannel_joined_across_responses_is_allowed() {
+        assert!(is_backchannel(&burst(Some(" Go ahead ."), 400, false)));
     }
 
     /// A reply that carries content ("got it, Tuesday afternoon") in a pause

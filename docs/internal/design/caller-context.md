@@ -93,6 +93,33 @@ The accepted first supported profile is deliberately bounded so that each owner 
 
 These choices define implementation order and the supported first profile. They do not weaken the wider Toolkit end-state requirements or authorize unsupported profiles through a compatibility fallback.
 
+## Open decision: where attribute-based access control lives
+
+This design currently assumes Meerkat carries typed caller facts and asks a
+host-owned decision point at each protected use, while MobKit and Elephant keep
+their existing attribute-based access control (ABAC) as the policy owners. That
+assumption is not settled. Before any implementation starts, decide between:
+
+- **Host decision point (current assumption).** Meerkat is the attribute carrier
+  and the policy enforcement point at every internal use (history load, model
+  attempt, tool dispatch, output release, replay, delegation). One general host
+  decision interface (operation, subject attributes, resource attributes,
+  context) is answered by MobKit's or Elephant's ABAC. Meerkat owns no policy
+  language.
+- **ABAC generalized into Meerkat.** MobKit's ABAC moves down into Meerkat as a
+  general capability, so containment of information between agents, sessions
+  and peers is expressed as attribute policy inside the runtime rather than
+  through coarse peering controls. MobKit and Elephant become policy authors and
+  hosts instead of separate engines.
+
+Either way the caller facts become a set of typed attributes rather than a fixed
+field list, so existing ABAC policies can consume them. Today's peer-wiring
+controls are a coarse way to bound information flow and should not be treated as
+the containment model this design needs.
+
+Ownership: this decision and the implementation that follows are owned by Luka
+in a separate development environment. It is not part of 0.8.50.
+
 ## Investigation and implementation sequence
 
 1. Version this design as a docs-only change in Meerkat's internal design area.

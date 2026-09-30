@@ -56679,7 +56679,10 @@ impl SessionService for RealCommsSessionService {
         }
         drop(sessions);
         // Block only for keep-alive sessions (notifier registered at create time).
-        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+        // Clone the notifier out first: an `if let` scrutinee guard would stay
+        // held while the turn parks and block every writer of the map.
+        let keep_alive_notifier = self.keep_alive_notifiers.read().await.get(id).cloned();
+        if let Some(notifier) = keep_alive_notifier {
             notifier.notified().await;
             return Ok(mock_run_result(
                 id.clone(),

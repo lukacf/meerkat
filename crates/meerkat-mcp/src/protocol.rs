@@ -7,7 +7,7 @@ use std::sync::Arc;
 use meerkat_core::ToolDef;
 use meerkat_core::types::{ContentBlock, ToolProvenance, ToolSourceKind};
 use rmcp::{
-    model::{CallToolRequestParams, Content, RawContent},
+    model::{CallToolRequestParams, CallToolResult, Content, RawContent},
     service::{RoleClient, RunningService},
 };
 use serde_json::Value;
@@ -36,7 +36,8 @@ impl McpProtocol {
     /// Text and image content are captured directly as [`ContentBlock`]
     /// variants; resource, audio, and resource-link content the agent loop does
     /// not model are preserved verbatim as [`ContentBlock::Structured`] rather
-    /// than silently dropped.
+    /// than silently dropped. The server's optional `structuredContent` JSON
+    /// value is appended as one additional Structured block.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
         let request = match args.as_object().cloned() {
             Some(arguments) => {
@@ -54,42 +55,14 @@ impl McpProtocol {
                     reason: e.to_string(),
                 })?;
 
-        if result.is_error.unwrap_or(false) {
-            return Err(McpError::ToolCallFailed {
-                tool: name.to_string(),
-                reason: tool_error_reason(&result.content),
-            });
-        }
-
-        Ok(extract_content_blocks(result.content))
+        convert_tool_result(result, name)
     }
 
-    /// Call a tool, returning only text content (errors on non-text content).
+    /// Call a tool, returning only text content (errors on non-text content,
+    /// including a server's `structuredContent`).
     pub async fn call_tool_text(&self, name: &str, args: &Value) -> Result<String, McpError> {
-        let request = match args.as_object().cloned() {
-            Some(arguments) => {
-                CallToolRequestParams::new(name.to_string()).with_arguments(arguments)
-            }
-            None => CallToolRequestParams::new(name.to_string()),
-        };
-
-        let result =
-            self.service
-                .call_tool(request)
-                .await
-                .map_err(|e| McpError::ToolCallFailed {
-                    tool: name.to_string(),
-                    reason: e.to_string(),
-                })?;
-
-        if result.is_error.unwrap_or(false) {
-            return Err(McpError::ToolCallFailed {
-                tool: name.to_string(),
-                reason: tool_error_reason(&result.content),
-            });
-        }
-
-        extract_text_content_strict(result.content).map_err(|message| McpError::ProtocolError {
+        let blocks = self.call_tool(name, args).await?;
+        extract_text_content_strict(blocks).map_err(|message| McpError::ProtocolError {
             message: format!("Tool '{name}' returned unsupported content: {message}"),
         })
     }
@@ -147,14 +120,32 @@ pub(crate) async fn list_all_tools(
     }
 }
 
-/// Derive a typed failure reason from an errored tool result's content.
-///
-/// MCP carries the server-authored error detail in `CallToolResult.content`
-/// when `is_error` is set. Flatten that text (and any unmodeled content) into
-/// the reason rather than laundering it away behind a fixed string.
-fn tool_error_reason(content: &[Content]) -> String {
-    let blocks = extract_content_blocks(content.to_vec());
-    let text = meerkat_core::types::text_content(&blocks);
+/// Preserve the server's ordered content, followed by its optional structured
+/// JSON value. Both public MCP wrappers use this conversion. Error results keep
+/// their existing failure contract and project all supplied detail into it.
+pub(crate) fn convert_tool_result(
+    result: CallToolResult,
+    name: &str,
+) -> Result<Vec<ContentBlock>, McpError> {
+    let mut blocks = extract_content_blocks(result.content);
+    if let Some(data) = result.structured_content {
+        let block = ContentBlock::structured(&data).map_err(|error| McpError::ProtocolError {
+            message: format!("Tool '{name}' returned invalid structured content: {error}"),
+        })?;
+        blocks.push(block);
+    }
+    if result.is_error.unwrap_or(false) {
+        return Err(McpError::ToolCallFailed {
+            tool: name.to_string(),
+            reason: tool_error_reason(&blocks),
+        });
+    }
+    Ok(blocks)
+}
+
+/// The public failure type carries derived text, not a typed MCP envelope.
+pub(crate) fn tool_error_reason(blocks: &[ContentBlock]) -> String {
+    let text = meerkat_core::types::text_content(blocks);
     if text.is_empty() {
         "tool returned error with no content".to_string()
     } else {
@@ -162,14 +153,8 @@ fn tool_error_reason(content: &[Content]) -> String {
     }
 }
 
-/// Convert MCP [`Content`] items to [`ContentBlock`] variants.
-///
-/// Shared extraction logic for the protocol layer (mirrors
-/// `connection::extract_content_blocks`). Text and image map to their typed
-/// [`ContentBlock`] equivalents; resource, audio, and resource-link content
-/// the agent loop does not model are preserved verbatim as
-/// [`ContentBlock::Structured`] JSON rather than silently dropped.
-fn extract_content_blocks(contents: Vec<Content>) -> Vec<ContentBlock> {
+/// Convert ordered MCP content entries without dropping unmodeled variants.
+pub(crate) fn extract_content_blocks(contents: Vec<Content>) -> Vec<ContentBlock> {
     contents.into_iter().map(content_block_from_raw).collect()
 }
 
@@ -201,16 +186,16 @@ fn structured_content_block(raw: &RawContent) -> ContentBlock {
     }
 }
 
-fn extract_text_content_strict(contents: Vec<Content>) -> Result<String, String> {
+fn extract_text_content_strict(contents: Vec<ContentBlock>) -> Result<String, String> {
     let mut out = String::new();
 
     for content in contents {
-        match content.raw {
-            RawContent::Text(text) => {
+        match content {
+            ContentBlock::Text { text } => {
                 if !out.is_empty() {
                     out.push('\n');
                 }
-                out.push_str(&text.text);
+                out.push_str(&text);
             }
             other => return Err(format!("{other:?}")),
         }
@@ -231,21 +216,21 @@ mod tests {
             Content::text("Line 2"),
             Content::text("Line 3"),
         ];
-        let result = extract_text_content_strict(contents).unwrap();
+        let result = extract_text_content_strict(extract_content_blocks(contents)).unwrap();
         assert_eq!(result, "Line 1\nLine 2\nLine 3");
     }
 
     #[test]
     fn test_extract_text_content_strict_single_item() {
         let contents = vec![Content::text("Only line")];
-        let result = extract_text_content_strict(contents).unwrap();
+        let result = extract_text_content_strict(extract_content_blocks(contents)).unwrap();
         assert_eq!(result, "Only line");
     }
 
     #[test]
     fn test_extract_text_content_strict_empty() {
         let contents: Vec<Content> = Vec::new();
-        let result = extract_text_content_strict(contents).unwrap();
+        let result = extract_text_content_strict(extract_content_blocks(contents)).unwrap();
         assert_eq!(result, "");
     }
 
@@ -320,7 +305,7 @@ mod tests {
     #[test]
     fn protocol_tool_error_reason_carries_server_detail() {
         let content = vec![Content::text("disk quota exceeded")];
-        let reason = tool_error_reason(&content);
+        let reason = tool_error_reason(&extract_content_blocks(content));
         assert_eq!(reason, "disk quota exceeded");
     }
 

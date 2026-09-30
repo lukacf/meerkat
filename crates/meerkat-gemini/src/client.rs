@@ -6594,4 +6594,94 @@ mod tests {
             Err(LlmError::InvalidRequest { .. })
         ));
     }
+
+    fn mcp_structured_payload() -> Value {
+        serde_json::json!({
+            "records": [{"name": "a\n\"b", "enabled": true, "missing": null,
+                         "numbers": [0, -7, 1.25], "children": [{"value": false}]}],
+            "empty": {}, "list": []
+        })
+    }
+
+    fn mcp_structured_request(model: &str, mixed: bool) -> LlmRequest {
+        let mut blocks = if mixed {
+            vec![
+                ContentBlock::Text {
+                    text: "before".into(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "cG5n".into(),
+                },
+                ContentBlock::Text {
+                    text: "after".into(),
+                },
+            ]
+        } else {
+            Vec::new()
+        };
+        blocks.push(ContentBlock::structured(&mcp_structured_payload()).expect("structured JSON"));
+        LlmRequest::new(
+            model,
+            vec![
+                Message::User(UserMessage::text("lookup")),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "call-structured".into(),
+                        name: "lookup".into(),
+                        args: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                )),
+                Message::tool_results(vec![ToolResult::with_blocks(
+                    "call-structured".into(),
+                    blocks,
+                    false,
+                )]),
+            ],
+        )
+    }
+
+    #[test]
+    fn mcp_structured_gemini_nested_result_reaches_request_body() {
+        let client = GeminiClient::new("test-key".into());
+        let body = client
+            .build_request_body(&mcp_structured_request("gemini-3.1-pro-preview", false))
+            .unwrap();
+        let parts = body["contents"][2]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        let result = &parts[0]["functionResponse"];
+        assert_eq!(result["name"], "lookup");
+        assert_eq!(result["response"]["error"], false);
+        assert_eq!(
+            serde_json::from_str::<Value>(result["response"]["content"].as_str().unwrap()).unwrap(),
+            mcp_structured_payload()
+        );
+    }
+
+    #[test]
+    fn mcp_structured_gemini_mixed_result_keeps_nested_text_and_image() {
+        let client = GeminiClient::new("test-key".into());
+        let body = client
+            .build_request_body(&mcp_structured_request("gemini-3.1-pro-preview", true))
+            .unwrap();
+        let parts = body["contents"][2]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        let result = &parts[0]["functionResponse"];
+        assert_eq!(result["name"], "lookup");
+        assert_eq!(result["response"]["error"], false);
+        let text = result["response"]["content"].as_str().unwrap();
+        let structured = text
+            .strip_prefix("before\n[image: image/png]\nafter\n")
+            .expect("ordered text and image projection");
+        assert_eq!(
+            serde_json::from_str::<Value>(structured).unwrap(),
+            mcp_structured_payload()
+        );
+        assert_eq!(
+            parts[1],
+            serde_json::json!({"inlineData": {"mimeType": "image/png", "data": "cG5n"}})
+        );
+    }
 }

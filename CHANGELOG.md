@@ -47,6 +47,10 @@ them.
   write operations require an existing current-schema database. They no longer
   create a missing database, initialize an empty replacement or migrate an
   older schema. Explicit store open remains the initialization/migration path.
+- Behaviour-only (not measured by the gate): `McpProtocol::call_tool_text`
+  rejects results containing `structuredContent` instead of silently
+  discarding it. Public signatures are unchanged; `McpConnection::call_tool_text`
+  includes the derived JSON text.
 
 ### Fixed
 
@@ -61,6 +65,9 @@ them.
   "storage is under offline maintenance") instead of a `Store` error whose
   message carried the host database path. The public classification stays
   `StoreError`; the path is logged in tracing only.
+- MCP tool results preserve `structuredContent` in the existing Structured content
+  block model alongside ordered text, images, and other content. Structured-only
+  failures now retain their derived JSON detail in the existing error reason.
 - MCP tool discovery now follows all `tools/list` pages in both connection
   wrappers, preserving tool order and metadata. Later-page errors reject the
   discovery result, and repeated or cycling cursors fail instead of looping.

@@ -185,20 +185,20 @@
       "text": "Okay so, um, let me just think out loud for a second here. The client is the Marigold account, and, uh, they want the kickoff moved. Not next week, they want it on Tuesday, in the afternoon if we can manage it. And the venue, uh, the venue is the Copenhagen office, the one downstairs, not the big hall. Um, the codename for the deck is Pelican, don't ask me why, marketing picked it. Oh and, uh, we should keep the budget line as it was, no changes there. So, um, yeah. Write all of that up as a short kickoff brief in a markdown file, and then read the whole brief back to me, slowly, every line.",
       "segments": [
         "Okay so, um, let me just think out loud for a second here. The client is the Marigold account, and, uh, they want the kickoff moved. Not next week,",
-        "they want it on Tuesday, in the afternoon if we can manage it. And the venue, uh, the venue is the Copenhagen office, the one downstairs, not the big hall.",
-        "Um, the codename for the deck is Pelican, don't ask me why, marketing picked it. Oh and, uh, we should keep the budget line as it was, no changes there.",
-        "So, um, yeah. Write all of that up as a short kickoff brief in a markdown file, and then read the whole brief back to me, slowly, every line."
+        "they want it on Tuesday, in the afternoon if we can manage it. And the venue, uh, the venue is the Copenhagen office, the one downstairs,",
+        "not the big hall. Um, the codename for the deck is Pelican, don't ask me why, marketing picked it. Oh and, uh, we should keep the budget line",
+        "as it was, no changes there. So, um, yeah. Write all of that up as a short kickoff brief in a markdown file, and then read the whole brief back to me, slowly, every line."
       ],
       "pauses_ms": [
         800,
         900,
         700
       ],
-      "sha256": "35581100436a85b7e7dbf903312549becaf5ddf526b06f556c60184397bb2062",
-      "duration_ms": 41942,
+      "sha256": "eba84f7fc2cf2d6e903e81ebeed9bc3d2339461161df9fadee35ce379db9deb2",
+      "duration_ms": 41914,
       "sample_rate_hz": 24000,
-      "trailing_silence_ms": 1545,
-      "notes": "S103 monologue (~27 s) with disfluencies and three 700-900 ms mid-sentence pauses kept verbatim between minted segments (server VAD must not split it), planting Marigold, Tuesday, Copenhagen, Pelican; ends with a request whose readout is long. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, verse), VAD-normalised, 1500 ms trailing-silence floor."
+      "trailing_silence_ms": 1580,
+      "notes": "S103 monologue (~27 s) with disfluencies and three 700-900 ms mid-sentence pauses kept verbatim between minted segments, each inside a clause (\"Not next week, [pause] they want\", \"the one downstairs, [pause] not the big hall\", \"the budget line [pause] as it was\"), never after a finished sentence (server VAD must not split it), planting Marigold, Tuesday, Copenhagen, Pelican; ends with a request whose readout is long. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, verse), VAD-normalised, 1500 ms trailing-silence floor."
     },
     {
       "name": "interrupt_barge_in",
@@ -391,12 +391,12 @@
       "name": "haul_e6",
       "file": "haul-e6.wav",
       "voice": "shimmer",
-      "text": "Have the executor count how many words are in that notes file and tell me the number.",
-      "sha256": "674de4ca81a1bbe5ade0414b6d9b5ca3c7ca27aadb914251803a5b28c02528a5",
-      "duration_ms": 6759,
+      "text": "Have the executor add one closing sentence about foghorns to that notes file, then tell me its new word count.",
+      "sha256": "5f983f0bf4131817438d54b46144fe8b470fa529a7bf50eb97d453e66203dace",
+      "duration_ms": 7831,
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1580,
-      "notes": "S106 exchange 6 (delegated); the second close and reopen follow. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
+      "notes": "S106 exchange 6 (delegated): a file edit only the executor can make, whose new word count nobody has heard yet (the earlier count request was answered natively from the exchange 3 result); the second close and reopen follow. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
     },
     {
       "name": "haul_e7",

@@ -732,6 +732,17 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Changed
 
+- Release Turbo S no longer rebuilds the browser WASM runtime inside every
+  test attempt. The GPT Live peer scenarios (97-107) materialize only what
+  their specs declare (the browser workspace packages and Playwright), since
+  their peer drives a bare page; the browser raw-session and mobpack
+  scenarios (45-48) consume `//:e2e_web_wasm_bundle`, one Bazel action that
+  builds the runtime with the same toolchain and dev profile and is served by
+  the remote cache while its inputs are unchanged. Each materialize step logs
+  its duration. Measured on BuildBuddy: a GPT Live attempt went from about
+  820s to about 16s, and scenario 47 from about 810s to about 16s plus one
+  shared 6-minute bundle build per source change.
+
 - `MobHandle::machine_state_changes` (and the actor's machine-state watch)
   fires when an applied machine input changes the machine state or the
   actor's roster projection changed, instead of on every applied machine
@@ -752,6 +763,39 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Fixed
 
+- Two Release Turbo S flakes are deterministic. The live-adapter smokes
+  (scenarios 71 and 72) read their spoken inputs from committed, verified
+  fixtures (`tests/integration/fixtures/live_adapter_tts`, minted by
+  `voice_fixtures mint`) instead of calling the OpenAI speech API on every
+  run, where a stalled response body failed scenario 72 at its 60 s client
+  timeout before the live path was exercised. Scenario 98 follows the typed
+  supersession signal: when the provider opens another turn on its own and
+  that newer output is admitted before the harness confirms the first, the
+  first is retired as Unmeasured by design and never commits, so the harness
+  confirms the newer output and measures the settlement bound from that
+  confirmation.
+- `scripts/generate-bazel-rust-builds.mjs` owns the Turbo S web WASM bundle
+  rules (the root BUILD.bazel carried them only as hand edits, so a
+  regeneration would have dropped them), and tests that read the committed
+  browser voice fixtures declare `//:live_smoke_browser_fixtures`, so the
+  integration crate's unit test finds them in remote runfiles.
+- GPT Live no longer talks over a user who pauses mid-thought. gpt-live-1
+  backchanneled ("mm-hm", "got it, Tuesday afternoon") into 700-900 ms pauses
+  of a long spoken request and sometimes delegated at a pause before the
+  request itself was said; the public API exposes no turn-detection setting,
+  so the default client-context session instructions now ask the model to
+  let the user finish: stay silent through pauses, including after a filler
+  ("um", "uh", "so"), no backchannels, no repeating details back, and no
+  delegation until the user has finished. Hosts: the guidance is part of the
+  default client-context instructions (also used by the deprecated private
+  GPT Live operator profile), so a host preface that asks the voice to read
+  details back now meets "do not repeat details back while the user is still
+  talking"; the rule only covers the user's own turn, and a preface that
+  needs read-back mid-utterance should say so explicitly or override the
+  instructions.
+  The S103 monologue fixture is re-minted so its three pauses sit inside a
+  clause, as the scenario documents, instead of two of them after a finished
+  sentence.
 - The placed-member external-edge route inputs (`RecordExternalRouteInstall`,
   `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`,
   `RollbackExternalRouteInstall`) are now declared runtime-internal in the
@@ -1260,6 +1304,14 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   `max_run` passes during that read. The Bazel production `meerkat_mob`
   library no longer compiles the `test-support` hooks; its test variant keeps
   them.
+- A GPT Live open whose pre-open summary was ready but failed its projection
+  check no longer fails the whole open. The seeded path took the open
+  projection lease from the body-free config before its fallible steps (tool
+  listing, re-projection, `validate_projection`); when one failed, the open
+  fell back to the late summary path with a config whose lease was gone, and
+  the adapter refused it with "experimental live canonical seed custody was
+  already consumed". The lease now moves only once the re-projected config
+  validates, so the fallback opens late as intended.
 
 ## [0.8.48] - 2026-09-28
 

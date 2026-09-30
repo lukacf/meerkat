@@ -2723,9 +2723,6 @@ mod orchestrator {
                 return Ok(None);
             }
             summary.validate_current(&current, &identity)?;
-            let Some(lease) = body_free.take_open_projection_lease() else {
-                return Ok(None);
-            };
             let tools = self.service.live_visible_tool_defs(session_id).await?;
             let generation = current
                 .transcript_rewrite_generation()
@@ -2737,12 +2734,15 @@ mod orchestrator {
                 current.messages_for_model_boundary(),
                 current.messages(),
             )?
-            .with_open_projection_lease(lease)
             .with_user_content_identities(current.realtime_user_content_identities())
             .with_user_content_tombstones(current.realtime_user_content_tombstones())
             .with_transcript_rewrite_generation(generation);
-            summary.validate_projection(session_id, &config)?;
-            Ok(Some(config))
+            // Only a projection the summary validates against takes over the
+            // lease. Every fallible step above leaves it with the body-free
+            // config, which the late path opens with; taken earlier, a failed
+            // check fell back to a late open whose adapter then found the seed
+            // custody consumed and refused the open.
+            Ok(summary.adopt_seeded_projection(session_id, body_free, config)?)
         }
 
         /// Hand an adopted pre-open generation to its preparation job once

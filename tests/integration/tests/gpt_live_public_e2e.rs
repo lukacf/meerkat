@@ -2360,6 +2360,21 @@ async fn s99_native_exchange(
             return Ok(s99_answer_text(&events, start));
         }
         if Instant::now() >= deadline {
+            // Tolerant evidence (cross-scenario rate): the user spoke and the
+            // model produced no output at all for the whole window.
+            let assistant_output = events[start..]
+                .iter()
+                .any(|event| event["type"] == "session.output_transcript.delta");
+            if user_start.is_some() && !assistant_output {
+                let last_input_start_ms = events[start..]
+                    .iter()
+                    .filter(|event| is_user_input(event))
+                    .filter_map(|event| event["start_ms"].as_f64())
+                    .fold(0.0_f64, f64::max);
+                println!(
+                    "GPT_LIVE_MODEL_SILENT_AFTER_INPUT scenario=S99 exchange={fixture} last_input_start_ms={last_input_start_ms} waited_ms=90000"
+                );
+            }
             s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
                 exchange,
                 matched: false,

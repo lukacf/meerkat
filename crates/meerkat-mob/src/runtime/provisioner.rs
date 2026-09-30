@@ -17267,6 +17267,7 @@ mod bridge_rejection_tests {
                         interaction_id: None,
                         run_id: None,
                         objective_id: Some(objective_id),
+                        turn_input: None,
                     },
                     ..Default::default()
                 },

@@ -2755,6 +2755,7 @@ impl MemberTurnOptions {
                 interaction_id: self.interaction_id,
                 objective_id: self.objective_id,
                 run_id: None,
+                turn_input: None,
             },
             ..Default::default()
         }

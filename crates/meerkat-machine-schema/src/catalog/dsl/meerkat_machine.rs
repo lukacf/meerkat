@@ -1630,6 +1630,7 @@ pub enum LiveContextPayloadAvailability {
 /// result merged into the source member after its channel closed. Runtime
 /// work output is history the model has not seen, never speech to voice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[non_exhaustive]
 pub enum LiveContextRowSource {
     #[default]
     Conversation,

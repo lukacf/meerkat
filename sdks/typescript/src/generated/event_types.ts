@@ -1073,6 +1073,12 @@ export type ToolCallArguments = Record<string, unknown>;
 export type ObjectiveId = string;
 
 /**
+ * Non-conversational authorship of a turn's input (see
+ * [`TranscriptMessageIdentity::turn_input`]).
+ */
+export type TranscriptTurnInput = "runtime_authored";
+
+/**
  * Stable runtime identity for a transcript message.
  *
  * These fields are optional so older persisted sessions deserialize without a
@@ -1084,6 +1090,7 @@ export type TranscriptMessageIdentity = {
   objective_id?: ObjectiveId | null;
   realtime_origin?: RealtimeMessageOrigin | null;
   run_id?: RunId | null;
+  turn_input?: TranscriptTurnInput | null;
 };
 
 export interface SystemTime {

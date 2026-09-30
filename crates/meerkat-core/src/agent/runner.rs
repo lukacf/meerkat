@@ -4284,6 +4284,7 @@ mod skill_activation_effect_tests {
             interaction_id: Some(interaction_id),
             run_id: None,
             objective_id: Some(objective_id),
+            turn_input: None,
         };
 
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
@@ -4645,6 +4646,7 @@ mod skill_activation_effect_tests {
             interaction_id: Some(interaction_id),
             run_id: None,
             objective_id: None,
+            turn_input: None,
         };
 
         let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
@@ -4710,6 +4712,7 @@ mod skill_activation_effect_tests {
             interaction_id: Some(interaction_id),
             run_id: None,
             objective_id: None,
+            turn_input: None,
         }));
 
         agent

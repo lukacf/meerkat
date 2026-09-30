@@ -1415,6 +1415,11 @@ class RealtimeMessageOrigin(TypedDict, total=False):
     session_id: Required[SessionId]
 
 
+# Non-conversational authorship of a turn's input (see
+# [`TranscriptMessageIdentity::turn_input`]).
+TranscriptTurnInput = Literal['runtime_authored']
+
+
 class TranscriptMessageIdentity(TypedDict, total=False):
     """Stable runtime identity for a transcript message.
 
@@ -1426,6 +1431,7 @@ class TranscriptMessageIdentity(TypedDict, total=False):
     objective_id: NotRequired[Optional[ObjectiveId]]
     realtime_origin: NotRequired[Optional[RealtimeMessageOrigin]]
     run_id: NotRequired[Optional[RunId]]
+    turn_input: NotRequired[Optional[TranscriptTurnInput]]
 
 
 class SystemTime(TypedDict, total=False):

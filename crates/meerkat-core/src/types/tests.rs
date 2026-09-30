@@ -229,6 +229,7 @@ fn test_transcript_message_identity_serialization_is_optional() {
         interaction_id: Some(interaction_id),
         run_id: Some(run_id.clone()),
         objective_id: None,
+        turn_input: None,
     };
 
     let json = serde_json::to_value(Message::User(user)).unwrap();

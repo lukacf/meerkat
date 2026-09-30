@@ -6187,6 +6187,17 @@
                 "type": "null"
               }
             ]
+          },
+          "turn_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TranscriptTurnInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who authored the input of the turn that produced this message, when it\nwas not conversational input: stamped at admission from the turn's\nwork attribution, never inferred from transcript position. Absent for\nconversational turns (typed, spoken or peer input)."
           }
         },
         "type": "object"
@@ -6432,6 +6443,16 @@
               "range"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "TranscriptTurnInput": {
+        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "oneOf": [
+          {
+            "const": "runtime_authored",
+            "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
           }
         ]
       },
@@ -28683,6 +28704,17 @@
                 "type": "null"
               }
             ]
+          },
+          "turn_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TranscriptTurnInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who authored the input of the turn that produced this message, when it\nwas not conversational input: stamped at admission from the turn's\nwork attribution, never inferred from transcript position. Absent for\nconversational turns (typed, spoken or peer input)."
           }
         },
         "type": "object"
@@ -28928,6 +28960,16 @@
               "range"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "TranscriptTurnInput": {
+        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "oneOf": [
+          {
+            "const": "runtime_authored",
+            "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
           }
         ]
       },
@@ -43151,6 +43193,17 @@
                 "type": "null"
               }
             ]
+          },
+          "turn_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TranscriptTurnInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who authored the input of the turn that produced this message, when it\nwas not conversational input: stamped at admission from the turn's\nwork attribution, never inferred from transcript position. Absent for\nconversational turns (typed, spoken or peer input)."
           }
         },
         "type": "object"
@@ -43396,6 +43449,16 @@
               "range"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "TranscriptTurnInput": {
+        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "oneOf": [
+          {
+            "const": "runtime_authored",
+            "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
           }
         ]
       },
@@ -61337,6 +61400,17 @@
                 "type": "null"
               }
             ]
+          },
+          "turn_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TranscriptTurnInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who authored the input of the turn that produced this message, when it\nwas not conversational input: stamped at admission from the turn's\nwork attribution, never inferred from transcript position. Absent for\nconversational turns (typed, spoken or peer input)."
           }
         },
         "type": "object"
@@ -61582,6 +61656,16 @@
               "range"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "TranscriptTurnInput": {
+        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "oneOf": [
+          {
+            "const": "runtime_authored",
+            "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
           }
         ]
       },
@@ -79321,6 +79405,17 @@
                 "type": "null"
               }
             ]
+          },
+          "turn_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TranscriptTurnInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who authored the input of the turn that produced this message, when it\nwas not conversational input: stamped at admission from the turn's\nwork attribution, never inferred from transcript position. Absent for\nconversational turns (typed, spoken or peer input)."
           }
         },
         "type": "object"
@@ -79566,6 +79661,16 @@
               "range"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "TranscriptTurnInput": {
+        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "oneOf": [
+          {
+            "const": "runtime_authored",
+            "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
           }
         ]
       },
@@ -89263,6 +89368,17 @@
                 "type": "null"
               }
             ]
+          },
+          "turn_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TranscriptTurnInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who authored the input of the turn that produced this message, when it\nwas not conversational input: stamped at admission from the turn's\nwork attribution, never inferred from transcript position. Absent for\nconversational turns (typed, spoken or peer input)."
           }
         },
         "type": "object"
@@ -89508,6 +89624,16 @@
               "range"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "TranscriptTurnInput": {
+        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "oneOf": [
+          {
+            "const": "runtime_authored",
+            "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
           }
         ]
       },
@@ -146307,6 +146433,17 @@
                 "type": "null"
               }
             ]
+          },
+          "turn_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TranscriptTurnInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who authored the input of the turn that produced this message, when it\nwas not conversational input: stamped at admission from the turn's\nwork attribution, never inferred from transcript position. Absent for\nconversational turns (typed, spoken or peer input)."
           }
         },
         "type": "object"
@@ -146552,6 +146689,16 @@
               "range"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "TranscriptTurnInput": {
+        "description": "Non-conversational authorship of a turn's input (see\n[`TranscriptMessageIdentity::turn_input`]).",
+        "oneOf": [
+          {
+            "const": "runtime_authored",
+            "description": "Runtime-authored injected execution context, such as a voice job's\nresult merged into its source member after the voice channel closed.",
+            "type": "string"
           }
         ]
       },

@@ -412,11 +412,10 @@ pub(crate) fn classify_committed_boundary_rows_after(
         Vec::new()
     };
 
-    let sources = boundary_row_sources(raw_rows.iter().map(|(_, message, _)| message));
     raw_rows
         .into_iter()
-        .zip(sources)
-        .map(|((sequence, message, serialized), source)| {
+        .map(|(sequence, message, serialized)| {
+            let source = row_source(&message);
             let origin = match &message {
                 Message::User(user) => user.identity.realtime_origin.as_ref(),
                 Message::BlockAssistant(assistant) => assistant.identity.realtime_origin.as_ref(),
@@ -446,33 +445,26 @@ pub(crate) fn classify_committed_boundary_rows_after(
         .collect()
 }
 
-/// What drove the turn of each committed row, in order. The input of the
-/// turn an assistant row answers is the nearest earlier user row of the same
-/// boundary: a reply to runtime-authored injected execution context (no
-/// conversational user input, such as a post-close result merge) is runtime
-/// work output, replayed quietly instead of voiced. A boundary whose input row
-/// lies before it keeps the conversational default.
+/// What drove the turn that committed a row. The member's reply to
+/// runtime-authored injected execution context (such as a post-close result
+/// merge) carries `TranscriptTurnInput::RuntimeAuthored` on its identity,
+/// stamped at admission from the turn's work attribution; it is runtime work
+/// output, replayed quietly instead of voiced. Every other row is
+/// conversation. Transcript position is never consulted: a mid-turn steer can
+/// follow a typed row, and a reply can commit in a later boundary than its
+/// input.
 #[cfg(feature = "live")]
-fn boundary_row_sources<'a>(
-    messages: impl Iterator<Item = &'a Message>,
-) -> Vec<crate::meerkat_machine::dsl::LiveContextRowSource> {
+fn row_source(message: &Message) -> crate::meerkat_machine::dsl::LiveContextRowSource {
     use crate::meerkat_machine::dsl::LiveContextRowSource;
-    let mut turn_input_is_runtime_work = false;
-    messages
-        .map(|message| match message {
-            Message::User(user) => {
-                turn_input_is_runtime_work = matches!(
-                    user.transcript_role,
-                    meerkat_core::types::TranscriptUserRole::InjectedContext
-                );
-                LiveContextRowSource::Conversation
-            }
-            Message::BlockAssistant(_) if turn_input_is_runtime_work => {
-                LiveContextRowSource::RuntimeWork
-            }
-            _ => LiveContextRowSource::Conversation,
-        })
-        .collect()
+    match message {
+        Message::BlockAssistant(assistant)
+            if assistant.identity.turn_input
+                == Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored) =>
+        {
+            LiveContextRowSource::RuntimeWork
+        }
+        _ => LiveContextRowSource::Conversation,
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -616,44 +608,47 @@ mod tests {
         );
     }
 
-    /// The reply to runtime-authored injected execution context (a post-close
-    /// result merge) is runtime work output; a reply to a typed turn, even
-    /// one with host-attached injected context before it, is conversation.
+    /// The source is read from the reply's stamped turn authorship, never
+    /// from transcript position.
     #[test]
-    fn runtime_work_replies_are_separated_from_conversational_turns() {
+    fn row_source_reads_the_stamped_turn_authorship() {
         use crate::meerkat_machine::dsl::LiveContextRowSource::{Conversation, RuntimeWork};
-        let injected = |text: &str| {
-            let mut message = UserMessage::text(text);
-            message.transcript_role = meerkat_core::types::TranscriptUserRole::InjectedContext;
-            Message::User(message)
-        };
-        let reply = |text: &str| {
-            Message::BlockAssistant(meerkat_core::types::BlockAssistantMessage::snapshot(vec![
-                AssistantBlock::Text {
+        let reply = |text: &str, runtime_authored: bool| {
+            let mut message =
+                meerkat_core::types::BlockAssistantMessage::snapshot(vec![AssistantBlock::Text {
                     text: text.into(),
                     meta: None,
-                },
-            ]))
+                }]);
+            if runtime_authored {
+                message.identity.turn_input =
+                    Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored);
+            }
+            Message::BlockAssistant(message)
         };
-        let merge = [
-            injected("Result of the voice request"),
-            reply("Done, the file is written."),
-        ];
-        assert_eq!(
-            boundary_row_sources(merge.iter()),
-            vec![Conversation, RuntimeWork]
-        );
-        let typed = [
-            injected("host context"),
+        let mut steer = UserMessage::text("a durable mid-turn steer");
+        steer.transcript_role = meerkat_core::types::TranscriptUserRole::InjectedContext;
+
+        // (a) A typed turn followed by a durable mid-turn steer (injected
+        // context) and the reply: the reply stays conversation.
+        let typed_with_steer = [
             Message::User(UserMessage::text("typed turn")),
-            reply("Noted."),
+            Message::User(steer.clone()),
+            reply("Noted.", false),
         ];
         assert_eq!(
-            boundary_row_sources(typed.iter()),
+            typed_with_steer.iter().map(row_source).collect::<Vec<_>>(),
             vec![Conversation, Conversation, Conversation]
         );
+
+        // (b) A merge reply committed alone, in a later boundary than its
+        // injected input, stays runtime work.
+        assert_eq!(
+            row_source(&reply("Done, the file is written.", true)),
+            RuntimeWork
+        );
+
         let merged = classify(
-            &merge[1],
+            &reply("Done, the file is written.", true),
             LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
         );
         assert_eq!(
@@ -662,7 +657,7 @@ mod tests {
         );
         assert_eq!(
             classify(
-                &merge[0],
+                &Message::User(steer),
                 LiveContextCommittedTextProvenance::ParentSessionServiceTurn
             )
             .disposition(),

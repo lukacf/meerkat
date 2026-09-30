@@ -1740,6 +1740,109 @@ mod live_context_mirror_tests {
             .expect("bind experimental live execution");
     }
 
+    /// Runtime work output queued before the conversation waits for it, and
+    /// the user's turn start itself requests the drain that replays it on
+    /// the quiet lane during that turn (no later commit or turn end needed).
+    #[tokio::test]
+    async fn a_started_user_turn_drains_replayed_runtime_work_held_for_the_conversation() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        let mut merged = meerkat_core::UserMessage::text("Result of the voice request");
+        merged.transcript_role = meerkat_core::types::TranscriptUserRole::InjectedContext;
+        session.push(meerkat_core::Message::User(merged));
+        let mut reply = meerkat_core::types::BlockAssistantMessage::snapshot(vec![
+            meerkat_core::AssistantBlock::Text {
+                text: "Done, the file is written.".into(),
+                meta: None,
+            },
+        ]);
+        reply.identity.turn_input = Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored);
+        session.push(meerkat_core::Message::BlockAssistant(reply));
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("seal the merge turn");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &committed, "store-commit")
+            .await
+            .expect("enqueue the merge turn");
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+            .await
+            .expect("drain before the conversation");
+        assert!(
+            host.appends.lock().expect("appends").is_empty(),
+            "runtime work output is held until the conversation starts"
+        );
+        let key = (session_id.clone(), channel_id.clone());
+        let before = machine
+            .shared
+            .live_context_drain_tasks
+            .lock()
+            .expect("drain tasks")
+            .get(&key)
+            .cloned();
+        let queued = machine
+            .shared
+            .live_context_queued_rows
+            .lock()
+            .expect("queued")
+            .get(&(session_id.clone(), 2))
+            .expect("the held reply stays queued")
+            .clone();
+        assert!(queued.is_causal_reassertion());
+        let binding = queued.binding();
+        let provider_binding = meerkat_live::ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(binding.generation()),
+            meerkat_live::LiveRuntimeBindingFence::new(binding.fence_token()),
+        );
+        let turn = meerkat_live::LiveSidebandTurnRef::__from_provider_observation(
+            &channel_id,
+            "first-user-turn".into(),
+            "private-first-user-turn".into(),
+        )
+        .expect("turn");
+        machine
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("the user's first turn starts");
+        let requested = machine
+            .shared
+            .live_context_drain_tasks
+            .lock()
+            .expect("drain tasks")
+            .get(&key)
+            .cloned()
+            .expect("the turn start requested a drain");
+        assert!(
+            before
+                .as_ref()
+                .is_none_or(|before| !Arc::ptr_eq(before, &requested)),
+            "a fresh drain, not the completed pre-conversation one"
+        );
+        requested
+            .wait()
+            .await
+            .expect("the turn-start drain completes");
+        let appends = host.appends.lock().expect("appends");
+        assert_eq!(appends.len(), 1, "{appends:?}");
+        assert!(appends[0].1.contains("Done, the file is written."));
+        assert_eq!(
+            host.append_kinds.lock().expect("kinds").as_slice(),
+            &[crate::live_execution::LiveContextAppendKind::CausalReassertion],
+            "replayed on the quiet lane during the user's turn"
+        );
+    }
+
     async fn bound_experimental_live_machine(
         canonical_seed_cursor: u64,
     ) -> (

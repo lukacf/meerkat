@@ -424,13 +424,18 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   `AuthorizeLiveContextAppendDeferredByConversationAttached` and
   `AuthorizeLiveContextAppendDeferredByConversationRunning` are added (kernel
   `TransitionId::*` discriminants move).
+- `meerkat_core::types::TranscriptMessageIdentity` gains the public field
+  `turn_input: Option<TranscriptTurnInput>`, and the `#[non_exhaustive]` enum
+  `meerkat_core::types::TranscriptTurnInput` (`RuntimeAuthored`) is added.
+  Struct literals must add the field (`None` for conversational turns). The
+  field is serde-additive (absent on old rows) and appears in the emitted
+  wire schemas.
 
 ### Added
 
 - `meerkat_mob::MobHandle::start_injected_context_work_for_identity_bounded`
   queues runtime-authored content on a member as injected execution context
   (exact runtime-input custody, no synthesized conversational user row).
-
 - Session event subscriptions replay from a typed cursor (#1236).
   `SessionService::subscribe_session_events_from(id, SessionEventCursor)` and
   `EphemeralSessionService`/`PersistentSessionService`
@@ -788,14 +793,19 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   (`SpokenCanonicalRow`) and released the late summary and the result into
   silence. The merge is now runtime-authored injected execution context (no
   conversational user row), and the member's reply to it is runtime work
-  output (`EnqueueLiveContextRow` carries `row_source`): it is queued as
+  output: the mob stamps `TranscriptTurnInput::RuntimeAuthored` on the turn's
+  transcript identity from its work attribution, the live mirror reads it
+  from the committed reply (never from transcript position), and
+  `EnqueueLiveContextRow` carries it as `row_source`. It is queued as
   `ReplayRuntimeWork` and replayed on the quiet thinking lane once the
   conversation has started, after the late summary, and never starts the
   conversation itself. Typed and peer rows are voiced as before
-  (lukacf/meerkat-mobkit#474). The replay is not held behind an active
-  provider turn, so the result reaches the model while the user's first
-  utterance is still in flight, before it answers; voiced rows and
-  reassertions of live speech still wait for the turn boundary.
+  (lukacf/meerkat-mobkit#474). The replay is not held behind the user phase
+  of a provider turn (no assistant turn started for the turn's interaction),
+  so the result reaches the model while the user's first utterance is still
+  in flight, before it answers; once an assistant turn has started it waits
+  like every other row, and voiced rows and reassertions of live speech
+  still wait for the turn boundary.
 - Model fallback from GPT-6 no longer skips every target as
   `request_unsupported`. Since the GPT-6 rows gained the prompt-cache
   capabilities, their build-derived cache defaults (mode, TTL and a

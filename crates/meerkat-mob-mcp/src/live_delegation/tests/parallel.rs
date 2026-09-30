@@ -183,6 +183,7 @@ struct Fixture {
     binding: LiveDelegationRuntimeBinding,
     provider_binding: ProviderWebrtcBinding,
     workgraph: Option<meerkat::WorkGraphService>,
+    service: Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
 }
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -252,6 +253,7 @@ async fn fixture_with_policy(
         Arc::new(meerkat_store::MemoryBlobStore::new()),
     ));
     let runtime = service.runtime_adapter().expect("runtime");
+    let session_service = service.clone();
     let mobs = Arc::new(
         crate::MobMcpState::new(service.clone(), meerkat_mob::MobControlPrincipal::Owner)
             .with_workgraph_service(host_workgraph.clone()),
@@ -320,6 +322,7 @@ async fn fixture_with_policy(
         binding,
         provider_binding,
         workgraph,
+        service: session_service,
     }
 }
 
@@ -1425,6 +1428,21 @@ async fn machine_close_before_the_transport_sweep_merges_a_pending_result_once()
         merge.conversational_text
     );
     fx.client.release(merge.index);
+    // The member's committed reply carries the turn's runtime authorship on
+    // its identity, which a live channel's mirror reads as runtime work.
+    wait_until(WAIT, || async {
+        fx.service
+            .export_realtime_refresh_session_snapshot(&fx.session_id)
+            .await
+            .is_ok_and(|session| {
+                session.messages().iter().any(|message| {
+                    matches!(message, meerkat_core::Message::BlockAssistant(reply)
+                        if reply.identity.turn_input
+                            == Some(meerkat_core::types::TranscriptTurnInput::RuntimeAuthored))
+                })
+            })
+    })
+    .await;
 
     // The transport sweep runs after the task merged: nothing merges twice.
     fx.coordinator

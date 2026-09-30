@@ -254,6 +254,36 @@ struct TranscriptIdentityConsensus {
     interaction_id: IdentityFieldConsensus<InteractionId>,
     run_id: IdentityFieldConsensus<RunId>,
     objective_id: IdentityFieldConsensus<meerkat_core::interaction::ObjectiveId>,
+    turn_input: TurnInputConsensus,
+}
+
+/// Non-conversational turn-input authorship holds for the batch only when
+/// every input carries the same one: a runtime-authored input batched with
+/// conversational input makes a conversational turn, so absence is a value
+/// here, not an unknown.
+#[derive(Debug, Clone, Default)]
+enum TurnInputConsensus {
+    #[default]
+    Unseen,
+    Agreed(meerkat_core::types::TranscriptTurnInput),
+    Conversational,
+}
+
+impl TurnInputConsensus {
+    fn observe(&mut self, candidate: Option<meerkat_core::types::TranscriptTurnInput>) {
+        *self = match (std::mem::take(self), candidate) {
+            (Self::Unseen, Some(input)) => Self::Agreed(input),
+            (Self::Agreed(current), Some(input)) if current == input => Self::Agreed(current),
+            _ => Self::Conversational,
+        };
+    }
+
+    fn finish(self) -> Option<meerkat_core::types::TranscriptTurnInput> {
+        match self {
+            Self::Agreed(input) => Some(input),
+            Self::Unseen | Self::Conversational => None,
+        }
+    }
 }
 
 impl TranscriptIdentityConsensus {
@@ -261,6 +291,7 @@ impl TranscriptIdentityConsensus {
         self.interaction_id.observe(identity.interaction_id);
         self.run_id.observe(identity.run_id.clone());
         self.objective_id.observe(identity.objective_id);
+        self.turn_input.observe(identity.turn_input);
     }
 
     fn finish(self) -> TranscriptMessageIdentity {
@@ -269,6 +300,7 @@ impl TranscriptIdentityConsensus {
             interaction_id: self.interaction_id.finish(),
             run_id: self.run_id.finish(),
             objective_id: self.objective_id.finish(),
+            turn_input: self.turn_input.finish(),
         }
     }
 }

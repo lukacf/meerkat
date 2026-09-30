@@ -634,6 +634,18 @@ impl BrowserPeer {
         Ok(serde_json::from_value(result["timeline"].clone())?)
     }
 
+    /// Close the in-progress assistant response, so its `response_end`
+    /// (with its text and `flushed: true`) is recorded, and return the
+    /// timeline. A response otherwise ends only on new user speech, a
+    /// disconnect or evidence stop, so a scenario that checks the final
+    /// response's text must flush it first.
+    pub async fn flush_response_timeline(
+        &mut self,
+    ) -> Result<Vec<TimelineEntry>, Box<dyn std::error::Error>> {
+        let result = self.call(json!({"type":"flush_response"})).await?;
+        Ok(serde_json::from_value(result["timeline"].clone())?)
+    }
+
     pub async fn energy(&mut self) -> Result<EnergyReport, Box<dyn std::error::Error>> {
         let result = self.call(json!({"type":"energy"})).await?;
         Ok(serde_json::from_value(result)?)

@@ -338,7 +338,7 @@ async function prepare(command) {
     };
     // ---- responses and duplicate readouts ------------------------------
     const normalizeSentence = (text) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
-    state.finishResponse = () => {
+    state.finishResponse = ({ flushed = false } = {}) => {
       const text = state.response.text;
       if (!text.trim()) return;
       const seen = new Map();
@@ -354,7 +354,7 @@ async function prepare(command) {
       }
       // The text travels with the entry so scenarios can check a readout for
       // repeated lines (short brief lines fall under the 5-word floor above).
-      state.pushTimeline('response_end', { index: state.response.index, chars: text.length, text: text.slice(0, 8000) });
+      state.pushTimeline('response_end', { index: state.response.index, chars: text.length, text: text.slice(0, 8000), flushed });
       state.response = { text: '', started_ms: null, index: state.response.index + 1 };
     };
     // Close the open utterance now (`reason`: 'delegation' when
@@ -775,6 +775,18 @@ async function timeline() {
   return page.evaluate(() => ({ timeline: globalThis.__gptLivePeer.timeline }));
 }
 
+// Close the in-progress assistant response (a response otherwise ends only
+// when the user speaks again, the peer disconnects, or evidence stops) so its
+// `response_end` entry, with its text, is on the timeline a scenario reads
+// next; returns that timeline.
+async function flushResponse() {
+  return page.evaluate(() => {
+    const state = globalThis.__gptLivePeer;
+    state.finishResponse({ flushed: true });
+    return { timeline: state.timeline };
+  });
+}
+
 async function energy() {
   return page.evaluate(() => {
     const state = globalThis.__gptLivePeer;
@@ -915,6 +927,7 @@ async function handle(command) {
     case 'silence': return silence(command);
     case 'disconnect': return disconnect(command);
     case 'timeline': return timeline();
+    case 'flush_response': return flushResponse();
     case 'energy': return energy();
     case 'snapshot': return snapshot();
     case 'stop_evidence': return stopEvidence();

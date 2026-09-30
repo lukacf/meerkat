@@ -2973,7 +2973,9 @@ fn unprompted_assistant_response_starts(timeline: &[TimelineEntry], from_ms: u64
 }
 
 /// Readout lines an assistant response at or after `from_ms` speaks more
-/// than once (a duplicate readout inside one response).
+/// than once (a duplicate readout inside one response). The final response
+/// has a `response_end` only after the scenario flushed it
+/// (`flush_response_timeline`).
 ///
 /// A response is the peer's `response` index, so an unprompted second readout
 /// with no user speech in between lands in the same response as the first;
@@ -4782,7 +4784,10 @@ async fn run_s103_interrupt_and_recover(
         // Let the corrections play out: the assistant may delegate the edit
         // (one or two executor turns) or answer natively.
         wait_for_settled(&mut live, Duration::from_secs(6), Duration::from_secs(150)).await?;
-        let timeline = live.peer.timeline().await?;
+        // Flush the final response (the corrected brief's readout) so its
+        // text reaches the duplicate-readout check below; nothing else ends
+        // it before this read.
+        let timeline = live.peer.flush_response_timeline().await?;
         let assistant_quiet_after_onset_ms = timeline
             .iter()
             .filter(|e| e.kind == TimelineKind::AssistantAudioEnd && e.t_ms >= barge_in_start_ms)
@@ -7838,8 +7843,10 @@ mod config_tests {
 
     /// The brief read once, line by line, then read again from its first line
     /// with no user speech in between: one peer response whose short lines
-    /// repeat. The burst rule cannot see it (same response index); the
-    /// readout-line rule does.
+    /// repeat. No user speech follows, so its `response_end` exists only
+    /// because the scenario flushes the open response before its final read
+    /// (`flush_response_timeline`, `flushed: true`). The burst rule cannot see
+    /// it (same response index); the readout-line rule does.
     #[test]
     fn s103_second_unprompted_readout_of_short_brief_lines_is_flagged() {
         use serde_json::json;
@@ -7857,7 +7864,7 @@ mod config_tests {
             (
                 75000,
                 "response_end",
-                json!({"index": 2, "chars": 200, "text": format!("{brief}\n{brief}")}),
+                json!({"index": 2, "chars": 200, "text": format!("{brief}\n{brief}"), "flushed": true}),
             ),
         ]);
         assert!(super::unprompted_assistant_response_starts(&entries, 53790).is_empty());

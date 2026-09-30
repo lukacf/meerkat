@@ -52,6 +52,15 @@ them.
   discarding it. Public signatures are unchanged; `McpConnection::call_tool_text`
   includes the derived JSON text.
 
+### Added
+
+- Optional connection-local host form elicitation for MCP stdio, SSE and
+  streamable HTTP, including both native router connection paths. Existing
+  constructors keep their default handler. Host factories receive the exact
+  selected server configuration; authentication remains with the auth resolver.
+  Other callbacks are not enabled by this first profile. AgentFactory, SDK and
+  Toolkit configuration of this optional service remain separate follow-ups.
+
 ### Fixed
 
 - WorkGraph observations, including execution recovery, distinguish an

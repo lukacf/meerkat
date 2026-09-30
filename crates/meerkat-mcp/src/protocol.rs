@@ -8,18 +8,24 @@ use meerkat_core::ToolDef;
 use meerkat_core::types::{ContentBlock, ToolProvenance, ToolSourceKind};
 use rmcp::{
     model::{CallToolRequestParams, CallToolResult, Content, RawContent},
-    service::{RoleClient, RunningService},
+    service::{Peer, RoleClient, RunningService},
 };
 use serde_json::Value;
 
 use crate::McpError;
 
 pub struct McpProtocol {
-    service: RunningService<RoleClient, ()>,
+    service: crate::client_service::ConnectedClient,
 }
 
 impl McpProtocol {
     pub fn new(service: RunningService<RoleClient, ()>) -> Self {
+        Self {
+            service: service.into(),
+        }
+    }
+
+    pub(crate) fn from_client(service: crate::client_service::ConnectedClient) -> Self {
         Self { service }
     }
 
@@ -82,7 +88,7 @@ impl McpProtocol {
 /// refuse the whole observation rather than publishing a partial tool list.
 /// Cursors are opaque; repeated cursors are a protocol error, not completion.
 pub(crate) async fn list_all_tools(
-    service: &RunningService<RoleClient, ()>,
+    service: &Peer<RoleClient>,
     server_name: &str,
 ) -> Result<Vec<ToolDef>, McpError> {
     let mut request = None;

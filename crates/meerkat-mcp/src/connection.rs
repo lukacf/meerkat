@@ -1,6 +1,7 @@
 //! MCP connection management
 
 use crate::McpError;
+use crate::client_service::{ClientServiceSelection, ConnectedClient, McpClientServiceFactory};
 use crate::transport::sse::{SseClientConfig, SseClientTransport};
 use crate::transport::{
     headers_from_map, sse::ReqwestSseClient, streamable_http::ReqwestStreamableHttpClient,
@@ -13,11 +14,7 @@ use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
 use meerkat_core::types::ContentBlock;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::{
-    model::CallToolRequestParams,
-    service::{RoleClient, RunningService, ServiceExt},
-    transport::TokioChildProcess,
-};
+use rmcp::{model::CallToolRequestParams, transport::TokioChildProcess};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,7 +23,7 @@ use tokio::process::Command;
 /// Connection to an MCP server
 pub struct McpConnection {
     config: McpServerConfig,
-    service: RunningService<RoleClient, ()>,
+    service: ConnectedClient,
 }
 
 #[async_trait]
@@ -72,6 +69,20 @@ impl McpConnection {
         auth_mode: McpAuthMode,
         auth_resolver: Option<Arc<dyn McpAuthResolver>>,
     ) -> Result<Self, McpError> {
+        Self::connect_with_services(config, auth_mode, auth_resolver, None).await
+    }
+
+    /// Connect with an optional host client-service factory. The first profile
+    /// forwards form elicitation only; authentication remains with the resolver.
+    /// Each physical attempt receives a fresh service for this exact config.
+    pub async fn connect_with_services(
+        config: &McpServerConfig,
+        auth_mode: McpAuthMode,
+        auth_resolver: Option<Arc<dyn McpAuthResolver>>,
+        client_factory: Option<Arc<dyn McpClientServiceFactory>>,
+    ) -> Result<Self, McpError> {
+        // Refusal precedes process spawn, SSE startup and HTTP transport effects.
+        let client = ClientServiceSelection::select(config, client_factory.as_deref())?;
         let service = match &config.transport {
             McpTransportConfig::Stdio(stdio) => {
                 let mut cmd = Command::new(&stdio.command);
@@ -85,7 +96,8 @@ impl McpConnection {
                         reason: format!("Failed to spawn process: {e}"),
                     })?;
 
-                ().serve(transport)
+                client
+                    .serve(transport)
                     .await
                     .map_err(|e| McpError::ConnectionFailed {
                         reason: format!("Failed to establish MCP connection: {e}"),
@@ -102,13 +114,15 @@ impl McpConnection {
                             &http.url,
                             auth_mode,
                             auth_resolver,
+                            client_factory,
+                            client,
                         )
                         .await;
                     }
                     McpHttpTransport::Sse => {
-                        let client = ReqwestSseClient::new(headers);
+                        let http_client = ReqwestSseClient::new(headers);
                         let transport = SseClientTransport::start_with_client(
-                            client,
+                            http_client,
                             SseClientConfig {
                                 sse_endpoint: http.url.clone().into(),
                                 use_message_endpoint: None,
@@ -118,7 +132,8 @@ impl McpConnection {
                         .map_err(|e| McpError::ConnectionFailed {
                             reason: format!("Failed to establish SSE connection: {e}"),
                         })?;
-                        ().serve(transport)
+                        client
+                            .serve(transport)
                             .await
                             .map_err(|e| McpError::ConnectionFailed {
                                 reason: format!("Failed to establish MCP connection: {e}"),
@@ -140,12 +155,14 @@ impl McpConnection {
         url: &str,
         auth_mode: McpAuthMode,
         auth_resolver: Option<Arc<dyn McpAuthResolver>>,
+        client_factory: Option<Arc<dyn McpClientServiceFactory>>,
+        client: ClientServiceSelection,
     ) -> Result<Self, McpError> {
         let has_static_authorization = headers
             .keys()
             .any(|name| name.as_str().eq_ignore_ascii_case("authorization"));
         if has_static_authorization {
-            return Self::connect_streamable_http_once(config, headers, url, None, None)
+            return Self::connect_streamable_http_once(config, headers, url, None, None, client)
                 .await
                 .map_err(StreamableConnectError::into_mcp_error);
         }
@@ -175,9 +192,16 @@ impl McpConnection {
                 .interactive_login(&target, None)
                 .await
                 .map_err(mcp_auth_error_to_connection_failed)?;
-            return Self::connect_streamable_http_once(config, headers, url, Some(token), None)
-                .await
-                .map_err(StreamableConnectError::into_mcp_error);
+            return Self::connect_streamable_http_once(
+                config,
+                headers,
+                url,
+                Some(token),
+                None,
+                client,
+            )
+            .await
+            .map_err(StreamableConnectError::into_mcp_error);
         }
         let first = Self::connect_streamable_http_once(
             config,
@@ -185,6 +209,7 @@ impl McpConnection {
             url,
             stored_token.clone(),
             Some(crate::transport::streamable_http::AuthChallengeRecorder::default()),
+            client,
         )
         .await;
         match first {
@@ -220,9 +245,20 @@ impl McpConnection {
                         .await
                         .map_err(mcp_auth_error_to_connection_failed)?,
                 };
-                Self::connect_streamable_http_once(config, headers, url, Some(token), None)
-                    .await
-                    .map_err(StreamableConnectError::into_mcp_error)
+                // The first attempt consumed its service. A retry selects a
+                // fresh owner for the same config before touching transport.
+                let retry_client =
+                    ClientServiceSelection::select(config, client_factory.as_deref())?;
+                Self::connect_streamable_http_once(
+                    config,
+                    headers,
+                    url,
+                    Some(token),
+                    None,
+                    retry_client,
+                )
+                .await
+                .map_err(StreamableConnectError::into_mcp_error)
             }
             Err(err) => Err(err.into_mcp_error()),
         }
@@ -234,22 +270,23 @@ impl McpConnection {
         url: &str,
         bearer_token: Option<String>,
         recorder: Option<crate::transport::streamable_http::AuthChallengeRecorder>,
+        client: ClientServiceSelection,
     ) -> Result<Self, StreamableConnectError> {
         let recorder = recorder.unwrap_or_default();
-        let client =
+        let http_client =
             ReqwestStreamableHttpClient::new_with_auth_challenge(headers, recorder.clone());
         let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
         if let Some(token) = bearer_token {
             transport_config = transport_config.auth_header(token);
         }
-        let transport = StreamableHttpClientTransport::with_client(client, transport_config);
-        let service =
-            ().serve(transport)
-                .await
-                .map_err(|error| StreamableConnectError {
-                    reason: format!("Failed to establish MCP connection: {error}"),
-                    auth: recorder.take(),
-                })?;
+        let transport = StreamableHttpClientTransport::with_client(http_client, transport_config);
+        let service = client
+            .serve(transport)
+            .await
+            .map_err(|error| StreamableConnectError {
+                reason: format!("Failed to establish MCP connection: {error}"),
+                auth: recorder.take(),
+            })?;
         Ok(Self {
             config: config.clone(),
             service,
@@ -275,6 +312,17 @@ impl McpConnection {
         auth_mode: McpAuthMode,
         auth_resolver: Option<Arc<dyn McpAuthResolver>>,
     ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
+        Self::connect_and_enumerate_with_services(config, auth_mode, auth_resolver, None).await
+    }
+
+    /// Connect and enumerate under the existing timeout, with an exact-attempt
+    /// host service factory. Native staged and synchronous router paths use this.
+    pub async fn connect_and_enumerate_with_services(
+        config: &McpServerConfig,
+        auth_mode: McpAuthMode,
+        auth_resolver: Option<Arc<dyn McpAuthResolver>>,
+        client_factory: Option<Arc<dyn McpClientServiceFactory>>,
+    ) -> Result<(Self, Vec<Arc<ToolDef>>), McpError> {
         let timeout_secs = config
             .connect_timeout_secs
             .unwrap_or(Self::DEFAULT_CONNECT_TIMEOUT_SECS);
@@ -285,7 +333,9 @@ impl McpConnection {
 
         let server_name = config.name.clone();
         tokio::time::timeout(timeout, async {
-            let conn = Self::connect_with_mcp_auth(config, auth_mode, auth_resolver).await?;
+            let conn =
+                Self::connect_with_services(config, auth_mode, auth_resolver, client_factory)
+                    .await?;
             let tools = conn
                 .list_tools(&server_name)
                 .await?
@@ -301,6 +351,12 @@ impl McpConnection {
                 config.name
             ),
         })?
+    }
+
+    /// Transfer this exact connected owner into the protocol wrapper without
+    /// another handshake or host-service selection.
+    pub fn into_protocol(self) -> crate::McpProtocol {
+        crate::McpProtocol::from_client(self.service)
     }
 
     /// Get the config used to create this connection.

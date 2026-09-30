@@ -3,6 +3,7 @@
 //! Connect to MCP servers and route tool calls.
 
 mod adapter;
+mod client_service;
 mod connection;
 mod error;
 pub mod external_tool_surface_authority;
@@ -13,6 +14,7 @@ mod transport;
 
 pub use adapter::McpRouterAdapter;
 pub use adapter::{McpNotReady, McpReloadFailure, McpReloadReport};
+pub use client_service::McpClientServiceFactory;
 pub use connection::{McpAuthResolver, McpConnection};
 pub use error::McpError;
 pub use meerkat_core::{ExternalToolDelta, ExternalToolDeltaPhase};
@@ -46,3 +48,6 @@ inventory::submit! {
         extensions: &[],
     }
 }
+
+#[cfg(test)]
+mod client_service_tests;

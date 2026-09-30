@@ -44,7 +44,13 @@ name = "lifecycle_contract"
 path = "tests/lifecycle_contract.rs"
 required-features = ["test-support"]
 
+[[test]]
+name = "form_elicitation"
+path = "tests/form_elicitation.rs"
+required-features = ["test-support"]
+
 [dev-dependencies]
+mcp-test-server = { path = "../../tests/fixtures/mcp-test-server" } # test-only shared rmcp handler; never a published runtime dependency
 tokio = { workspace = true, features = ["test-util", "macros"] }
 meerkat-runtime = { path = "../meerkat-runtime", default-features = false } # path-only (no version): breaks packaging dev-dep cycle; flags mirror the workspace dep
 axum = { workspace = true }

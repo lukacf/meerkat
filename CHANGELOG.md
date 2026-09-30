@@ -779,6 +779,23 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   regeneration would have dropped them), and tests that read the committed
   browser voice fixtures declare `//:live_smoke_browser_fixtures`, so the
   integration crate's unit test finds them in remote runfiles.
+- GPT Live no longer talks over a user who pauses mid-thought. gpt-live-1
+  backchanneled ("mm-hm", "got it, Tuesday afternoon") into 700-900 ms pauses
+  of a long spoken request and sometimes delegated at a pause before the
+  request itself was said; the public API exposes no turn-detection setting,
+  so the default client-context session instructions now ask the model to
+  let the user finish: stay silent through pauses, including after a filler
+  ("um", "uh", "so"), no backchannels, no repeating details back, and no
+  delegation until the user has finished. Hosts: the guidance is part of the
+  default client-context instructions (also used by the deprecated private
+  GPT Live operator profile), so a host preface that asks the voice to read
+  details back now meets "do not repeat details back while the user is still
+  talking"; the rule only covers the user's own turn, and a preface that
+  needs read-back mid-utterance should say so explicitly or override the
+  instructions.
+  The S103 monologue fixture is re-minted so its three pauses sit inside a
+  clause, as the scenario documents, instead of two of them after a finished
+  sentence.
 - The placed-member external-edge route inputs (`RecordExternalRouteInstall`,
   `AuthorizeExternalRouteRemovalBeforeUnwire`, `ResolveExternalRouteInstall`,
   `RollbackExternalRouteInstall`) are now declared runtime-internal in the

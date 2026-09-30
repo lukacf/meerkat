@@ -14,7 +14,9 @@ use subtle::ConstantTimeEq;
 ///
 /// The secret is resolved once from the environment at construction time
 /// (via `from_env()`), not on every request. This avoids TOCTOU issues.
-#[derive(Debug, Clone, Default)]
+///
+/// `Debug` redacts the secret.
+#[derive(Clone, Default)]
 pub enum WebhookAuth {
     /// No authentication — accept all requests.
     #[default]
@@ -24,6 +26,18 @@ pub enum WebhookAuth {
         /// The expected secret value (read from env at construction time).
         secret: String,
     },
+}
+
+impl std::fmt::Debug for WebhookAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::SharedSecret { .. } => f
+                .debug_struct("SharedSecret")
+                .field("secret", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 impl WebhookAuth {
@@ -67,6 +81,14 @@ pub fn verify_webhook(headers: &HeaderMap, auth: &WebhookAuth) -> Result<(), &'s
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webhook_auth_debug_redacts_secret() {
+        const SECRET: &str = "sk-live-secret-value";
+        let rendered = format!("{:?} {:#?}", auth_secret(SECRET), auth_secret(SECRET));
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
 
     fn auth_secret(s: &str) -> WebhookAuth {
         WebhookAuth::SharedSecret {

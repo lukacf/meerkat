@@ -1524,13 +1524,31 @@ struct StoredMcpOAuthDiscovery {
     scopes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `Debug` redacts the client secret.
+#[derive(Clone, Serialize, Deserialize)]
 struct StoredMcpOAuthClient {
     client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_secret: Option<String>,
     token_endpoint_auth_method: String,
     redirect_uri: String,
+}
+
+impl std::fmt::Debug for StoredMcpOAuthClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredMcpOAuthClient")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "token_endpoint_auth_method",
+                &self.token_endpoint_auth_method,
+            )
+            .field("redirect_uri", &self.redirect_uri)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1564,6 +1582,21 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
+
+    #[test]
+    fn stored_mcp_oauth_client_debug_redacts_client_secret() {
+        const SECRET: &str = "sk-live-secret-value";
+        let client = StoredMcpOAuthClient {
+            client_id: "client-visible".into(),
+            client_secret: Some(SECRET.into()),
+            token_endpoint_auth_method: "client_secret_post".into(),
+            redirect_uri: "http://127.0.0.1:1/callback".into(),
+        };
+        let rendered = format!("{client:?} {client:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(rendered.contains("client-visible"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
 
     /// A certified `AuthMachine` lease handle for tests. `meerkat-runtime` is a
     /// dev-dependency, so tests can mint the same generated lease the CLI

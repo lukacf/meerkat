@@ -16,8 +16,9 @@ use tokio::time::timeout;
 
 use super::{PersistedAuthMode, PersistedTokens};
 
-/// Spec for a subprocess-based credential source.
-#[derive(Debug, Clone)]
+/// Spec for a subprocess-based credential source. `Debug` redacts argument
+/// and env values.
+#[derive(Clone)]
 pub struct CommandCredentialSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
@@ -25,6 +26,24 @@ pub struct CommandCredentialSpec {
     pub env: HashMap<String, String>,
     pub timeout_ms: u64,
     pub refresh_interval_ms: Option<u64>,
+}
+
+impl std::fmt::Debug for CommandCredentialSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env: std::collections::BTreeMap<&str, &str> = self
+            .env
+            .keys()
+            .map(|name| (name.as_str(), "<redacted>"))
+            .collect();
+        f.debug_struct("CommandCredentialSpec")
+            .field("program", &self.program)
+            .field("args", &vec!["<redacted>"; self.args.len()])
+            .field("cwd", &self.cwd)
+            .field("env", &env)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("refresh_interval_ms", &self.refresh_interval_ms)
+            .finish()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -130,6 +149,24 @@ impl CommandCredentialRunner {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_credential_spec_debug_redacts_args_and_env_values() {
+        const SECRET: &str = "sk-live-secret-value";
+        let spec = CommandCredentialSpec {
+            program: "print-token".into(),
+            args: vec!["--key".into(), SECRET.into()],
+            cwd: None,
+            env: HashMap::from([("TOKEN_SEED".to_string(), SECRET.to_string())]),
+            timeout_ms: 1_000,
+            refresh_interval_ms: None,
+        };
+        let rendered = format!("{spec:?} {spec:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        for kept in ["print-token", "TOKEN_SEED", "<redacted>"] {
+            assert!(rendered.contains(kept), "missing {kept}: {rendered}");
+        }
+    }
 
     fn spec_echo(token: &str) -> CommandCredentialSpec {
         CommandCredentialSpec {

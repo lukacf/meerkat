@@ -91,9 +91,17 @@ pub trait OpenAiLiveSessionFactory: Send + Sync {
 }
 
 /// Concrete OpenAI live client backed by `oai-rt-rs`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiLiveClient {
     api_key: String,
+}
+
+impl std::fmt::Debug for OpenAiLiveClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiLiveClient")
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl OpenAiLiveClient {
@@ -6424,6 +6432,14 @@ fn translate_realtime_event(event: RealtimeSessionEvent) -> LiveAdapterObservati
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openai_live_client_debug_redacts_api_key() {
+        const SECRET: &str = "sk-live-secret-value";
+        let rendered = format!("{:?}", OpenAiLiveClient::new(SECRET));
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
     use meerkat_contracts::{
         RealtimeAudioChunk, RealtimeInputChunk, RealtimeInputKind, RealtimeOutputKind,
         RealtimeTextChunk, RealtimeTurningMode,

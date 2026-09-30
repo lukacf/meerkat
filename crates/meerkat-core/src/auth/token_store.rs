@@ -186,8 +186,8 @@ pub enum PersistedAuthMode {
     Command,
 }
 
-/// Serializable token bundle.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Serializable token bundle. `Debug` redacts the secret and tokens.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PersistedTokens {
     pub auth_mode: PersistedAuthMode,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -214,6 +214,23 @@ pub struct PersistedTokens {
     pub account_id: Option<String>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+}
+
+impl std::fmt::Debug for PersistedTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::optional;
+        f.debug_struct("PersistedTokens")
+            .field("auth_mode", &self.auth_mode)
+            .field("primary_secret", &optional(&self.primary_secret))
+            .field("refresh_token", &optional(&self.refresh_token))
+            .field("id_token", &optional(&self.id_token))
+            .field("expires_at", &self.expires_at)
+            .field("last_refresh", &self.last_refresh)
+            .field("scopes", &self.scopes)
+            .field("account_id", &self.account_id)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
 }
 
 impl PersistedTokens {
@@ -512,6 +529,19 @@ pub trait RefreshCoordinator: Send + Sync {
 mod tests {
     use super::*;
     use crate::{CredentialAccountRef, connection::BindingOrigin};
+
+    #[test]
+    fn persisted_tokens_debug_redacts_secret_and_tokens() {
+        const SECRET: &str = "sk-live-secret-value";
+        let mut tokens = PersistedTokens::api_key(SECRET);
+        tokens.refresh_token = Some(format!("refresh-{SECRET}"));
+        tokens.id_token = Some(format!("id-{SECRET}"));
+        tokens.account_id = Some("acct-visible".into());
+        let rendered = format!("{tokens:?} {tokens:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(rendered.contains("acct-visible"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
 
     #[test]
     fn binding_key_serialization_remains_legacy_compatible() {

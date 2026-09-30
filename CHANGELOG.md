@@ -151,6 +151,14 @@ them.
   and `McpAddParams`), `SkillRepoTransport`, the hook `CommandRuntimeConfig`
   and `HttpRuntimeConfig`, and the internal MCP SSE and streamable HTTP
   clients' header maps. `Serialize` and equality are unchanged.
+- `Debug` output of credential-carrying auth types no longer exposes secrets:
+  `CredentialSourceSpec` (inline secret, command argument and env values),
+  `ResolvedAuthEnvelope` (secret, header values), `PersistedTokens` (primary
+  secret, refresh and id tokens), `OAuthTokenResult`, `CommandCredentialSpec`,
+  `AzureClientCredentials`, the stored MCP OAuth client secret, the
+  `CreateProfileParams`, `ProvisionApiKeyParams` and
+  `RestAuthProfileCreateRequest` wire requests, the OpenAI live and realtime
+  text clients' API keys, and `WebhookAuth`.
 - WorkGraph observations, including execution recovery, distinguish an
   unavailable backing store from an absent record and preserve one read-only
   snapshot across schema validation and data queries. Ordinary writes also

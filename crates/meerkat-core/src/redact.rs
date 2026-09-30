@@ -73,6 +73,11 @@ impl fmt::Debug for RedactedUrl<'_> {
     }
 }
 
+/// An optional secret: `None`, or `Some("<redacted>")`.
+pub(crate) fn optional<T>(value: &Option<T>) -> Option<&'static str> {
+    value.as_ref().map(|_| REDACTED)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -32,12 +32,24 @@ use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 
 const DEFAULT_AUTHORITY: &str = "https://login.microsoftonline.com";
 
-#[derive(Clone, Debug)]
+/// `Debug` redacts the client secret.
+#[derive(Clone)]
 pub struct AzureClientCredentials {
     pub tenant_id: String,
     pub client_id: String,
     pub client_secret: String,
     pub authority_host: String,
+}
+
+impl std::fmt::Debug for AzureClientCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AzureClientCredentials")
+            .field("tenant_id", &self.tenant_id)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("authority_host", &self.authority_host)
+            .finish()
+    }
 }
 
 impl AzureClientCredentials {
@@ -284,5 +296,25 @@ impl HttpAuthorizer for AzureAdAuthorizer {
 
     fn expires_at(&self) -> Option<DateTime<Utc>> {
         self.cached_expires_at()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn azure_client_credentials_debug_redacts_client_secret() {
+        const SECRET: &str = "sk-live-secret-value";
+        let credentials = AzureClientCredentials {
+            tenant_id: "tenant-visible".into(),
+            client_id: "client-visible".into(),
+            client_secret: SECRET.into(),
+            authority_host: DEFAULT_AUTHORITY.into(),
+        };
+        let rendered = format!("{credentials:?} {credentials:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(rendered.contains("tenant-visible"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
     }
 }

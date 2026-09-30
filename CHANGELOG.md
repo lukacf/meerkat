@@ -829,6 +829,12 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   the lifecycle operation that later retires or reloads the member takes it
   over. The operation-binding restore used for running members keeps
   failing closed on the same refusal.
+- `delivery_terminal_wait` no longer flakes under load: its retire step
+  joins the single-flight retirement to its terminal instead of failing on
+  the typed in-progress answer the 2 s test budget returns for a slow saga,
+  and its past-deadline read accepts both documented outcomes
+  (`NotAdmittedByDeadline`, or `NotObservedByDeadline` when the one read
+  cannot finish within the 100 ms floor).
 - Two Release Turbo S flakes are deterministic. The live-adapter smokes
   (scenarios 71 and 72) read their spoken inputs from committed, verified
   fixtures (`tests/integration/fixtures/live_adapter_tts`, minted by

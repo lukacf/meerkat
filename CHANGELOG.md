@@ -56,6 +56,11 @@ them.
   refuse a missing or non-current store, so a failed read cannot be followed by
   silent recreation on the next write. Unavailable-store errors use the public
   backend label `sqlite`; host paths and full open failures remain in tracing.
+- A WorkGraph store operation refused by a held SQLite maintenance fence is
+  `WorkGraphError::BackingStoreUnavailable` (backend `sqlite`, reason
+  "storage is under offline maintenance") instead of a `Store` error whose
+  message carried the host database path. The public classification stays
+  `StoreError`; the path is logged in tracing only.
 
 ## [0.8.49] - 2026-09-30
 

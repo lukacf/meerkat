@@ -671,8 +671,9 @@ unprompted.";
 /// whether a typed request still needs a response to the model.
 pub const LIVE_SUPERSEDED_TYPED_PREFIX: &str = "From the text chat, typed before the spoken turns you have \
 already heard in this call and delivered late (context data): whatever the user has said aloud since supersedes it \
-where they conflict, so never restate a value it sets that later speech replaced as current. If it is a user request \
-that the later speech did not replace, it still needs a response.";
+only where they conflict, so never restate a value that later speech replaced as current; everything else it states \
+still holds and is current. If it is a user request that the later speech did not replace, it still needs a \
+response.";
 
 /// Startup instructions with the history framing appended once, for the
 /// open whose summary rides the startup `input` as a developer item.
@@ -8297,7 +8298,8 @@ mod tests {
     fn superseded_typed_framing_leaves_the_response_decision_to_the_model() {
         let framing = super::LIVE_SUPERSEDED_TYPED_PREFIX;
         assert!(framing.contains("typed before the spoken turns"));
-        assert!(framing.contains("supersedes it where they conflict"));
+        assert!(framing.contains("supersedes it only where they conflict"));
+        assert!(framing.contains("everything else it states still holds"));
         assert!(framing.contains("still needs a response"));
         // The spoken turns were heard; the row itself never claims to be.
         for false_claim in [
@@ -19415,18 +19417,33 @@ mod tests {
                         )
                     })
                     .unwrap();
+                // The heard correction's own replay (framed as already heard)
+                // follows the older typed fact.
                 let spoken = commands
                     .iter()
                     .position(|command| {
                         matches!(
                             command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
-                            if text.contains("Spoken code: Cyan.")
+                            if text.starts_with(LIVE_CAUSAL_REPLAY_PREFIX)
+                                && text.contains("Spoken code: Cyan.")
                         )
                     })
                     .unwrap();
                 assert!(
                     typed < spoken,
                     "the newer spoken fact must follow the older typed fact"
+                );
+                // The superseded typed row also carries that correction in the
+                // same append, after the typed text.
+                assert!(
+                    commands.iter().any(|command| matches!(
+                        command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                        if text.starts_with(LIVE_SUPERSEDED_TYPED_PREFIX)
+                            && text.find("Newer code: Amber.").is_some_and(|typed_at| text
+                                .find("Spoken code: Cyan.")
+                                .is_some_and(|spoken_at| typed_at < spoken_at))
+                    )),
+                    "the superseded typed row carries its correction after it"
                 );
                 assert!(
                     commands.iter().any(|command| matches!(

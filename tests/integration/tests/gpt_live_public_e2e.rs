@@ -1839,6 +1839,27 @@ fn s99_answer_keeps_everything_from_the_onset_without_in_flight_speech() {
     assert!(s99_in_flight_at_onset(&events, 0).is_none());
 }
 
+/// The dropped-word miss: the answer begins after the in-flight chain goes
+/// quiet, inside a pause of the question, and finishes after the question's
+/// last words. The whole answer is kept; a threshold at the question's last
+/// input delta (minus the trailing-punctuation tolerance) dropped
+/// "Otter willow".
+#[test]
+fn s99_answer_keeps_an_answer_that_begins_in_a_pause_of_the_question() {
+    let events = s99_oracle_events(&[
+        ("assistant", 9_000.0, "And that is the context."),
+        ("user", 10_000.0, " Now tell me the phrase,"),
+        ("assistant", 11_600.0, " Otter willow"),
+        ("user", 13_000.0, " do not guess."),
+        ("assistant", 13_100.0, " falcon maple badger."),
+    ]);
+    assert_eq!(
+        s99_answer_text(&events, 0),
+        " Otter willow falcon maple badger."
+    );
+    assert!(s99_in_flight_at_onset(&events, 0).is_some());
+}
+
 /// Assistant transcript of the exchange at `start` that began before the
 /// question's first input delta: a response already streaming at the onset,
 /// recorded as evidence (`s99_answer_text` excludes it and its continuation).

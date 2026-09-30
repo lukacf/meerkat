@@ -3824,6 +3824,32 @@ pub struct LiveContextAppendAuthority {
     provider_dispatch_consumed: Arc<AtomicBool>,
 }
 
+/// Heading between a superseded typed row and the user speech that
+/// superseded it, carried in the same append so the model never holds the
+/// stale value without its correction.
+pub const LIVE_SUPERSEDING_SPEECH_HEADING: &str =
+    "Said aloud later in this call, superseding it where they conflict:";
+
+/// Payload of a superseded typed row: the row, then every later heard user
+/// speech row still queued behind it, in canonical order.
+#[must_use]
+pub fn superseded_typed_row_context<'a>(
+    typed: &str,
+    superseding_speech: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let mut context = typed.to_string();
+    let mut speech = superseding_speech.into_iter().peekable();
+    if speech.peek().is_some() {
+        context.push('\n');
+        context.push_str(LIVE_SUPERSEDING_SPEECH_HEADING);
+        for row in speech {
+            context.push('\n');
+            context.push_str(row);
+        }
+    }
+    context
+}
+
 /// Generated purpose of an append, never a caller-selected provider role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveContextAppendKind {
@@ -4217,6 +4243,13 @@ impl LiveContextQueuedRow {
             LiveContextRowDisposition::ReassertCausalTail
                 | LiveContextRowDisposition::ReassertAssistantOutput
         )
+    }
+
+    /// A quiet replay of user speech this call heard live: the rows that can
+    /// supersede a typed row held behind a late summary.
+    #[must_use]
+    pub fn is_heard_speech_replay(&self) -> bool {
+        self.disposition == LiveContextRowDisposition::ReassertCausalTail
     }
 
     /// A quiet replay of runtime work output the model has never seen, such

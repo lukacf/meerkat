@@ -906,6 +906,21 @@ mod live_context_mirror_tests {
             assert_eq!(records[0].1, "frozen historical prefix");
             assert!(records[1].1.contains("new typed correction"));
             assert!(!records[1].1.contains("old source"));
+            // The superseded typed row carries the speech that superseded
+            // it, after it, in one append.
+            let typed_at = records[1]
+                .1
+                .find("new typed correction")
+                .expect("typed row");
+            let heading_at = records[1]
+                .1
+                .find(crate::live_execution::LIVE_SUPERSEDING_SPEECH_HEADING)
+                .expect("superseding heading");
+            let spoken_at = records[1]
+                .1
+                .find("spoken correction while history is pending")
+                .expect("superseding speech rides with the typed row");
+            assert!(typed_at < heading_at && heading_at < spoken_at);
             assert!(
                 records[2]
                     .1
@@ -10816,6 +10831,40 @@ impl MeerkatMachine {
                         .remove(&key);
                     continue;
                 }
+            };
+            // A typed row superseded by newer heard speech (generated edge
+            // AuthorizeLiveContextAppendSuperseded) travels together with the
+            // speech rows that superseded it, in canonical order: sent alone,
+            // the model spoke its stale value before the correction's replay
+            // arrived (S99). The later rows still replay on their own edges.
+            let context = if authority.kind()
+                == crate::live_execution::LiveContextAppendKind::SupersededTypedRow
+            {
+                let queued_rows = self
+                    .shared
+                    .live_context_queued_rows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut superseding: Vec<(u64, String)> = queued_rows
+                    .iter()
+                    .filter(|((row_session, row_cursor), row)| {
+                        row_session == session_id
+                            && *row_cursor > next_cursor
+                            && row.is_heard_speech_replay()
+                    })
+                    .filter_map(|((_, row_cursor), row)| {
+                        row.provider_context()
+                            .map(|text| (*row_cursor, text.to_string()))
+                    })
+                    .collect();
+                drop(queued_rows);
+                superseding.sort_by_key(|(row_cursor, _)| *row_cursor);
+                crate::live_execution::superseded_typed_row_context(
+                    &context,
+                    superseding.iter().map(|(_, text)| text.as_str()),
+                )
+            } else {
+                context
             };
             drop(projection_guard);
             let (returned_authority, outcome) = host

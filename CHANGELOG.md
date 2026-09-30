@@ -817,6 +817,18 @@ fix: status polling no longer starves a staged run's start (#1226); see the
 
 ### Fixed
 
+- A cold mob actor no longer fail-stops at startup when a stopped member's
+  previous session runtime has already reached Stopped. Its cleanup-delivery
+  recovery re-registers that session, which clears the member binding, and
+  the runtime then refuses the unbound composition endpoint (typed,
+  pre-effect `RegistrationOwned`) while the previous attachment's retained
+  cleanup tail still owns the registration. Startup mapped that refusal to
+  an internal error and exited before admitting a command, so every command
+  on the handle returned `ActorCommandChannelClosed`. Delivery custody now
+  stays with the registration's owner at that seam and startup continues;
+  the lifecycle operation that later retires or reloads the member takes it
+  over. The operation-binding restore used for running members keeps
+  failing closed on the same refusal.
 - Two Release Turbo S flakes are deterministic. The live-adapter smokes
   (scenarios 71 and 72) read their spoken inputs from committed, verified
   fixtures (`tests/integration/fixtures/live_adapter_tts`, minted by

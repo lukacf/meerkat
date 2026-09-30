@@ -360,7 +360,7 @@ GitHub-hosted runners and sized to a 25-minute push-to-terminal budget:
   changes never start the machine lanes) changed.
 - `clippy`: one lane per shard of every directly changed package
   (`clippy --no-deps --all-targets --all-features -D warnings`).
-- `unit`: `nextest --lib --bins --profile ci-pr` (identical to `fast`) for
+- `unit`: `nextest --lib --bins --profile ci-pr` (`fast` plus a 4-minute hung-test kill) for
   the changed packages outside the meerkat-mob compile chain; crates that
   compile `meerkat-mob` (mob, mob-mcp, mob-pack, rpc, rest, mcp-server,
   rkat, web-runtime, integration-tests, machine-codegen, machine-dsl-tests,

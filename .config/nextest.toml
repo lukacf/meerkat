@@ -33,14 +33,28 @@ success-output = "immediate-final"
 filter = 'test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'
 slow-timeout = { period = "60s", terminate-after = 8 }
 
-# Pull-request CI unit lane (ci.yml). Identical to `fast`: nothing is
-# excluded from the PR lane. The profile exists so the lane has its own name
+# Pull-request and main CI unit lanes (ci.yml). `fast` plus a hang bound:
+# nothing is excluded from the lanes. The profile exists so the lane has its own name
 # for a PR-lane-only adjustment, and so that any such adjustment is a
 # reviewed change here rather than an ad hoc filter in the workflow. #1160
 # replaced the fixed peer-admission p99 bound with a budget derived from an
 # unwedged baseline on the same host, so that test runs here too.
 [profile.ci-pr]
 inherits = "fast"
+# CI safety net, not a correctness mechanism: `fast` only reports a test
+# still running each minute, so a hung test held its lane until the job
+# timeout (40 min PR, 60 min main) and the run said nothing about which test.
+# Bound it exactly like ci-unit: after four slow periods nextest kills the
+# test and reports it as a named failure.
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[[profile.ci-pr.overrides]]
+# The same exact-case headroom ci-unit grants: this workflow-style xtask test
+# (the xtask[machine-authority] feature suite runs it in this profile) does
+# nested machine-authority compilation and measured about 4.5 minutes on
+# GitHub-hosted runners.
+filter = 'test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'
+slow-timeout = { period = "60s", terminate-after = 8 }
 
 [profile.fast]
 # Cargo's default fast lane: unit + integration-fast, with dedicated e2e lane

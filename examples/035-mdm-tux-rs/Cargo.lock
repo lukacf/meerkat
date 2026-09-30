@@ -2096,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2140,7 +2140,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-anthropic"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-atif"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "chrono",
  "meerkat-core",
@@ -2174,7 +2174,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-auth-core"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "axum",
@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-capabilities"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "inventory",
  "meerkat-core",
@@ -2217,7 +2217,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-client"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "meerkat-anthropic",
  "meerkat-core",
@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-comms"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "base64",
@@ -2262,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-contracts"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "base64",
  "chrono",
@@ -2282,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-copilot"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2303,7 +2303,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-core"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "base64",
@@ -2335,7 +2335,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-gemini"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2359,7 +2359,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-hooks"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-jobs"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-live"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "axum",
@@ -2416,7 +2416,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-llm-core"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2440,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-derive"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "quote",
  "syn 2.0.117",
@@ -2448,14 +2448,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-dsl"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "meerkat-machine-dsl-core",
 ]
 
 [[package]]
 name = "meerkat-machine-dsl-core"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2464,7 +2464,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-kernels"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "indexmap",
  "meerkat-core",
@@ -2475,7 +2475,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-schema"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "indexmap",
  "meerkat-core",
@@ -2487,7 +2487,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mcp"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "futures",
@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-memory"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "hnsw_rs",
@@ -2531,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2569,7 +2569,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2597,14 +2597,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-models"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "meerkat-core",
 ]
 
 [[package]]
 name = "meerkat-openai"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2633,7 +2633,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-providers"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "meerkat-auth-core",
  "meerkat-llm-core",
@@ -2641,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-rpc"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "axum",
@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-runtime"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2704,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-schedule"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2728,7 +2728,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-session"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "futures",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-skills"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "indexmap",
@@ -2773,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-sqlite"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "rusqlite",
  "thiserror 2.0.18",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2804,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-tools"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "base64",
@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-workgraph"
-version = "0.8.48"
+version = "0.8.49"
 dependencies = [
  "async-trait",
  "chrono",

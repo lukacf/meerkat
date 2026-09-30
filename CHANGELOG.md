@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.49] - 2026-09-30
+
 0.8.48 was tagged but never published to crates.io or GitHub Releases, so
 this is the first published release after 0.8.47. It also carries the 0.8.48
 fix: status polling no longer starves a staged run's start (#1226); see the
@@ -15444,7 +15446,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.48...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.49...HEAD
+[0.8.49]: https://github.com/lukacf/meerkat/compare/v0.8.48...v0.8.49
 [0.8.48]: https://github.com/lukacf/meerkat/compare/v0.8.47...v0.8.48
 [0.8.47]: https://github.com/lukacf/meerkat/compare/v0.8.46...v0.8.47
 [0.8.46]: https://github.com/lukacf/meerkat/compare/v0.8.45...v0.8.46

@@ -116,12 +116,12 @@
       "name": "standup_headings",
       "file": "standup-headings.wav",
       "voice": "coral",
-      "text": "Read me the headings of the second one.",
-      "sha256": "55083d0f3a489e2211a08cb37a940909e1a98a37dfe2350693e8925206834ab0",
-      "duration_ms": 4503,
+      "text": "Have the executor open that plan file and read me every heading in it, then tell me how many lines it has.",
+      "sha256": "f8e2d2bb4e94229c578f817124e5e1104b55293380d1bbcfde921a7dd35cc778",
+      "duration_ms": 7846,
       "sample_rate_hz": 24000,
-      "trailing_silence_ms": 1580,
-      "notes": "S100 request 3 at assistant_quiet+300 ms: the answer window must carry the planted second heading token. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, coral), VAD-normalised, 1500 ms trailing-silence floor."
+      "trailing_silence_ms": 1598,
+      "notes": "S100 request 3 at assistant_quiet+300 ms (delegated): read the headings back from the file, with its line count, which only the executor can see (the earlier \"read me the headings of the second one\" was answerable from the exchange history and ambiguous about which \"one\"); the answer window must carry the planted second heading token. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, coral), VAD-normalised, 1500 ms trailing-silence floor."
     },
     {
       "name": "standup_barge_in",

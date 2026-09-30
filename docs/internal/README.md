@@ -6,3 +6,7 @@ maintainers but should not be published as Mintlify product documentation.
 
 Public documentation lives under `docs/`. Anything in `docs/` should have
 frontmatter, a clear audience, and a place in `docs/docs.json`.
+
+## Current design investigations
+
+- [Caller context through existing work owners](design/caller-context.md): accepted design direction and ownership evidence required before API changes.

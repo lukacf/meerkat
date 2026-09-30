@@ -1773,6 +1773,72 @@ fn s99_answer_text(events: &[Value], start: usize) -> String {
     answer
 }
 
+#[cfg(test)]
+fn s99_oracle_events(entries: &[(&str, f64, &str)]) -> Vec<Value> {
+    entries
+        .iter()
+        .map(|(kind, start_ms, text)| {
+            let event_type = if *kind == "user" {
+                "session.input_transcript.delta"
+            } else {
+                "session.output_transcript.delta"
+            };
+            json!({"type": event_type, "start_ms": start_ms, "delta": text})
+        })
+        .collect()
+}
+
+/// An in-flight chain, then the answer after a quiet gap of at least the
+/// assistant-turn bound: the answer is kept, the in-flight chain is not.
+#[test]
+fn s99_answer_keeps_a_reply_after_the_in_flight_chain_goes_quiet() {
+    let events = s99_oracle_events(&[
+        ("assistant", 9_000.0, "And to finish,"),
+        ("user", 10_000.0, " Now tell me"),
+        ("assistant", 10_400.0, " the context."),
+        ("user", 11_000.0, " the phrase."),
+        ("assistant", 12_000.0, " Otter willow falcon"),
+        ("assistant", 12_400.0, " maple badger."),
+    ]);
+    assert_eq!(
+        s99_answer_text(&events, 0),
+        " Otter willow falcon maple badger."
+    );
+    assert!(s99_in_flight_at_onset(&events, 0).is_some());
+}
+
+/// An in-flight chain that flows straight on (every gap under the bound)
+/// is excluded whole: none of it can satisfy the match, so S99 fails
+/// closed instead of crediting speech that began before the question.
+#[test]
+fn s99_answer_excludes_an_in_flight_chain_that_flows_straight_on() {
+    let events = s99_oracle_events(&[
+        ("assistant", 9_000.0, "Your vault phrase is"),
+        ("user", 10_000.0, " Now tell me the phrase."),
+        ("assistant", 10_200.0, " otter willow"),
+        ("assistant", 11_000.0, " falcon maple badger."),
+    ]);
+    assert_eq!(s99_answer_text(&events, 0), "");
+}
+
+/// No speech in flight at the onset: everything the assistant says from
+/// the question's first input delta on is the answer, including speech
+/// at a pause before the question's last words.
+#[test]
+fn s99_answer_keeps_everything_from_the_onset_without_in_flight_speech() {
+    let events = s99_oracle_events(&[
+        ("user", 10_000.0, " Now tell me the phrase, do"),
+        ("assistant", 12_000.0, " Otter willow"),
+        ("user", 12_300.0, " not guess."),
+        ("assistant", 12_600.0, " falcon maple badger."),
+    ]);
+    assert_eq!(
+        s99_answer_text(&events, 0),
+        " Otter willow falcon maple badger."
+    );
+    assert!(s99_in_flight_at_onset(&events, 0).is_none());
+}
+
 /// Assistant transcript of the exchange at `start` that began before the
 /// question's first input delta: a response already streaming at the onset,
 /// recorded as evidence (`s99_answer_text` excludes it and its continuation).
@@ -3187,11 +3253,11 @@ const S100_DELEGATION_CONTEXT_PREFIX: &str = "Live delegation execution context:
 /// after it.
 const ASSISTANT_CONTEXT_HEADING_START: &str = "assistant already generated on the call meanwhile";
 
-/// Prefix of a late bootstrap summary delivered on the thinking lane after
-/// the first user utterance (facade `LIVE_LATE_SUMMARY_PREFIX`, summary
-/// seeding redesign). A summary ready before the open rides `session.input`
-/// instead and uses no append lane at all.
-const LATE_SUMMARY_PREFIX: &str = "Conversation history summary (context data, not a new user request; answer questions about these facts yourself, directly):";
+// Prefix of a late bootstrap summary delivered on the thinking lane after
+// the first user utterance (summary seeding redesign). A summary ready
+// before the open rides `session.input` instead and uses no append lane at
+// all.
+use meerkat::experimental_gpt_live::LIVE_LATE_SUMMARY_PREFIX as LATE_SUMMARY_PREFIX;
 
 /// Recent turns the host seeds verbatim next to a ready summary (facade
 /// `LIVE_STARTUP_RECENT_TURNS`).

@@ -647,8 +647,12 @@ pub const LIVE_STARTUP_RECENT_TURNS: usize = 4;
 /// user turn: the same factual framing as the startup developer item. It
 /// rides without the startup instructions' bootstrap framing, so it states
 /// positively that questions about these facts are answered directly (S99
-/// saw a native recall question delegated instead).
-pub const LIVE_LATE_SUMMARY_PREFIX: &str = "Conversation history summary (context data, not a new user request; answer questions about these facts yourself, directly):";
+/// saw a native recall question delegated instead), and that anything
+/// needing the current state of files, tools or new information is still
+/// delegated (the S106 class of current-state questions).
+pub const LIVE_LATE_SUMMARY_PREFIX: &str = "Conversation history summary (context data, not a new user request; \
+answer questions about these facts yourself, directly; delegate anything that needs the current state of files, \
+tools or new information):";
 
 /// Prefix of one causal-tail row replayed on the quiet thinking lane after
 /// a late summary. The row is speech this call already heard and answered;

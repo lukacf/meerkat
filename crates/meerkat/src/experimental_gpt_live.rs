@@ -644,9 +644,17 @@ This call continues that conversation: do not greet or introduce yourself; wait 
 pub const LIVE_STARTUP_RECENT_TURNS: usize = 4;
 
 /// Prefix of a summary delivered on the quiet thinking lane after the first
-/// user turn: the same factual framing as the startup developer item.
-pub const LIVE_LATE_SUMMARY_PREFIX: &str =
-    "Conversation history summary (context data, not a new user request):";
+/// user turn: the same factual framing as the startup developer item. It
+/// rides without the startup instructions' bootstrap framing, so it states
+/// positively that questions about these facts are answered directly (S99
+/// saw a native recall question delegated instead), and that anything
+/// needing the current state of files, tools or new information still goes
+/// to the executor (the S106 class of current-state questions). The wording
+/// never names a delegate: mentions of delegating prime the model to
+/// delegate recall questions too (S99).
+pub const LIVE_LATE_SUMMARY_PREFIX: &str = "Conversation history summary (context data, not a new user request; \
+answer questions about these facts yourself, directly; use the executor for anything that needs the current state of \
+files, tools or new information):";
 
 /// Prefix of one causal-tail row replayed on the quiet thinking lane after
 /// a late summary. The row is speech this call already heard and answered;

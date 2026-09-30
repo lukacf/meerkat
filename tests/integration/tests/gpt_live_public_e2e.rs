@@ -4509,8 +4509,13 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         // row per user utterance closed by a delegation.created or a
         // response's first output delta (the browser's input finals), plus
         // the typed seed. A user delta arriving after the close is a new row.
-        let finals = live.peer.energy().await?.input_finals;
-        let user_alternations = finals.len();
+        // An utterance still open at close (a goodbye the provider never
+        // finished, or a final word that arrived after the reply began) is
+        // committed by the runtime at close, so it is a row too.
+        let report = live.peer.energy().await?;
+        let finals = report.input_finals.clone();
+        let open_utterance = !report.input_open.trim().is_empty();
+        let user_alternations = report.heard_utterances().len();
         let exchanges = 1 + user_alternations;
         println!(
             "GPT_LIVE_S100_ALTERNATIONS user_alternations={user_alternations} spoken_fixtures=5 finals={:?}",
@@ -4576,27 +4581,16 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                 )),
             }
         }
-        // A goodbye the provider never finished has no browser input final
-        // (no response or delegation closed it), so it is not an exchange;
-        // its canonical row, if the host committed the open utterance at
-        // close, must be exactly the goodbye's input deltas.
-        let stalled_goodbye_row = goodbye_timing.is_none()
-            && !goodbye_input_final
-            && rows.spoken.len() == exchanges + 1
-            && rows
-                .spoken
-                .last()
-                .is_some_and(|row| same_transcript_words(row, &normalize_words(&goodbye_input)))
-            && !normalize_words(&goodbye_input).is_empty();
-        if stalled_goodbye_row {
+        if open_utterance {
             println!(
-                "GPT_LIVE_S100_STALLED_GOODBYE_ROW row={:?}",
+                "GPT_LIVE_S100_OPEN_UTTERANCE_AT_CLOSE text={:?} last_row={:?}",
+                report.input_open,
                 rows.spoken.last()
             );
         }
-        if rows.spoken.len() != exchanges && !stalled_goodbye_row {
+        if rows.spoken.len() != exchanges {
             deterministic_failures.push(format!(
-                "canonical spoken user rows at close ({}) differ from the exchange count ({exchanges}: typed seed + {user_alternations} user role alternations); spoken rows: {:?}",
+                "canonical spoken user rows at close ({}) differ from the exchange count ({exchanges}: typed seed + {user_alternations} heard utterances, one still open at close counted); spoken rows: {:?}",
                 rows.spoken.len(),
                 rows.spoken
             ));
@@ -6324,13 +6318,16 @@ async fn s106_reopen_cycle(
     // delegation), so the channel's count is read only once it has settled:
     // read right after the last question, the reply to it may still be in
     // flight and its utterance still pending.
+    // An utterance still open here (a final word that arrived after the
+    // reply began) is committed by the runtime as its own user row at close,
+    // so it is heard too.
     user_text.extend(
         live.peer
             .energy()
             .await?
-            .input_finals
+            .heard_utterances()
             .iter()
-            .map(|input| normalize_words(&input.text)),
+            .map(|text| normalize_words(text)),
     );
     live.record_uplink("S106").await?;
     let close = close_or_record(live, evidence, channel, "S106", deterministic_failures).await?;
@@ -6699,9 +6696,9 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             live.peer
                 .energy()
                 .await?
-                .input_finals
+                .heard_utterances()
                 .iter()
-                .map(|input| normalize_words(&input.text)),
+                .map(|text| normalize_words(text)),
         );
         live.record_uplink("S106").await?;
         let close3 = close_or_record(&mut live, &evidence, channel, "S106", &mut deterministic_failures).await?;

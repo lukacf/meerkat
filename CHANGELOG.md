@@ -908,7 +908,10 @@ fix: status polling no longer starves a staged run's start (#1226); see the
   replayed turn again), and replayed runtime work output as background work
   the model has not seen. The superseded-row framing states that only the
   values later speech changed are replaced and everything else in the row
-  still holds (the model had dropped an unchanged typed fact as stale). A
+  still holds (the model had dropped an unchanged typed fact as stale). The
+  late summary's prefix now also says questions about its facts are answered
+  directly: it rides the thinking lane without the startup instructions'
+  bootstrap framing, and a native recall question was delegated instead. A
   superseded typed row is delivered in one append
   together with the heard speech that superseded it; those speech rows still
   replay on their own afterwards, so the model sees them twice by design.

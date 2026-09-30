@@ -1718,6 +1718,15 @@ impl SessionState {
 
     /// Return the open turn for `role`, finishing a different-role turn and
     /// starting a new one when the speaker changes.
+    ///
+    /// Turns are synthesized from speaker changes because the protocol has no
+    /// input item identity and no input-completed event
+    /// (`session.input_transcript.delta` carries only `event_id`, `delta`,
+    /// `start_ms` and `end_ms`). A user delta that arrives after the model
+    /// began answering (the user's last word landing during the reply)
+    /// therefore opens a new user turn of its own: nothing in the protocol
+    /// joins it to the turn the speaker change finished. This is expected,
+    /// not a lost or duplicated utterance.
     fn ensure_open_turn(&mut self, role: GptLiveTurnRole) -> GptLiveTurnRef {
         if let Some(open) = self.open_turn.as_ref()
             && open.role == role

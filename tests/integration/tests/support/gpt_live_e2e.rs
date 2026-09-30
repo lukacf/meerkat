@@ -884,11 +884,29 @@ pub struct DelegationInput {
 pub struct EnergyReport {
     pub energy: EnergySummary,
     pub input_finals: Vec<InputFinal>,
+    /// The user utterance still open: deltas no response or delegation has
+    /// closed. Public Live has no input item identity or input-completed
+    /// event, so a final word that arrives after the reply began opens a new
+    /// utterance; the runtime commits it as its own user row at close.
+    #[serde(default)]
+    pub input_open: String,
     #[serde(default)]
     pub delegation_inputs: Vec<DelegationInput>,
 }
 
 impl EnergyReport {
+    /// Every user utterance the browser heard on this channel, in order: the
+    /// closed input finals, then the utterance still open, if any. Read once
+    /// the channel has settled, this is what the runtime commits as spoken
+    /// user rows by the time the channel closes.
+    pub fn heard_utterances(&self) -> Vec<String> {
+        self.input_finals
+            .iter()
+            .map(|input| input.text.clone())
+            .chain((!self.input_open.trim().is_empty()).then(|| self.input_open.clone()))
+            .collect()
+    }
+
     /// Evidence-sized copy of the windows: at most `max` (t_ms, rms) pairs,
     /// keeping the per-bucket maximum so speech onsets survive downsampling.
     pub fn downsampled_windows(&self, max: usize) -> Vec<(u32, f32)> {

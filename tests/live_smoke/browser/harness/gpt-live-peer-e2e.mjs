@@ -861,6 +861,10 @@ async function energy() {
         first_assistant_audio_ms: state.energy.first_assistant_audio_ms,
       },
       input_finals: state.inputTranscript.finals,
+      // The utterance still open: user deltas no response or delegation has
+      // closed yet (for example a final word that arrived after the reply
+      // began). The runtime commits it as a user row when the channel closes.
+      input_open: state.inputTranscript.pending.map((delta) => delta.text).join(''),
       delegation_inputs: state.delegationJoin.inputs,
     };
   });

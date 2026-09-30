@@ -3568,6 +3568,16 @@ fn fixture_end_entry(timeline: &[TimelineEntry], schedule_id: u64) -> Option<&Ti
     })
 }
 
+/// Whether the committed spoken user rows carry exactly the words the
+/// browser heard, in order. Two-sided: a word heard but not committed (or
+/// committed but not heard) fails. `heard` includes an utterance still open
+/// at close (see `EnergyReport::heard_utterances`), because the runtime
+/// commits that open user turn when the channel closes; counting it is not a
+/// relaxation, the committed side must still carry it.
+fn spoken_rows_carry_heard(heard: &[String], committed_rows: &[String]) -> bool {
+    normalize_words(&heard.join(" ")) == normalize_words(&committed_rows.join(" "))
+}
+
 /// Lowercased words only: transcript punctuation and casing differ between
 /// the browser-derived input final and the committed executor input.
 fn normalize_words(text: &str) -> String {
@@ -4509,8 +4519,13 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         // row per user utterance closed by a delegation.created or a
         // response's first output delta (the browser's input finals), plus
         // the typed seed. A user delta arriving after the close is a new row.
-        let finals = live.peer.energy().await?.input_finals;
-        let user_alternations = finals.len();
+        // An utterance still open at close (a goodbye the provider never
+        // finished, or a final word that arrived after the reply began) is
+        // committed by the runtime at close, so it is a row too.
+        let report = live.peer.energy().await?;
+        let finals = report.input_finals.clone();
+        let open_utterance = !report.input_open.trim().is_empty();
+        let user_alternations = report.heard_utterances().len();
         let exchanges = 1 + user_alternations;
         println!(
             "GPT_LIVE_S100_ALTERNATIONS user_alternations={user_alternations} spoken_fixtures=5 finals={:?}",
@@ -4576,27 +4591,16 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                 )),
             }
         }
-        // A goodbye the provider never finished has no browser input final
-        // (no response or delegation closed it), so it is not an exchange;
-        // its canonical row, if the host committed the open utterance at
-        // close, must be exactly the goodbye's input deltas.
-        let stalled_goodbye_row = goodbye_timing.is_none()
-            && !goodbye_input_final
-            && rows.spoken.len() == exchanges + 1
-            && rows
-                .spoken
-                .last()
-                .is_some_and(|row| same_transcript_words(row, &normalize_words(&goodbye_input)))
-            && !normalize_words(&goodbye_input).is_empty();
-        if stalled_goodbye_row {
+        if open_utterance {
             println!(
-                "GPT_LIVE_S100_STALLED_GOODBYE_ROW row={:?}",
+                "GPT_LIVE_S100_OPEN_UTTERANCE_AT_CLOSE text={:?} last_row={:?}",
+                report.input_open,
                 rows.spoken.last()
             );
         }
-        if rows.spoken.len() != exchanges && !stalled_goodbye_row {
+        if rows.spoken.len() != exchanges {
             deterministic_failures.push(format!(
-                "canonical spoken user rows at close ({}) differ from the exchange count ({exchanges}: typed seed + {user_alternations} user role alternations); spoken rows: {:?}",
+                "canonical spoken user rows at close ({}) differ from the exchange count ({exchanges}: typed seed + {user_alternations} heard utterances, one still open at close counted); spoken rows: {:?}",
                 rows.spoken.len(),
                 rows.spoken
             ));
@@ -6324,13 +6328,16 @@ async fn s106_reopen_cycle(
     // delegation), so the channel's count is read only once it has settled:
     // read right after the last question, the reply to it may still be in
     // flight and its utterance still pending.
+    // An utterance still open here (a final word that arrived after the
+    // reply began) is committed by the runtime as its own user row at close,
+    // so it is heard too.
     user_text.extend(
         live.peer
             .energy()
             .await?
-            .input_finals
+            .heard_utterances()
             .iter()
-            .map(|input| normalize_words(&input.text)),
+            .map(|text| normalize_words(text)),
     );
     live.record_uplink("S106").await?;
     let close = close_or_record(live, evidence, channel, "S106", deterministic_failures).await?;
@@ -6699,9 +6706,9 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             live.peer
                 .energy()
                 .await?
-                .input_finals
+                .heard_utterances()
                 .iter()
-                .map(|input| normalize_words(&input.text)),
+                .map(|text| normalize_words(text)),
         );
         live.record_uplink("S106").await?;
         let close3 = close_or_record(&mut live, &evidence, channel, "S106", &mut deterministic_failures).await?;
@@ -6737,11 +6744,12 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         let utterances = user_text.len() - typed_turns;
         let heard_words = normalize_words(&user_text.join(" "));
         let row_words = normalize_words(&rows.spoken.join(" "));
+        let words_match = spoken_rows_carry_heard(&user_text, &rows.spoken);
         println!(
             "GPT_LIVE_S106_HISTORY spoken_user_rows={} injected_rows={merged_results} expected_rows={} (typed {typed_turns} + utterances {utterances}) words_match={} executor_inputs={}",
             rows.spoken.len(),
             typed_turns + utterances,
-            heard_words == row_words,
+            words_match,
             rows.executor_inputs.len()
         );
         // The row count is evidence, not a verdict: the browser and the
@@ -6758,7 +6766,7 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             ),
             &mut tolerant_failures,
         )?;
-        if heard_words != row_words {
+        if !words_match {
             deterministic_failures.push(format!(
                 "canonical spoken user rows do not carry exactly the typed turns and heard utterances;\n    rows:  {row_words:?}\n    heard: {heard_words:?}"
             ));
@@ -7990,6 +7998,79 @@ fn delegated_worker_lifecycle(events: &Value) -> DelegatedWorkerLifecycle {
 mod config_tests {
     use super::{API_KEY_ENV, BINDING, REALM, scenario_config};
     use meerkat_core::CredentialSourceSpec;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    /// The browser's heard utterances are its closed finals plus the one
+    /// still open; an empty open utterance adds nothing.
+    #[test]
+    fn heard_utterances_append_the_open_utterance() {
+        let report: super::support::EnergyReport = serde_json::from_value(serde_json::json!({
+            "energy": {"threshold": 0.01, "window_ms": 20, "windows": [], "assistant_active": false,
+                       "overlap_ms": 0, "first_assistant_audio_ms": []},
+            "input_finals": [{"t_ms": 10, "text": "Remind me, which venue did I mention"}],
+            "input_open": " earlier",
+        }))
+        .unwrap();
+        assert_eq!(
+            report.heard_utterances(),
+            strings(&["Remind me, which venue did I mention", " earlier"])
+        );
+        let closed: super::support::EnergyReport = serde_json::from_value(serde_json::json!({
+            "energy": {"threshold": 0.01, "window_ms": 20, "windows": [], "assistant_active": false,
+                       "overlap_ms": 0, "first_assistant_audio_ms": []},
+            "input_finals": [{"t_ms": 10, "text": "Remind me, which venue did I mention earlier"}],
+            "input_open": "  ",
+        }))
+        .unwrap();
+        assert_eq!(closed.heard_utterances().len(), 1);
+    }
+
+    /// The S106 split (the last word opened its own turn after the reply
+    /// began): heard with the open utterance matches the two committed rows;
+    /// the old closed-finals-only oracle did not.
+    #[test]
+    fn an_open_utterance_committed_at_close_is_heard() {
+        let committed = strings(&["Remind me, which venue did I mention?", " earlier"]);
+        assert!(super::spoken_rows_carry_heard(
+            &strings(&["Remind me, which venue did I mention", " earlier"]),
+            &committed
+        ));
+        assert!(!super::spoken_rows_carry_heard(
+            &strings(&["Remind me, which venue did I mention"]),
+            &committed
+        ));
+    }
+
+    /// Two-sided: text the browser heard but the runtime did not commit
+    /// still fails, whether the committed row is truncated, a word is
+    /// dropped, or the open utterance's row is missing.
+    #[test]
+    fn a_truncated_committed_row_still_fails() {
+        let heard = strings(&["Remind me, which venue did I mention", " earlier"]);
+        for committed in [
+            strings(&["Remind me, which venue did I mention"]),
+            strings(&["Remind me, which venue", " earlier"]),
+            strings(&["Remind me, which did I mention", " earlier"]),
+            Vec::new(),
+        ] {
+            assert!(
+                !super::spoken_rows_carry_heard(&heard, &committed),
+                "{committed:?}"
+            );
+        }
+        // And text committed but never heard fails too.
+        assert!(!super::spoken_rows_carry_heard(
+            &strings(&["Remind me, which venue did I mention"]),
+            &strings(&[
+                "Remind me, which venue did I mention",
+                " earlier",
+                " anyway"
+            ])
+        ));
+    }
 
     #[tokio::test]
     async fn output_transport_receipts_do_not_wait_for_playback_or_test_polling() {

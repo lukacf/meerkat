@@ -3247,6 +3247,8 @@ pub struct LiveDelegationRecoverySnapshot {
     terminal: Option<LiveDelegationWorkerTerminalKind>,
     late: bool,
     result_eligible: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    result_delivery: Option<LiveDelegationResultDeliveryObservation>,
 }
 
 impl LiveDelegationRecoverySnapshot {
@@ -3275,7 +3277,21 @@ impl LiveDelegationRecoverySnapshot {
             terminal,
             late,
             result_eligible,
+            #[cfg(any(test, feature = "test-support"))]
+            result_delivery: None,
         }
+    }
+
+    /// The generated result-delivery observation, once the result append
+    /// for this operation resolved.
+    #[cfg(all(feature = "live", any(test, feature = "test-support")))]
+    #[must_use]
+    pub(crate) fn with_result_delivery(
+        mut self,
+        result_delivery: Option<LiveDelegationResultDeliveryObservation>,
+    ) -> Self {
+        self.result_delivery = result_delivery;
+        self
     }
 
     #[must_use]
@@ -3326,6 +3342,15 @@ impl LiveDelegationRecoverySnapshot {
     #[must_use]
     pub const fn result_eligible(&self) -> bool {
         self.result_eligible
+    }
+
+    /// How the operation's result append to the provider resolved
+    /// (`Delivered` once the provider acknowledged it); `None` while no
+    /// result has been released or its append is in flight. Test support.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub const fn result_delivery(&self) -> Option<LiveDelegationResultDeliveryObservation> {
+        self.result_delivery
     }
 }
 

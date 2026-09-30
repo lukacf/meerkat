@@ -430,6 +430,17 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
         .authorize_live_delegation_result_delivery(&release, "bounded terminal result")
         .await
         .expect("recover committed result delivery authority without replay");
+    let result_delivery = || async {
+        machine
+            .live_delegation_recovery_snapshots(&session_id)
+            .await
+            .expect("recovery snapshots")
+            .into_iter()
+            .find(|snapshot| snapshot.operation_id() == operation.operation_id())
+            .expect("retired worker snapshot")
+            .result_delivery()
+    };
+    assert_eq!(result_delivery().await, None, "delivery is in flight");
     machine
         .resolve_live_delegation_result_delivery(
             &delivery,
@@ -437,6 +448,11 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
         )
         .await
         .expect("resolve result delivery");
+    assert_eq!(
+        result_delivery().await,
+        Some(crate::live_execution::LiveDelegationResultDeliveryObservation::Delivered),
+        "the snapshot projects the committed delivery observation"
+    );
     machine
         .resolve_live_delegation_result_delivery(
             &recovered_delivery,

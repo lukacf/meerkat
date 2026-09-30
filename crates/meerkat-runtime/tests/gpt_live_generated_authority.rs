@@ -2323,43 +2323,111 @@ fn quiet_history_waits_for_the_conversation_without_a_bootstrap() {
 /// Replayed runtime work output is admitted during the user phase of a
 /// provider turn only: once an assistant turn is attributed to the turn's
 /// interaction it waits for the turn boundary like every other row, so it can
-/// never interleave with an in-flight response.
+/// never interleave with an in-flight response. That state is reachable
+/// through real inputs before the user's TurnFinished lands: a delegation
+/// result delivered while the provider turn is still active re-arms the
+/// awaiting interaction, and the model's response is attributed to it.
 #[test]
 fn replayed_runtime_work_after_the_assistant_turn_started_stays_deferred() {
+    const RESULT_DIGEST: &str = "result-before-turn-finished-digest";
     let mut authority = opened_authority();
     bind_experimental(&mut authority, 0);
-    start_user_turn(&mut authority, "user-turn");
+    admit_provider_turn_delegation(&mut authority);
+    prepare_confirmed_completed_worker(&mut authority);
+    let release = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultRelease {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("a completed result is released while the provider turn is still active");
+    let disposition = release
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            mm::MeerkatMachineEffect::LiveDelegationResultReleaseAuthorized {
+                disposition, ..
+            } => Some(*disposition),
+            _ => None,
+        })
+        .expect("release authority carries its disposition");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultDelivery {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+            result_digest: RESULT_DIGEST.to_string(),
+            disposition,
+        },
+    )
+    .expect("released result receives delivery authority");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationResultDelivery {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            operation_id: operation_id(),
+            result_digest: RESULT_DIGEST.to_string(),
+            replacement_channel_id: String::new(),
+            canonical_seed_cursor: 0,
+            observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
+        },
+    )
+    .expect("the result is delivered before the user's TurnFinished arrives");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            assistant_turn_ref: "assistant-answers-the-result".to_string(),
+            candidate_interaction_id: "unused-candidate".to_string(),
+        },
+    )
+    .expect("the model's response is attributed through the re-armed awaiting interaction");
+    assert!(
+        authority
+            .state()
+            .live_provider_turn_by_channel
+            .contains_key(CHANNEL),
+        "the user's provider turn is still active"
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_assistant_interaction_by_turn
+            .get("assistant-answers-the-result"),
+        authority
+            .state()
+            .live_active_interaction_by_channel
+            .get(CHANNEL),
+        "the assistant turn belongs to the active provider turn's interaction"
+    );
     enqueue_sourced_mirror_row(
         &mut authority,
         "merged-result-reply",
         1,
         mm::LiveContextRowSource::RuntimeWork,
     );
-    let mut state = authority.state().clone();
-    let interaction = state.live_active_interaction_by_channel[CHANNEL].clone();
-    state
-        .live_assistant_interaction_by_turn
-        .insert("assistant-turn".into(), interaction);
-    state
-        .live_assistant_turn_channel_by_ref
-        .insert("assistant-turn".into(), CHANNEL.into());
-    state.live_assistant_origin_by_turn.insert(
-        "assistant-turn".into(),
-        mm::LiveAssistantTurnOrigin::ForegroundCorrelated,
-    );
-    state
-        .live_assistant_playback_segment_by_turn
-        .insert("assistant-turn".into(), 0);
-    let mut responding = mm::MeerkatMachineAuthority::recover_from_state(state)
-        .expect("an assistant turn attributed to the active interaction is a valid state");
-    let effects = authorize_row(&mut responding, "merged-result-reply", 0).expect("typed deferral");
+    let effects = authorize_row(&mut authority, "merged-result-reply", 0).expect("typed deferral");
     assert!(
         deferred(&effects, "merged-result-reply"),
-        "no quiet replay during an in-flight response"
+        "no quiet replay during an in-flight response: {effects:?}"
     );
-    let effects = authorize_row(&mut authority, "merged-result-reply", 0)
-        .expect("the same row is admitted in the user phase");
-    assert!(authorized(&effects, "merged-result-reply"));
 }
 
 /// A voiced row and a quiet reassertion of live speech still wait for the

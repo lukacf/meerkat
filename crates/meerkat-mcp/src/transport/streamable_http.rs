@@ -23,11 +23,20 @@ use rmcp::transport::streamable_http_client::{
 ///
 /// Reuses a single `reqwest::Client` for connection pooling and better performance.
 /// A default client is created via `new()`, or pass an existing client via `with_client()`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct ReqwestStreamableHttpClient {
     client: reqwest::Client,
     headers: HeaderMap,
     auth_challenge: AuthChallengeRecorder,
+}
+
+impl std::fmt::Debug for ReqwestStreamableHttpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReqwestStreamableHttpClient")
+            .field("headers", &super::RedactedHeaders(&self.headers))
+            .field("auth_challenge", &self.auth_challenge)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Typed record of an auth-class connection failure captured at the transport

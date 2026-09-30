@@ -44,7 +44,10 @@ impl McpTransportKind {
 }
 
 /// Stdio transport configuration
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+///
+/// `Debug` keeps the command and env names but redacts argument and env
+/// values, which commonly carry tokens.
+#[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct McpStdioConfig {
     /// Command to spawn the server
@@ -58,7 +61,10 @@ pub struct McpStdioConfig {
 }
 
 /// HTTP transport configuration (streamable HTTP or legacy SSE)
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+///
+/// `Debug` keeps header names but redacts header values, and redacts URL
+/// userinfo, query and fragment, which commonly carry credentials.
+#[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct McpHttpConfig {
     /// Server URL
@@ -69,6 +75,85 @@ pub struct McpHttpConfig {
     /// HTTP transport selection (default: streamable-http)
     #[serde(default)]
     pub transport: Option<McpHttpTransport>,
+}
+
+const REDACTED: &str = "<redacted>";
+
+impl std::fmt::Debug for McpStdioConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpStdioConfig")
+            .field("command", &self.command)
+            .field("args", &RedactedList(self.args.len()))
+            .field("env", &RedactedValues(&self.env))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for McpHttpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpHttpConfig")
+            .field("url", &RedactedUrl(&self.url))
+            .field("headers", &RedactedValues(&self.headers))
+            .field("transport", &self.transport)
+            .finish()
+    }
+}
+
+/// Debug view of a secret-bearing map: keys in sorted order, values redacted.
+struct RedactedValues<'a>(&'a HashMap<String, String>);
+
+impl std::fmt::Debug for RedactedValues<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut keys: Vec<&str> = self.0.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        f.debug_map()
+            .entries(keys.into_iter().map(|key| (key, REDACTED)))
+            .finish()
+    }
+}
+
+/// Debug view of a secret-bearing list: its length, every value redacted.
+struct RedactedList(usize);
+
+impl std::fmt::Debug for RedactedList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(std::iter::repeat_n(REDACTED, self.0))
+            .finish()
+    }
+}
+
+/// Debug view of a URL: scheme, host and path kept; userinfo, query and
+/// fragment redacted.
+struct RedactedUrl<'a>(&'a str);
+
+impl std::fmt::Debug for RedactedUrl<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (base, suffix) = match self.0.find(['?', '#']) {
+            Some(index) => (&self.0[..index], Some(&self.0[index..=index])),
+            None => (self.0, None),
+        };
+        let (scheme, rest) = match base.find("://") {
+            Some(index) => base.split_at(index + 3),
+            None => ("", base),
+        };
+        let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        let mut shown = String::with_capacity(self.0.len());
+        shown.push_str(scheme);
+        match authority.rfind('@') {
+            Some(index) => {
+                shown.push_str(REDACTED);
+                shown.push_str(&authority[index..]);
+            }
+            None => shown.push_str(authority),
+        }
+        shown.push_str(path);
+        if let Some(separator) = suffix {
+            shown.push_str(separator);
+            shown.push_str(REDACTED);
+        }
+        std::fmt::Debug::fmt(&shown, f)
+    }
 }
 
 /// HTTP transport selection for URL-based servers
@@ -1116,6 +1201,59 @@ impl std::fmt::Display for McpScope {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn mcp_server_config_debug_redacts_credentials() {
+        const SECRET: &str = "sk-live-secret-value";
+        let stdio = McpServerConfig::stdio(
+            "local",
+            "npx",
+            vec!["--api-key".into(), SECRET.into()],
+            HashMap::from([("API_TOKEN".to_string(), SECRET.to_string())]),
+        );
+        let http = McpServerConfig::streamable_http(
+            "remote",
+            format!("https://user:{SECRET}@mcp.example.com/v1/mcp?token={SECRET}#{SECRET}"),
+            HashMap::from([("Authorization".to_string(), format!("Bearer {SECRET}"))]),
+        );
+        let sse = McpServerConfig::sse(
+            "legacy",
+            "https://sse.example.com/sse",
+            HashMap::from([("X-Api-Key".to_string(), SECRET.to_string())]),
+        );
+        let config = McpConfig {
+            servers: vec![stdio.clone(), http.clone(), sse.clone()],
+        };
+        let transports = (&stdio, &http.transport, &sse.transport);
+
+        for rendered in [
+            format!("{config:?}"),
+            format!("{config:#?}"),
+            format!("{transports:?}"),
+        ] {
+            assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+            for kept in [
+                "local",
+                "npx",
+                "API_TOKEN",
+                "Authorization",
+                "X-Api-Key",
+                "mcp.example.com/v1/mcp",
+                "https://sse.example.com/sse",
+                "<redacted>",
+            ] {
+                assert!(rendered.contains(kept), "missing {kept}: {rendered}");
+            }
+        }
+        assert_eq!(
+            format!("{:?}", RedactedUrl("https://u:p@h.example/p?q=1")),
+            r#""https://<redacted>@h.example/p?<redacted>""#
+        );
+        assert_eq!(
+            format!("{:?}", RedactedUrl("http://127.0.0.1:8080/mcp")),
+            r#""http://127.0.0.1:8080/mcp""#
+        );
+    }
 
     #[tokio::test]
     async fn test_empty_config_loads() {

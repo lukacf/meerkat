@@ -139,6 +139,12 @@ them.
   a composition are reported together. The canonical TLC lane runs the bounded
   adaptive witness through the new `xtask machine-verify-witness` command, which
   applies the same completion proof instead of trusting a bare `tlc` exit code.
+- `Debug` output of MCP server configuration no longer exposes credentials.
+  `McpStdioConfig` keeps the command and env names but redacts argument and env
+  values; `McpHttpConfig` keeps header names but redacts header values and URL
+  userinfo, query and fragment. This also covers `McpServerConfig`, `McpConfig`
+  and `McpAddParams`, which embed them, and the internal SSE and streamable HTTP
+  clients' header maps. `Serialize` and equality are unchanged.
 - WorkGraph observations, including execution recovery, distinguish an
   unavailable backing store from an absent record and preserve one read-only
   snapshot across schema validation and data queries. Ordinary writes also

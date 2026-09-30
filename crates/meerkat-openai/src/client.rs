@@ -9085,4 +9085,97 @@ mod tests {
             Err(LlmError::InvalidRequest { .. })
         ));
     }
+
+    fn mcp_structured_payload() -> Value {
+        serde_json::json!({
+            "records": [{"name": "a\n\"b", "enabled": true, "missing": null,
+                         "numbers": [0, -7, 1.25], "children": [{"value": false}]}],
+            "empty": {}, "list": []
+        })
+    }
+
+    fn mcp_structured_request(model: &str, mixed: bool) -> LlmRequest {
+        let mut blocks = if mixed {
+            vec![
+                ContentBlock::Text {
+                    text: "before".into(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "cG5n".into(),
+                },
+                ContentBlock::Text {
+                    text: "after".into(),
+                },
+            ]
+        } else {
+            Vec::new()
+        };
+        blocks.push(ContentBlock::structured(&mcp_structured_payload()).expect("structured JSON"));
+        LlmRequest::new(
+            model,
+            vec![
+                Message::User(UserMessage::text("lookup")),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "call-structured".into(),
+                        name: "lookup".into(),
+                        args: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                )),
+                Message::tool_results(vec![ToolResult::with_blocks(
+                    "call-structured".into(),
+                    blocks,
+                    false,
+                )]),
+            ],
+        )
+    }
+
+    #[test]
+    fn mcp_structured_openai_nested_result_reaches_request_body() {
+        let client = OpenAiClient::new("test-key".into());
+        let body = client
+            .build_request_body(&mcp_structured_request("gpt-5.4", false))
+            .unwrap();
+        let result = &body["input"][2];
+        assert_eq!(result["type"], "function_call_output");
+        assert_eq!(result["call_id"], "call-structured");
+        assert_eq!(
+            serde_json::from_str::<Value>(result["output"].as_str().unwrap()).unwrap(),
+            mcp_structured_payload()
+        );
+    }
+
+    #[test]
+    fn mcp_structured_openai_mixed_result_keeps_order_and_image() {
+        let client = OpenAiClient::new("test-key".into());
+        let body = client
+            .build_request_body(&mcp_structured_request("gpt-5.4", true))
+            .unwrap();
+        let result = &body["input"][2];
+        assert_eq!(result["type"], "function_call_output");
+        assert_eq!(result["call_id"], "call-structured");
+        let parts = result["output"].as_array().unwrap();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(
+            parts[0],
+            serde_json::json!({"type": "input_text", "text": "before"})
+        );
+        assert_eq!(
+            parts[1],
+            serde_json::json!({"type": "input_image", "image_url": "data:image/png;base64,cG5n"})
+        );
+        assert_eq!(
+            parts[2],
+            serde_json::json!({"type": "input_text", "text": "after"})
+        );
+        assert_eq!(parts[3]["type"], "input_text");
+        assert_eq!(
+            serde_json::from_str::<Value>(parts[3]["text"].as_str().unwrap()).unwrap(),
+            mcp_structured_payload()
+        );
+    }
 }

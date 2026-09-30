@@ -14,7 +14,7 @@ use meerkat_core::types::ContentBlock;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{
-    model::{CallToolRequestParams, RawContent},
+    model::CallToolRequestParams,
     service::{RoleClient, RunningService, ServiceExt},
     transport::TokioChildProcess,
 };
@@ -324,7 +324,8 @@ impl McpConnection {
     /// image content are captured as their typed [`ContentBlock`] variants;
     /// resource, audio, and resource-link content the agent loop does not model
     /// are preserved verbatim as [`ContentBlock::Structured`] rather than
-    /// silently dropped.
+    /// silently dropped. Optional `structuredContent` is appended as one
+    /// additional Structured block containing that JSON value.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
         let request = match args.as_object().cloned() {
             Some(arguments) => {
@@ -342,23 +343,13 @@ impl McpConnection {
                     reason: format!("{e}"),
                 })?;
 
-        // Check for tool error. The MCP server carries the error detail in
-        // `content`; carry it through as the typed reason rather than dropping
-        // it behind a fixed string.
-        if result.is_error.unwrap_or(false) {
-            return Err(McpError::ToolCallFailed {
-                tool: name.to_string(),
-                reason: tool_error_reason(&result.content),
-            });
-        }
-
-        Ok(extract_content_blocks(result.content))
+        crate::protocol::convert_tool_result(result, name)
     }
 
     /// Call a tool, returning only the text content as a concatenated string.
     ///
-    /// This is a convenience wrapper around [`call_tool`](Self::call_tool) that
-    /// discards non-text content. Useful for callers that only need text.
+    /// This projects every block returned by [`call_tool`](Self::call_tool)
+    /// to text, including derived JSON for Structured blocks and media labels.
     pub async fn call_tool_text(&self, name: &str, args: &Value) -> Result<String, McpError> {
         let blocks = self.call_tool(name, args).await?;
         Ok(meerkat_core::types::text_content(&blocks))
@@ -406,56 +397,11 @@ fn mcp_auth_error_to_connection_failed(error: McpOAuthError) -> McpError {
     }
 }
 
-/// Derive a typed failure reason from an errored tool result's content.
-///
-/// MCP carries the server-authored error detail in `CallToolResult.content`
-/// when `is_error` is set. Flatten that text (and any unmodeled content) into
-/// the reason rather than laundering it away behind a fixed string.
-fn tool_error_reason(content: &[rmcp::model::Content]) -> String {
-    let blocks = extract_content_blocks(content.to_vec());
-    let text = meerkat_core::types::text_content(&blocks);
-    if text.is_empty() {
-        "tool returned error with no content".to_string()
-    } else {
-        text
-    }
-}
-
-/// Convert MCP [`Content`] items to [`ContentBlock`] variants.
-///
-/// Text and image content map to their typed [`ContentBlock`] equivalents.
-/// Resource, audio, and resource-link content the core agent loop does not
-/// model are preserved verbatim as [`ContentBlock::Structured`] JSON rather
-/// than silently dropped.
-fn extract_content_blocks(contents: Vec<rmcp::model::Content>) -> Vec<ContentBlock> {
-    contents.into_iter().map(content_block_from_raw).collect()
-}
-
-/// Faithfully map a single MCP [`RawContent`] to a [`ContentBlock`].
-///
-/// No variant is silently dropped: unmodeled variants are preserved as
-/// [`ContentBlock::Structured`] carrying the original JSON, falling back to a
-/// debug text projection if the content cannot be serialized.
-fn content_block_from_raw(content: rmcp::model::Content) -> ContentBlock {
-    match content.raw {
-        RawContent::Text(text) => ContentBlock::Text { text: text.text },
-        RawContent::Image(image) => ContentBlock::Image {
-            media_type: image.mime_type,
-            data: meerkat_core::ImageData::Inline { data: image.data },
-        },
-        other => match serde_json::value::to_raw_value(&other) {
-            Ok(data) => ContentBlock::Structured { data },
-            Err(_) => ContentBlock::Text {
-                text: format!("{other:?}"),
-            },
-        },
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 pub mod tests {
     use super::*;
+    use crate::protocol::{extract_content_blocks, tool_error_reason};
     use async_trait::async_trait;
     use axum::extract::State;
     use axum::http::{HeaderMap, StatusCode};
@@ -611,7 +557,7 @@ pub mod tests {
     #[test]
     fn mcp_tool_error_reason_carries_server_detail() {
         let content = vec![Content::text("disk quota exceeded")];
-        let reason = tool_error_reason(&content);
+        let reason = tool_error_reason(&extract_content_blocks(content));
         assert_eq!(reason, "disk quota exceeded");
     }
 
@@ -1112,3 +1058,7 @@ pub mod tests {
 #[cfg(test)]
 #[path = "pagination_tests.rs"]
 mod pagination_tests;
+
+#[cfg(test)]
+#[path = "structured_result_tests.rs"]
+mod structured_result_tests;

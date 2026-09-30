@@ -5571,4 +5571,99 @@ mod tests {
             Err(LlmError::InvalidRequest { .. })
         ));
     }
+
+    fn mcp_structured_payload() -> Value {
+        serde_json::json!({
+            "records": [{"name": "a\n\"b", "enabled": true, "missing": null,
+                         "numbers": [0, -7, 1.25], "children": [{"value": false}]}],
+            "empty": {}, "list": []
+        })
+    }
+
+    fn mcp_structured_request(model: &str, mixed: bool) -> LlmRequest {
+        let mut blocks = if mixed {
+            vec![
+                ContentBlock::Text {
+                    text: "before".into(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "cG5n".into(),
+                },
+                ContentBlock::Text {
+                    text: "after".into(),
+                },
+            ]
+        } else {
+            Vec::new()
+        };
+        blocks.push(ContentBlock::structured(&mcp_structured_payload()).expect("structured JSON"));
+        LlmRequest::new(
+            model,
+            vec![
+                Message::User(UserMessage::text("lookup")),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "call-structured".into(),
+                        name: "lookup".into(),
+                        args: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                )),
+                Message::tool_results(vec![ToolResult::with_blocks(
+                    "call-structured".into(),
+                    blocks,
+                    false,
+                )]),
+            ],
+        )
+    }
+
+    #[test]
+    fn mcp_structured_anthropic_nested_result_reaches_request_body() {
+        let client = AnthropicClient::new("test-key".into()).unwrap();
+        let body = client
+            .build_request_body(&mcp_structured_request("claude-sonnet-4-5", false))
+            .unwrap();
+        let result = &body["messages"][2]["content"][0];
+        assert_eq!(result["type"], "tool_result");
+        assert_eq!(result["tool_use_id"], "call-structured");
+        assert_eq!(result["is_error"], false);
+        assert_eq!(
+            serde_json::from_str::<Value>(result["content"].as_str().unwrap()).unwrap(),
+            mcp_structured_payload()
+        );
+    }
+
+    #[test]
+    fn mcp_structured_anthropic_mixed_result_keeps_order_and_image() {
+        let client = AnthropicClient::new("test-key".into()).unwrap();
+        let body = client
+            .build_request_body(&mcp_structured_request("claude-sonnet-4-5", true))
+            .unwrap();
+        let result = &body["messages"][2]["content"][0];
+        assert_eq!(result["type"], "tool_result");
+        assert_eq!(result["tool_use_id"], "call-structured");
+        assert_eq!(result["is_error"], false);
+        let parts = result["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(
+            parts[0],
+            serde_json::json!({"type": "text", "text": "before"})
+        );
+        assert_eq!(
+            parts[1],
+            serde_json::json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "cG5n"}})
+        );
+        assert_eq!(
+            parts[2],
+            serde_json::json!({"type": "text", "text": "after"})
+        );
+        assert_eq!(parts[3]["type"], "text");
+        assert_eq!(
+            serde_json::from_str::<Value>(parts[3]["text"].as_str().unwrap()).unwrap(),
+            mcp_structured_payload()
+        );
+    }
 }

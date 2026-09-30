@@ -2301,8 +2301,7 @@ impl SqliteWorkGraphStore {
         &self,
         f: impl FnOnce(&Connection) -> Result<T, WorkGraphError>,
     ) -> Result<T, WorkGraphError> {
-        let _guard = meerkat_sqlite::OperationGuard::for_database(&self.path)
-            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        let _guard = self.operation_guard()?;
         let mut conn =
             meerkat_sqlite::open(&self.path, meerkat_sqlite::ConnectionProfile::ReadOnly)
                 .map_err(|err| self.backing_store_unavailable(err))?;
@@ -2325,6 +2324,27 @@ impl SqliteWorkGraphStore {
         Ok(result)
     }
 
+    /// Admit one store operation past the maintenance fence. A held fence
+    /// (offline maintenance) is the backing store being unavailable, not an
+    /// absent record; its diagnostic names the host path, so it goes to
+    /// tracing and the public error stays path-free, as for an open failure.
+    fn operation_guard(&self) -> Result<meerkat_sqlite::OperationGuard, WorkGraphError> {
+        meerkat_sqlite::OperationGuard::for_database(&self.path).map_err(|error| match error {
+            meerkat_sqlite::SqliteStoreError::MaintenanceFenceHeld { .. } => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %error,
+                    "workgraph backing store is under offline maintenance"
+                );
+                WorkGraphError::BackingStoreUnavailable {
+                    backend: "sqlite".to_string(),
+                    reason: "storage is under offline maintenance".to_string(),
+                }
+            }
+            other => self.backing_store_unavailable(other),
+        })
+    }
+
     fn backing_store_unavailable(&self, error: meerkat_sqlite::SqliteStoreError) -> WorkGraphError {
         // SQLite's open errors can include the host path in their Display.
         // Keep the complete diagnostic out of the agent-facing error payload.
@@ -2345,8 +2365,7 @@ impl SqliteWorkGraphStore {
     ) -> Result<T, WorkGraphError> {
         // Per-operation fence guard: lives exactly as long as the connection
         // it admits.
-        let _guard = meerkat_sqlite::OperationGuard::for_database(&self.path)
-            .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+        let _guard = self.operation_guard()?;
         let mut conn = meerkat_sqlite::open_with(
             &self.path,
             meerkat_sqlite::ConnectionProfile::Primary { create: false },
@@ -5721,6 +5740,102 @@ mod tests {
             );
         }
         assert!(!path.exists());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_held_maintenance_fence_keeps_paths_out_of_public_payloads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("private-household-workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let item = service
+            .create(CreateWorkItemRequest {
+                title: "committed before the fence".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create");
+        // Another process holds the exclusive maintenance fence: a raw
+        // exclusive lock on the fence file without the in-process holder
+        // registry entry that would self-admit this process.
+        let foreign = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(meerkat_sqlite::fence_lock_path(&path))
+            .expect("open fence lock file");
+        foreign.try_lock().expect("foreign exclusive fence");
+
+        let private_path = path.to_string_lossy();
+        let assert_path_free = |public_text: &str| {
+            assert!(
+                !public_text.contains(private_path.as_ref()),
+                "{public_text}"
+            );
+            assert!(
+                !public_text.contains("private-household-workgraph.sqlite3"),
+                "{public_text}"
+            );
+        };
+        // A read and a write are both refused as unavailable, not absent.
+        for error in [
+            store
+                .get_item("realm", &WorkNamespace::default(), &item.id)
+                .await
+                .map(|_| ())
+                .expect_err("observation under a held fence"),
+            service
+                .create(CreateWorkItemRequest {
+                    title: "must not be written under the fence".to_string(),
+                    ..Default::default()
+                })
+                .await
+                .map(|_| ())
+                .expect_err("write under a held fence"),
+        ] {
+            assert!(
+                matches!(
+                    &error,
+                    WorkGraphError::BackingStoreUnavailable { backend, reason }
+                        if backend == "sqlite" && reason.contains("offline maintenance")
+                ),
+                "{error:?}"
+            );
+            assert_path_free(&error.to_string());
+            assert_path_free(&format!("{error:?}"));
+        }
+        for (name, arguments) in [
+            ("workgraph_list", json!({})),
+            ("workgraph_create", json!({"title": "must not be written"})),
+        ] {
+            let error = crate::handle_unscoped_workgraph_tools_call(&service, name, &arguments)
+                .await
+                .expect_err("tool must preserve the fence refusal");
+            assert_eq!(error.code, crate::WorkGraphToolErrorCode::StoreError);
+            let wire = serde_json::to_value(&error).expect("tool error wire");
+            assert_eq!(wire["code"], "store_error");
+            assert!(
+                error.message.contains("offline maintenance"),
+                "{}",
+                error.message
+            );
+            assert_path_free(&wire.to_string());
+        }
+
+        // Releasing the fence restores service over the same committed store.
+        drop(foreign);
+        assert_eq!(
+            store
+                .get_item("realm", &WorkNamespace::default(), &item.id)
+                .await
+                .expect("read after the fence is released")
+                .expect("committed item")
+                .title,
+            item.title
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

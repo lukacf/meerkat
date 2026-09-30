@@ -476,9 +476,9 @@ fn map_error(error: WorkGraphError) -> WorkGraphToolError {
             WorkGraphToolErrorCode::InvalidArguments
         }
         WorkGraphError::UnsupportedBackend(_) => WorkGraphToolErrorCode::CapabilityUnavailable,
-        WorkGraphError::Store(_) | WorkGraphError::NamespaceAssignmentRequired { .. } => {
-            WorkGraphToolErrorCode::StoreError
-        }
+        WorkGraphError::Store(_)
+        | WorkGraphError::BackingStoreUnavailable { .. }
+        | WorkGraphError::NamespaceAssignmentRequired { .. } => WorkGraphToolErrorCode::StoreError,
     };
     WorkGraphToolError::new(code, error.to_string())
 }

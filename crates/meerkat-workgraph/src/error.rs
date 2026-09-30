@@ -50,6 +50,10 @@ pub enum WorkGraphError {
         required_realm_id: String,
         realm_id: String,
     },
+    /// The backing store could not be opened for observation. This must not
+    /// be interpreted as an absent item or permission to repeat a mutation.
+    #[error("work graph backing store '{backend}' is unavailable: {reason}")]
+    BackingStoreUnavailable { backend: String, reason: String },
 }
 
 impl WorkGraphError {

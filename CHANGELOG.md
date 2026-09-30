@@ -35,6 +35,24 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_workgraph::WorkGraphError` and
+  `meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkGraphErrorKind`
+  gain `BackingStoreUnavailable`. Exhaustive matches must handle the new
+  variant; existing variant ordering is preserved. The canonical public
+  error classification remains `StoreError`.
+- Behaviour-only (not measured by the gate): `SqliteWorkGraphStore` read
+  operations require an existing current-schema database. They no longer
+  create a missing database, initialize an empty replacement or migrate an
+  older schema. Explicit store open remains the initialization/migration path.
+
+### Fixed
+
+- WorkGraph observations, including execution recovery, distinguish an
+  unavailable backing store from an absent record and preserve one read-only
+  snapshot across schema validation and data queries.
+
 ## [0.8.49] - 2026-09-30
 
 0.8.48 was tagged but never published to crates.io or GitHub Releases, so

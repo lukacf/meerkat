@@ -266,6 +266,7 @@ pub enum WorkGraphErrorKind {
     NamespaceAssignmentRequired,
     UnsupportedBackend,
     AttentionTargetRealmMismatch,
+    BackingStoreUnavailable,
 }
 
 /// Machine-owned public error classification surfaced to REST/RPC callers. The
@@ -1918,6 +1919,7 @@ machine! {
             on input ClassifyWorkGraphPublicError { kind }
             guard "store_error_class" {
                 kind == WorkGraphErrorKind::Store
+                    || kind == WorkGraphErrorKind::BackingStoreUnavailable
                     || kind == WorkGraphErrorKind::NamespaceAssignmentRequired
             }
             update {}

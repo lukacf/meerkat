@@ -144,6 +144,12 @@ them.
   values; `McpHttpConfig` keeps header names but redacts header values and URL
   userinfo, query and fragment. This also covers `McpServerConfig`, `McpConfig`
   and `McpAddParams`, which embed them, and the internal SSE and streamable HTTP
+- `Debug` output of MCP, skill-repository and hook configuration no longer
+  exposes credentials. Names stay visible; argument values, env values, header
+  values and URL userinfo, query and fragment print as `"<redacted>"`. Covered:
+  `McpStdioConfig` and `McpHttpConfig` (and so `McpServerConfig`, `McpConfig`
+  and `McpAddParams`), `SkillRepoTransport`, the hook `CommandRuntimeConfig`
+  and `HttpRuntimeConfig`, and the internal MCP SSE and streamable HTTP
   clients' header maps. `Serialize` and equality are unchanged.
 - WorkGraph observations, including execution recovery, distinguish an
   unavailable backing store from an absent record and preserve one read-only

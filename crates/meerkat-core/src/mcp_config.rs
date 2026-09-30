@@ -77,14 +77,12 @@ pub struct McpHttpConfig {
     pub transport: Option<McpHttpTransport>,
 }
 
-const REDACTED: &str = "<redacted>";
-
 impl std::fmt::Debug for McpStdioConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpStdioConfig")
             .field("command", &self.command)
-            .field("args", &RedactedList(self.args.len()))
-            .field("env", &RedactedValues(&self.env))
+            .field("args", &crate::redact::RedactedList(self.args.len()))
+            .field("env", &crate::redact::RedactedValues::of(self.env.keys()))
             .finish()
     }
 }
@@ -92,67 +90,13 @@ impl std::fmt::Debug for McpStdioConfig {
 impl std::fmt::Debug for McpHttpConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpHttpConfig")
-            .field("url", &RedactedUrl(&self.url))
-            .field("headers", &RedactedValues(&self.headers))
+            .field("url", &crate::redact::RedactedUrl(&self.url))
+            .field(
+                "headers",
+                &crate::redact::RedactedValues::of(self.headers.keys()),
+            )
             .field("transport", &self.transport)
             .finish()
-    }
-}
-
-/// Debug view of a secret-bearing map: keys in sorted order, values redacted.
-struct RedactedValues<'a>(&'a HashMap<String, String>);
-
-impl std::fmt::Debug for RedactedValues<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut keys: Vec<&str> = self.0.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        f.debug_map()
-            .entries(keys.into_iter().map(|key| (key, REDACTED)))
-            .finish()
-    }
-}
-
-/// Debug view of a secret-bearing list: its length, every value redacted.
-struct RedactedList(usize);
-
-impl std::fmt::Debug for RedactedList {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list()
-            .entries(std::iter::repeat_n(REDACTED, self.0))
-            .finish()
-    }
-}
-
-/// Debug view of a URL: scheme, host and path kept; userinfo, query and
-/// fragment redacted.
-struct RedactedUrl<'a>(&'a str);
-
-impl std::fmt::Debug for RedactedUrl<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (base, suffix) = match self.0.find(['?', '#']) {
-            Some(index) => (&self.0[..index], Some(&self.0[index..=index])),
-            None => (self.0, None),
-        };
-        let (scheme, rest) = match base.find("://") {
-            Some(index) => base.split_at(index + 3),
-            None => ("", base),
-        };
-        let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-        let mut shown = String::with_capacity(self.0.len());
-        shown.push_str(scheme);
-        match authority.rfind('@') {
-            Some(index) => {
-                shown.push_str(REDACTED);
-                shown.push_str(&authority[index..]);
-            }
-            None => shown.push_str(authority),
-        }
-        shown.push_str(path);
-        if let Some(separator) = suffix {
-            shown.push_str(separator);
-            shown.push_str(REDACTED);
-        }
-        std::fmt::Debug::fmt(&shown, f)
     }
 }
 
@@ -1245,14 +1189,6 @@ mod tests {
                 assert!(rendered.contains(kept), "missing {kept}: {rendered}");
             }
         }
-        assert_eq!(
-            format!("{:?}", RedactedUrl("https://u:p@h.example/p?q=1")),
-            r#""https://<redacted>@h.example/p?<redacted>""#
-        );
-        assert_eq!(
-            format!("{:?}", RedactedUrl("http://127.0.0.1:8080/mcp")),
-            r#""http://127.0.0.1:8080/mcp""#
-        );
     }
 
     #[tokio::test]

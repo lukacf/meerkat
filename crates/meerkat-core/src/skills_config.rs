@@ -79,7 +79,10 @@ pub struct SkillRepositoryConfig {
 }
 
 /// Transport configuration for a skill repository.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` keeps the command, env names and URL location but redacts argument
+/// values, env values and URL userinfo, query and fragment.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum SkillRepoTransport {
     Filesystem {
@@ -120,6 +123,59 @@ pub enum SkillRepoTransport {
         #[serde(default = "default_clone_depth")]
         depth: Option<usize>,
     },
+}
+
+impl std::fmt::Debug for SkillRepoTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redact::{RedactedList, RedactedUrl, RedactedValues};
+        match self {
+            Self::Filesystem { path } => f.debug_struct("Filesystem").field("path", path).finish(),
+            Self::Stdio {
+                command,
+                args,
+                cwd,
+                env,
+                timeout_seconds,
+            } => f
+                .debug_struct("Stdio")
+                .field("command", command)
+                .field("args", &RedactedList(args.len()))
+                .field("cwd", cwd)
+                .field("env", &RedactedValues::of(env.keys()))
+                .field("timeout_seconds", timeout_seconds)
+                .finish(),
+            Self::Http {
+                url,
+                auth,
+                refresh_seconds,
+                timeout_seconds,
+            } => f
+                .debug_struct("Http")
+                .field("url", &RedactedUrl(url))
+                .field("auth", auth)
+                .field("refresh_seconds", refresh_seconds)
+                .field("timeout_seconds", timeout_seconds)
+                .finish(),
+            Self::Git {
+                url,
+                git_ref,
+                ref_type,
+                skills_root,
+                auth,
+                refresh_seconds,
+                depth,
+            } => f
+                .debug_struct("Git")
+                .field("url", &RedactedUrl(url))
+                .field("git_ref", git_ref)
+                .field("ref_type", ref_type)
+                .field("skills_root", skills_root)
+                .field("auth", auth)
+                .field("refresh_seconds", refresh_seconds)
+                .field("depth", depth)
+                .finish(),
+        }
+    }
 }
 
 /// Typed HTTP skill-repository credential, parsed at config ingress.
@@ -393,6 +449,48 @@ auth = { scheme = "bearer", token = "secret" }
                 token: "secret".into()
             })
         );
+    }
+
+    #[test]
+    fn skill_repo_transport_debug_redacts_env_args_and_url_credentials() {
+        const SECRET: &str = "sk-live-secret-value";
+        let transports = [
+            SkillRepoTransport::Stdio {
+                command: "skills-server".into(),
+                args: vec!["--token".into(), SECRET.into()],
+                cwd: None,
+                env: std::collections::BTreeMap::from([(
+                    "SKILLS_TOKEN".to_string(),
+                    SECRET.to_string(),
+                )]),
+                timeout_seconds: 15,
+            },
+            SkillRepoTransport::Http {
+                url: format!("https://skills.example.com/index?key={SECRET}"),
+                auth: None,
+                refresh_seconds: 300,
+                timeout_seconds: 15,
+            },
+            SkillRepoTransport::Git {
+                url: format!("https://x-access-token:{SECRET}@github.com/org/skills.git"),
+                git_ref: "main".into(),
+                ref_type: GitRefType::default(),
+                skills_root: None,
+                auth: None,
+                refresh_seconds: 300,
+                depth: Some(1),
+            },
+        ];
+        let rendered = format!("{transports:?} {transports:#?}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        for kept in [
+            "skills-server",
+            "SKILLS_TOKEN",
+            "https://skills.example.com/index?<redacted>",
+            "https://<redacted>@github.com/org/skills.git",
+        ] {
+            assert!(rendered.contains(kept), "missing {kept}: {rendered}");
+        }
     }
 
     #[test]

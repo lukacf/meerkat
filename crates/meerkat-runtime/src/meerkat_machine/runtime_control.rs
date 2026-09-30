@@ -10859,10 +10859,30 @@ impl MeerkatMachine {
                     .collect();
                 drop(queued_rows);
                 superseding.sort_by_key(|(row_cursor, _)| *row_cursor);
+                // The generated edge guarantees a later queued heard-speech
+                // row; an empty set means runtime custody diverged from it.
+                // Fail closed rather than send the typed row without its
+                // correction (the S99 failure mode).
                 crate::live_execution::superseded_typed_row_context(
                     &context,
                     superseding.iter().map(|(_, text)| text.as_str()),
                 )
+                .ok_or_else(|| {
+                    debug_assert!(
+                        false,
+                        "superseded typed row authorized without a queued superseding speech row"
+                    );
+                    tracing::error!(
+                        session_id = %session_id,
+                        channel_id = %channel_id,
+                        cursor = next_cursor,
+                        "live context invariant breach: superseded typed row has no queued superseding speech row; not sending it bare"
+                    );
+                    RuntimeDriverError::Internal(
+                        "superseded typed row authorized without a queued superseding speech row"
+                            .to_string(),
+                    )
+                })?
             } else {
                 context
             };

@@ -1650,6 +1650,7 @@ pub enum LiveContextRowSource {
 /// author is what separates heard user speech, which alone supersedes a typed
 /// row held behind a late summary, from the assistant's own speech.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[non_exhaustive]
 pub enum LiveContextRowAuthor {
     #[default]
     User,

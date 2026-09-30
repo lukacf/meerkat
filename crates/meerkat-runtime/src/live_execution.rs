@@ -3831,23 +3831,26 @@ pub const LIVE_SUPERSEDING_SPEECH_HEADING: &str =
     "Said aloud later in this call, superseding it where they conflict:";
 
 /// Payload of a superseded typed row: the row, then every later heard user
-/// speech row still queued behind it, in canonical order.
+/// speech row still queued behind it, in canonical order. `None` when no
+/// superseding row is given: the generated edge only supersedes a row with at
+/// least one later heard-speech row queued, and sending the typed row without
+/// its correction is the failure this bundling exists to prevent (S99), so a
+/// caller must fail closed instead of sending it bare.
 #[must_use]
 pub fn superseded_typed_row_context<'a>(
     typed: &str,
     superseding_speech: impl IntoIterator<Item = &'a str>,
-) -> String {
-    let mut context = typed.to_string();
+) -> Option<String> {
     let mut speech = superseding_speech.into_iter().peekable();
-    if speech.peek().is_some() {
+    speech.peek()?;
+    let mut context = typed.to_string();
+    context.push('\n');
+    context.push_str(LIVE_SUPERSEDING_SPEECH_HEADING);
+    for row in speech {
         context.push('\n');
-        context.push_str(LIVE_SUPERSEDING_SPEECH_HEADING);
-        for row in speech {
-            context.push('\n');
-            context.push_str(row);
-        }
+        context.push_str(row);
     }
-    context
+    Some(context)
 }
 
 /// Generated purpose of an append, never a caller-selected provider role.
@@ -5214,6 +5217,26 @@ impl LiveDelegationResultDeliveryReceipt {
 
 #[cfg(test)]
 mod tests {
+    /// A superseded typed row is never composed without its correction: the
+    /// empty set is typed as `None` so the drain fails closed.
+    #[test]
+    fn superseded_typed_row_context_requires_superseding_speech() {
+        assert_eq!(
+            super::superseded_typed_row_context("typed", std::iter::empty()),
+            None
+        );
+        let composed =
+            super::superseded_typed_row_context("typed", ["first spoken", "second spoken"])
+                .expect("superseding speech present");
+        let typed_at = composed.find("typed").expect("typed row");
+        let heading_at = composed
+            .find(super::LIVE_SUPERSEDING_SPEECH_HEADING)
+            .expect("heading");
+        let first_at = composed.find("first spoken").expect("first");
+        let second_at = composed.find("second spoken").expect("second");
+        assert!(typed_at < heading_at && heading_at < first_at && first_at < second_at);
+    }
+
     use super::*;
     use meerkat_core::ops::OperationId;
     use meerkat_core::{

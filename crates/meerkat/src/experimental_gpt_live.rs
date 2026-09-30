@@ -5353,8 +5353,8 @@ impl ExperimentalGptLiveWebrtcTransport {
         let command = match kind {
             // A typed row is conversational input the provider has not heard.
             // It is voiced as commentary. A typed row that waited behind a
-            // late summary while the channel heard newer speech arrives here
-            // as a CausalReassertion instead (generated edge
+            // late summary while the channel heard newer speech arrives as a
+            // SupersededTypedRow instead (generated edge
             // AuthorizeLiveContextAppendSuperseded): voiced after that speech,
             // gpt-live-1 made it the newest fact, 3/3 on 2026-09-29 (S99).
             meerkat_runtime::live_execution::LiveContextAppendKind::Ordinary => {

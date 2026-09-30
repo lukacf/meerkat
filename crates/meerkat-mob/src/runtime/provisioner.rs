@@ -15,6 +15,9 @@ use futures::FutureExt as _;
 use meerkat_core::comms::{PeerAddress, PeerName, TrustedPeerDescriptor};
 use meerkat_core::event_injector::SubscribableInjector;
 #[cfg(feature = "runtime-adapter")]
+use meerkat_core::lifecycle::InputId;
+use meerkat_core::lifecycle::RunId as CoreRunId;
+#[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
     CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle,
@@ -22,8 +25,6 @@ use meerkat_core::lifecycle::core_executor::{
 };
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
-#[cfg(feature = "runtime-adapter")]
-use meerkat_core::lifecycle::{InputId, RunId as CoreRunId};
 use meerkat_core::ops::OperationId;
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::ops_lifecycle::OperationStatus;

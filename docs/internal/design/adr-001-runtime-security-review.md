@@ -90,7 +90,7 @@ repairs, and did not disclose the subagent verdicts.
 | Reviewer | Role | Status |
 | --- | --- | --- |
 | `claude-gcp-lead` | GCP Meerkat/MobKit lead | [RED on r2](reviews/adr-001/gcp-lead-r2.md); F1-F9 resolved in the dispositions below. |
-| `homecore` | Homecore developer | [RED on r2](reviews/adr-001/homecore-r2.md); F1-F10 resolved in the dispositions below. |
+| `homecore` | Homecore developer | [RED on r2](reviews/adr-001/homecore-r2.md); F1-F10 dispositioned below. F5 closed as an accepted limitation: anonymous, physical and dynamic profiles remain unavailable. |
 | `ob3` | OB3 developer | [RED on r2](reviews/adr-001/ob3-r2.md); F1-F7 resolved in the dispositions below. |
 | `toolkit-codex-local` | Meerkat Toolkit developer | [GREEN on r2](reviews/adr-001/toolkit-r2.md), with implementation acceptance requirements. |
 
@@ -224,7 +224,8 @@ this [manifest](reviews/adr-001/candidate-r6-manifest.json). The complete
 four bus reviewers with the final hashes. No earlier verdict is silently
 carried forward to different bytes.
 
-The final delta resolves Homecore N5 and D1, the GCP lead's domain clarification,
+The final delta resolves Homecore N5 and D1 from its [r4 review](reviews/adr-001/homecore-r4.md)
+and subsequent clarification, the GCP lead's domain clarification,
 and OB3's profile-applicability precision. Domains are determined for each
 canonical authority and its state. A handle exposing Meerkat-owned grant state
 must use its owner-side fence, while Elephant can retain independent resource

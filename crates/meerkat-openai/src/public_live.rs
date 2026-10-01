@@ -13,7 +13,7 @@
 //! admission, delegation meaning, channel policy, and model selection remain
 //! outside this module.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use meerkat_core::model_profile::catalog::ModelReleaseStage;
 use meerkat_core::types::Message;
@@ -1003,14 +1003,56 @@ impl PublicLiveBrokerSession {
         delegation: &GptLiveDelegationRef,
         text: impl Into<String>,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        self.append_delegation_commentary(delegation, text, false)
+            .await
+    }
+
+    /// Append an executor result to an observed client delegation, as
+    /// commentary exactly like [`Self::append_delegation_context`].
+    ///
+    /// Measured against gpt-live-1, the model occasionally acknowledges a
+    /// result commentary and never voices it. When the result's
+    /// acknowledgement (the Delivered transition) finds the session idle, so
+    /// no transcript delta from either speaker arrived since this
+    /// delegation's release began, the broker follows the result with one
+    /// short instructions-lane cue, the lane the provider documents for
+    /// prompting speech. The cue is broker-owned: its receipt is consumed
+    /// here and never surfaced.
+    pub async fn append_delegation_result(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: impl Into<String>,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        self.append_delegation_commentary(delegation, text, true)
+            .await
+    }
+
+    async fn append_delegation_commentary(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: impl Into<String>,
+        result: bool,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         let text = require_context(text)?;
         let token = self
             .state
             .lock()
             .await
-            .reserve_append(PendingAppendLane::Delegation)?;
+            .reserve_delegation_commentary(&delegation.0, result)?;
         let event = Self::commentary_event(token, text, Nullable(Some(delegation.0.clone())));
         self.deliver_append(token, event).await
+    }
+
+    /// Send the result cues whose idle condition held at acknowledgement.
+    async fn send_due_result_cues(&self) -> Result<(), GptLiveBrokerError> {
+        loop {
+            let Some(token) = self.state.lock().await.reserve_due_result_cue()? else {
+                return Ok(());
+            };
+            let event = Self::instructions_event(token, 0, LIVE_RESULT_CUE.to_owned());
+            self.deliver_append(token, event).await?;
+            tracing::info!("public Live result cue sent");
+        }
     }
 
     fn commentary_event(
@@ -1160,6 +1202,7 @@ impl PublicLiveBrokerSession {
                 Some((frame.client_event_id.clone(), matched_owned))
             });
             let applied = state.apply_frame(frame);
+            let cues_due = state.due_result_cues > 0 && !state.close_requested;
             #[cfg(feature = "test-realtime-fixtures")]
             if let Some(capture) = &self.thinking_capture
                 && let Some((client_event_id, matched_owned)) = instructions_ack
@@ -1181,6 +1224,10 @@ impl PublicLiveBrokerSession {
                 });
             }
             applied?;
+            if cues_due {
+                drop(state);
+                self.send_due_result_cues().await?;
+            }
         }
     }
 
@@ -1290,6 +1337,9 @@ struct PendingAppend {
     token: GptLiveAppendToken,
     outstanding_receipts: Vec<String>,
     rejected: bool,
+    /// A broker-owned result cue: its receipts drain here and nothing about
+    /// it is surfaced, so the sideband's append correlation never sees it.
+    internal: bool,
 }
 
 struct PendingAppendIndex(usize);
@@ -1385,6 +1435,17 @@ struct SessionState {
     seen_delegation_ids: HashSet<String>,
     queued_observations: VecDeque<GptLiveBrokerObservation>,
     reflected_output_audio_frames: u64,
+    /// Count of transcript deltas (input or output) observed, in wire order.
+    /// Unchanged across an interval means nobody spoke in it.
+    transcript_epoch: u64,
+    /// The most recent delegation-lane append: its provider delegation id and
+    /// the transcript epoch when it was sent.
+    last_delegation_append: Option<(String, u64)>,
+    /// Result appends awaiting their acknowledgement, with the transcript
+    /// epoch their idle interval started at.
+    result_cue_candidates: HashMap<GptLiveAppendToken, u64>,
+    /// Result cues whose idle condition held at acknowledgement, not yet sent.
+    due_result_cues: usize,
     close_requested: bool,
     closed_observed: bool,
 }
@@ -1405,6 +1466,10 @@ impl Default for SessionState {
             seen_delegation_ids: HashSet::new(),
             queued_observations: VecDeque::new(),
             reflected_output_audio_frames: 0,
+            transcript_epoch: 0,
+            last_delegation_append: None,
+            result_cue_candidates: HashMap::new(),
+            due_result_cues: 0,
             close_requested: false,
             closed_observed: false,
         }
@@ -1434,6 +1499,42 @@ impl SessionState {
         count: usize,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         self.reserve_append_fragments(PendingAppendLane::Instructions, count)
+    }
+
+    /// Reserve one delegation-lane commentary append; a result also records
+    /// where its idle interval starts. That is this delegation's previous
+    /// append when it immediately precedes the result on the delegation lane
+    /// (the Completed narration introducing it), so a model already answering
+    /// that narration is not cued; otherwise the result itself.
+    fn reserve_delegation_commentary(
+        &mut self,
+        delegation_id: &str,
+        result: bool,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        let token = self.reserve_append(PendingAppendLane::Delegation)?;
+        let epoch = self.transcript_epoch;
+        let since = match self.last_delegation_append.as_ref() {
+            Some((previous, previous_epoch)) if previous == delegation_id => *previous_epoch,
+            _ => epoch,
+        };
+        self.last_delegation_append = Some((delegation_id.to_owned(), epoch));
+        if result {
+            self.result_cue_candidates.insert(token, since);
+        }
+        Ok(token)
+    }
+
+    /// Reserve the next due result cue as a broker-owned instructions append.
+    fn reserve_due_result_cue(&mut self) -> Result<Option<GptLiveAppendToken>, GptLiveBrokerError> {
+        if self.due_result_cues == 0 {
+            return Ok(None);
+        }
+        self.due_result_cues -= 1;
+        let token = self.reserve_instructions_append(1)?;
+        if let Some(pending) = self.pending_appends.back_mut() {
+            pending.internal = true;
+        }
+        Ok(Some(token))
     }
 
     fn outstanding_receipt_count(&self) -> usize {
@@ -1472,6 +1573,7 @@ impl SessionState {
             token,
             outstanding_receipts,
             rejected: false,
+            internal: false,
         });
         Ok(token)
     }
@@ -1497,7 +1599,7 @@ impl SessionState {
                     let Some(interrupted) = pending.lane.interrupted_by_close(pending.token) else {
                         return true;
                     };
-                    if !pending.rejected {
+                    if !pending.rejected && !pending.internal {
                         observations.push_back(interrupted);
                     }
                     false
@@ -1591,7 +1693,10 @@ impl SessionState {
                     let pending = &mut self.pending_appends[append_index.0];
                     pending.outstanding_receipts.remove(receipt_index.0);
                     let report_rejection = self.close_requested || pending.lane.is_fragmented();
-                    if report_rejection && !pending.rejected {
+                    if pending.internal {
+                        tracing::info!("public Live result cue rejected by the provider");
+                        pending.rejected = true;
+                    } else if report_rejection && !pending.rejected {
                         self.queued_observations
                             .push_back(pending.lane.rejected(pending.token));
                         pending.rejected = true;
@@ -1599,7 +1704,9 @@ impl SessionState {
                     // Retain unmatched fragments after partial rejection so
                     // later exact receipts can drain without fabricating ACK.
                     if pending.outstanding_receipts.is_empty() {
+                        let token = pending.token;
                         self.pending_appends.remove(append_index.0);
+                        self.result_cue_candidates.remove(&token);
                     }
                     if report_rejection {
                         return Ok(());
@@ -1672,16 +1779,44 @@ impl SessionState {
         }
         pending.outstanding_receipts.remove(receipt_index.0);
         if pending.outstanding_receipts.is_empty() {
-            if !pending.rejected {
+            let (token, rejected, internal) = (pending.token, pending.rejected, pending.internal);
+            if internal {
+                tracing::info!(rejected, "public Live result cue acknowledged");
+            } else if !rejected {
                 self.queued_observations
-                    .push_back(pending.lane.acknowledged(pending.token));
+                    .push_back(pending.lane.acknowledged(token));
             }
             self.pending_appends.remove(append_index.0);
+            if let Some(since) = self.result_cue_candidates.remove(&token)
+                && !rejected
+            {
+                self.decide_result_cue(since);
+            }
         }
         Ok(())
     }
 
+    /// The result's acknowledgement is the Delivered transition. The model is
+    /// idle there when no transcript delta, from either speaker, arrived in
+    /// the interval that started when this delegation's release began: the
+    /// model did not start answering the preceding narration and the user is
+    /// not speaking. Only then does the result get a speak cue; output in
+    /// progress means the model is already speaking and needs none.
+    fn decide_result_cue(&mut self, since: u64) {
+        let deltas_since = self.transcript_epoch.saturating_sub(since);
+        if deltas_since == 0 {
+            tracing::info!("public Live result delivered while idle; result cue due");
+            self.due_result_cues = self.due_result_cues.saturating_add(1);
+        } else {
+            tracing::info!(
+                deltas_since,
+                "public Live result delivered with speech in progress; result cue suppressed"
+            );
+        }
+    }
+
     fn record_transcript_delta(&mut self, role: GptLiveTurnRole, delta: String) {
+        self.transcript_epoch = self.transcript_epoch.saturating_add(1);
         let turn = self.ensure_open_turn(role);
         self.queue_transcript_fragment(role, turn, delta.clone());
         if let Some(open) = self.open_turn.as_mut() {
@@ -1955,6 +2090,11 @@ pub fn __commentary_client_event_id(token: GptLiveAppendToken) -> String {
 fn thinking_event_id(token: GptLiveAppendToken, index: usize) -> String {
     format!("meerkat-thinking-{}-{index}", token.0)
 }
+
+/// The speak cue that follows a result delivered while the session is idle.
+/// Neutral and short: it names no content, so it cannot carry or alter the
+/// result it points at.
+const LIVE_RESULT_CUE: &str = "Tell the user this result now.";
 
 fn instructions_event_id(token: GptLiveAppendToken, index: usize) -> String {
     format!("meerkat-instructions-{}-{index}", token.0)
@@ -3097,6 +3237,146 @@ mod tests {
         assert_eq!(context_fragments("").len(), 0);
         assert_eq!(context_fragments(&"x".repeat(500)).len(), 1);
         assert_eq!(context_fragments(&"x".repeat(501)).len(), 2);
+    }
+
+    fn instructions_ack(client_event_id: &str) -> Value {
+        let mut value = ack(Some(client_event_id));
+        value["type"] = json!("session.instructions.appended");
+        value
+    }
+
+    /// A delegation whose model already said "one moment": the release
+    /// (Completed narration, then the result) starts after that speech.
+    fn state_with_spoken_delegation() -> SessionState {
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta("book a table")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_cue", "client")))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta("one moment")))
+            .unwrap();
+        drain(&mut state);
+        state
+    }
+
+    #[test]
+    fn a_result_delivered_while_idle_gets_one_broker_owned_speak_cue() {
+        let mut state = state_with_spoken_delegation();
+        let narration = state
+            .reserve_delegation_commentary("dlg_cue", false)
+            .unwrap();
+        let result = state
+            .reserve_delegation_commentary("dlg_cue", true)
+            .unwrap();
+        state
+            .apply_frame(frame(ack(Some(&pending_event_id(narration)))))
+            .unwrap();
+        assert_eq!(state.due_result_cues, 0, "narration is never cued");
+        state
+            .apply_frame(frame(ack(Some(&pending_event_id(result)))))
+            .unwrap();
+        assert_eq!(state.due_result_cues, 1);
+        drain(&mut state);
+        let cue = state
+            .reserve_due_result_cue()
+            .unwrap()
+            .expect("one cue due");
+        assert_eq!(state.reserve_due_result_cue().unwrap(), None, "exactly one");
+        state
+            .apply_frame(frame(instructions_ack(&instructions_event_id(cue, 0))))
+            .unwrap();
+        assert!(
+            drain(&mut state).is_empty(),
+            "the cue's acknowledgement is consumed by the broker, never surfaced"
+        );
+        assert_eq!(state.outstanding_receipt_count(), 0);
+    }
+
+    #[test]
+    fn speech_after_the_release_began_suppresses_the_cue() {
+        // The model answering the Completed narration before the result lands.
+        let mut state = state_with_spoken_delegation();
+        let narration = state
+            .reserve_delegation_commentary("dlg_cue", false)
+            .unwrap();
+        let result = state
+            .reserve_delegation_commentary("dlg_cue", true)
+            .unwrap();
+        state
+            .apply_frame(frame(ack(Some(&pending_event_id(narration)))))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta(" here it is")))
+            .unwrap();
+        state
+            .apply_frame(frame(ack(Some(&pending_event_id(result)))))
+            .unwrap();
+        assert_eq!(state.due_result_cues, 0);
+
+        // The user speaking when the result lands.
+        let mut state = state_with_spoken_delegation();
+        let result = state
+            .reserve_delegation_commentary("dlg_cue", true)
+            .unwrap();
+        state.apply_frame(frame(input_delta("and also"))).unwrap();
+        state
+            .apply_frame(frame(ack(Some(&pending_event_id(result)))))
+            .unwrap();
+        assert_eq!(state.due_result_cues, 0);
+    }
+
+    #[test]
+    fn another_delegations_append_does_not_extend_the_idle_interval() {
+        // Speech before the result's own send is outside its interval when
+        // the preceding append belongs to another delegation.
+        let mut state = state_with_spoken_delegation();
+        let other = state
+            .reserve_delegation_commentary("dlg_other", false)
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta(" still on it")))
+            .unwrap();
+        let result = state
+            .reserve_delegation_commentary("dlg_cue", true)
+            .unwrap();
+        state
+            .apply_frame(frame(ack(Some(&pending_event_id(other)))))
+            .unwrap();
+        state
+            .apply_frame(frame(ack(Some(&pending_event_id(result)))))
+            .unwrap();
+        assert_eq!(state.due_result_cues, 1);
+    }
+
+    #[test]
+    fn a_rejected_result_or_cue_surfaces_nothing_extra() {
+        let mut state = state_with_spoken_delegation();
+        let result = state
+            .reserve_delegation_commentary("dlg_cue", true)
+            .unwrap();
+        state
+            .apply_frame(frame(append_rejected(Some(&pending_event_id(result)))))
+            .unwrap();
+        assert_eq!(state.due_result_cues, 0);
+        assert!(state.result_cue_candidates.is_empty());
+        drain(&mut state);
+
+        state.due_result_cues = 1;
+        let cue = state.reserve_due_result_cue().unwrap().unwrap();
+        state
+            .apply_frame(frame(append_rejected(Some(&instructions_event_id(cue, 0)))))
+            .unwrap();
+        assert!(
+            !drain(&mut state).iter().any(|observation| matches!(
+                observation,
+                GptLiveBrokerObservation::InstructionsContextAppendRejected { .. }
+            )),
+            "a rejected cue is not a rejected owner append"
+        );
+        assert_eq!(state.outstanding_receipt_count(), 0);
     }
 
     #[test]

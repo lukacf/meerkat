@@ -2445,6 +2445,16 @@ trait ExperimentalGptLiveBrokerSession: Send + Sync {
         text: String,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError>;
 
+    /// An executor result for one delegation. Sessions without a distinct
+    /// result path append it as delegation context.
+    async fn append_delegation_result(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        self.append_delegation_context(delegation, text).await
+    }
+
     async fn next_observation(
         &self,
     ) -> Result<Option<GptLiveBrokerObservation>, GptLiveBrokerError>;
@@ -2536,6 +2546,14 @@ impl ExperimentalGptLiveBrokerSession for PublicLiveBrokerSession {
         text: String,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         PublicLiveBrokerSession::append_delegation_context(self, delegation, text).await
+    }
+
+    async fn append_delegation_result(
+        &self,
+        delegation: &GptLiveDelegationRef,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        PublicLiveBrokerSession::append_delegation_result(self, delegation, text).await
     }
 
     async fn next_observation(
@@ -7858,7 +7876,7 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                     .reserve(SidebandAppendLane::Delegation, attempt)?;
                 let result = self
                     .session
-                    .append_delegation_context(&provider_delegation, text)
+                    .append_delegation_result(&provider_delegation, text)
                     .await;
                 #[cfg(feature = "test-realtime-fixtures")]
                 if let Ok(token) = &result {

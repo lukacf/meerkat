@@ -20,7 +20,11 @@ Root prepared an isolated native composition on the lead-agreed 8302972d at
 69d040f7e. No new native declaration was written. Two generated model conflicts
 kept the new base artifact wholesale pending canonical regeneration; those
 artifacts are not claimed current. Reserved live declarations still await the
-lead handoff. No push or broad gate has been attempted.
+lead handoff. No push or broad gate has been attempted. The simplified default will start from
+a clean main and selectively reuse required contracts and owner code; the old
+26-commit composition is preserved evidence, not its required dependency stack.
+R4 and the review record explicitly leave the irreducible-request outcome pending
+Luka's clarification. No new scheduler/terminal path has started.
 
 ## Prior high-assurance schedule, retained as history
 

@@ -2,8 +2,10 @@
 
 ## Status and reason
 
-Candidate r3, 2026-10-01. Luka has explicitly approved replacing the previous
-first-profile requirements with a simpler default. The detailed contract below
+Candidate r4, 2026-10-01. One irreducible-request disposition below
+is explicitly pending Luka's clarification; no new scheduler path is selected.
+Luka has approved replacing the previous first-profile requirements with a
+simpler default. The detailed contract below
 is undergoing adversarial review. It is a design decision, not an implementation
 or performance claim.
 
@@ -128,6 +130,17 @@ retain the complete union of contributing restrictions through summaries, tool
 results and memory. A summary or model label never declassifies its sources. Splitting one mixed-context
 response afterward does not establish independent provenance.
 
+Build each model request as an authorized context projection. Omit disallowed
+items and their complete transitive data/control-derived closure before
+inference, then continue with eligible context. Retained artifacts keep their
+envelopes; removing a citation does not sanitize a summary, argument or later
+message. Unknown closure excludes the whole uncertain artifact. Use a fixed
+typed withheld marker only under an explicit audience-safe contract, including
+whether existence/count may be revealed. Reset provider-held context/cache that
+contains excluded dependencies. Preserve the original input and association;
+projection cannot silently drop or reinterpret the request to manufacture an
+eligible call.
+
 The checked local generation covers every depended-on local fact: policy, grant
 and ancestor validity, identity relationships, resource classification and
 route/audience binding. Their canonical owners publish changes and invalidate
@@ -162,7 +175,9 @@ missing mapping refuses that call. Argument-selected processors/destinations
 still require resolution unless expressly covered by that unit grant. A server
 using its own broad credential is
 inside that declared trust boundary, not evidence of per-resource enforcement.
-Provider-hosted tools likewise require their actual action/destination contract.
+Provider-hosted tools likewise require their actual action/destination contract;
+protected retrieval must have its source envelope or trusted source enforcement
+bound before provider consumption, not merely a label on the returned result.
 
 Deduplicated blob bytes keep each reference's envelope; sharing content identity
 never selects the least restrictive reference. An output envelope conservatively
@@ -202,6 +217,16 @@ revocation takes effect at the next local check; remote staleness is a distinct,
 documented guarantee, not a local generation counter pretending to be remote
 truth.
 
+Ordinary Slack, Gmail or device APIs need not implement Elephant's protocol.
+Under an explicit source contract, a declared trusted adapter/local policy
+owner can attest local classification, retained-copy use and freshness bounds.
+It cannot invent a vendor-issued lease or claim stronger remote ACL currentness
+than authenticated observations establish. If remote-current access is required,
+that remote authority's accepted lease/observation is necessary. Remote-issued
+restrictions keep their own issuer/expiry and cannot be renewed locally. A local
+retained-copy contract must state its separate use, revocation and deletion
+semantics; a TTL, cache hit or reconnect is not new permission.
+
 ## Time, failures, retries and audit
 
 Use the host clock with configured bounded leeway for expiry, following the
@@ -224,30 +249,25 @@ compaction and comms refusals use their operation-specific typed results. A
 refused subscriber receives an audience-safe notice while others continue;
 notices themselves have a fixed authorized disclosure contract.
 
-For a refused model request, first schedule any independently authorized context,
-route or other ready operation. Never erase source restrictions, re-use a tainted
-summary or escalate permissions. If none is eligible, the existing native turn
-owner needs an explicit nonterminal `AwaitingWork` phase; the current
-`WaitingForOps` means real barriers and is not a substitute. This is a required
-extension to the canonical owner and runner, not an already-shipping state or a
-separate security machine. Preserve the run/input/turn and payload, release the
-attempt's execution resources, and emit typed `RefusedYield` to the current caller
-and authorized observers. The runner yields through a nonterminal progress path, not `Done`, `Err` or
-immediate `Repoll`. Waiters receive `RefusedYield` or the existing terminal result;
-a yield keeps the observation attached, and synchronous surfaces return the
-receipt plus run/input references so callers can reattach. It is no resume token.
-
-Admission remains open. Owner-validated changes to eligible work, context or
-authority wake preparation, retaining the same run identity for resumed work.
-Duplicate/no-change wakes do nothing. Only input admissible to the current turn
-may join it; queue-only input is never silently converted to steer. The native
-scheduler must let independently eligible work run in its proper context/turn
-while retaining refused work; inability to do so is an implementation gap, not
-permission to terminate the refused run or block the session. No busy polling,
-run-terminal event, session hold or reconciliation latch is allowed. Incompatible
-contributors remain separate. Identical denied bindings await a relevant change. Real process,
+If projection cannot produce an authorized model request, first schedule an
+independently authorized context, route or other ready operation. Never erase
+source restrictions, re-use a tainted summary or escalate permissions. Identical
+denied bindings are not retried without a relevant change. Real process,
 provider or storage failure retains its existing behavior; governance does not
 widen an operation denial into one.
+
+**One disposition is pending Luka's direct clarification:** no permitted
+processor can process the original current request at all. The smaller option
+returns a typed, audience-safe request-refusal outcome, releases that request's
+run slot and lets queued work proceed, without claiming the task succeeded.
+The strict non-completion option preserves the run/input/turn and payload, gives
+waiters a visible nonterminal refusal, and still lets independent queued work
+proceed. The current owner has one run slot per session; the latter would require
+an explicit native scheduling extension. Simply adding `AwaitingWork`, keeping
+that slot occupied or reusing `WaitingForOps` would violate the no-session-hold
+requirement. Neither option is selected or implemented here. Do not silently
+convert queued work to steer, merge incompatible requesters or introduce a
+security latch while this decision is pending.
 
 An uncertain disclosure-only model call is audited and may retry automatically
 after fresh authorization under existing bounded retry/backoff policy. Repeated
@@ -268,7 +288,11 @@ Record the requester/actor/executor, work and parent operation, policy version,
 source/processor/audience bindings, decision/reason, start and observed outcome
 through the native operation/event owner. Authoritative audit batches join the
 next existing native commit boundary, with existing retention/access controls;
-there is no hidden per-dispatch commit/fsync. Accepted pending records cannot
+there is no hidden per-dispatch commit/fsync. An in-memory embedder names the
+actual existing durable host commit it joins (such as ordinary per-turn session
+persistence), or explicitly declares process-lifetime audit. Neither a native
+in-memory commit nor an optional exporter manufactures durability. Accepted
+pending records cannot
 silently drop on backpressure or clean close. Cover denials, delegation, reads,
 compaction, model/tool calls, comms and publication. Known authoritative staging
 failure refuses the affected new protected operation; native transaction failure
@@ -276,7 +300,7 @@ keeps its ordinary scope. Never retroactively relabel a completed effect failed.
 
 Optional projections/exporters fail observably without blocking execution. A
 silently dropping queue cannot be the sole audit authority: in particular,
-MobKit's current `MobKitEventLogHandle::ingest` ignores `try_send` failure
+MobKit's current `EventLogHandle::ingest` ignores `try_send` failure
 ([issue 510](https://github.com/lukacf/meerkat-mobkit/issues/510)). Stall/overflow
 that path in acceptance tests and prove native audit survives and export loss is
 observable; export completeness is distinct from native audit.
@@ -285,26 +309,27 @@ This is host-trusted semantic audit, not a crash-complete external proof. With
 no additional durable pre-effect barrier, a crash can lose the most recent
 uncommitted attempt details. Recovery marks the unfinished native work as an
 uncertain audit tail; it cannot assert the exact set of external effects or
-claim that missing records prove non-execution. Operators who require externally witnessed, rollback-resistant or complete
-pre-effect evidence need a separately selected future high-assurance profile.
+claim that missing records prove non-execution. Operators who require externally
+witnessed, rollback-resistant or complete pre-effect evidence need a separately selected future high-assurance profile.
 
 ## Acceptance and implementation order
 
 The added authorization cost must be below **1 ms p99 per tool dispatch and
 per model call**, and at most **10 percent per representative turn**. Include
 policy matching, metadata resolution, context aggregation, generation misses,
-recording and allocation attributable to authorization. Report warm hits,
-policy invalidation/recompute, cold setup and source refresh separately, with
+recording and allocation attributable to authorization. Count any extra model
+calls/tokens from partitioned compaction against the turn budget; they are not
+free preparation work. Report warm hits, policy invalidation/recompute, cold setup and source refresh separately, with
 unfavorable cases visible. Zero added hot-path RTT and fsync counts are explicit
 assertions, not assumptions from latency alone.
 
 Use matched trusted-embedded/governed runs with identical deterministic tools
-and provider traffic, payloads, concurrency and existing store settings. Measure
-at 1 and 16 concurrent operations, 1/100/1,000/10,000 dependencies and sustained
+and provider behavior, logical payloads, concurrency and existing store settings.
+Report authorization-induced changes in call count rather than normalizing them
+away. Measure at 1 and 16 concurrent operations, 1/100/1,000/10,000 dependencies and sustained
 streaming/audio publication. Record at least 10,000 dispatch samples per
 steady-state cell, p50/p95/p99, CPU, allocations, native write-lock hold time and
-storage/network calls. Reserve
-an actual quiet host window; compile everything beforehand. Test active memory
+storage/network calls. Reserve an actual quiet host window; compile everything beforehand. Test active memory
 pressure separately. Larger-context cost must scale with context changes, not
 repeat a whole dependency walk on every tool dispatch or stream chunk.
 
@@ -316,8 +341,9 @@ repeat a whole dependency walk on every tool dispatch or stream chunk.
    is ready: prove no run-terminal event, cancellation or session hold occurs.
    Revoke a grant ancestor without a policy edit, race compile/invalidation, and
    test excluded cross-product tuples through cache reuse, batching and fallback.
-   Prove each refusal route (tool, model yield, recipient, memory/compaction/comms)
-   leaves no unanswered waiter or run falsely marked running with no wake path.
+   Prove each refusal route (tool, model, recipient, memory/compaction/comms)
+   leaves no unanswered waiter or session blocked by the refused operation. The
+   irreducible-request case follows the explicit owner decision still pending above.
 2. Extend that same path across every built-in provider, streaming/live,
    compaction, memory, comms/delegation and Elephant. Shared evaluation stays
    portable, including wasm32, without pulling native witness/clock dependencies

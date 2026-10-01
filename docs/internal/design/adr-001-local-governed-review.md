@@ -19,10 +19,11 @@ not prerequisites for this default. Earlier acceptances retain their exact scope
 | --- | --- | --- |
 | r1 | `bbf338e21790cf4f300aabfe44954662ad32706ecb5f77fe43397d11ecd44527` | Internal adversarial findings repaired in r2. |
 | r2 | `589ede7935310f466492da380b2f666ba42ee4071fa5b9551999835047b26c9d` | Three internal reviewers GREEN. Four bus reviewers returned the findings below. |
-| r3 | `c765254055ed49bc83c0a4db6b9faf245d3b74fd89e684a72457fe5f55403b18` | Three internal reviewers GREEN on the exact r2-to-r3 delta. A specific irreducible-request disposition remains with Luka; r3 is not final four-reviewer acceptance. |
+| r3 | `c765254055ed49bc83c0a4db6b9faf245d3b74fd89e684a72457fe5f55403b18` | Three internal reviewers GREEN. OB3 and Homecore closed their findings; GCP closed F2-F8 but required the premature scheduler choice to become pending and the planned filtering/lease clauses to appear in the text. |
+| r4 | `ff5fc7bc7f87ee3ee715b72dde5efee0fbb5b1e43c4e9d8f3a2c5cc70f7fe31c` | Independent information/runtime delta reviews GREEN; exact candidate sent to all four bus reviewers. Irreducible-request disposition remains expressly pending Luka, so complete final design acceptance is not claimed. |
 
 Frozen candidates, exact patches, manifests and copied reviews live under
-`/Users/luka/.codex/adr-001-evidence/local-governed-default-r{1,2,3}`.
+`/Users/luka/.codex/adr-001-evidence/local-governed-default-r{1,2,3,4}`.
 The r3 candidate manifest is
 `5d2c4e63470d179070afcc86dfeb58d0cfe80b9cc1c32249c4807d525e7a223a`;
 its internal-review manifest is
@@ -70,9 +71,40 @@ ineligible provider-held context, preserving original work and all retained
 envelopes. A fixed withheld marker has its own audience-safe contract. This is
 not permission to erase restrictions from a summary or silently rewrite intent.
 
+## R4 delta and remaining decision
+
+R4 makes authorized context projection the ordinary path; exclusions close over
+transitive data/control dependencies without rewriting the original request or
+stripping retained envelopes. It requires provider context/cache reset when
+necessary and source enforcement before hosted retrieval consumes protected data.
+It distinguishes trusted-adapter retained-copy policy from remote-issued ACL
+leases, states an in-memory host's actual audit durability, and counts extra
+compaction inference in the turn budget. The private MobKit type name is corrected
+to `EventLogHandle`.
+
+The proposed `AwaitingWork` mechanism is no longer selected. R4 explicitly names
+the one-run-slot problem and leaves the choice to Luka: a local typed refusal for
+an entirely unprocessable request, or retained open work with a properly reviewed
+native scheduling extension. No terminal refusal or scheduler change has started.
+Simply occupying the only run slot would violate the no-session-hold requirement.
+
+R4 candidate manifest:
+`180382b43baf3e614effaf32e635a2034e057022b238e4d943a97689fb9bbd1b`.
+Its information/runtime review manifest is
+`25251445930a713935c69183519634352c1f66c72f465879dacdcb37bdf98e78`.
+Root read both complete reports and verified exact candidate/patch hashes.
+
+The separate read-only minimal composition plan is frozen with r4, SHA-256
+`aa7ed1be046adfbb1ba9640bf2fab02eb76f7d8b16d77a8e719ff990e91745c3`.
+It starts from a clean main and selectively retains qualified principals, pure
+contracts and an adapted canonical grant owner. The newly authored generic codec,
+join, projection, preparation and witness stack is not an inherent prerequisite.
+The port and actual existing-owner integration still require implementation and
+verification; no source-only plan establishes a working governed path.
+
 ## Validation and execution posture
 
-`make docs-check` and `git diff --check` passed for r3. The check covered 116
+`make docs-check` and `git diff --check` passed for r3 and r4. The check covered 116
 public documentation pages and the associated documentation contract tests.
 This is documentation validation only. There are no authorization performance
 measurements or full-path implementation acceptance claims for this candidate.

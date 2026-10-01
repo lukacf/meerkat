@@ -422,7 +422,10 @@ them.
   `gpt_live_generated_authority` that no PR lane could see. Measured on 4
   cores: 168 s and 396 s; over the last 60 merges the suites would have run
   on 17 and 25. The CI gate requires every selected suite, and main's
-  attestation records the lane's result.
+  attestation records the lane's result. The Bazel generator no longer tags
+  `gpt_live_generated_authority_test` as `live` (its name says GPT Live, but
+  its 71 tests run in-process with no provider key), so the Bazel fast lanes
+  that filter out `live` now run it.
 
 - Main CI builds meerkat-mob's unit tests once and runs them in parallel
   partitions. Its default and `openai-live` lanes took 12.5-20 min on the

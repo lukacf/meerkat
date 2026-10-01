@@ -1129,7 +1129,22 @@ function compileData(target, packageRoot, includeTests) {
   };
 }
 
+// Test targets whose name says "live" for the GPT Live product region, not
+// for a live provider: they run in-process with no provider key, so the
+// substring rule below must not give them the `live` tag that every Bazel CI
+// lane filters out. gpt_live_generated_authority (meerkat-runtime, 71 tests)
+// was verified green with every provider key unset, with and without the
+// crate's `live` feature.
+const NOT_LIVE_PROVIDER_TESTS = new Set(["meerkat-runtime:gpt_live_generated_authority"]);
+
 function testTags(pkg, target) {
+  const tags = testTagsFromName(pkg, target);
+  if (!NOT_LIVE_PROVIDER_TESTS.has(`${packageKey(pkg)}:${target.name}`)) return tags;
+  const kept = tags.filter((tag) => tag !== "live");
+  return kept.length ? kept : ["fast"];
+}
+
+function testTagsFromName(pkg, target) {
   const haystack = [
     packageKey(pkg),
     target.name,

@@ -744,6 +744,7 @@ test_suite(
         "//crates/meerkat-runtime:driver_ephemeral_test",
         "//crates/meerkat-runtime:driver_persistent_test",
         "//crates/meerkat-runtime:durable_tail_recovery_authorization_test",
+        "//crates/meerkat-runtime:gpt_live_generated_authority_test",
         "//crates/meerkat-runtime:handles_dispatch_through_dispatcher_test",
         "//crates/meerkat-runtime:meerkat_machine_test",
         "//crates/meerkat-runtime:meerkat_runtime_unit_test",

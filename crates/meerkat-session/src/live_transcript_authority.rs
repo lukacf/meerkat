@@ -10,7 +10,7 @@ use meerkat_core::{
     LiveAssistantPlaybackEvidence, LiveAssistantPlaybackTruncationDisposition,
     LiveAssistantPlaybackTruncationError, LiveAssistantPlaybackTruncationEvidence, LiveChannelId,
     NormalizedLiveUserInputDigest, ProvisionalLiveHandoff, RealtimeTranscriptEvent,
-    RealtimeTranscriptMaterializedMessage, SessionId,
+    RealtimeTranscriptMaterializedMessage, RepresentedLiveUserRow, SessionId,
 };
 use sha2::{Digest, Sha256};
 
@@ -426,6 +426,79 @@ pub(crate) fn commit_final_live_user_transcript(
             "live final-user transcript did not become canonical in this commit".to_string(),
         ));
     }
+    let committed_message_count = agent.snapshot().message_count;
+    prepared.finish(Some(digest), Some(committed_message_count))
+}
+
+/// Confirm a client delegation whose user words are already canonical.
+///
+/// The provider finished the user turn(s) before `session.delegation.created`
+/// arrived (the model spoke first), so the live transcript committed them as
+/// rows; the delegation re-presents them. Each represented row must be
+/// committed under its item id with exactly its text, and the delegation's
+/// final text must carry them in order; the final input is then reconciled
+/// as committed against its digest and no row is appended. Anything else
+/// fails: a re-presentation never falls back to committing the words again.
+pub(crate) fn commit_represented_live_user_transcript(
+    agent: &mut dyn SessionAgent,
+    session_id: &SessionId,
+    provisional: ProvisionalLiveHandoff,
+    final_event: RealtimeTranscriptEvent,
+    represented: &[RepresentedLiveUserRow],
+) -> Result<FinalLiveUserTranscriptCommitEvidence, meerkat_core::error::AgentError> {
+    let prepared = PreparedLiveUserTranscriptCommit::prepare(session_id, &provisional)?;
+    let RealtimeTranscriptEvent::UserTranscriptFinal { item_id, text, .. } = final_event.payload()
+    else {
+        return Err(meerkat_core::error::AgentError::ConfigError(
+            "live final-user commit requires UserTranscriptFinal".to_string(),
+        ));
+    };
+    if item_id != provisional.correlation().provider().user_turn_id() {
+        return Err(meerkat_core::error::AgentError::ConfigError(
+            "live final-user commit provider correlation mismatch".to_string(),
+        ));
+    }
+    if represented.is_empty() {
+        return Err(meerkat_core::error::AgentError::ConfigError(
+            "a represented live user transcript names no committed row".to_string(),
+        ));
+    }
+    let session = agent.session_clone()?;
+    for row in represented {
+        let committed = session.messages().iter().find_map(|message| match message {
+            meerkat_core::Message::User(user)
+                if user
+                    .identity
+                    .realtime_origin
+                    .as_ref()
+                    .and_then(|origin| origin.provider_item_id())
+                    == Some(row.item_id.as_str()) =>
+            {
+                Some(user.text_content())
+            }
+            _ => None,
+        });
+        if committed.as_deref() != Some(row.text.as_str()) {
+            return Err(meerkat_core::error::AgentError::InternalError(
+                "a represented live user row is not committed with its exact text".to_string(),
+            ));
+        }
+    }
+    let mut rest = text.as_str();
+    for row in represented {
+        let trimmed = row.text.trim();
+        match rest.find(trimmed) {
+            Some(at) => rest = &rest[at + trimmed.len()..],
+            None => {
+                return Err(meerkat_core::error::AgentError::InternalError(
+                    "the delegation's final text does not carry its represented rows in order"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    let digest = NormalizedLiveUserInputDigest::derive(text)
+        .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))?;
     let committed_message_count = agent.snapshot().message_count;
     prepared.finish(Some(digest), Some(committed_message_count))
 }
@@ -1643,6 +1716,136 @@ mod tests {
             Some(committed_boundary),
             "later canonical appends cannot move the sealed fork boundary"
         );
+    }
+
+    fn committed_user_row(agent: &mut PlaybackTestAgent, item_id: &str, text: &str) {
+        agent
+            .append_realtime_transcript_event_for_channel(
+                RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: item_id.to_string(),
+                    previous_item_id: None,
+                    content_index: 0,
+                    text: text.to_string(),
+                },
+                LiveChannelId::new("channel-a"),
+            )
+            .expect("commit a finished user turn");
+    }
+
+    fn represented_final(text: &str) -> RealtimeTranscriptEvent {
+        RealtimeTranscriptEvent::UserTranscriptFinal {
+            item_id: "turn-private".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            text: text.to_string(),
+        }
+    }
+
+    fn split_rows() -> Vec<RepresentedLiveUserRow> {
+        vec![
+            RepresentedLiveUserRow {
+                item_id: "user-once-it".to_string(),
+                text: "just tell me the word count once it".to_string(),
+            },
+            RepresentedLiveUserRow {
+                item_id: "user-saved".to_string(),
+                text: "'s saved".to_string(),
+            },
+        ]
+    }
+
+    /// BuildBuddy 2e218ad5: both halves of the split request were committed
+    /// as finished user turns before the delegation arrived. The delegation
+    /// re-presents them: confirmed as committed against the joined digest,
+    /// and no row is appended.
+    #[test]
+    fn a_represented_delegation_confirms_the_committed_rows_and_appends_none() {
+        let mut agent = PlaybackTestAgent::new();
+        let session_id = agent.session_id();
+        committed_user_row(
+            &mut agent,
+            "user-once-it",
+            "just tell me the word count once it",
+        );
+        committed_user_row(&mut agent, "user-saved", "'s saved");
+        assert_eq!(agent.snapshot().message_count, 2);
+
+        let evidence = commit_represented_live_user_transcript(
+            &mut agent,
+            &session_id,
+            provisional(),
+            represented_final("just tell me the word count once it 's saved"),
+            &split_rows(),
+        )
+        .expect("confirm the represented rows");
+
+        assert_eq!(agent.snapshot().message_count, 2, "no row is appended");
+        assert_eq!(
+            evidence.disposition(),
+            FinalLiveUserTranscriptDisposition::Committed
+        );
+        assert_eq!(
+            evidence.normalized_final_input_digest(),
+            Some(
+                &NormalizedLiveUserInputDigest::derive(
+                    "just tell me the word count once it 's saved"
+                )
+                .expect("digest")
+            )
+        );
+        assert_eq!(evidence.committed_message_count(), Some(2));
+    }
+
+    /// Fail closed: a represented row that is missing, or committed with other
+    /// text, or a final text that does not carry the rows in order, is never
+    /// committed as a new row instead.
+    #[test]
+    fn a_represented_delegation_fails_closed_on_any_mismatch() {
+        let run =
+            |rows: &[(&str, &str)], represented: Vec<RepresentedLiveUserRow>, final_text: &str| {
+                let mut agent = PlaybackTestAgent::new();
+                let session_id = agent.session_id();
+                for (item_id, text) in rows {
+                    committed_user_row(&mut agent, item_id, text);
+                }
+                let before = agent.snapshot().message_count;
+                let result = commit_represented_live_user_transcript(
+                    &mut agent,
+                    &session_id,
+                    provisional(),
+                    represented_final(final_text),
+                    &represented,
+                );
+                assert_eq!(agent.snapshot().message_count, before, "nothing appended");
+                result.is_err()
+            };
+        let joined = "just tell me the word count once it 's saved";
+        // The tail row was never committed.
+        assert!(run(
+            &[("user-once-it", "just tell me the word count once it")],
+            split_rows(),
+            joined
+        ));
+        // Committed with different text.
+        assert!(run(
+            &[
+                ("user-once-it", "just tell me the word count once it"),
+                ("user-saved", "is saved"),
+            ],
+            split_rows(),
+            joined
+        ));
+        // The final text does not carry the rows in order.
+        assert!(run(
+            &[
+                ("user-once-it", "just tell me the word count once it"),
+                ("user-saved", "'s saved"),
+            ],
+            split_rows(),
+            "'s saved just tell me the word count once it"
+        ));
+        // No represented row at all.
+        assert!(run(&[], Vec::new(), joined));
     }
 
     #[test]

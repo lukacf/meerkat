@@ -1143,6 +1143,24 @@ pub trait MobSessionService:
         bound: std::time::Duration,
     ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError>;
 
+    /// [`Self::commit_live_delegation_final_transcript_at_turn_boundary`] for
+    /// a delegation that re-presents user rows the live transcript already
+    /// committed: the rows are verified and none is appended.
+    async fn commit_live_delegation_represented_transcript_at_turn_boundary(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+        _represented: Vec<meerkat_core::RepresentedLiveUserRow>,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        Err(SessionError::Unsupported(
+            "live delegation re-presentation requires a runtime-backed persistent session service"
+                .into(),
+        ))
+    }
+
     /// Validate the exact current durable member's bridge policy and isolated
     /// client capability before any live channel/provider open.
     #[cfg(feature = "openai-live")]
@@ -2707,6 +2725,27 @@ where
             session_id,
             provisional,
             Some(final_event),
+            bound,
+        )
+        .await
+    }
+
+    #[cfg(feature = "openai-live")]
+    async fn commit_live_delegation_represented_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        represented: Vec<meerkat_core::RepresentedLiveUserRow>,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        self.commit_live_user_transcript_represented_with_machine_at_turn_boundary(
+            machine,
+            session_id,
+            provisional,
+            final_event,
+            represented,
             bound,
         )
         .await

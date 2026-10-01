@@ -10763,6 +10763,30 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn commit_live_delegation_represented_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        represented: Vec<meerkat_core::RepresentedLiveUserRow>,
+        bound: std::time::Duration,
+    ) -> Result<
+        meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary,
+        meerkat_core::service::SessionError,
+    > {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_represented_transcript_at_turn_boundary(
+            &self.inner,
+            machine,
+            session_id,
+            provisional,
+            final_event,
+            represented,
+            bound,
+        )
+        .await
+    }
+
     async fn observe_session_resume_authority(
         &self,
         session_id: &SessionId,
@@ -14197,6 +14221,30 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
             session_id,
             provisional,
             final_event,
+            bound,
+        )
+        .await
+    }
+
+    async fn commit_live_delegation_represented_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        represented: Vec<meerkat_core::RepresentedLiveUserRow>,
+        bound: std::time::Duration,
+    ) -> Result<
+        meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_represented_transcript_at_turn_boundary(
+            &self.inner,
+            machine,
+            session_id,
+            provisional,
+            final_event,
+            represented,
             bound,
         )
         .await

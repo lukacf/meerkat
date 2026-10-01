@@ -2055,6 +2055,17 @@ enum SessionCommand {
             >,
         >,
     },
+    CommitLiveUserTranscriptRepresented {
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: RealtimeTranscriptEvent,
+        represented: Vec<meerkat_core::RepresentedLiveUserRow>,
+        reply_tx: oneshot::Sender<
+            Result<
+                meerkat_core::FinalLiveUserTranscriptCommitEvidence,
+                meerkat_core::error::AgentError,
+            >,
+        >,
+    },
     CommitLiveAssistantPlaybackTruncation {
         channel_id: meerkat_core::LiveChannelId,
         interaction_id: meerkat_core::InteractionId,
@@ -5272,6 +5283,45 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map_err(SessionError::Agent)
     }
 
+    /// Confirm a client delegation that re-presents user rows the live
+    /// transcript already committed: verified against those rows, appending
+    /// none (see `live_transcript_authority::commit_represented_live_user_transcript`).
+    pub async fn commit_live_user_transcript_represented(
+        &self,
+        id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: RealtimeTranscriptEvent,
+        represented: Vec<meerkat_core::RepresentedLiveUserRow>,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::CommitLiveUserTranscriptRepresented {
+                provisional,
+                final_event,
+                represented,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
     /// Apply an assistant playback-prefix observation only after generated
     /// SessionDocument authority classifies the exact interaction evidence.
     #[allow(clippy::too_many_arguments)]
@@ -8009,6 +8059,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::CommitLiveUserTranscriptFinal { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
+            SessionCommand::CommitLiveUserTranscriptRepresented { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
             SessionCommand::CommitLiveAssistantPlaybackTruncation { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
@@ -9233,6 +9286,32 @@ async fn session_task<A: SessionAgent>(
                     provisional,
                     final_event,
                 );
+                if result.is_ok() {
+                    let snap = agent.snapshot();
+                    control.publish_summary(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                }
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::CommitLiveUserTranscriptRepresented {
+                provisional,
+                final_event,
+                represented,
+                reply_tx,
+            } => {
+                let result =
+                    crate::live_transcript_authority::commit_represented_live_user_transcript(
+                        &mut agent,
+                        &session_id,
+                        provisional,
+                        final_event,
+                        &represented,
+                    );
                 if result.is_ok() {
                     let snap = agent.snapshot();
                     control.publish_summary(SessionSummaryCache {

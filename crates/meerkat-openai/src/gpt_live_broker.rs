@@ -26,6 +26,24 @@ impl std::fmt::Debug for GptLiveAppendToken {
     }
 }
 
+/// A finished user turn a client delegation re-presents: its reference and
+/// the exact transcript its `TurnFinished` reported.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GptLiveRepresentedUserTurn {
+    pub turn: GptLiveTurnRef,
+    pub transcript: String,
+}
+
+impl std::fmt::Debug for GptLiveRepresentedUserTurn {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GptLiveRepresentedUserTurn")
+            .field("turn", &self.turn)
+            .field("transcript", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Opaque delegation reference that can only be minted by this adapter.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct GptLiveDelegationRef(pub(crate) String);
@@ -193,6 +211,11 @@ pub enum GptLiveBrokerObservation {
         transcript: String,
         request_transcript: String,
         assistant_context: String,
+        /// User turns already finished (and reported with `TurnFinished`)
+        /// that this delegation re-presents because no user turn was open
+        /// when it arrived; empty when the delegation terminated an open
+        /// user turn.
+        represented_turns: Vec<GptLiveRepresentedUserTurn>,
     },
     DelegationActionableInputUnsupported {
         delegation: GptLiveDelegationRef,

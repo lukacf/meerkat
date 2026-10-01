@@ -3946,6 +3946,72 @@ mod orchestrator {
             .await
         }
 
+        /// Judge the client's raw decoded-audio counters for the output the
+        /// runtime requested media health for (the channel's first assistant
+        /// output). A media fault closes the channel through the ordinary
+        /// explicit close (retained summary custody is the normal path)
+        /// before the verdict is returned, so a client that receives
+        /// `media_fault` may reopen at once when `reopen_recommended`.
+        #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+        pub async fn report_experimental_live_media_health(
+            &self,
+            host: &Arc<LiveAdapterHost>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            channel: &LiveChannelId,
+            report: &meerkat_contracts::LiveMediaHealthParams,
+        ) -> Result<meerkat_contracts::LiveMediaHealthResult, crate::surface::ExperimentalLiveMediaHealthError>
+        {
+            use crate::surface::ExperimentalLiveMediaHealthError;
+            let session_id = self
+                .runtime_adapter
+                .live_session_for_active_channel(channel)
+                .await
+                .ok_or_else(|| {
+                    ExperimentalLiveMediaHealthError::Refused(
+                        "the channel is not active".to_string(),
+                    )
+                })?;
+            if report.channel_id != channel.as_str() {
+                return Err(ExperimentalLiveMediaHealthError::Refused(
+                    "the report names another channel".to_string(),
+                ));
+            }
+            let max_rms_micros = crate::surface::live_media_health_rms_micros(report.max_rms);
+            let judgement = self
+                .runtime_adapter
+                .observe_live_media_health(
+                    &session_id,
+                    channel,
+                    &report.output_id,
+                    report.decoded_frames,
+                    report.audible_frames,
+                    max_rms_micros,
+                )
+                .await
+                .map_err(|error| ExperimentalLiveMediaHealthError::Refused(error.to_string()))?;
+            if !judgement.media_faulted() {
+                return Ok(meerkat_contracts::LiveMediaHealthResult {
+                    verdict: meerkat_contracts::LiveMediaHealthVerdict::Audible,
+                    reopen_recommended: false,
+                });
+            }
+            tracing::warn!(
+                %session_id,
+                %channel,
+                decoded_frames = report.decoded_frames,
+                audible_frames = report.audible_frames,
+                max_rms_micros,
+                reopen_recommended = judgement.reopen_recommended(),
+                "the channel's first assistant output decoded silent; closing it on a media fault"
+            );
+            self.close_experimental_live_channel(host, authority, channel)
+                .await?;
+            Ok(meerkat_contracts::LiveMediaHealthResult {
+                verdict: meerkat_contracts::LiveMediaHealthVerdict::MediaFault,
+                reopen_recommended: judgement.reopen_recommended(),
+            })
+        }
+
         /// The sealed recovery proves its append already resolved ambiguous.
         /// Its drain worker is realizing this close and cannot join itself.
         #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]

@@ -81,8 +81,9 @@ them.
   `ProviderInputLatency`; exhaustive matches must handle them.
 - `meerkat_core::mcp_config::McpHttpConfig` and the HTTP variant of
   `meerkat_contracts::wire::PortableMcpDecl` gain `oauth_account: Option<String>`.
-- `meerkat_core::mcp_config::McpServerConfig` and both variants of
-  `meerkat_contracts::wire::PortableMcpDecl` gain
+- `meerkat_core::mcp_config::McpServerConfig`,
+  `meerkat_contracts::wire::PortableMcpDecl::Stdio` and
+  `meerkat_contracts::wire::PortableMcpDecl::Http` gain
   `tool_names: BTreeMap<String, String>`. Rust literals must supply the field;
   serialized configurations may omit it, and constructors select an empty map.
   It maps exact raw MCP operations to explicit exposed names. Unmapped names

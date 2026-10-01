@@ -2063,7 +2063,10 @@ impl crate::surface::LiveWebrtcBoundReadyCustody for ExperimentalGptLiveBoundRea
         }
         let observation = self
             .live_adapter_host
-            .reserve_channel_close_observation(binding.channel_id())
+            .reserve_channel_close_observation(
+                binding.channel_id(),
+                meerkat_core::LiveChannelCloseReason::OpenAbandoned,
+            )
             .await;
         match observation {
             Ok(observation) => {

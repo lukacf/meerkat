@@ -1382,6 +1382,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Invariants
 - `live_delegation_steer_records_are_authorized_and_single`
+- `live_media_health_budget_and_verdicts_are_consistent`
 - `fence_requires_bound_runtime`
 - `runtime_generation_requires_bound_runtime`
 - `live_execution_binding_is_complete_and_channel_scoped`

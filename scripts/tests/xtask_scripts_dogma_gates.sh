@@ -333,6 +333,10 @@ printf '%s\n' \
   'echo "Error: Action property AuditNeverUnregistersWithPreparation is violated."' \
   'echo "Error: Invariant AuditNeverCancelsRecovery is violated."' \
   'prev=""; for a in "$@"; do if [ "$prev" = "dot" ]; then printf "%s\n" "1 [label=\"\\n/\\\\ session_id = [tag |-> \\\"none\\\"]\"]" > "$a.dot"; fi; prev="$a"; done' \
+  'echo "Error: Invariant NotGoalAudible is violated."' \
+  'echo "Error: Invariant NotGoalSilentReopen is violated."' \
+  'echo "Error: Invariant NotGoalSilentExhausted is violated."' \
+  'echo "Error: Invariant NotGoalFaultedChannelReportsClosed is violated."' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 

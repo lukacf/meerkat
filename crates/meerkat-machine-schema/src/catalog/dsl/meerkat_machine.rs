@@ -8911,6 +8911,18 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_delegation_steer_operation_by_continuation.contains_key(continuation_id))
         }
 
+        // Live media health: each session recommends at most one media-fault
+        // reopen, a recorded verdict belongs to a judged channel, and a
+        // judged channel's first output was requested.
+        invariant live_media_health_budget_and_verdicts_are_consistent {
+            for_all(budget_session in self.live_media_fault_reopens_by_session.keys(),
+                self.live_media_fault_reopens_by_session.get_copied(budget_session).get("value") <= 1)
+            && for_all(verdict_channel in self.live_media_fault_reopen_recommended_by_channel.keys(),
+                self.live_media_health_judged_channels.contains(verdict_channel))
+            && for_all(judged_channel in self.live_media_health_judged_channels,
+                self.live_media_health_requested_output_by_channel.contains_key(judged_channel))
+        }
+
         invariant fence_requires_bound_runtime {
             self.active_fence_token == None || self.active_runtime_id != None
         }

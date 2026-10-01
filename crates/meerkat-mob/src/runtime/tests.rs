@@ -30863,6 +30863,101 @@ async fn test_snapshotless_recovery_never_publishes_foreign_attachment_endpoint(
     );
 }
 
+/// Regression for the cold-start fail-stop behind the
+/// `test_snapshotless_recovery_never_publishes_foreign_attachment_endpoint`
+/// flake, driven directly instead of by load. The stopped member's session
+/// runtime is taken to Stopped (to terminal, through the exact registration)
+/// before the host restarts, so the cold actor's cleanup-delivery recovery
+/// re-registers a stopped session and the runtime refuses the unbound
+/// endpoint with the typed, pre-effect `RegistrationOwned`: the previous
+/// attachment's retained cleanup tail still owns the registration. The
+/// actor must keep admitting commands, leave custody with that owner, and
+/// let the explicit resume take the member over.
+#[tokio::test]
+async fn cold_actor_startup_serves_while_a_stopped_members_registration_is_owned() {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let identity = AgentIdentity::from("owned-registration-worker");
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), identity.clone(), None)
+        .await
+        .expect("spawn member");
+    let session_id = handle
+        .get_member(&identity)
+        .await
+        .expect("roster query")
+        .expect("spawned member")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    handle.stop().await.expect("stop before restart");
+
+    let registration = adapter
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("stopped member keeps its runtime registration");
+    assert!(
+        adapter
+            .stop_runtime_executor_until_terminal_if_current(&registration, "fixture: stopped")
+            .await
+            .expect("stop the member's session runtime to terminal"),
+        "the member's exact registration reaches Stopped before the restart"
+    );
+
+    crash_stop_and_release_routes(handle).await;
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("stopped mob reconstruction should succeed");
+
+    assert_eq!(
+        resumed.status().await.expect("reconstructed mob status"),
+        MobState::Stopped,
+        "reconstruction must not implicitly resume the mob"
+    );
+    let owned = adapter
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("re-registered stopped session");
+    assert!(
+        !adapter
+            .registration_is_current_without_runtime_owner(&owned)
+            .await,
+        "delivery custody stays with the registration's current owner"
+    );
+
+    // Before the fix the actor exited during cleanup-delivery recovery, so
+    // this command got SharedLifecycleFailure(ActorCommandChannelClosed).
+    resumed
+        .resume()
+        .await
+        .expect("explicit resume takes the owned member over");
+    assert_eq!(
+        resumed.status().await.expect("status after resume"),
+        MobState::Running
+    );
+    assert!(
+        resumed
+            .get_member(&identity)
+            .await
+            .expect("roster query after resume")
+            .is_some(),
+        "the member is still projected after resume"
+    );
+}
+
 #[test]
 fn test_mob_machine_rejects_peer_id_reuse_across_generation_owners() {
     use crate::machines::mob_machine as dsl;

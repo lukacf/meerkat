@@ -6140,6 +6140,8 @@ struct AuthorityValidatingMobRunStore {
 
 impl AuthorityValidatingMobRunStore {
     fn validate_run(run: &MobRun, context: &str) -> Result<(), MobStoreError> {
+        #[cfg(test)]
+        authority_validating_run_store_tests::record_validation(&run.run_id);
         run.validate_flow_authority_projection().map_err(|error| {
             MobStoreError::Internal(format!(
                 "MobRunStore {context} returned run '{}' whose lifecycle projection is not authorized by MobMachine: {error}",
@@ -7552,6 +7554,85 @@ mod supervisor_rotation_migration_tests {
 #[cfg(test)]
 mod authority_validating_run_store_tests {
     use super::*;
+    use crate::ids::StepId;
+    use crate::run::MobRunStatus;
+    use std::collections::HashMap;
+
+    /// Full authority-log validations per run id; tests use fresh run ids,
+    /// so parallel tests do not share counts.
+    fn validations() -> &'static std::sync::Mutex<HashMap<RunId, u64>> {
+        static VALIDATIONS: std::sync::OnceLock<std::sync::Mutex<HashMap<RunId, u64>>> =
+            std::sync::OnceLock::new();
+        VALIDATIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn record_validation(run_id: &RunId) {
+        *validations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(run_id.clone())
+            .or_default() += 1;
+    }
+
+    fn validation_count(run_id: &RunId) -> u64 {
+        validations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(run_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn authority_backed_run() -> MobRun {
+        MobRun::authority_backed_for_steps(
+            RunId::new(),
+            MobId::from("validation-boundary-mob"),
+            FlowId::from("flow"),
+            [StepId::from("step-1")],
+            MobRunStatus::Pending,
+            serde_json::json!({}),
+        )
+        .expect("authority-backed run")
+    }
+
+    /// Validations each operation costs through a store wrapped `layers`
+    /// times, as storage, the builder, the flow engine, its frame kernel and
+    /// terminalization each wrap the store they receive.
+    async fn validations_per_operation(layers: usize) -> (u64, u64, u64) {
+        let mut store: Arc<dyn MobRunStore> = Arc::new(InMemoryMobRunStore::new());
+        for _ in 0..layers {
+            store = authority_validating_mob_run_store(store);
+        }
+        let run = authority_backed_run();
+        let run_id = run.run_id.clone();
+        let mob_id = run.mob_id.clone();
+        store
+            .create_run(run)
+            .await
+            .expect("create authority-backed run");
+        let created = validation_count(&run_id);
+        store
+            .get_run(&run_id)
+            .await
+            .expect("read run")
+            .expect("run exists");
+        let read = validation_count(&run_id) - created;
+        store.list_runs(&mob_id, None).await.expect("list runs");
+        let listed = validation_count(&run_id) - created - read;
+        (created, read, listed)
+    }
+
+    #[tokio::test]
+    async fn each_run_store_operation_validates_once_however_many_constructors_wrap_it() {
+        let single = validations_per_operation(1).await;
+        assert_eq!(single.1, 1, "a read validates the run once");
+        assert_eq!(single.2, 1, "a listing validates the run once");
+        assert_eq!(
+            validations_per_operation(5).await,
+            single,
+            "five wrapping constructors cost what one does"
+        );
+    }
 
     /// Storage, the builder, the flow engine, its frame kernel and
     /// terminalization each wrap the store they receive. A stacked layer

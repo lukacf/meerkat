@@ -96,6 +96,13 @@ them.
 
 ### Added
 
+- `meerkat_mob::store::MobRunStore` gains
+  `flow_authority_validation_boundary`, a `#[doc(hidden)]` method with a
+  default body. Not a break: existing implementations compile unchanged. Its
+  return type lives in a crate-private module, so only `meerkat-mob`'s own
+  flow-authority validation boundary can override it. Custom stores keep the
+  default and are always validated. It exists so the boundary is applied once
+  per store (see Fixed).
 - Optional connection-local host form elicitation for MCP stdio, SSE and
   streamable HTTP, including both native router connection paths. Existing
   constructors keep their default handler. Host factories receive the exact

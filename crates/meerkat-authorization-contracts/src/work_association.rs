@@ -113,7 +113,9 @@ pub struct InputAuthorityAssociationCandidate {
     pub ingress_actor: PrincipalRef,
     /// Principal represented by the logical executor for this work. This is a
     /// claim the native owner must authenticate against the actual requester
-    /// and scoped mandate. Absence never selects a credential or agent owner.
+    /// and scoped mandate. An explicit null never selects a credential or agent
+    /// owner. The wire field must be present even when its value is null.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub represented_subject: Option<PrincipalRef>,
     pub original_authentication: HistoricalEvidenceRef,
     pub logical_executor: PrincipalRef,
@@ -129,6 +131,8 @@ pub struct InputAuthorityAssociationCandidate {
     /// Exact admitted controller route, projected from the actual selected
     /// client. This is historical identity data, never a runnable client or
     /// permission; governed native admission requires a verified selection.
+    /// The wire field must be present even when its candidate value is null.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub controller_model: Option<meerkat_core::ControllerModelSelection>,
     /// Independently admitted controller ceiling. This does not grant a model
     /// route; the actual current policy owner must still allow that operation.

@@ -837,6 +837,38 @@ example, `missing_default_binding`, `lease_absent`, or
 `openai-live-openai-api-backend`) without logging credentials, provider payloads,
 or connection URLs. These diagnostics do not change admission policy.
 
+### Media health of the first output
+
+A public Live WebRTC session can occasionally carry silent media for its whole
+life while the model speaks: transcripts arrive, but the remote audio track
+decodes as silence. The runtime catches this on each channel's first assistant
+output, in `ProviderManagedUnmeasured` mode:
+
+1. When that output's first segment commits with a non-empty transcript, the
+   runtime sends `live/media_health_requested { channel_id, output_id }`. The
+   `output_id` is only a report key (that output is already settled; it is not
+   a playback handle).
+2. The client answers with `live/media_health { channel_id, output_id,
+   decoded_frames, audible_frames, max_rms }`: raw counters from the channel's
+   media start to now (nothing was audible before the first output).
+   `audible_frames` counts decoded frames whose RMS reached the client's
+   non-silent floor, and `max_rms` is linear amplitude (0.0 to 1.0). The client
+   never sends a verdict.
+3. The runtime judges the counters. `audible` keeps the channel open. A
+   `media_fault` (no audible frame and a peak below 0.002) means the runtime
+   has already closed the channel through the ordinary close (retained summary
+   custody included) before it answered. `reopen_recommended` is true for the
+   session's first media fault, so the client can reopen with the retained
+   context. A second fault on the same session closes without the
+   recommendation, so a broken media path never loops.
+
+`live/status` then reports
+`{"status": "closed", "reason": "media_fault", "reopen_recommended": true}`.
+A plain close still reports `{"status": "closed"}`. The request is made once
+per channel. A report for an output the runtime did not request, a repeated
+report, or a report for an inactive channel is refused. A client that never
+answers leaves the output unjudged: no fault and no reopen.
+
 For public Live, `live/playback_complete` is an explicit caller-confirmed
 snapshot cut: it commits the transcript prefix observed at that ordered
 checkpoint, without waiting for the next user turn or a close. It does not

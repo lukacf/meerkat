@@ -4523,6 +4523,34 @@ class MeerkatClient:
         """
         return await self._request("live/status", {"channel_id": channel_id})
 
+    async def live_media_health(
+        self,
+        channel_id: str,
+        output_id: str,
+        decoded_frames: int,
+        audible_frames: int,
+        max_rms: float,
+    ) -> dict[str, Any]:
+        """Report decoded-audio counters for a requested output.
+
+        Wraps `live/media_health`, the answer to a
+        `live/media_health_requested` notification. Send raw counters from the
+        channel's media start to now; the runtime judges them. Returns the
+        `LiveMediaHealthResult` shape: `verdict` (`audible` or `media_fault`)
+        and, for a media fault, `reopen_recommended`. On `media_fault` the
+        runtime has already closed the channel.
+        """
+        return await self._request(
+            "live/media_health",
+            {
+                "channel_id": channel_id,
+                "output_id": output_id,
+                "decoded_frames": decoded_frames,
+                "audible_frames": audible_frames,
+                "max_rms": max_rms,
+            },
+        )
+
     async def live_close(self, channel_id: str) -> LiveCloseResult:
         """Close a live channel. Wraps `live/close`."""
         raw = await self._request("live/close", {"channel_id": channel_id})

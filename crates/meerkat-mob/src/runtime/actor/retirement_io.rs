@@ -3695,6 +3695,13 @@ impl MobActor {
                         .write()
                         .await
                         .remove_member(&continuation.entry.agent_identity);
+                    // The roster removal is retirement's last observable
+                    // change and nothing publishes after it: wake the
+                    // machine-state watch, whose contract covers every roster
+                    // mutation, so a watcher that saw the retirement's
+                    // machine publication while the member was still seated
+                    // re-projects now.
+                    self.publish_machine_state_projection();
                     self.reachability_observations
                         .clear_member(&continuation.entry.agent_identity);
                     if matches!(
@@ -4907,6 +4914,9 @@ impl MobActor {
                             .write()
                             .await
                             .remove_member(&continuation.entry.agent_identity);
+                        // Roster mutation after the rollback's last machine
+                        // publication: wake machine-state watchers.
+                        self.publish_machine_state_projection();
                         self.per_spawn_external_tools
                             .write()
                             .await

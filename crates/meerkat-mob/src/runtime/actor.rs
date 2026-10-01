@@ -6819,6 +6819,19 @@ enum RestoredOperationBindingSeam {
     ExplicitResumePostCommit,
 }
 
+/// Outcome of rehydrating a member's composition delivery custody.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompositionDeliveryRestore {
+    /// This actor holds delivery custody for the exact registration.
+    Restored,
+    /// The runtime refused the unbound endpoint before any effect because the
+    /// exact registration still has another owner (a retained executor
+    /// cleanup tail of its previous attachment). Custody stays with that
+    /// owner; nothing was taken or changed.
+    HeldByRegistrationOwner,
+}
+
 #[cfg(feature = "runtime-adapter")]
 #[derive(Clone)]
 struct ResumeOperationBindingIo {
@@ -28325,8 +28338,14 @@ impl MobActor {
                 entry.agent_identity
             )));
         }
-        if local_member_owner {
-            Self::restore_composition_delivery(&io, &entry, &bindings).await?;
+        if local_member_owner
+            && Self::restore_composition_delivery(&io, &entry, &bindings).await?
+                == CompositionDeliveryRestore::HeldByRegistrationOwner
+        {
+            return Err(MobError::Internal(format!(
+                "restore composition custody for member '{}': materialization registration for session {} has another owner",
+                entry.agent_identity, generated_owner_session_id
+            )));
         }
         if let Some((operation_id, display_name, recovery_expectation)) = placed_operation {
             io.provisioner
@@ -28369,9 +28388,9 @@ impl MobActor {
         io: &ResumeOperationBindingIo,
         entry: &RosterEntry,
         bindings: &meerkat_core::SessionRuntimeBindings,
-    ) -> Result<(), MobError> {
+    ) -> Result<CompositionDeliveryRestore, MobError> {
         let Some(dispatcher) = io.provisioner.composition_signal_dispatcher() else {
-            return Ok(());
+            return Ok(CompositionDeliveryRestore::Restored);
         };
         let registration = io
             .adapter
@@ -28396,19 +28415,27 @@ impl MobActor {
             .await
             .map_err(|error| MobError::Internal(format!("restore composition custody: {error}")))?;
         if !recovered {
-            let mut prepared = io
+            let mut prepared = match io
                 .adapter
                 .prepare_local_session_materialization_for_registration(registration)
                 .await
-                .map_err(|error| {
-                    MobError::Internal(format!("prepare exact composition recovery: {error}"))
-                })?;
+            {
+                Ok(prepared) => prepared,
+                Err(meerkat_runtime::RuntimeBindingsError::RegistrationOwned(_)) => {
+                    return Ok(CompositionDeliveryRestore::HeldByRegistrationOwner);
+                }
+                Err(error) => {
+                    return Err(MobError::Internal(format!(
+                        "prepare exact composition recovery: {error}"
+                    )));
+                }
+            };
             prepared
                 .commit_unbound_composition_endpoint(dispatcher)
                 .await
                 .map_err(|error| MobError::Internal(error.to_string()))?;
         }
-        Ok(())
+        Ok(CompositionDeliveryRestore::Restored)
     }
 
     /// Rehydrate delivery custody for pending retirement, and for existing
@@ -28493,7 +28520,24 @@ impl MobActor {
                 .map_err(|error| {
                     MobError::Internal(format!("prepare local cleanup delivery: {error}"))
                 })?;
-            Self::restore_composition_delivery(&io, &entry, &bindings).await?;
+            // A cold start can re-register a session whose runtime already
+            // stopped, which clears its member binding; the unbound endpoint
+            // is then refused, typed and pre-effect, while the previous
+            // attachment's retained cleanup tail still owns the registration.
+            // That owner keeps delivery custody until the lifecycle operation
+            // that retires or reloads this member takes it over; failing the
+            // actor here would refuse every command for a condition that
+            // needs no startup action.
+            if Self::restore_composition_delivery(&io, &entry, &bindings).await?
+                == CompositionDeliveryRestore::HeldByRegistrationOwner
+            {
+                tracing::debug!(
+                    mob_id = %self.definition.id,
+                    member = %entry.agent_identity,
+                    session_id = %session,
+                    "local cleanup delivery custody stays with the registration's current owner"
+                );
+            }
             // The generated member or pending retirement tuple identifies the
             // same operation registry for a later archive's final transition.
             // This creates no serving/runtime binding.
@@ -44903,6 +44947,9 @@ impl MobActor {
         }
         roster.remove_member(&ctx.agent_identity);
         drop(roster);
+        // Disposal publishes its machine transition before this removal, so
+        // wake machine-state watchers for the roster mutation itself.
+        self.publish_machine_state_projection();
         // Disposal ends the member's lifetime: drop the retained per-spawn
         // overlay so host dispatchers are released and a later spawn of the
         // same identity cannot revive with a stale tool surface.

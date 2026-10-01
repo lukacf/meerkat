@@ -561,14 +561,23 @@ async fn unknown_delivery_reports_typed_unknown_by_deadline_and_for_retired_memb
         "an unknown key is polled until the wait slice ends: {elapsed:?}"
     );
 
+    // A past deadline gets one read within the 100 ms evidence floor. The
+    // contract names both outcomes: the read finished and found no admitted
+    // input, or it could not finish within the floor (a loaded host), so
+    // nothing was observed.
     let started = std::time::Instant::now();
     let report = wait_delivery(&fixture, &never_sent, &bound(), started).await;
-    assert!(matches!(
-        report.work(),
-        DeliveryTerminalWait::Unknown {
-            cause: DeliveryUnknownCause::NotAdmittedByDeadline
-        }
-    ));
+    assert!(
+        matches!(
+            report.work(),
+            DeliveryTerminalWait::Unknown {
+                cause: DeliveryUnknownCause::NotAdmittedByDeadline
+                    | DeliveryUnknownCause::NotObservedByDeadline
+            }
+        ),
+        "past-deadline wait: {:?}",
+        report.work()
+    );
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "a past deadline takes one snapshot read"
@@ -596,7 +605,7 @@ async fn unknown_delivery_reports_typed_unknown_by_deadline_and_for_retired_memb
     fixture.close_channel().await;
     tokio::time::timeout(
         WAIT,
-        fixture.handle.retire(fixture.entry.agent_identity.clone()),
+        crate::runtime::tests::retire_to_terminal(&fixture.handle, &fixture.entry.agent_identity),
     )
     .await
     .expect("retire finishes")

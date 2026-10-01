@@ -660,10 +660,12 @@ This call continues that conversation: do not greet or introduce yourself; wait 
 /// shape the provider itself hands a replacement voice engine (recent
 /// messages plus a summary of older ones). Older turns are covered by the
 /// summary; the startup input budget drops the oldest of these first. A
-/// retained summary seeds at most this many rows since it verbatim: a longer
-/// verbatim startup history correlated with the provider stopping input
-/// transcription after a long answer (see the `meerkat_openai::public_live`
-/// module notes).
+/// retained summary is refused above this many conversation turns since it
+/// (a coarse pre-check). The binding limit is in provider startup items:
+/// `meerkat_openai::public_live::LIVE_STARTUP_VERBATIM_ITEMS_MAX` bounds every
+/// summary-bearing seed to the summary plus at most four verbatim items,
+/// because a turn can span several items and a longer verbatim startup
+/// history left the provider silent after a long answer (S106, 2026-10-01).
 pub const LIVE_STARTUP_RECENT_TURNS: usize = 4;
 
 /// Prefix of a summary delivered on the quiet thinking lane after the first
@@ -2338,6 +2340,14 @@ struct ExperimentalGptLiveInitialSeed {
 }
 
 enum GptLiveSeedContext {
+    /// No summary policy: the whole canonical history is seeded verbatim, up
+    /// to the provider's 128-item startup cap. Known stall risk, deliberately
+    /// unbounded here: a long verbatim startup history left gpt-live-1 silent
+    /// after a long answer (S106, 2026-10-01: 14 of 48 runs at 9-14 verbatim
+    /// items, 0 of 22 at 0-5; earlier 8 of 10 at 25-29). Summary-bearing
+    /// seeds are bounded by `LIVE_STARTUP_VERBATIM_ITEMS_MAX`; this default
+    /// path awaits a product decision (default summary policy and/or a typed
+    /// refusal of long canonical seeds), see issue #1397.
     Canonical(Vec<meerkat_core::types::Message>),
     /// No summary is ready at open; the most recent conversation turns (when
     /// any fit) ride the startup input verbatim as context only.

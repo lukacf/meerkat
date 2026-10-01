@@ -339,6 +339,21 @@ enum SummaryCoverage {
 /// tokens. Tokens are estimated conservatively at three bytes each; the
 /// provider's own tokenizer verdict stays visible as a startup error.
 pub const LIVE_STARTUP_INPUT_MAX_ITEMS: usize = 128;
+
+/// Most verbatim history items a summary-bearing startup seed carries beside
+/// its summary item, counted in provider startup items (the rows
+/// `history_item` keeps). Measured 2026-10-01 on S106 (BuildBuddy ce0642cd,
+/// 4e3671d0 against 5c1e7fa4, 04bbffbc, 6d78a046): a final reopen seeded
+/// with the summary plus 9-14 verbatim items left gpt-live-1 silent after a
+/// long answer (the next utterance is transcribed, then no reply, no turn
+/// end, no error) in 14 of 48 runs (29%); the same scenario seeded with 0 or
+/// 5 items (summary plus at most four) did so in 0 of 22. Earlier: 8/10 at
+/// 25-29 verbatim items, 1/8 within four, 0/18 on a fresh summary. The cause
+/// is provider behaviour; we can only keep verbatim startup history short.
+/// A retained summary (covering only what precedes its verbatim rows) whose
+/// rows exceed this is refused, so the open summarizes afresh; a fresh
+/// summary covers everything, so its oldest recent items are dropped.
+pub const LIVE_STARTUP_VERBATIM_ITEMS_MAX: usize = 4;
 pub const LIVE_STARTUP_INPUT_TOKEN_BUDGET: usize = 8192;
 const LIVE_STARTUP_INPUT_BYTES_PER_TOKEN: usize = 3;
 
@@ -428,6 +443,9 @@ fn history_item(message: &Message) -> Option<InitialItem> {
 #[must_use]
 pub fn preceding_history_summary_fits(summary: &str, following: &[Message]) -> bool {
     let items: Vec<InitialItem> = following.iter().filter_map(history_item).collect();
+    if items.len() > LIVE_STARTUP_VERBATIM_ITEMS_MAX {
+        return false;
+    }
     let tokens = items
         .iter()
         .chain(std::iter::once(&summary_item(
@@ -444,9 +462,24 @@ pub fn preceding_history_summary_fits(summary: &str, following: &[Message]) -> b
 /// [`PublicLiveOpenConfig::with_pending_context_after_recent`]).
 #[must_use]
 pub fn recent_history_fits(recent: &[Message]) -> bool {
-    let items: Vec<InitialItem> = recent.iter().filter_map(history_item).collect();
+    let items = bounded_late_recent_items(recent);
     let tokens = items.iter().map(estimated_startup_tokens).sum::<usize>();
     items.len() < LIVE_STARTUP_INPUT_MAX_ITEMS && tokens <= LIVE_STARTUP_INPUT_TOKEN_BUDGET
+}
+
+/// The verbatim items a Late (summary-pending) open seeds from `recent`: the
+/// newest [`LIVE_STARTUP_VERBATIM_ITEMS_MAX`], starting at a user row so no
+/// reply is seeded without its question. Trimming is safe here: the late
+/// summary covers the whole history, these rows included; they only let the
+/// model answer about the newest turns before it lands.
+fn bounded_late_recent_items(recent: &[Message]) -> Vec<InitialItem> {
+    let items: Vec<InitialItem> = recent.iter().filter_map(history_item).collect();
+    let newest = &items[items.len().saturating_sub(LIVE_STARTUP_VERBATIM_ITEMS_MAX)..];
+    let first_user = newest
+        .iter()
+        .position(|item| item.role == InitialRole::User)
+        .unwrap_or(newest.len());
+    newest[first_user..].to_vec()
 }
 
 /// Compose the startup input from a leading item that is always kept and a
@@ -459,11 +492,13 @@ fn budget_startup_input(
     let mut truncation = LiveStartupInputTruncation::default();
     let mut items = Vec::with_capacity(recent.len() + 1);
     let mut tokens = estimated_startup_tokens(&keep);
-    // Newest first so the oldest are the ones left out.
+    // Newest first so the oldest are the ones left out. The summary covers
+    // every recent item, so the verbatim bound only trims repetition.
     let mut kept_recent = Vec::new();
     for item in recent.iter().rev() {
         let item_tokens = estimated_startup_tokens(item);
-        if kept_recent.len() + 1 < LIVE_STARTUP_INPUT_MAX_ITEMS
+        if kept_recent.len() < LIVE_STARTUP_VERBATIM_ITEMS_MAX
+            && kept_recent.len() + 1 < LIVE_STARTUP_INPUT_MAX_ITEMS
             && tokens + item_tokens <= LIVE_STARTUP_INPUT_TOKEN_BUDGET
         {
             tokens += item_tokens;
@@ -707,12 +742,15 @@ impl PublicLiveOpenConfig {
     /// [`Self::with_pending_context`], with the most recent canonical turns
     /// seeded verbatim as startup input under their own roles: the late
     /// summary still covers the whole history, but a question about the
-    /// newest turns no longer waits for it. Nothing is dropped to fit the
-    /// provider limits; check [`recent_history_fits`] first.
+    /// newest turns no longer waits for it. At most
+    /// [`LIVE_STARTUP_VERBATIM_ITEMS_MAX`] of the newest items are seeded,
+    /// starting at a user row (the late summary covers the rest); nothing
+    /// else is dropped to fit the provider limits, so check
+    /// [`recent_history_fits`] first.
     #[must_use]
     pub fn with_pending_context_after_recent(mut self, recent: &[Message]) -> Self {
         self.context_seed = PublicLiveContextSeed::HistoricalContextPending {
-            recent: recent.iter().filter_map(history_item).collect(),
+            recent: bounded_late_recent_items(recent),
         };
         self
     }
@@ -2770,8 +2808,9 @@ mod tests {
             "oldest dropped"
         );
         assert!(items[2].content[0].text.starts_with("turn 3 "));
-        // The item cap holds too: 130 tiny turns keep the developer item and
-        // the 127 newest turns.
+        // The verbatim bound holds too: 130 tiny turns keep the developer
+        // item and the newest LIVE_STARTUP_VERBATIM_ITEMS_MAX turns (the
+        // summary covers all of them).
         let many: Vec<Message> = (0..130)
             .map(|index| Message::User(UserMessage::text(format!("t{index}"))))
             .collect();
@@ -2780,13 +2819,16 @@ mod tests {
             .with_history(&many)
             .with_context_summary("summary");
         let items = capped.context_seed.initial_input().unwrap();
-        assert_eq!(items.len(), LIVE_STARTUP_INPUT_MAX_ITEMS);
-        assert_eq!(capped.startup_input_truncation().dropped_items, 3);
+        assert_eq!(items.len(), 1 + LIVE_STARTUP_VERBATIM_ITEMS_MAX);
         assert_eq!(
-            items[1].content[0].text, "t3",
-            "the three oldest were dropped"
+            capped.startup_input_truncation().dropped_items,
+            130 - LIVE_STARTUP_VERBATIM_ITEMS_MAX
         );
-        assert_eq!(items[127].content[0].text, "t129");
+        assert_eq!(items[1].content[0].text, "t126", "only the newest kept");
+        assert_eq!(
+            items[LIVE_STARTUP_VERBATIM_ITEMS_MAX].content[0].text,
+            "t129"
+        );
         // The summary is never dropped, even alone over budget.
         let huge = PublicLiveOpenConfig::new("v=0", "marin")
             .unwrap()
@@ -2849,6 +2891,76 @@ mod tests {
         assert!(format!("{config:?}").contains("PrecedingHistory"));
     }
 
+    /// Pins the verbatim startup bound to the measured safe shape: a summary
+    /// plus at most four verbatim items (S106 29% silent turns at 9-14 items
+    /// against 0% at 0-5; see `LIVE_STARTUP_VERBATIM_ITEMS_MAX`).
+    #[test]
+    fn live_startup_verbatim_items_bound_is_the_measured_safe_shape() {
+        assert_eq!(LIVE_STARTUP_VERBATIM_ITEMS_MAX, 4);
+        use meerkat_core::types::UserMessage;
+        let rows: Vec<Message> = (0..14)
+            .map(|index| Message::User(UserMessage::text(format!("r{index}"))))
+            .collect();
+        // A retained summary with more verbatim rows than the bound is
+        // refused (the open summarizes afresh).
+        assert!(!preceding_history_summary_fits("summary", &rows[..10]));
+        assert!(preceding_history_summary_fits("summary", &rows[..4]));
+        // A fresh summary seeds at most the bound beside its summary item.
+        let fresh = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_history(&rows)
+            .with_context_summary("summary");
+        assert!(
+            fresh.context_seed.initial_input().unwrap().len()
+                <= 1 + LIVE_STARTUP_VERBATIM_ITEMS_MAX
+        );
+    }
+
+    /// A Late open seeds at most the verbatim bound of the newest items,
+    /// starting at a user row: its late summary covers the whole history.
+    #[test]
+    fn late_recent_seed_keeps_the_newest_bounded_items_from_a_user_row() {
+        use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, UserMessage};
+        let assistant = |text: &str| {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: text.to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ))
+        };
+        let user = |text: &str| Message::User(UserMessage::text(text));
+        // 14 rows: u0 a0 u1 a1 ... u6 a6. The newest four are u5 a5 u6 a6.
+        let rows: Vec<Message> = (0..7)
+            .flat_map(|i| [user(&format!("u{i}")), assistant(&format!("a{i}"))])
+            .collect();
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_pending_context_after_recent(&rows);
+        let items = config.context_seed.initial_input().unwrap();
+        let texts: Vec<&str> = items
+            .iter()
+            .map(|item| item.content[0].text.as_str())
+            .collect();
+        assert_eq!(texts, ["u5", "a5", "u6", "a6"]);
+        // A cut that lands on a reply drops it: no answer without its
+        // question. Rows ending at u6 have a4 u5 a5 u6 as the newest four.
+        let items = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_pending_context_after_recent(&rows[..13])
+            .context_seed
+            .initial_input()
+            .unwrap();
+        let texts: Vec<&str> = items
+            .iter()
+            .map(|item| item.content[0].text.as_str())
+            .collect();
+        assert_eq!(texts, ["u5", "a5", "u6"]);
+        // The fit check judges the bounded seed, so a long recent tail fits.
+        assert!(recent_history_fits(&rows));
+    }
+
     #[test]
     fn preceding_history_summary_never_drops_a_verbatim_turn() {
         use meerkat_core::types::UserMessage;
@@ -2875,14 +2987,22 @@ mod tests {
         assert!(items[1].content[0].text.starts_with("turn 1 "));
         assert!(!preceding_history_summary_fits("summary", &following));
         assert!(preceding_history_summary_fits("summary", &following[..2]));
-        // The item cap: the developer item plus 127 turns fit, 128 do not.
+        // The verbatim bound: the summary plus LIVE_STARTUP_VERBATIM_ITEMS_MAX
+        // verbatim items fit, one more does not (the open then summarizes
+        // afresh instead of seeding a long verbatim history).
         let many: Vec<Message> = (0..128)
             .map(|index| Message::User(UserMessage::text(format!("t{index}"))))
             .collect();
-        assert!(preceding_history_summary_fits("summary", &many[..127]));
-        assert!(!preceding_history_summary_fits("summary", &many));
+        assert!(preceding_history_summary_fits(
+            "summary",
+            &many[..LIVE_STARTUP_VERBATIM_ITEMS_MAX]
+        ));
+        assert!(!preceding_history_summary_fits(
+            "summary",
+            &many[..=LIVE_STARTUP_VERBATIM_ITEMS_MAX]
+        ));
         // Rows the voice model never sees do not count against the limits.
-        let mut with_system = many[..127].to_vec();
+        let mut with_system = many[..LIVE_STARTUP_VERBATIM_ITEMS_MAX].to_vec();
         with_system.push(Message::System(meerkat_core::types::SystemMessage::new(
             "executor instructions",
         )));
@@ -2897,11 +3017,14 @@ mod tests {
     #[test]
     fn recent_turns_past_the_startup_limits_do_not_fit() {
         let utterance = |text: String| Message::User(meerkat_core::types::UserMessage::text(text));
+        // Item count no longer refuses a Late seed: only the newest
+        // LIVE_STARTUP_VERBATIM_ITEMS_MAX are seeded (the late summary covers
+        // the rest), so a long tail of short turns fits.
         let many: Vec<Message> = (0..LIVE_STARTUP_INPUT_MAX_ITEMS)
             .map(|turn| utterance(format!("turn {turn}")))
             .collect();
-        assert!(!recent_history_fits(&many));
-        assert!(recent_history_fits(&many[1..]));
+        assert!(recent_history_fits(&many));
+        // The token budget still refuses: one turn over it never fits.
         let long = vec![utterance(
             "word ".repeat(LIVE_STARTUP_INPUT_TOKEN_BUDGET * 2),
         )];

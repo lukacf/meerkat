@@ -2964,7 +2964,9 @@ mod orchestrator {
                 }
             };
             // A retained seed carries at most the recent-turns window of
-            // conversation turns since its summary. Longer verbatim startup
+            // conversation turns since its summary (a coarse pre-check; the
+            // provider-item bound `LIVE_STARTUP_VERBATIM_ITEMS_MAX` in the
+            // startup fit check below is the binding limit). Longer verbatim startup
             // history correlated with the provider stopping input
             // transcription after a long answer (S106: 8/10 stalled against
             // 1/8 within a four-row window and 0/18 on main), with no error

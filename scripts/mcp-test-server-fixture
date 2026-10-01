@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Print the absolute path of the exact mcp-test-server binary that
+# meerkat-mcp's form-elicitation tests spawn via MEERKAT_MCP_TEST_SERVER.
+#
+# The tests never search PATH or guess a target directory: they require this
+# variable to name the exact fixture binary. Bazel sets it from runfiles
+# (crates/meerkat-mcp/BUILD.bazel). This script is the Cargo counterpart:
+# Cargo test lanes call it and export the result before running nextest.
+#
+# - An explicitly set MEERKAT_MCP_TEST_SERVER is printed unchanged.
+# - Otherwise the fixture is built with the caller's cargo (default
+#   ./scripts/repo-cargo, so the same per-worktree target directory and dev
+#   profile as the test build) and the executable path is read from cargo's
+#   own artifact message.
+#
+# Usage:
+#   MEERKAT_MCP_TEST_SERVER="$(scripts/mcp-test-server-fixture)"
+#   export MEERKAT_MCP_TEST_SERVER
+set -euo pipefail
+
+if [[ -n "${MEERKAT_MCP_TEST_SERVER:-}" ]]; then
+  printf '%s\n' "$MEERKAT_MCP_TEST_SERVER"
+  exit 0
+fi
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cargo_bin="${CARGO:-$root/scripts/repo-cargo}"
+
+messages="$(
+  "$cargo_bin" build -p mcp-test-server --bin mcp-test-server --locked \
+    --message-format=json-render-diagnostics
+)"
+
+binary="$(
+  python3 -c '
+import json
+import sys
+
+found = None
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    message = json.loads(line)
+    target = message.get("target") or {}
+    if (
+        message.get("reason") == "compiler-artifact"
+        and target.get("name") == "mcp-test-server"
+        and "bin" in target.get("kind", [])
+        and message.get("executable")
+    ):
+        found = message["executable"]
+if found is None:
+    sys.exit("cargo reported no mcp-test-server executable artifact")
+print(found)
+' <<<"$messages"
+)"
+
+if [[ ! -x "$binary" ]]; then
+  echo "mcp-test-server artifact is not an executable file: $binary" >&2
+  exit 1
+fi
+printf '%s\n' "$binary"

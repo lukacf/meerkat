@@ -486,6 +486,10 @@ if [[ "${run_clippy}" -eq 1 ]]; then
   "$CARGO" clippy "${clippy_flags[@]}" "${clippy_scope_args[@]}" ${clippy_target_args[@]+"${clippy_target_args[@]}"} -- -D warnings
 fi
 if [[ "${run_tests}" -eq 1 ]]; then
+  # meerkat-mcp's form-elicitation integration tests spawn the exact
+  # mcp-test-server binary named here (Bazel sets it from runfiles).
+  MEERKAT_MCP_TEST_SERVER="$(CARGO="$CARGO" scripts/mcp-test-server-fixture)"
+  export MEERKAT_MCP_TEST_SERVER
   "$CARGO" nextest run "${test_flags[@]}" --profile fast --no-tests=pass \
     --show-progress none --status-level none --final-status-level fail
 fi

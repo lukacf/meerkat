@@ -5,6 +5,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-status.XXXXXX")"
 HARNESS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-harness.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT" "$HARNESS_ROOT"' EXIT
+# The gate must build and export the fixture itself, not inherit it.
+unset MEERKAT_MCP_TEST_SERVER
 
 if ! grep -Fq "deterministic-locks/\${stamp_key}.lock" "$REPO_ROOT/scripts/pre-push-unit.sh"; then
   echo "pre-push deterministic gate must lock only an identical source fingerprint" >&2
@@ -34,6 +36,11 @@ args=" $* "
 if [[ "${1:-}" == "metadata" ]]; then
   printf '{}\n'
   exit 0
+elif [[ "${1:-}" == "build" && "$args" == *" -p mcp-test-server "* ]]; then
+  # The fixture artifact must be an existing executable; reuse this script.
+  [[ "$args" == *" --locked "* ]] || exit 95
+  printf '{"reason":"compiler-artifact","target":{"name":"mcp-test-server","kind":["bin"]},"executable":"%s"}\n' "$0"
+  exit 0
 elif [[ "$args" == *" nextest list "* && "$args" == *" --test cold_restart_mob_resume "* ]]; then
   lane="headcanonical-build"
 elif [[ "$args" == *" nextest list "* && "$args" == *" --workspace "* ]]; then
@@ -42,6 +49,8 @@ elif [[ "$args" == *" nextest list "* && "$args" == *" --workspace "* ]]; then
 elif [[ "$args" == *" --binaries-metadata "* && "$args" == *" -E kind(lib) "* ]]; then
   lane="unit"
 elif [[ "$args" == *" --binaries-metadata "* && "$args" == *" -E kind(test) "* ]]; then
+  # The integration lane must hand the tests the exact fixture binary.
+  [[ "${MEERKAT_MCP_TEST_SERVER:-}" == "$0" ]] || exit 96
   lane="integration"
 elif [[ "$args" == *" --binaries-metadata "* && "$args" == *" -E binary(cold_restart_mob_resume) "* ]]; then
   lane="headcanonical-process-death"

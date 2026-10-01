@@ -320,6 +320,10 @@ build_headcanonical_inventory() {
 }
 
 write_cargo_metadata
+# meerkat-mcp's form-elicitation integration tests spawn the exact
+# mcp-test-server binary named here (Bazel sets it from runfiles).
+MEERKAT_MCP_TEST_SERVER="$("$ROOT/scripts/mcp-test-server-fixture")"
+export MEERKAT_MCP_TEST_SERVER
 retry_lane \
   "workspace default-feature test build" \
   "$BUILD_TIMEOUT_SECS" \

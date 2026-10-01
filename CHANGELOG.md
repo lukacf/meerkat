@@ -155,6 +155,18 @@ them.
   UnregisterInProgress"). Completion cleanup joins the exact registration's
   teardown until terminal, so the outcome arrives once the runtime is gone and
   a client reusing the session cannot race a half-torn-down registration.
+- Mob flow runs no longer validate their MobMachine authority log three to
+  five times per run-store operation. Every read and mutation through the
+  flow-authority validation boundary replays the run's whole authority log,
+  and storage, the builder, the flow engine, its frame kernel and flow
+  terminalization each wrapped the store they received in another boundary,
+  so each layer replayed the log again. A branch-fallback flow with 37
+  authority inputs ran 515 full validations, 32.5 s of its 33.9 s in a debug
+  build (`test_branch_winner_is_selected_only_after_success_allowing_fallback`
+  timed out under load). Wrapping is now idempotent: the boundary reports
+  itself through a sealed, doc-hidden, defaulted `MobRunStore` method that
+  only this crate can implement, and the same run takes 151 validations and
+  11 s. Validation coverage is unchanged.
 - The Cargo test lanes provide the MCP form-elicitation fixture again. Since
   #1338, `meerkat-mcp`'s `form_elicitation` tests (which require
   `MEERKAT_MCP_TEST_SERVER` to name the exact `mcp-test-server` binary and

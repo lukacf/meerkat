@@ -185,6 +185,18 @@ pub(crate) mod private {
             Err(MobStoreError::DefinitionEpochPersistenceUnavailable)
         }
     }
+
+    /// Proof that a run store is the MobMachine flow-authority validation
+    /// boundary. Only this crate can name or construct it, so a custom store
+    /// cannot claim to validate.
+    #[derive(Debug, Clone, Copy)]
+    pub struct FlowAuthorityValidationBoundary(());
+
+    impl FlowAuthorityValidationBoundary {
+        pub(super) fn new() -> Self {
+            Self(())
+        }
+    }
 }
 
 pub(crate) fn terminal_event_identity(kind: &MobEventKind) -> Option<(&RunId, &FlowId)> {
@@ -5797,6 +5809,16 @@ pub trait MobIdentityStatusStore: Send + Sync {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobRunStore: Send + Sync {
+    /// Sealed: only the crate's flow-authority validation boundary returns
+    /// `Some`, which keeps wrapping it idempotent. External stores cannot
+    /// name the proof type and keep this default.
+    #[doc(hidden)]
+    fn flow_authority_validation_boundary(
+        &self,
+    ) -> Option<private::FlowAuthorityValidationBoundary> {
+        None
+    }
+
     async fn create_run(&self, run: MobRun) -> Result<(), MobStoreError>;
     async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobStoreError>;
     async fn list_runs(
@@ -6098,9 +6120,17 @@ pub trait MobRunStore: Send + Sync {
 /// The inner store owns IO mechanics only. Every `MobRun` crossing this boundary
 /// must validate against its persisted MobMachine authority log before callers
 /// may consume lifecycle/status/flow-state projections.
+///
+/// Idempotent: a store that already is this boundary is returned as is.
+/// Storage, the builder, the flow engine, its frame kernel and terminalization
+/// each wrap the store they receive, and every layer replayed the whole
+/// authority log again on each read and after each mutation.
 pub(crate) fn authority_validating_mob_run_store(
     inner: Arc<dyn MobRunStore>,
 ) -> Arc<dyn MobRunStore> {
+    if inner.flow_authority_validation_boundary().is_some() {
+        return inner;
+    }
     Arc::new(AuthorityValidatingMobRunStore { inner })
 }
 
@@ -6168,6 +6198,12 @@ impl AuthorityValidatingMobRunStore {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobRunStore for AuthorityValidatingMobRunStore {
+    fn flow_authority_validation_boundary(
+        &self,
+    ) -> Option<private::FlowAuthorityValidationBoundary> {
+        Some(private::FlowAuthorityValidationBoundary::new())
+    }
+
     async fn create_run(&self, run: MobRun) -> Result<(), MobStoreError> {
         Self::validate_run(&run, "create_run")?;
         let run_id = run.run_id.clone();
@@ -7509,6 +7545,31 @@ mod supervisor_rotation_migration_tests {
                 .supervisor_pending_authority_operation_id
                 .as_deref(),
             Some(expected_operation_id.as_str())
+        );
+    }
+}
+
+#[cfg(test)]
+mod authority_validating_run_store_tests {
+    use super::*;
+
+    /// Storage, the builder, the flow engine, its frame kernel and
+    /// terminalization each wrap the store they receive. A stacked layer
+    /// replayed the whole authority log again on every read and after every
+    /// mutation, so wrapping must not stack.
+    #[test]
+    fn wrapping_an_authority_validating_run_store_returns_it() {
+        let raw: Arc<dyn MobRunStore> = Arc::new(InMemoryMobRunStore::new());
+        assert!(raw.flow_authority_validation_boundary().is_none());
+        let validated = authority_validating_mob_run_store(Arc::clone(&raw));
+        assert!(
+            !Arc::ptr_eq(&validated, &raw),
+            "a raw store gets the validation boundary"
+        );
+        let rewrapped = authority_validating_mob_run_store(Arc::clone(&validated));
+        assert!(
+            Arc::ptr_eq(&rewrapped, &validated),
+            "the validation boundary is not stacked"
         );
     }
 }

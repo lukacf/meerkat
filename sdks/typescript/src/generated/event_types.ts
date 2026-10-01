@@ -558,6 +558,11 @@ export type InteractionFailureReason = {
 export type InteractionId = string;
 
 /**
+ * Typed cause of a runtime-initiated live channel close.
+ */
+export type LiveChannelCloseReason = "media_fault";
+
+/**
  * Closed classifier for recoverable LLM failures.
  */
 export type LlmRetryFailureKind = "rate_limited" | "network_timeout" | "call_timeout" | "retryable_provider_error";
@@ -1405,6 +1410,12 @@ export type AgentEvent = {
   job_id: string;
   terminal_status: BackgroundJobTerminalStatus;
   type: "background_job_completed";
+} | {
+  channel_id: string;
+  reason: LiveChannelCloseReason;
+  reopen_recommended: boolean;
+  session_id: SessionId;
+  type: "live_channel_closed";
 } | {
   record: TranscriptRewriteRecord;
   session_id: SessionId;

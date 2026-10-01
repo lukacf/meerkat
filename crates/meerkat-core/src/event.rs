@@ -136,6 +136,17 @@ pub enum AgentErrorClass {
     NoPendingBoundary,
 }
 
+/// Typed cause of a runtime-initiated live channel close.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveChannelCloseReason {
+    /// The channel's first assistant output had a non-empty transcript but
+    /// the client decoded no audible audio for it.
+    MediaFault,
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1055,6 +1066,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::StreamTruncated { .. } => "stream_truncated",
         AgentEvent::ToolConfigChanged { .. } => "tool_config_changed",
         AgentEvent::BackgroundJobCompleted { .. } => "background_job_completed",
+        AgentEvent::LiveChannelClosed { .. } => "live_channel_closed",
         AgentEvent::TranscriptRewriteCommitted { .. } => TRANSCRIPT_REWRITE_COMMITTED_EVENT_TYPE,
         AgentEvent::TranscriptRewriteAuditReceiptCommitted { .. } => {
             TRANSCRIPT_REWRITE_AUDIT_RECEIPT_COMMITTED_EVENT_TYPE
@@ -2532,6 +2544,18 @@ pub enum AgentEvent {
         display_name: String,
         terminal_status: BackgroundJobTerminalStatus,
         detail: String,
+    },
+
+    /// The runtime closed one of this session's live channels for a typed
+    /// cause (a media fault on its first assistant output). Published on the
+    /// session event stream after the close commits, so every observer
+    /// learns the cause and whether the session may reopen the channel with
+    /// its retained context, without polling `live/status`.
+    LiveChannelClosed {
+        session_id: SessionId,
+        channel_id: String,
+        reason: LiveChannelCloseReason,
+        reopen_recommended: bool,
     },
 
     /// Released 0.8.10 generation-zero full-body compatibility row.

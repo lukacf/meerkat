@@ -1983,6 +1983,16 @@
           }
         ]
       },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
+          }
+        ]
+      },
       "LiveChannelId": {
         "description": "Opaque identity of one live channel binding.\n\nA replacement channel receives a new value. Semantic observations retain\nthis identity so a delayed callback from the old binding fails its fence.",
         "type": "string"
@@ -6224,6 +6234,35 @@
         "type": "object"
       },
       {
+        "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.",
+        "properties": {
+          "channel_id": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/LiveChannelCloseReason"
+          },
+          "reopen_recommended": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "type": {
+            "const": "live_channel_closed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "session_id",
+          "channel_id",
+          "reason",
+          "reopen_recommended"
+        ],
+        "type": "object"
+      },
+      {
         "description": "Released 0.8.10 generation-zero full-body compatibility row.\n\nCurrent writers must never emit this variant. It is decoded only by the\none-time compatibility reconciliation path; receipt batches supersede\nthe redundant body copy.",
         "properties": {
           "record": {
@@ -7979,6 +8018,35 @@
               "display_name",
               "terminal_status",
               "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The runtime closed one of this session's live channels for a typed\ncause (a media fault on its first assistant output). Published on the\nsession event stream after the close commits, so every observer\nlearns the cause and whether the session may reopen the channel with\nits retained context, without polling `live/status`.",
+            "properties": {
+              "channel_id": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/LiveChannelCloseReason"
+              },
+              "reopen_recommended": {
+                "type": "boolean"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "live_channel_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "channel_id",
+              "reason",
+              "reopen_recommended"
             ],
             "type": "object"
           },
@@ -9887,6 +9955,16 @@
               "kind"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "LiveChannelCloseReason": {
+        "description": "Typed cause of a runtime-initiated live channel close.",
+        "oneOf": [
+          {
+            "const": "media_fault",
+            "description": "The channel's first assistant output had a non-empty transcript but\nthe client decoded no audible audio for it.",
+            "type": "string"
           }
         ]
       },

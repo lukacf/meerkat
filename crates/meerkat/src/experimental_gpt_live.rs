@@ -21026,6 +21026,11 @@ mod tests {
                 "a report for an output the runtime did not request is refused"
             );
             if matches!(close_case, Some(RecoveryCloseCase::MediaFaultOnFirstOutput)) {
+                use futures::StreamExt;
+                let mut observer = service
+                    .subscribe_session_events(&session_id)
+                    .await
+                    .expect("an observer subscribes to the session event stream");
                 let verdict = member_host
                     .report_experimental_live_media_health(
                         authority.as_ref(),
@@ -21041,6 +21046,32 @@ mod tests {
                         verdict: meerkat_contracts::LiveMediaHealthVerdict::MediaFault,
                         reopen_recommended: true,
                     }
+                );
+                // An observer that did not send the report learns the typed
+                // close from the session event stream, without polling.
+                let closed_event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while let Some(envelope) = observer.next().await {
+                        if let meerkat_core::AgentEvent::LiveChannelClosed {
+                            channel_id,
+                            reason,
+                            reopen_recommended,
+                            ..
+                        } = envelope.payload
+                        {
+                            return Some((channel_id, reason, reopen_recommended));
+                        }
+                    }
+                    None
+                })
+                .await
+                .expect("the closed fact is published after the close commits");
+                assert_eq!(
+                    closed_event,
+                    Some((
+                        old_channel.to_string(),
+                        meerkat_core::LiveChannelCloseReason::MediaFault,
+                        true
+                    ))
                 );
                 let closed = member_host
                     .validate_experimental_live_channel_custody(

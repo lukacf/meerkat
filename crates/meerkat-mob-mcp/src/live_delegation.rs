@@ -265,6 +265,31 @@ fn live_bridge_admission_matches_current_owner(
         && admission.session_id() == current_binding.session_id()
 }
 
+/// One continuation of a user's utterance (speech after the provider created
+/// the delegation at a pause mid-sentence) on its way to that delegation's
+/// worker.
+#[derive(Clone)]
+struct PendingContinuation {
+    provider_binding: ProviderWebrtcBinding,
+    delegation: LiveSidebandDelegationRef,
+    /// The item id the continuation's canonical user row commits under.
+    continuation_id: String,
+    transcript: String,
+}
+
+/// The steer text a delegation's worker receives for one continuation.
+fn continuation_steer_text(transcript: &str) -> String {
+    format!(
+        "The user kept speaking after this request was sent. The rest of the same spoken \
+         request (a speech transcript) follows; treat it as part of the request:\n{}",
+        transcript.trim()
+    )
+}
+
+fn continuation_digest(transcript: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(transcript.as_bytes()))
+}
+
 struct ActiveDelegation {
     retained: Arc<RetainedDelegation>,
     #[allow(
@@ -951,6 +976,10 @@ impl<Authority> ExactDelegationResultProjection<Authority> {
 
 #[derive(Default)]
 struct RetainedDelegationResult {
+    /// Steered continuations whose canonical commit did not confirm the
+    /// steered text (a material conflict, or never committed); surfaced when
+    /// the result is released.
+    unconfirmed_continuations: usize,
     reconciliation: Option<LiveHandoffReconciliationReceipt>,
     result_text: Option<String>,
     release_authority: Option<LiveDelegationResultReleaseAuthority>,
@@ -1170,6 +1199,9 @@ pub struct ExperimentalLiveDelegationCoordinator {
     active: Arc<Mutex<std::collections::HashMap<OperationId, ActiveDelegation>>>,
     schedules: Arc<Mutex<std::collections::HashMap<ActiveChannelKey, ChannelSchedule>>>,
     retained: Arc<Mutex<std::collections::HashMap<OperationId, Arc<RetainedDelegation>>>>,
+    /// Utterance continuations for delegations still queued for a worker,
+    /// delivered once the worker starts.
+    pending_continuations: Arc<Mutex<Vec<PendingContinuation>>>,
     failed_start_cleanups:
         Arc<Mutex<std::collections::HashMap<OperationId, OwnedDelegationCleanup>>>,
     result_delivery_tasks: Arc<Mutex<std::collections::HashMap<OperationId, JoinHandle<()>>>>,
@@ -1474,6 +1506,7 @@ impl ExperimentalLiveDelegationCoordinator {
             active: Arc::new(Mutex::new(std::collections::HashMap::new())),
             schedules: Arc::new(Mutex::new(std::collections::HashMap::new())),
             retained: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            pending_continuations: Arc::new(Mutex::new(Vec::new())),
             failed_start_cleanups: Arc::new(Mutex::new(std::collections::HashMap::new())),
             result_delivery_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             pending_result_recoveries: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -2831,6 +2864,22 @@ impl ExperimentalLiveDelegationCoordinator {
                     if observation.binding() != &binding {
                         break;
                     }
+                    if let LiveSidebandObservationKind::UserTurnContinuesDelegation {
+                        turn,
+                        delegation,
+                        transcript,
+                    } = observation.kind()
+                    {
+                        self.steer_continuation(PendingContinuation {
+                            provider_binding: binding.clone(),
+                            delegation: delegation.clone(),
+                            continuation_id:
+                                meerkat::experimental_gpt_live::live_user_transcript_item_id(turn),
+                            transcript: transcript.clone(),
+                        })
+                        .await;
+                        continue;
+                    }
                     if let LiveSidebandObservationKind::DelegationRequested {
                         turn,
                         delegation,
@@ -3982,6 +4031,203 @@ impl ExperimentalLiveDelegationCoordinator {
     /// delegation append lane. The machine refuses kinds that do not match
     /// the item's schedule state and repeats of the last released kind; a
     /// refusal is not an error here.
+    /// Route one utterance continuation to its delegation's worker: steer a
+    /// started worker now, hold it for a delegation still queued for a
+    /// worker, and leave it an ordinary turn when the delegation has no live
+    /// worker any more.
+    async fn steer_continuation(&self, continuation: PendingContinuation) {
+        if let Some(retained) = self.retained_for_continuation(&continuation).await {
+            self.deliver_continuation(retained, continuation).await;
+            return;
+        }
+        let key = (
+            continuation.provider_binding.session_id().clone(),
+            continuation.provider_binding.channel_id().clone(),
+        );
+        let queued = self
+            .schedules
+            .lock()
+            .await
+            .get(&key)
+            .is_some_and(|schedule| {
+                schedule
+                    .pending
+                    .values()
+                    .any(|pending| pending.delegation == continuation.delegation)
+            });
+        if !queued {
+            tracing::debug!(
+                "utterance continuation has no live delegation worker; it stays an ordinary turn"
+            );
+            return;
+        }
+        let delegation = continuation.delegation.clone();
+        self.pending_continuations.lock().await.push(continuation);
+        // The worker may have started between the two reads above.
+        if let Some(retained) = self
+            .retained
+            .lock()
+            .await
+            .values()
+            .find(|retained| retained.delegation == delegation)
+            .cloned()
+        {
+            self.deliver_pending_continuations(&retained).await;
+        }
+    }
+
+    async fn retained_for_continuation(
+        &self,
+        continuation: &PendingContinuation,
+    ) -> Option<Arc<RetainedDelegation>> {
+        self.retained
+            .lock()
+            .await
+            .values()
+            .find(|retained| {
+                retained.delegation == continuation.delegation
+                    && retained.runtime_binding.channel_id()
+                        == continuation.provider_binding.channel_id()
+            })
+            .cloned()
+    }
+
+    /// A queued delegation's worker started: deliver the continuations that
+    /// arrived while it waited, each exactly once.
+    async fn deliver_pending_continuations(&self, retained: &Arc<RetainedDelegation>) {
+        let ready: Vec<PendingContinuation> = {
+            let mut pending = self.pending_continuations.lock().await;
+            let (ready, waiting): (Vec<_>, Vec<_>) = pending
+                .drain(..)
+                .partition(|continuation| continuation.delegation == retained.delegation);
+            *pending = waiting;
+            ready
+        };
+        for continuation in ready {
+            self.deliver_continuation(Arc::clone(retained), continuation)
+                .await;
+        }
+    }
+
+    /// Steer one continuation into the worker under generated steer
+    /// authority, then reconcile it against its canonical commit when that
+    /// lands (after an existing member's turn ends).
+    async fn deliver_continuation(
+        &self,
+        retained: Arc<RetainedDelegation>,
+        continuation: PendingContinuation,
+    ) {
+        let digest = continuation_digest(&continuation.transcript);
+        let authority = match self
+            .runtime
+            .authorize_live_delegation_steer(
+                &retained.runtime_binding,
+                &retained.operation,
+                &continuation.continuation_id,
+                &digest,
+            )
+            .await
+        {
+            Ok(authority) => authority,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    operation_id = %retained.operation.operation_id(),
+                    "utterance continuation was not authorized as a steer; it stays an ordinary turn"
+                );
+                return;
+            }
+        };
+        let Some(mob_handle) = retained.mob_handle.as_ref() else {
+            tracing::warn!(
+                operation_id = %retained.operation.operation_id(),
+                "steered continuation has no mob handle to reach its worker"
+            );
+            return;
+        };
+        let worker = self
+            .execution_policy
+            .worker_identity(&retained.source_identity, retained.operation.operation_id());
+        let interaction_id = retained
+            .operation
+            .domain_correlation()
+            .interaction_id()
+            .to_string();
+        match MobDeliveryIdentity::new(
+            format!("live-delegation-steer:{}", continuation.continuation_id),
+            interaction_id,
+        ) {
+            Ok(delivery_identity) => {
+                let work = WorkSpec::new(
+                    continuation_steer_text(&continuation.transcript),
+                    WorkOrigin::Internal,
+                );
+                match mob_handle
+                    .steer_work_for_identity_with_delivery_identity(worker, work, delivery_identity)
+                    .await
+                {
+                    Ok(_) => tracing::info!(
+                        operation_id = %retained.operation.operation_id(),
+                        "utterance continuation steered into its delegation's worker"
+                    ),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        operation_id = %retained.operation.operation_id(),
+                        "steered continuation was not accepted by its worker"
+                    ),
+                }
+            }
+            Err(error) => tracing::warn!(
+                %error,
+                "steered continuation has no valid delivery identity"
+            ),
+        }
+        let runtime = Arc::clone(&self.runtime);
+        tokio::spawn(async move {
+            let outcome = retained
+                .control
+                .continuation_commit(
+                    &continuation.provider_binding,
+                    &continuation.continuation_id,
+                )
+                .await;
+            let (committed, matches) = match &outcome {
+                meerkat::experimental_gpt_live::ExperimentalGptLiveContinuationCommit::Committed {
+                    text,
+                } => (true, continuation_digest(text) == digest),
+                meerkat::experimental_gpt_live::ExperimentalGptLiveContinuationCommit::NotCommitted => {
+                    (false, false)
+                }
+            };
+            match runtime
+                .reconcile_live_delegation_steer(
+                    &authority,
+                    &retained.runtime_binding,
+                    committed,
+                    matches,
+                )
+                .await
+            {
+                Ok(LiveHandoffReconciliation::Confirmed) => tracing::debug!(
+                    operation_id = %retained.operation.operation_id(),
+                    "steered continuation confirmed by its canonical commit"
+                ),
+                Ok(reconciliation) => {
+                    tracing::warn!(
+                        ?reconciliation,
+                        operation_id = %retained.operation.operation_id(),
+                        "steered continuation was not confirmed by its canonical commit"
+                    );
+                    retained.result.lock().await.unconfirmed_continuations += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "steered continuation reconciliation failed");
+                    retained.result.lock().await.unconfirmed_continuations += 1;
+                }
+            }
+        });
+    }
+
     async fn narrate_on_held_lane(
         &self,
         subject: &NarrationSubject,
@@ -4414,6 +4660,7 @@ impl ExperimentalLiveDelegationCoordinator {
             retained.operation.operation_id().clone(),
             Arc::clone(&retained),
         );
+        self.deliver_pending_continuations(&retained).await;
         let task_coordinator = Arc::new(self.clone());
         let task_retained = Arc::clone(&retained);
         let task_channel_key = channel_key.clone();
@@ -6914,6 +7161,14 @@ mod tests {
         /// narration reports `ActiveBindingUnavailable`, as the real control
         /// plane does between the physical close and the machine's close.
         binding_unavailable: std::sync::atomic::AtomicBool,
+        /// Canonical commit outcomes of continuations by id; an unscripted
+        /// continuation never committed.
+        continuation_commits: Mutex<
+            std::collections::HashMap<
+                String,
+                meerkat::experimental_gpt_live::ExperimentalGptLiveContinuationCommit,
+            >,
+        >,
     }
 
     #[cfg(feature = "experimental-gpt-live-gate0-harness")]
@@ -7062,6 +7317,20 @@ mod tests {
             Ok(ExperimentalGptLiveNarrationDispatch::Resolved(
                 meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
             ))
+        }
+
+        async fn continuation_commit(
+            &self,
+            _binding: &ProviderWebrtcBinding,
+            continuation_id: &str,
+        ) -> meerkat::experimental_gpt_live::ExperimentalGptLiveContinuationCommit {
+            self.continuation_commits
+                .lock()
+                .await
+                .remove(continuation_id)
+                .unwrap_or(
+                    meerkat::experimental_gpt_live::ExperimentalGptLiveContinuationCommit::NotCommitted,
+                )
         }
     }
 

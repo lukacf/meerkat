@@ -7715,7 +7715,7 @@ async fn apply_mcp_boundary(
         action.operation == ToolConfigChangeOperation::Remove
             && action.phase == McpLifecyclePhase::Draining
     }) {
-        spawn_mcp_drain_task(adapter, drain_task_running, lifecycle_tx);
+        adapter.spawn_removal_drain(drain_task_running, lifecycle_tx);
     }
 
     queued_actions.extend(result.delta.lifecycle_actions);
@@ -7753,46 +7753,6 @@ async fn apply_mcp_boundary_to_turn_prompt(
         *turn_prompt = ContentInput::Blocks(blocks);
     }
     Ok(())
-}
-
-/// Spawn a background task that monitors removing MCP servers.
-#[cfg(feature = "mcp")]
-fn spawn_mcp_drain_task(
-    adapter: Arc<McpRouterAdapter>,
-    task_running: Arc<AtomicBool>,
-    lifecycle_tx: mpsc::UnboundedSender<McpLifecycleAction>,
-) {
-    if task_running
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let delta = match adapter.progress_removals().await {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!("background MCP drain apply failed: {e}");
-                    break;
-                }
-            };
-            for action in delta.lifecycle_actions {
-                let _ = lifecycle_tx.send(action);
-            }
-            match adapter.has_removing_servers().await {
-                Ok(true) => continue,
-                Ok(false) => break,
-                Err(e) => {
-                    tracing::warn!("background MCP drain state check failed: {e}");
-                    break;
-                }
-            }
-        }
-        task_running.store(false, Ordering::Release);
-    });
 }
 
 /// Validate session existence and retrieve its MCP adapter.

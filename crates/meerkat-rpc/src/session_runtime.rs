@@ -11610,7 +11610,7 @@ impl SessionRuntime {
             action.operation == ToolConfigChangeOperation::Remove
                 && action.phase == McpLifecyclePhase::Draining
         }) {
-            Self::spawn_mcp_drain_task_if_needed(adapter.clone(), drain_task_running, lifecycle_tx);
+            adapter.spawn_removal_drain(drain_task_running, lifecycle_tx);
         }
 
         queued_actions.extend(result.delta.lifecycle_actions);
@@ -11643,47 +11643,6 @@ impl SessionRuntime {
             *turn_prompt = ContentInput::Blocks(blocks);
         }
         Ok(())
-    }
-
-    #[cfg(feature = "mcp")]
-    fn spawn_mcp_drain_task_if_needed(
-        adapter: Arc<McpRouterAdapter>,
-        task_running: Arc<AtomicBool>,
-        lifecycle_tx: mpsc::UnboundedSender<McpLifecycleAction>,
-    ) {
-        if task_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let delta = match adapter.progress_removals().await {
-                    Ok(delta) => delta,
-                    Err(err) => {
-                        tracing::warn!("background MCP drain apply failed: {err}");
-                        break;
-                    }
-                };
-
-                for action in delta.lifecycle_actions {
-                    let _ = lifecycle_tx.send(action);
-                }
-
-                match adapter.has_removing_servers().await {
-                    Ok(true) => continue,
-                    Ok(false) => break,
-                    Err(err) => {
-                        tracing::warn!("background MCP drain state check failed: {err}");
-                        break;
-                    }
-                }
-            }
-            task_running.store(false, Ordering::Release);
-        });
     }
 
     #[cfg(feature = "mcp")]
@@ -25832,7 +25791,6 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "flaky under load (8/30): Remove event missing at the remove boundary, #1461"]
     async fn start_turn_applies_staged_mcp_remove_and_reload_at_turn_boundary() {
         let server_config = mcp_server_config("test-server");
         let temp = tempfile::tempdir().unwrap();
@@ -25867,6 +25825,17 @@ mod tests {
                 && payload.target == "test-server"
                 && payload.status_text() == "pending"
         }));
+        // The add connects in the background. A remove staged while it is
+        // still pending is deferred to a later boundary, so wait until the
+        // server is connected and installed.
+        let adapter = runtime
+            .mcp_adapter_for_session(&session_id)
+            .await
+            .expect("mcp adapter");
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the add connects");
 
         runtime
             .mcp_stage_remove(&session_id, "test-server".to_string())
@@ -25886,11 +25855,14 @@ mod tests {
             .await
             .expect("turn remove should apply staged remove");
         let remove_events = collect_tool_config_events(&mut event_rx).await;
-        assert!(remove_events.iter().any(|payload| {
-            payload.operation == ToolConfigChangeOperation::Remove
-                && payload.target == "test-server"
-                && matches!(payload.status_text().as_str(), "applied" | "draining")
-        }));
+        assert!(
+            remove_events.iter().any(|payload| {
+                payload.operation == ToolConfigChangeOperation::Remove
+                    && payload.target == "test-server"
+                    && matches!(payload.status_text().as_str(), "applied" | "draining")
+            }),
+            "remove boundary events: {remove_events:?}"
+        );
     }
 
     #[cfg(feature = "mcp")]
@@ -25970,20 +25942,12 @@ mod tests {
                 && payload.status_text() == "draining"
         }));
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if !adapter
-                    .has_removing_servers()
-                    .await
-                    .expect("check removing state")
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("timed out waiting for forced removal to finalize");
+        assert!(
+            adapter
+                .wait_removals_finalized(Duration::from_secs(10))
+                .await,
+            "the drain must finalize the timed-out removal"
+        );
 
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
@@ -25998,17 +25962,7 @@ mod tests {
             )
             .await
             .expect("follow-up boundary");
-        let second_turn_events = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let events = collect_tool_config_events(&mut event_rx).await;
-                if !events.is_empty() {
-                    break events;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_default();
+        let second_turn_events = collect_tool_config_events(&mut event_rx).await;
         assert!(
             second_turn_events.iter().any(|payload| {
                 payload.operation == ToolConfigChangeOperation::Remove
@@ -26021,7 +25975,6 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "flaky under load (11/30): depends on the 100 ms MCP drain poll, #1461"]
     async fn staged_ops_remain_boundary_gated_while_background_drain_runs() {
         let server1_config = mcp_server_config("server-draining");
         let server2_config = mcp_server_config("server-staged");
@@ -26055,6 +26008,12 @@ mod tests {
             .mcp_adapter_for_session(&session_id)
             .await
             .expect("mcp adapter");
+        // The add connects in the background; the server must be installed
+        // before its in-flight count is set and its remove is staged.
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the add connects");
         adapter
             .set_removal_timeout_for_testing(Duration::from_secs(3))
             .await
@@ -26097,7 +26056,12 @@ mod tests {
             .await
             .expect("stage second add");
 
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        // What the background drain does on every wake: progressing
+        // removals must not apply the staged add outside a boundary.
+        adapter
+            .progress_removals()
+            .await
+            .expect("progress removals");
         assert!(
             adapter.tools().is_empty(),
             "background drain must not apply newly staged add outside boundary"
@@ -26130,9 +26094,15 @@ mod tests {
             "expected Add+pending for server-staged at boundary, got: {next_turn_events:?}"
         );
 
-        // Turn 4: after the background connection resolves, drain_pending
-        // picks it up and the server becomes visible.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Turn 4: once the background connection delivers its result,
+        // drain_pending at the boundary picks it up and the server becomes
+        // visible.
+        assert!(
+            adapter
+                .wait_connect_results_delivered(Duration::from_secs(10))
+                .await,
+            "the staged add must deliver its connect result"
+        );
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
             .start_turn(
@@ -26167,7 +26137,6 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[tokio::test]
-    #[ignore = "fails under load (3/3 on 2 cores): fixed sleep on the 100 ms MCP drain poll, #1461"]
     async fn queued_lifecycle_actions_survive_boundary_apply_failure() {
         let server_config = mcp_server_config("lossless-server");
 
@@ -26200,8 +26169,18 @@ mod tests {
             .mcp_adapter_for_session(&session_id)
             .await
             .expect("mcp adapter");
+        // The add connects in the background; the server must be installed
+        // before its in-flight count is set and its remove is staged.
         adapter
-            .set_removal_timeout_for_testing(Duration::from_millis(20))
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the add connects");
+        // A removal timeout far past the test (a hang guard only): the
+        // removal must still be draining after the remove boundary, so the
+        // background drain, not that boundary, finalizes it. A 20 ms timeout
+        // raced the boundary's own removal pass and finalized there under load.
+        adapter
+            .set_removal_timeout_for_testing(Duration::from_secs(60))
             .await
             .expect("set timeout");
         adapter
@@ -26213,7 +26192,7 @@ mod tests {
             .mcp_stage_remove(&session_id, "lossless-server".to_string())
             .await
             .expect("stage remove");
-        let (event_tx, _event_rx) = mpsc::channel(64);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
             .start_turn(
                 &session_id,
@@ -26226,11 +26205,28 @@ mod tests {
             )
             .await
             .expect("remove boundary");
+        let remove_turn_events = collect_tool_config_events(&mut event_rx).await;
+        assert!(
+            remove_turn_events.iter().any(|payload| {
+                payload.operation == ToolConfigChangeOperation::Remove
+                    && payload.target == "lossless-server"
+                    && payload.status_text() == "draining"
+            }),
+            "the remove boundary starts draining, got: {remove_turn_events:?}"
+        );
 
-        // Wait for the background drain task to process the forced removal.
-        // Drain task polls every 100ms, timeout is 20ms, so after 500ms
-        // the forced removal should be queued in lifecycle_rx.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // The in-flight call finishes: the background drain wakes on it,
+        // finalizes the removal and queues its action for the next boundary.
+        adapter
+            .set_inflight_calls_for_testing("lossless-server", 0)
+            .await
+            .expect("finish inflight call");
+        assert!(
+            adapter
+                .wait_removals_finalized(Duration::from_secs(10))
+                .await,
+            "the drain must finalize the drained removal"
+        );
 
         runtime
             .mcp_stage_add(

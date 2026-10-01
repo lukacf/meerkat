@@ -8274,6 +8274,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 
 ### Invariants
+- `live_delegation_steer_records_are_authorized_and_single`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `fence_requires_bound_runtime`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

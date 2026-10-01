@@ -7210,6 +7210,39 @@ fn a_continuation_steers_a_worker_that_accepts_input_once() {
         "a terminal worker takes no more input"
     );
 
+    // The runtime's boundary delivery resolves exactly once per steer.
+    let delivery = |authority: &mut mm::MeerkatMachineAuthority, id: &str, delivered: bool| {
+        apply(
+            authority,
+            mm::MeerkatMachineInput::ResolveLiveDelegationSteerDelivery {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                operation_id: channel_operation(1),
+                continuation_id: id.to_string(),
+                delivered,
+            },
+        )
+    };
+    let resolved = delivery(&mut authority, "continuation-a", true).expect("delivered");
+    assert!(resolved.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationSteerDeliveryResolved {
+            delivered: true,
+            ..
+        }
+    )));
+    assert!(
+        delivery(&mut authority, "continuation-a", false).is_err(),
+        "one delivery outcome per steer"
+    );
+    delivery(&mut authority, "continuation-b", false).expect("not delivered");
+    assert!(
+        delivery(&mut authority, "continuation-unknown", true).is_err(),
+        "only an authorized steer has a delivery"
+    );
+
     // Each provisional steer is reconciled exactly once, after the worker's
     // turn ended and its canonical row committed (or did not).
     let confirmed = reconcile_steer(&mut authority, 1, "continuation-a", true, true)

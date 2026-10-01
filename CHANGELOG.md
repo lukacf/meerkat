@@ -71,6 +71,23 @@ them.
   Exhaustive matches must handle them. A repeated `tools/list` cursor was a
   `ProtocolError` whose message carried the reason; it is now the typed
   variant.
+- Live delegation steer (continuations of a user's utterance): new enum
+  variants `meerkat_openai::gpt_live_broker::GptLiveBrokerObservation::UserTurnContinuesDelegation`,
+  `meerkat_live::LiveSidebandObservationKind::UserTurnContinuesDelegation` and
+  `meerkat_core::TurnBoundaryDelivery::RequestOnlyAtNextBoundary`;
+  `meerkat_core::lifecycle::RunBoundaryReceipt` gains the field
+  `owner_contributions` (struct literals must name it); new MeerkatMachine
+  inputs and effects `AuthorizeLiveDelegationSteer`,
+  `ResolveLiveDelegationSteerDelivery`, `ReconcileLiveDelegationSteer` and
+  `ResolveLiveBoundaryOwnerContextReceipt` in the generated enums
+  (`MeerkatMachineInput::*`, `MeerkatMachineEffect::*`). Exhaustive matches
+  must handle the new variants. New public items:
+  `MeerkatMachine::deliver_live_owner_request_context`,
+  `authorize_live_delegation_steer`, `resolve_live_delegation_steer_delivery`,
+  `reconcile_live_delegation_steer`, `LiveOwnerContextDelivery`,
+  `LiveDelegationSteerAuthority`, `ExperimentalGptLiveContinuationCommit`,
+  `live_user_transcript_item_id`, and the defaulted
+  `ExperimentalGptLiveControlPlane::continuation_commit`.
 - `meerkat_workgraph::WorkGraphError`,
   `meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkGraphErrorKind`,
   and `meerkat_machine_kernels::generated::work_graph_lifecycle::WorkGraphErrorKind`
@@ -486,6 +503,18 @@ them.
   every queued input through its exact input cancellation (the input is
   abandoned `Cancelled` and its waiter resolves typed) before it acquires the
   boundary.
+- A GPT Live request the provider delegated at a pause mid-sentence no longer
+  loses the rest of the sentence. The next user turn to finish before any other
+  delegation is reported as continuing that delegation, and the rest of the
+  sentence reaches its worker under generated steer authority: straight into
+  the running turn as request-only context at its next model boundary
+  (recorded on that boundary's runtime receipt), or in the task of a worker
+  that had not started yet. A continuation that misses the worker's last model
+  call is not delivered and stays an ordinary turn; it never runs as a turn of
+  its own. Each steer is reconciled against its continuation's canonical row
+  when that commits. Compatibility note: a pre-0.8.50 build's recovery digest
+  enrichment can drop `owner_contributions` from a receipt written by 0.8.50+
+  (sequence and identity are kept; nothing fails).
 - A client delegation that arrives after the model already spoke (so no user
   turn is open) no longer commits the user's words twice. Public Live turns
   are synthesized from speaker changes, so those words were already committed

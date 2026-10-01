@@ -1367,6 +1367,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emitted By Transitions: `AbandonedCompletionResultResolved`, `CheckpointCompletionResultResolved`, `RuntimeCompletionResultResolved`
 
 ## Invariants
+- `live_delegation_steer_records_are_authorized_and_single`
 - `fence_requires_bound_runtime`
 - `runtime_generation_requires_bound_runtime`
 - `live_execution_binding_is_complete_and_channel_scoped`

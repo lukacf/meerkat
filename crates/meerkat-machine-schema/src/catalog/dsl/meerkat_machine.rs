@@ -8830,6 +8830,19 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Invariants
         // =====================================================================
 
+        // Every steer record belongs to an authorized steer: one digest, one
+        // reconciliation state, and at most one delivery outcome per
+        // continuation, never a delivery for a continuation that was not
+        // authorized.
+        invariant live_delegation_steer_records_are_authorized_and_single {
+            self.live_delegation_steer_digest_by_continuation.keys()
+                == self.live_delegation_steer_operation_by_continuation.keys()
+            && self.live_delegation_steer_reconciliation_by_continuation.keys()
+                == self.live_delegation_steer_operation_by_continuation.keys()
+            && for_all(continuation_id in self.live_delegation_steer_delivered_by_continuation.keys(),
+                self.live_delegation_steer_operation_by_continuation.contains_key(continuation_id))
+        }
+
         invariant fence_requires_bound_runtime {
             self.active_fence_token == None || self.active_runtime_id != None
         }

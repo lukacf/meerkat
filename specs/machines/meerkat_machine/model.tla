@@ -37166,6 +37166,7 @@ Next ==
     \/ \E owner_input_id \in StringValues : \E run_id \in RunIdValues : \E candidate_digest \in StringValues : \E completion_input_ids_digest \in StringValues : \E requires_session_checkpoint \in BOOLEAN : \E recipient_input_ids \in SetOfStringValues : \E finalization \in RuntimeCompletionFinalizationObservationValues : ResolveCheckpointCompletionResultFailedStopped(owner_input_id, run_id, candidate_digest, completion_input_ids_digest, requires_session_checkpoint, recipient_input_ids, finalization)
     \/ TerminalStutter
 
+live_delegation_steer_records_are_authorized_and_single == ((DOMAIN live_delegation_steer_digest_by_continuation = DOMAIN live_delegation_steer_operation_by_continuation) /\ (DOMAIN live_delegation_steer_reconciliation_by_continuation = DOMAIN live_delegation_steer_operation_by_continuation) /\ (\A continuation_id \in DOMAIN live_delegation_steer_delivered_by_continuation : (continuation_id \in DOMAIN live_delegation_steer_operation_by_continuation)))
 fence_requires_bound_runtime == (IF (active_fence_token = None) THEN TRUE ELSE (active_runtime_id # None))
 runtime_generation_requires_bound_runtime == (IF (active_runtime_generation = None) THEN TRUE ELSE (active_runtime_id # None))
 live_execution_binding_is_complete_and_channel_scoped == ((DOMAIN live_execution_runtime_id_by_channel = DOMAIN live_execution_fence_by_channel) /\ (DOMAIN live_execution_runtime_id_by_channel = DOMAIN live_execution_generation_by_channel) /\ (\A channel_id \in DOMAIN live_execution_runtime_id_by_channel : (channel_id \in DOMAIN live_channel_session_by_channel)))
@@ -37233,6 +37234,7 @@ DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(pending_op_refs) 
 
 Spec == Init /\ [][Next]_vars
 
+THEOREM Spec => []live_delegation_steer_records_are_authorized_and_single
 THEOREM Spec => []fence_requires_bound_runtime
 THEOREM Spec => []runtime_generation_requires_bound_runtime
 THEOREM Spec => []live_execution_binding_is_complete_and_channel_scoped

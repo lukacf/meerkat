@@ -891,6 +891,25 @@ pub enum Record {
         acknowledged: usize,
         greeted: bool,
     },
+    /// The runtime's verdict on the client's decoded-audio counters for a
+    /// channel's first assistant output (`live/media_health`).
+    MediaHealthJudged {
+        channel: u32,
+        output_id: String,
+        decoded_frames: u64,
+        audible_frames: u64,
+        max_rms: f64,
+        media_fault: bool,
+        reopen_recommended: bool,
+    },
+    /// The runtime closed `from_channel` on a media fault and the harness
+    /// reopened the session on `to_channel`; the exchange that waited on the
+    /// silent output is spoken again there.
+    MediaFaultReopened {
+        from_channel: u32,
+        to_channel: u32,
+        exchange: String,
+    },
     /// A tolerant (model-dependent) check: recorded with its outcome, never
     /// a gate on its own. The deterministic checks assert.
     Tolerant {

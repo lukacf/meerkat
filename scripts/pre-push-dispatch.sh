@@ -32,7 +32,11 @@ REMOTE_URL="$2"
 SOURCE_ROOT="$(git rev-parse --show-toplevel)"
 DISPATCH_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ZERO_SHA="0000000000000000000000000000000000000000"
-CACHE_VERSION="v1"
+# v2: a full-coverage stamp is written only when no hook was skipped. v1 stamps
+# were written even under SKIP, so they cannot tell a partial gate from a full
+# one; bumping the version makes every v1 stamp ignored without deleting files
+# that concurrent dispatchers may be reading.
+CACHE_VERSION="v2"
 LOCK_WAIT_SECS="${MEERKAT_PRE_PUSH_DISPATCH_LOCK_WAIT_SECS:-3600}"
 
 hash_path() {
@@ -43,6 +47,30 @@ hash_path() {
   else
     printf '%s' "$1" | cksum | cut -d' ' -f1
   fi
+}
+
+# pre-commit skips the comma-separated hook ids in SKIP and reports them as
+# passing, so a SKIP gate exits 0 without having run them. Normalize the set
+# (trimmed, sorted, de-duplicated, comma-joined) so evidence can record exactly
+# what it did not cover.
+normalize_skip_set() {
+  printf '%s' "${1:-}" | tr ',' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | grep -v '^$' | LC_ALL=C sort -u | paste -sd, - || true
+}
+
+# True when every hook id in the first set also appears in the second.
+skip_set_is_subset() {
+  local candidate="$1" allowed="$2" id
+  [[ -z "$candidate" ]] && return 0
+  local IFS=','
+  for id in $candidate; do
+    case ",${allowed}," in
+      *",${id},"*) ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
 }
 
 sanitize_cache_key() {
@@ -105,7 +133,17 @@ hook_cache_root="${git_common_dir}/meerkat-hook-cache"
 hook_cache_dir="${hook_cache_root}/exact-tree"
 # This accelerates identical tracked trees only. CI remains authoritative for
 # toolchain, environment, credential, and other inputs outside the Git tree.
+# Full-coverage evidence only: written after a gate that skipped nothing.
 hook_stamp="${hook_cache_dir}/${CACHE_VERSION}-${pushed_tree}.ok"
+# A SKIP gate records reduced-coverage evidence under its own name, labeled
+# with the skipped hook set. It is reused only by a push whose own SKIP covers
+# that set, so a later full push of the same tree re-runs the skipped hooks.
+skip_set="$(normalize_skip_set "${SKIP:-}")"
+partial_stamp_prefix="${hook_cache_dir}/${CACHE_VERSION}-${pushed_tree}.partial-"
+partial_stamp=""
+if [[ -n "$skip_set" ]]; then
+  partial_stamp="${partial_stamp_prefix}$(hash_path "$skip_set").ok"
+fi
 # Each source worktree gets a stable validation lane unless the caller names
 # one explicitly. The detached worktree, Cargo target, Bazel output base, and
 # dispatcher lock are all lane-owned, so unrelated worktrees can validate in
@@ -237,8 +275,29 @@ acquire_dispatcher_lock() {
 
 mkdir -p "$hook_cache_dir" "$(dirname "${validation_tree}")"
 
-if [[ "${MEERKAT_SKIP_PRE_PUSH_TREE_CACHE:-0}" != "1" && -f "$hook_stamp" ]]; then
-  echo "complete pre-push gate already validated for tree ${pushed_tree}; reusing exact-tree evidence."
+# Reuse full evidence for this tree, or reduced-coverage evidence whose skipped
+# hooks this push also skips. Prints which coverage is being reused.
+reuse_exact_tree_evidence() {
+  local stamp recorded
+  [[ "${MEERKAT_SKIP_PRE_PUSH_TREE_CACHE:-0}" == "1" ]] && return 1
+  if [[ -f "$hook_stamp" ]]; then
+    echo "complete pre-push gate already validated for tree ${pushed_tree}; reusing exact-tree evidence."
+    return 0
+  fi
+  [[ -n "$skip_set" ]] || return 1
+  for stamp in "${partial_stamp_prefix}"*.ok; do
+    [[ -f "$stamp" ]] || continue
+    recorded="$(sed -n 's/^skipped=//p' "$stamp" | head -1)"
+    [[ -n "$recorded" ]] || continue
+    if skip_set_is_subset "$recorded" "$skip_set"; then
+      echo "partial pre-push gate (skipped: ${recorded}) already validated for tree ${pushed_tree}; reusing it because this push also skips those hooks."
+      return 0
+    fi
+  done
+  return 1
+}
+
+if reuse_exact_tree_evidence; then
   exit 0
 fi
 
@@ -246,8 +305,7 @@ dispatch_step="waiting for the repository pre-push validation lane"
 acquire_dispatcher_lock
 
 # Another push may have validated this exact tree while this process waited.
-if [[ "${MEERKAT_SKIP_PRE_PUSH_TREE_CACHE:-0}" != "1" && -f "$hook_stamp" ]]; then
-  echo "complete pre-push gate already validated for tree ${pushed_tree}; reusing exact-tree evidence."
+if reuse_exact_tree_evidence; then
   exit 0
 fi
 
@@ -376,9 +434,18 @@ if [[ "$gate_status" -ne 0 ]]; then
 fi
 
 dispatch_step="recording exact-tree validation evidence"
-stamp_tmp="${hook_stamp}.tmp.$$"
-printf 'tree=%s\ncommit=%s\n' "$pushed_tree" "$pushed_commit" > "$stamp_tmp"
-mv "$stamp_tmp" "$hook_stamp"
+if [[ -z "$skip_set" ]]; then
+  stamp_tmp="${hook_stamp}.tmp.$$"
+  printf 'tree=%s\ncommit=%s\ncoverage=full\n' "$pushed_tree" "$pushed_commit" > "$stamp_tmp"
+  mv "$stamp_tmp" "$hook_stamp"
+else
+  stamp_tmp="${partial_stamp}.tmp.$$"
+  printf 'tree=%s\ncommit=%s\ncoverage=partial\nskipped=%s\n' \
+    "$pushed_tree" "$pushed_commit" "$skip_set" > "$stamp_tmp"
+  mv "$stamp_tmp" "$partial_stamp"
+  echo "note: SKIP=${skip_set} reduced this gate's coverage; recorded partial evidence only." >&2
+  echo "      A push of this tree without that SKIP re-runs the skipped hooks." >&2
+fi
 
 # Retention runs only here, after a passed gate, while this lane's lock is
 # still held so no peer can mistake it for an idle lane. It never decides the

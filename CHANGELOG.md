@@ -137,6 +137,13 @@ them.
   directory and profile), reads the executable path from cargo's artifact
   message and prints it; those lanes export it before running nextest. An
   explicitly set variable is kept as is.
+- The pre-push dispatcher no longer records a full exact-tree pass for a push
+  run with `SKIP=<hook ids>`. pre-commit reports skipped hooks as passing, so
+  such a gate used to write the same evidence as a full one, and a later
+  normal push of that tree reused it without running the skipped hooks. A SKIP
+  gate now writes partial evidence labeled with its skipped set, reused only
+  by a push that skips the same hooks. The stamp format moves to v2, so all
+  earlier (ambiguous) stamps are ignored.
 - Mob shutdown no longer fails intermittently with `failed to materialize
   committed HeadCanonical metadata ... metadata read authority is no longer
   current`. The shutdown visibility observation reads session metadata

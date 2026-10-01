@@ -494,7 +494,10 @@ the reused tests ran against the prior lock graph, and CI remains
 authoritative. Fail-closed `release-projection-only` and
 `pre-push-harness-only` classifiers can also reuse existing parent source-test
 evidence. This is separate from `pre-push-dispatch.sh`'s complete-hook success
-stamp, which is keyed to the entire pushed Git tree.
+stamp, which is keyed to the entire pushed Git tree and written only when no
+hook was skipped. A push with `SKIP=<hook ids>` records partial evidence labeled
+with the skipped set, reusable only by a later push of that tree that skips the
+same hooks; a push without that `SKIP` re-runs them.
 
 **Manual local preflight**:
 - `pre-commit run --hook-stage manual agent-check-changed` (runs `scripts/agent-gate --staged`)

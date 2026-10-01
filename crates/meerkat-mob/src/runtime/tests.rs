@@ -157,16 +157,14 @@ fn is_retirement_in_progress(error: &MobError) -> bool {
 
 /// Retire a member to its terminal result. `retire` is bounded by the
 /// retirement budget and answers a still-running saga with a typed
-/// in-progress error; calling it again joins the same single-flight saga and
-/// waits on its result, so this settles on the saga's own terminal outcome
-/// instead of failing on a slow but healthy retirement.
+/// in-progress error; this joins the exact singleflight saga and settles on
+/// its own terminal reply instead of failing on a slow but healthy
+/// retirement. (Re-calling `retire` instead would rejoin a slot whose
+/// deadline already passed and spin on immediate in-progress answers.)
 async fn retire_to_terminal(handle: &MobHandle, identity: &AgentIdentity) -> Result<(), MobError> {
-    loop {
-        match handle.retire(identity.clone()).await {
-            Err(error) if is_retirement_in_progress(&error) => {}
-            result => return result,
-        }
-    }
+    handle
+        .retire_joining_saga_until_terminal_for_test(identity.clone())
+        .await
 }
 
 struct TestPeerProjectionAuthorityState {
@@ -825,7 +823,37 @@ struct MockCommsRuntime {
     inbox_notify: Arc<tokio::sync::Notify>,
     mob_machine_trust_owner: std::sync::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
     trust_mutation_gate: std::sync::RwLock<Option<TrustMutationGate>>,
+    trust_removal_gate: std::sync::RwLock<Option<Arc<TrustRemovalGate>>>,
     outbound_content_taint: std::sync::RwLock<Option<meerkat_core::comms::SenderContentTaint>>,
+}
+
+/// Parks every trusted-peer removal on this runtime until released.
+/// `entered` counts the parked removals.
+struct TrustRemovalGate {
+    entered: tokio::sync::watch::Sender<u64>,
+    release: TestRuntimeControlBarrier,
+}
+
+impl TrustRemovalGate {
+    fn new() -> Self {
+        Self {
+            entered: tokio::sync::watch::Sender::new(0),
+            release: TestRuntimeControlBarrier::new(),
+        }
+    }
+
+    async fn pass(&self) {
+        self.entered.send_modify(|entered| *entered += 1);
+        self.release.wait_for_release().await;
+    }
+
+    async fn wait_for_entry(&self) {
+        self.entered
+            .subscribe()
+            .wait_for(|entered| *entered > 0)
+            .await
+            .expect("the gate owns its entry signal");
+    }
 }
 
 impl MockCommsRuntime {
@@ -870,7 +898,23 @@ impl MockCommsRuntime {
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
             mob_machine_trust_owner: std::sync::RwLock::new(None),
             trust_mutation_gate: std::sync::RwLock::new(None),
+            trust_removal_gate: std::sync::RwLock::new(None),
             outbound_content_taint: std::sync::RwLock::new(None),
+        }
+    }
+
+    fn park_trust_removals(&self, gate: Arc<TrustRemovalGate>) {
+        *self.trust_removal_gate.write().expect("trust removal gate") = Some(gate);
+    }
+
+    async fn pass_trust_removal_gate(&self) {
+        let gate = self
+            .trust_removal_gate
+            .read()
+            .expect("trust removal gate")
+            .clone();
+        if let Some(gate) = gate {
+            gate.pass().await;
         }
     }
 
@@ -1178,6 +1222,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
                 Ok(CommsTrustMutationResult::Added { created })
             }
             CommsTrustMutation::RemoveTrustedPeer { peer_id, authority } => {
+                self.pass_trust_removal_gate().await;
                 self.validate_mob_trust_authority_owner(&authority)?;
                 let parsed_peer_id = PeerId::parse(&peer_id)
                     .map_err(|error| SendError::Validation(error.to_string()))?;
@@ -38621,9 +38666,11 @@ async fn test_retire_fanout_notifies_150_peers_with_bounded_parallelism() {
         )
         .await;
 
+    // Join the saga to its terminal reply: a plain `retire` answers typed
+    // `MemberRetirementInProgress` once its 2 s test budget elapses while the
+    // saga keeps running, which a loaded threaded run reaches.
     let started = Instant::now();
-    handle
-        .retire(retiring.clone())
+    retire_to_terminal(&handle, &retiring)
         .await
         .expect("retire high-degree member");
     let elapsed = started.elapsed();
@@ -38639,10 +38686,6 @@ async fn test_retire_fanout_notifies_150_peers_with_bounded_parallelism() {
         max_concurrent <= super::actor::RETIRE_LOCAL_TRUST_CLEANUP_CONCURRENCY as u64,
         "retire notification/trust cleanup concurrency must stay bounded at {} jobs; max observed concurrent sends: {max_concurrent}",
         super::actor::RETIRE_LOCAL_TRUST_CLEANUP_CONCURRENCY
-    );
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "150 peer-retired notifications with {PER_NOTIFICATION_DELAY_MS}ms send delay should stay comfortably below a serialized stress timeout (elapsed={elapsed:?}, max_concurrent={max_concurrent})"
     );
     eprintln!(
         "retire fanout stress: peers={PEERS}, per_notification_delay_ms={PER_NOTIFICATION_DELAY_MS}, retire={elapsed:?}, max_concurrent={max_concurrent}"
@@ -38674,6 +38717,95 @@ async fn test_retire_fanout_notifies_150_peers_with_bounded_parallelism() {
             "{identity} should remove trust for the retired peer"
         );
     }
+}
+
+/// A plain `retire` answers typed in-progress once its budget elapses while
+/// the saga keeps running (here parked on the peer's trust removal), which
+/// is how a loaded run failed
+/// `test_retire_fanout_notifies_150_peers_with_bounded_parallelism`.
+/// `retire_to_terminal` joins the exact saga and settles on its own terminal
+/// reply once the fanout is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retire_to_terminal_joins_a_saga_that_outlives_the_retire_budget() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let retiring = AgentIdentity::from("retiring-past-budget");
+    let peer = AgentIdentity::from("peer-of-retiring");
+    let retiring_sid = handle
+        .spawn(ProfileName::from("worker"), retiring.clone(), None)
+        .await
+        .expect("spawn retiring member")
+        .bridge_session_id()
+        .expect("session-backed retiring member")
+        .clone();
+    let peer_sid = handle
+        .spawn(ProfileName::from("worker"), peer.clone(), None)
+        .await
+        .expect("spawn peer")
+        .bridge_session_id()
+        .expect("session-backed peer")
+        .clone();
+    handle
+        .wire(retiring.clone(), peer.clone())
+        .await
+        .expect("wire retiring member to its peer");
+    let gate = Arc::new(TrustRemovalGate::new());
+    service
+        .sessions
+        .read()
+        .await
+        .get(&peer_sid)
+        .cloned()
+        .expect("peer comms runtime")
+        .park_trust_removals(Arc::clone(&gate));
+
+    let plain = tokio::spawn({
+        let handle = handle.clone();
+        let retiring = retiring.clone();
+        async move { handle.retire(retiring).await }
+    });
+    gate.wait_for_entry().await;
+    let error = plain
+        .await
+        .expect("plain retire task")
+        .expect_err("a saga parked past the retire budget is not terminal");
+    assert!(
+        matches!(
+            &error,
+            MobError::MemberRetirementInProgress { member_id, stage }
+                if member_id == &retiring && stage == "actor_retirement_saga"
+        ),
+        "the caller budget answers the running saga typed in progress: {error:?}"
+    );
+
+    let joined = tokio::spawn({
+        let handle = handle.clone();
+        let retiring = retiring.clone();
+        async move { retire_to_terminal(&handle, &retiring).await }
+    });
+    gate.release.release_all();
+    // The joined saga's terminal reply is the signal; the deadline only
+    // bounds a broken run.
+    tokio::time::timeout(Duration::from_secs(30), joined)
+        .await
+        .expect("the joined retirement reaches its terminal reply")
+        .expect("joined retire task")
+        .expect("the joined saga retires the member");
+    assert!(
+        handle
+            .get_member(&retiring)
+            .await
+            .expect("read roster")
+            .is_none(),
+        "the joined saga removed the retired member"
+    );
+    assert!(
+        !service
+            .trusted_peer_names(&peer_sid)
+            .await
+            .iter()
+            .any(|name| name == &test_comms_name("worker", "retiring-past-budget")),
+        "the released removal untrusted the retired member on its peer"
+    );
 }
 
 #[tokio::test]
@@ -48791,20 +48923,27 @@ async fn test_branch_winner_is_selected_only_after_success_allowing_fallback() {
         .set_flow_turn_fail_for_session(&sid_fail, true)
         .await;
 
-    let run_id = handle
-        .run_flow(
+    let flow = handle
+        .start_flow_bounded(
             FlowId::from("branch_fallback"),
             serde_json::json!({"try_fallback": true}),
+            BoundedResultSpec::new("branch-fallback-root", 2_048).expect("valid bound"),
         )
         .await
         .expect("run branch fallback flow");
-    // This path exercises several generated frame transitions and has taken
-    // 20-50s locally under an unoptimized test build. Loaded Linux CI has
-    // exceeded the helper's generic 60s floor even though the exact observed
-    // failure and fallback both complete. Keep a bounded lane-specific margin;
-    // the assertions below still require the real terminal cause and join.
-    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(120)).await;
-    assert_eq!(terminal.status, MobRunStatus::Failed);
+    let run_id = flow.run_id().clone();
+    // Await the exact run's terminalization rather than polling
+    // `flow_status`: every status read replays the run's whole MobMachine
+    // authority log inline on the actor, so a 20 ms poll starved the flow's
+    // own commits and pushed this run past 60 s on a loaded host. The
+    // deadline only bounds a broken run.
+    let outcome = tokio::time::timeout(Duration::from_secs(120), flow.wait_bounded())
+        .await
+        .expect("branch fallback run reaches terminalization");
+    assert!(
+        matches!(&outcome, Err(FlowRunWaitError::FlowFailed { run_id: id }) if id == &run_id),
+        "the failed candidate fails the run: {outcome:?}"
+    );
 
     let events = handle.events().replay_all().await.expect("replay");
     let first_failure = events.iter().find_map(|event| match &event.kind {

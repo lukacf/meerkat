@@ -386,6 +386,29 @@ them.
   and its past-deadline read accepts both documented outcomes
   (`NotAdmittedByDeadline`, or `NotObservedByDeadline` when the one read
   cannot finish within the 100 ms floor).
+- Three `meerkat-mob` runtime tests no longer fail on a loaded host:
+  - `test_retire_fanout_notifies_150_peers_with_bounded_parallelism` joins
+    its retirement saga to its terminal reply instead of failing on the typed
+    `MemberRetirementInProgress` that a plain `retire` returns once the 2 s
+    test budget elapses while the saga keeps running. The shared
+    `retire_to_terminal` helper now waits on the exact single-flight saga's
+    result (a new cfg(test) `MobHandle` join). Before, it called `retire`
+    again, rejoined a slot whose deadline had already passed and spun on
+    immediate in-progress answers. The test's wall-clock `elapsed < 10s`
+    assertion is gone, because the observed concurrency bound is what proves
+    bounded parallelism. Regression test
+    `retire_to_terminal_joins_a_saga_that_outlives_the_retire_budget` parks
+    the saga on a peer's trust removal.
+  - `load_one_wedged_member_does_not_page_or_delay_peers` releases the wedged
+    member when its lane depth is recorded (the admission backlog gauge
+    signals every record under cfg(test)), bounded by the run's own budget
+    calibrated from the unwedged baseline. Before, it polled with a fixed 5 s
+    deadline, shorter than that budget.
+  - `test_branch_winner_is_selected_only_after_success_allowing_fallback`
+    awaits the exact run's terminalization through `start_flow_bounded`
+    instead of polling `flow_status` every 20 ms. Each status read replays the
+    run's whole MobMachine authority log inline on the actor, so the poll
+    starved the flow's own commits.
 - A GPT Live voice channel reopened on a session whose earlier channel was
   seeded with a context summary (or had one validated for late delivery) now
   opens with that summary plus the conversation rows committed since it,

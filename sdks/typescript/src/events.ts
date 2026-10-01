@@ -674,6 +674,20 @@ export interface BackgroundJobCompletedEvent {
   readonly detail: string;
 }
 
+/**
+ * The runtime closed one of the session's live channels for a typed cause.
+ * `reason` is `"media_fault"` when the channel's first assistant output had a
+ * transcript but no audible audio; `reopenRecommended` says whether the
+ * session may reopen the channel with its retained context.
+ */
+export interface LiveChannelClosedEvent {
+  readonly type: "live_channel_closed";
+  readonly sessionId: string;
+  readonly channelId: string;
+  readonly reason: "media_fault";
+  readonly reopenRecommended: boolean;
+}
+
 export interface TranscriptRewriteCommittedEvent {
   readonly type: "transcript_rewrite_committed";
   readonly sessionId: string;
@@ -732,6 +746,7 @@ export type AgentEvent =
   | StreamTruncatedEvent
   | ToolConfigChangedEvent
   | BackgroundJobCompletedEvent
+  | LiveChannelClosedEvent
   | TranscriptRewriteCommittedEvent
   | MalformedEvent
   | UnknownEvent;
@@ -1768,6 +1783,23 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
           ["completed", "failed", "aborted", "cancelled", "retired", "terminated"] as const,
         ),
         detail: requireStringField(raw, "detail"),
+      };
+    }
+    case "live_channel_closed": {
+      const reopen = raw.reopen_recommended;
+      if (reopen !== undefined && typeof reopen !== "boolean") {
+        throw new Error("reopen_recommended must be boolean");
+      }
+      return {
+        type,
+        sessionId: requireStringField(raw, "session_id"),
+        channelId: requireStringField(raw, "channel_id"),
+        reason: requireOneOf(
+          requireStringField(raw, "reason"),
+          "reason",
+          ["media_fault"] as const,
+        ),
+        reopenRecommended: reopen === true,
       };
     }
     case "transcript_rewrite_committed": {

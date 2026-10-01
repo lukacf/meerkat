@@ -614,6 +614,7 @@ export type {
   StreamTruncatedEvent,
   BackgroundJobCompletedEvent,
   BackgroundJobTerminalStatus,
+  LiveChannelClosedEvent,
   TranscriptRewriteCommittedEvent,
   ToolConfigChangedEvent,
   ToolConfigChangedPayload,

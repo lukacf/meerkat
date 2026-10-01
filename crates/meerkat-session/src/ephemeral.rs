@@ -2044,6 +2044,12 @@ enum SessionCommand {
             Result<RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError>,
         >,
     },
+    PublishLiveChannelClosed {
+        channel_id: meerkat_core::LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+        reopen_recommended: bool,
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
     AdmitLiveAssistantPlaybackTarget {
         channel_id: meerkat_core::LiveChannelId,
         interaction_id: meerkat_core::InteractionId,
@@ -5084,6 +5090,46 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map_err(SessionError::Agent)
     }
 
+    /// Publish the typed fact that the runtime closed one of the session's
+    /// live channels (`AgentEvent::LiveChannelClosed`) on the session event
+    /// stream. Called after the close committed; observers learn the cause
+    /// and the reopen recommendation without polling channel status.
+    pub async fn publish_live_channel_closed(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+        reopen_recommended: bool,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::PublishLiveChannelClosed {
+                channel_id,
+                reason,
+                reopen_recommended,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
     /// Apply an identity-bearing provider realtime transcript event.
     pub async fn append_realtime_transcript_event(
         &self,
@@ -8089,6 +8135,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::AppendRealtimeTranscriptEvent { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
+            SessionCommand::PublishLiveChannelClosed { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
             SessionCommand::AdmitLiveAssistantPlaybackTarget { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
@@ -9220,6 +9269,25 @@ async fn session_task<A: SessionAgent>(
                     control.publish_session_event(envelope).await;
                 }
                 let _ = reply_tx.send(result.map(|_| ()));
+            }
+            SessionCommand::PublishLiveChannelClosed {
+                channel_id,
+                reason,
+                reopen_recommended,
+                reply_tx,
+            } => {
+                let envelope = stamp_event_envelope(
+                    &next_seq,
+                    &source,
+                    AgentEvent::LiveChannelClosed {
+                        session_id: session_id.clone(),
+                        channel_id: channel_id.to_string(),
+                        reason,
+                        reopen_recommended,
+                    },
+                );
+                control.publish_session_event(envelope).await;
+                let _ = reply_tx.send(Ok(()));
             }
             SessionCommand::AppendRealtimeTranscriptEvent {
                 event,

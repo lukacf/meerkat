@@ -445,6 +445,36 @@ pub enum ExperimentalLiveChannelCloseError {
     Semantic(#[from] LiveChannelVerbError),
 }
 
+/// Publish the typed closed fact on the session event stream once the
+/// media-fault close committed: observers that did not send the report learn
+/// the cause and the reopen recommendation without polling. The session stream
+/// is not under the closed channel's binding, so it is still current. A
+/// session with no running actor has no stream observers; the fact stays
+/// readable from `live/status`.
+pub(crate) async fn publish_live_channel_closed_on_media_fault<B: SessionAgentBuilder + 'static>(
+    service: &PersistentSessionService<B>,
+    session_id: &SessionId,
+    channel_id: &LiveChannelId,
+    reopen_recommended: bool,
+) {
+    if let Err(error) = service
+        .publish_live_channel_closed(
+            session_id,
+            channel_id.clone(),
+            meerkat_core::LiveChannelCloseReason::MediaFault,
+            reopen_recommended,
+        )
+        .await
+    {
+        tracing::warn!(
+            %session_id,
+            channel = %channel_id,
+            %error,
+            "the media-fault close committed but its session event was not published"
+        );
+    }
+}
+
 /// A reported linear RMS (0.0 to 1.0) in the machine's millionths; anything
 /// non-finite or non-positive is silence.
 #[must_use]
@@ -2681,6 +2711,13 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         );
         self.close_experimental_live_active_channel(authority, channel_id, activation_receipt)
             .await?;
+        publish_live_channel_closed_on_media_fault(
+            &self.service,
+            &session_id,
+            channel_id,
+            judgement.reopen_recommended(),
+        )
+        .await;
         Ok(meerkat_contracts::LiveMediaHealthResult {
             verdict: meerkat_contracts::LiveMediaHealthVerdict::MediaFault,
             reopen_recommended: judgement.reopen_recommended(),

@@ -7930,6 +7930,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::Committed(evidence))
     }
 
+    /// Publish `AgentEvent::LiveChannelClosed` on the session event stream
+    /// (an ephemeral observation; nothing is persisted).
+    pub async fn publish_live_channel_closed(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        reason: meerkat_core::LiveChannelCloseReason,
+        reopen_recommended: bool,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .publish_live_channel_closed(id, channel_id, reason, reopen_recommended)
+            .await
+    }
+
     pub async fn commit_live_user_transcript_final(
         &self,
         id: &SessionId,

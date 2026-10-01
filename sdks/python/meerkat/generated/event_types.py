@@ -707,6 +707,10 @@ InteractionFailureReason = InteractionFailureReasonCancelled | InteractionFailur
 InteractionId = str
 
 
+# Typed cause of a runtime-initiated live channel close.
+LiveChannelCloseReason = Literal['media_fault']
+
+
 # Closed classifier for recoverable LLM failures.
 LlmRetryFailureKind = Literal['rate_limited', 'network_timeout', 'call_timeout', 'retryable_provider_error']
 
@@ -1997,6 +2001,20 @@ class AgentEventBackgroundJobCompleted(TypedDict, total=False):
     type: Required[Literal['background_job_completed']]
 
 
+class AgentEventLiveChannelClosed(TypedDict, total=False):
+    """The runtime closed one of this session's live channels for a typed
+    cause (a media fault on its first assistant output). Published on the
+    session event stream after the close commits, so every observer
+    learns the cause and whether the session may reopen the channel with
+    its retained context, without polling `live/status`.
+    """
+    channel_id: Required[str]
+    reason: Required[LiveChannelCloseReason]
+    reopen_recommended: Required[bool]
+    session_id: Required[SessionId]
+    type: Required[Literal['live_channel_closed']]
+
+
 class AgentEventTranscriptRewriteCommitted(TypedDict, total=False):
     """Released 0.8.10 generation-zero full-body compatibility row.
 
@@ -2172,7 +2190,7 @@ class AgentEventBoundaryAppendsDiscarded(TypedDict, total=False):
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventLiveChannelClosed | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

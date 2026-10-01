@@ -4008,6 +4008,25 @@ mod orchestrator {
             );
             self.close_experimental_live_channel(host, authority, channel)
                 .await?;
+            // Observers learn the cause on the session event stream, which
+            // is not under the closed channel's binding.
+            if let Err(error) = self
+                .service
+                .publish_live_channel_closed(
+                    &session_id,
+                    channel.clone(),
+                    meerkat_core::LiveChannelCloseReason::MediaFault,
+                    judgement.reopen_recommended(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    %session_id,
+                    %channel,
+                    %error,
+                    "the media-fault close committed but its session event was not published"
+                );
+            }
             Ok(meerkat_contracts::LiveMediaHealthResult {
                 verdict: meerkat_contracts::LiveMediaHealthVerdict::MediaFault,
                 reopen_recommended: judgement.reopen_recommended(),

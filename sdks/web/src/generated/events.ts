@@ -357,6 +357,8 @@ export type InterruptedToolRunDisposition = {
   kind: "unknown";
 };
 
+export type LiveChannelCloseReason = "media_fault";
+
 export type LiveChannelId = string;
 
 export interface LiveContextObservationId {
@@ -1217,6 +1219,14 @@ export interface BackgroundJobCompletedEvent {
   type: "background_job_completed";
 }
 
+export interface LiveChannelClosedEvent {
+  channel_id: string;
+  reason: LiveChannelCloseReason;
+  reopen_recommended: boolean;
+  session_id: SessionId;
+  type: "live_channel_closed";
+}
+
 export interface TranscriptRewriteCommittedEvent {
   record: TranscriptRewriteRecord;
   session_id: SessionId;
@@ -1389,6 +1399,7 @@ export type AgentEvent =
   StreamTruncatedEvent |
   ToolConfigChangedEvent |
   BackgroundJobCompletedEvent |
+  LiveChannelClosedEvent |
   TranscriptRewriteCommittedEvent |
   TranscriptRewriteAuditReceiptCommittedEvent |
   ProviderCacheBreakpointsDiscardedEvent |

@@ -14809,6 +14809,9 @@ async fn wedged_exact_interrupt_releases_mutation_gate_deduplicates_and_cannot_r
     }
 
     let machine = Arc::new(MeerkatMachine::ephemeral());
+    // This test exercises a wedged callback: shorten only this machine's
+    // acknowledgement bound.
+    machine.set_user_interrupt_ack_timeout_for_test(Duration::from_millis(100));
     let session_id = SessionId::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let requested_runs = Arc::new(std::sync::Mutex::new(Vec::new()));

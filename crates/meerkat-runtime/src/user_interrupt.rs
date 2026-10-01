@@ -25,11 +25,6 @@ pub(super) struct RunStopCapture {
     )>,
 }
 
-#[cfg(test)]
-const USER_INTERRUPT_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-#[cfg(not(test))]
-const USER_INTERRUPT_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
 impl MeerkatMachine {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn reconcile_user_interrupt_dispatch(
@@ -408,7 +403,33 @@ impl MeerkatMachine {
         .await
     }
 
+    /// This machine's user-interrupt acknowledgement bound.
+    fn user_interrupt_ack_timeout(&self) -> std::time::Duration {
+        #[cfg(test)]
+        {
+            *self
+                .test_user_interrupt_ack_timeout
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+        #[cfg(not(test))]
+        {
+            crate::meerkat_machine::USER_INTERRUPT_ACK_TIMEOUT
+        }
+    }
+
+    /// Shorten this machine's user-interrupt acknowledgement bound for a test
+    /// that exercises a wedged executor callback.
+    #[cfg(test)]
+    pub(crate) fn set_user_interrupt_ack_timeout_for_test(&self, timeout: std::time::Duration) {
+        *self
+            .test_user_interrupt_ack_timeout
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = timeout;
+    }
+
     pub(super) async fn await_user_interrupt_dispatch(
+        &self,
         mut result_rx: crate::tokio::sync::watch::Receiver<
             Option<Result<bool, RuntimeDriverError>>,
         >,
@@ -417,7 +438,8 @@ impl MeerkatMachine {
         if let Some(result) = result_rx.borrow().clone() {
             return result;
         }
-        match crate::tokio::time::timeout(USER_INTERRUPT_ACK_TIMEOUT, result_rx.changed()).await {
+        let ack_timeout = self.user_interrupt_ack_timeout();
+        match crate::tokio::time::timeout(ack_timeout, result_rx.changed()).await {
             Ok(Ok(())) => result_rx.borrow().clone().ok_or_else(|| {
                 RuntimeDriverError::Internal(
                     "hard-interrupt completion changed without publishing a result".to_string(),
@@ -430,7 +452,7 @@ impl MeerkatMachine {
                 run_id: expected_run_id.clone(),
                 reason: format!(
                     "executor callback exceeded the {} ms acknowledgement bound; exact reconciliation continues process-owned",
-                    USER_INTERRUPT_ACK_TIMEOUT.as_millis()
+                    ack_timeout.as_millis()
                 ),
             }),
         }

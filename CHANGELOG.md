@@ -80,8 +80,37 @@ them.
   inputs and effects `AuthorizeLiveDelegationSteer`,
   `ResolveLiveDelegationSteerDelivery`, `ReconcileLiveDelegationSteer` and
   `ResolveLiveBoundaryOwnerContextReceipt` in the generated enums
-  (`MeerkatMachineInput::*`, `MeerkatMachineEffect::*`). Exhaustive matches
-  must handle the new variants. New public items:
+  (`MeerkatMachineInput::*`, `MeerkatMachineEffect::*`). Later discriminants
+  and ordering move in `MeerkatMachineInputVariant::*`,
+  `MeerkatMachineEffectVariant::*` and `MeerkatMachineEffect::*`
+  (meerkat-machine-schema, re-exported by meerkat-runtime), in kernel
+  `Input::*`, `InputKind::*`, `Effect::*`, `EffectKind::*` and
+  `TransitionId::*`, and in `GptLiveBrokerObservation::*` and
+  `LiveSidebandObservationKind::*`. `MeerkatMachineState` (schema and
+  runtime) and kernel `State` gain the fields
+  `live_delegation_steer_operation_by_continuation`,
+  `live_delegation_steer_digest_by_continuation`,
+  `live_delegation_steer_reconciliation_by_continuation` and
+  `live_delegation_steer_delivered_by_continuation` (struct literals must
+  name them). The new effects are `LiveDelegationSteerAuthorized`,
+  `LiveDelegationSteerDeliveryResolved`, `LiveDelegationSteerReconciled` and
+  `LiveBoundaryOwnerContextReceiptResolved`; the new kernel transitions are
+  `AuthorizeLiveDelegationSteerIdle`, `AuthorizeLiveDelegationSteerAttached`,
+  `AuthorizeLiveDelegationSteerRunning`,
+  `ResolveLiveDelegationSteerDeliveryIdle`,
+  `ResolveLiveDelegationSteerDeliveryAttached`,
+  `ResolveLiveDelegationSteerDeliveryRunning`,
+  `ReconcileLiveDelegationSteerConfirmedIdle`,
+  `ReconcileLiveDelegationSteerConfirmedAttached`,
+  `ReconcileLiveDelegationSteerConfirmedRunning`,
+  `ReconcileLiveDelegationSteerMaterialConflictIdle`,
+  `ReconcileLiveDelegationSteerMaterialConflictAttached`,
+  `ReconcileLiveDelegationSteerMaterialConflictRunning`,
+  `ReconcileLiveDelegationSteerMissingIdle`,
+  `ReconcileLiveDelegationSteerMissingAttached`,
+  `ReconcileLiveDelegationSteerMissingRunning` and
+  `ResolveLiveBoundaryOwnerContextReceiptRunning`. Exhaustive matches must
+  handle the new variants. New public items:
   `MeerkatMachine::deliver_live_owner_request_context`,
   `authorize_live_delegation_steer`, `resolve_live_delegation_steer_delivery`,
   `reconcile_live_delegation_steer`, `LiveOwnerContextDelivery`,

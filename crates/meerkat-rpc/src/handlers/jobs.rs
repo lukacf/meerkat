@@ -158,6 +158,18 @@ pub async fn handle_cancel(
     params: Option<&RawValue>,
     runtime: &Arc<SessionRuntime>,
 ) -> RpcResponse {
+    let callback_route = runtime.default_callback_route();
+    handle_cancel_on_route(id, params, runtime, callback_route.as_ref()).await
+}
+
+/// As [`handle_cancel`], delivering any callback to the requesting connection's
+/// route only.
+pub async fn handle_cancel_on_route(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &Arc<SessionRuntime>,
+    callback_route: Option<&crate::callback_dispatcher::CallbackRoute>,
+) -> RpcResponse {
     let params: JobsCancelParams = match parse(id.clone(), params) {
         Ok(params) => params,
         Err(response) => return response,
@@ -183,7 +195,9 @@ pub async fn handle_cancel(
     match service.request_cancel(&job_id).await {
         Ok(_) => match projected(runtime, &job_id).await {
             Ok(job) => {
-                if let Some(dispatcher) = runtime.callback_tool_dispatcher(Vec::new()) {
+                if let Some(dispatcher) = callback_route
+                    .map(|route| runtime.callback_tool_dispatcher_for_route(route, Vec::new()))
+                {
                     let cancel_job_id = job_id.clone();
                     tokio::spawn(async move {
                         if let Err(error) = dispatcher.cancel_detached_job(&cancel_job_id).await {
@@ -429,6 +443,18 @@ pub async fn handle_retry(
     params: Option<&RawValue>,
     runtime: &Arc<SessionRuntime>,
 ) -> RpcResponse {
+    let callback_route = runtime.default_callback_route();
+    handle_retry_on_route(id, params, runtime, callback_route.as_ref()).await
+}
+
+/// As [`handle_retry`], delivering any callback to the requesting connection's
+/// route only.
+pub async fn handle_retry_on_route(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &Arc<SessionRuntime>,
+    callback_route: Option<&crate::callback_dispatcher::CallbackRoute>,
+) -> RpcResponse {
     let params: JobsRetryParams = match parse(id.clone(), params) {
         Ok(params) => params,
         Err(response) => return response,
@@ -447,7 +473,9 @@ pub async fn handle_retry(
     {
         Ok(_) => match projected(runtime, &job_id).await {
             Ok(job) => {
-                if let Some(dispatcher) = runtime.callback_tool_dispatcher(Vec::new()) {
+                if let Some(dispatcher) = callback_route
+                    .map(|route| runtime.callback_tool_dispatcher_for_route(route, Vec::new()))
+                {
                     let retry_due_at_ms = params.retry_due_at_ms;
                     tokio::spawn(async move {
                         let now_ms = std::time::SystemTime::now()

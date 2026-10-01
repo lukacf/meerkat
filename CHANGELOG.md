@@ -446,6 +446,23 @@ them.
   `gh run rerun` command that recovers it. A cancelled run never builds an
   exact-tree attestation.
 
+- PR CI runs crate integration tests (`tests/*.rs`) for the suites in
+  `INTEGRATION_SUITES` (`scripts/ci-cargo-lanes.mjs`) when their trigger
+  packages change: meerkat-runtime (machine schema, DSL and kernel crates,
+  runtime) and meerkat-machine-codegen (the same plus meerkat-mob and
+  codegen). The unit lanes run `--lib --bins` only, so #1349 merged with
+  three failures in `runtime_alphabet_parity` and
+  `gpt_live_generated_authority` that no PR lane could see. Measured on 4
+  cores: 168 s and 396 s; over the last 60 merges the suites would have run
+  on 17 and 25. The CI gate requires every selected suite, and main's
+  attestation records the lane's result. The Bazel generator's `live` tag
+  (filtered out by every Bazel CI lane) is now an explicit opt-in for real
+  provider tests (`LIVE_PROVIDER_TESTS`, or the `openai-live-e2e` feature)
+  instead of any target with "live" in its name or path. That substring
+  rule hid 15 provider-free targets from every Bazel lane, among them GPT
+  Live region tests and `durable_delivery_inbox` ("delivery"); all 15 pass
+  with provider keys unset and an unreachable proxy, and now carry `fast`.
+
 - Main CI builds meerkat-mob's unit tests once and runs them in parallel
   partitions. Its default and `openai-live` lanes took 12.5-20 min on the
   hosted 4-vCPU runners, two thirds of it compiling the crate's own

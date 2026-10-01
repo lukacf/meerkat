@@ -23,6 +23,11 @@ name: CI
 #                     nextest --lib --bins --profile ci-pr (ci-pr = fast),
 #                     plus the feature-gated suites of those packages
 #                     (FEATURE_UNIT_SUITES in scripts/ci-cargo-lanes.mjs)
+#   integration     - (xN) the tests/*.rs binaries of each integration
+#                     suite whose trigger packages changed
+#                     (INTEGRATION_SUITES in scripts/ci-cargo-lanes.mjs):
+#                     nextest -p <package> --test '*'; pull requests and
+#                     main pushes alike
 #   closure-check   - cargo check (lib and bin targets) over the
 #                     reverse-dependency closure of the changed packages
 #   example-web     - sdks/web wasm runtime build plus the example 031, 032
@@ -225,6 +230,8 @@ jobs:
       main_archive_build_matrix: ${{ steps.plan.outputs.main_archive_build_matrix }}
       main_archive_run_count: ${{ steps.plan.outputs.main_archive_run_count }}
       main_archive_run_matrix: ${{ steps.plan.outputs.main_archive_run_matrix }}
+      integration_count: ${{ steps.plan.outputs.integration_count }}
+      integration_matrix: ${{ steps.plan.outputs.integration_matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -256,7 +263,7 @@ jobs:
           # build-relevant change; a failure here fails the CI gate.
           node scripts/ci-cargo-lanes.mjs --format github --base "${classification_base}" --head HEAD \
             | tee "${RUNNER_TEMP}/ci-cargo-lanes.txt" >> "${GITHUB_OUTPUT}"
-          grep -vE '^(closure_flags|shard_matrix|unit_shard_matrix|main_unit_shard_matrix|main_archive_build_matrix|main_archive_run_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
+          grep -vE '^(closure_flags|shard_matrix|unit_shard_matrix|main_unit_shard_matrix|main_archive_build_matrix|main_archive_run_matrix|integration_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
 
   fmt-governance:
     name: Format + governance
@@ -648,6 +655,79 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: sccache-log-unit-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /home/runner/work/_temp/sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  integration:
+    name: Integration tests (${{ matrix.name }})
+    needs: changes
+    # A crate's tests/*.rs binaries run in no unit lane (those run --lib
+    # --bins). Each row is an integration suite whose trigger packages
+    # changed (INTEGRATION_SUITES in scripts/ci-cargo-lanes.mjs); measured on
+    # 4 cores after a meerkat-runtime change: runtime 168 s, machine-codegen
+    # 396 s, so about 6 and 13 minutes on a hosted runner, well inside the
+    # lane execution budget.
+    if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.integration_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.integration_matrix) }}
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Registry only; compiled objects come from sccache (see the unit lanes).
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Integration tests (tests/*.rs binaries of the suite package)
+        shell: bash
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          set -euo pipefail
+          [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in an integration lane"; exit 1; }
+          # --no-tests=fail: a suite whose package lost its tests/ binaries
+          # must be removed from INTEGRATION_SUITES, not pass silently.
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo nextest run ${PACKAGES} --test '*' --profile ci-pr \
+            --no-tests=fail --no-fail-fast --status-level fail --final-status-level fail
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-integration-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
@@ -1309,6 +1389,7 @@ jobs:
       - ratchets
       - clippy
       - unit
+      - integration
       - main-unit
       - main-unit-archive-build
       - main-unit-archive-run
@@ -1329,6 +1410,8 @@ jobs:
           RATCHETS_RESULT: ${{ needs.ratchets.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          INTEGRATION_COUNT: ${{ needs.changes.outputs.integration_count }}
           MAIN_UNIT_PACKED_RESULT: ${{ needs.main-unit.result }}
           MAIN_UNIT_ARCHIVE_BUILD_RESULT: ${{ needs.main-unit-archive-build.result }}
           MAIN_UNIT_ARCHIVE_RUN_RESULT: ${{ needs.main-unit-archive-run.result }}
@@ -1373,7 +1456,7 @@ jobs:
             echo "::notice::unit tests deferred to the push-to-main run (meerkat-mob compile chain): ${UNIT_DEFERRED}"
           fi
           echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ratchets=${RATCHETS_RESULT}"
-          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
+          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} integration=${INTEGRATION_RESULT} (${INTEGRATION_COUNT} suites) main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
           failed=0
           require_success() {
             local lane="$1" result="$2"
@@ -1455,6 +1538,16 @@ jobs:
             else
               forbid_failure "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
             fi
+          fi
+          # Integration suites: every suite whose trigger packages changed must
+          # run and pass; with none selected the lane must not have failed.
+          if [[ "${RUST_CHANGED}" == "true" && "${INTEGRATION_COUNT}" =~ ^[0-9]+$ ]] && (( INTEGRATION_COUNT > 0 )); then
+            require_ran "Integration tests" "${INTEGRATION_RESULT}"
+          elif [[ "${RUST_CHANGED}" == "true" && ! "${INTEGRATION_COUNT}" =~ ^[0-9]+$ ]]; then
+            echo "::error::the plan carries no integration suite count (integration_count='${INTEGRATION_COUNT}')."
+            failed=1
+          else
+            forbid_failure "Integration tests" "${INTEGRATION_RESULT}"
           fi
           # Example web suites: every main push, and pull requests that touch
           # the web runtime, its crates, or examples 031-033.
@@ -1705,6 +1798,7 @@ jobs:
           RATCHETS_RESULT: ${{ needs.ratchets.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
           MAIN_UNIT_PACKED_RESULT: ${{ needs.main-unit.result }}
           MAIN_UNIT_ARCHIVE_BUILD_RESULT: ${{ needs.main-unit-archive-build.result }}
           MAIN_UNIT_ARCHIVE_RUN_RESULT: ${{ needs.main-unit-archive-run.result }}
@@ -1753,6 +1847,7 @@ jobs:
             --arg ratchets "${RATCHETS_RESULT}" \
             --arg clippy "${CLIPPY_RESULT}" \
             --arg unit "${UNIT_RESULT}" \
+            --arg integration "${INTEGRATION_RESULT}" \
             --arg main_unit "${MAIN_UNIT_RESULT}" \
             --arg closure_check "${CLOSURE_CHECK_RESULT}" \
             --arg wasm_check "${WASM_CHECK_RESULT}" \
@@ -1792,6 +1887,7 @@ jobs:
                 ratchets: $ratchets,
                 clippy: $clippy,
                 unit: $unit,
+                integration: $integration,
                 main_unit: $main_unit,
                 closure_check: $closure_check,
                 wasm_check: $wasm_check,

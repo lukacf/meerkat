@@ -568,8 +568,9 @@ rust_test(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -1126,6 +1127,7 @@ test_suite(
         ":docs_machine_authority_alignment_test",
         ":draining_registration_fence_test",
         ":forked_participant_lifecycle_machine_test",
+        ":gpt_live_authority_contract_test",
         ":identity_roundtrip_test",
         ":meerkat_machine_schema_unit_test",
         ":model_routing_handoff_lifecycle_test",

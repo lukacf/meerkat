@@ -733,8 +733,9 @@ rust_test(
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -1705,6 +1706,7 @@ test_suite(
         ":fork_at_rotates_session_id_test",
         ":hooks_contracts_test",
         ":image_generation_contracts_test",
+        ":live_assistant_playback_authority_test",
         ":mcp_config_crossproc_test",
         ":meerkat_core_unit_test",
         ":model_routing_control_history_test",

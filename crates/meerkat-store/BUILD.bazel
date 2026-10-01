@@ -497,8 +497,9 @@ rust_test(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -816,6 +817,7 @@ test_suite(
         ":model_routing_handoff_resume_test",
         ":rct_contracts_test",
         ":schedule_atomic_mutation_test",
+        ":schedule_live_waiter_gate_test",
         ":schedule_machine_state_projection_test",
         ":schedule_occurrence_list_pushdown_test",
         ":schedule_receipt_projection_test",

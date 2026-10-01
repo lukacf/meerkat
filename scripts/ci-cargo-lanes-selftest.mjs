@@ -459,6 +459,34 @@ for (const path of [
   assert.deepEqual(docs.main_feature_unit_shards, []);
 }
 
+// Integration suites: a directly changed trigger package runs the suite's
+// tests/*.rs binaries; a leaf change and docs run none; workspace mode runs
+// every suite; the github output carries the matrix rows.
+{
+  const names = (plan) => plan.integration_suites.map((suite) => suite.packages[0]);
+  assert.deepEqual(names(planFor(["crates/meerkat-runtime/src/lib.rs"])), ["meerkat-runtime", "meerkat-machine-codegen"]);
+  assert.deepEqual(
+    names(planFor(["crates/meerkat-machine-schema/src/lib.rs"])),
+    ["meerkat-runtime", "meerkat-machine-codegen"],
+    "a machine schema or DSL change runs both suites",
+  );
+  assert.deepEqual(names(planFor(["crates/meerkat-mob/src/lib.rs"])), ["meerkat-machine-codegen"], "mob runs the codegen parity suite");
+  assert.deepEqual(names(planFor(["crates/meerkat-machine-codegen/tests/runtime_alphabet_parity.rs"])), ["meerkat-machine-codegen"]);
+  assert.deepEqual(names(planFor(["crates/meerkat-sqlite/src/lib.rs"])), []);
+  assert.deepEqual(names(planFor(["docs/index.mdx"])), []);
+  assert.deepEqual(names(planFor(["Cargo.toml"])), ["meerkat-runtime", "meerkat-machine-codegen"], "workspace mode runs every suite");
+  const github = run(["--format", "github", "--", "crates/meerkat-runtime/src/lib.rs"]);
+  assert.equal(github.status, 0, github.stderr);
+  const lines = Object.fromEntries(github.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  const rows = JSON.parse(lines.integration_matrix).include;
+  assert.equal(Number(lines.integration_count), 2);
+  assert.deepEqual(rows.map((row) => row.packages), ["-p meerkat-runtime", "-p meerkat-machine-codegen"]);
+  const docsGithub = run(["--format", "github", "--", "docs/index.mdx"]);
+  const docsLines = Object.fromEntries(docsGithub.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  assert.equal(docsLines.integration_count, "0");
+  assert.deepEqual(JSON.parse(docsLines.integration_matrix).include, [{ name: "none", packages: "" }]);
+}
+
 // Bazel graph check selection: Bazel-relevant paths, any Cargo manifest, and
 // moved or deleted Rust files select it; documentation does not.
 {

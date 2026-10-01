@@ -312,8 +312,9 @@ rust_test(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-kernels",
     },
     tags = [
-        "live",
+        "fast",
     ],
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -340,6 +341,7 @@ test_suite(
     tests = [
         ":content_shape_wire_contract_test",
         ":kernel_typed_round_trip_test",
+        ":live_token_debug_redaction_test",
         ":meerkat_machine_kernels_unit_test",
     ],
 )

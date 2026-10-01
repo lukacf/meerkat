@@ -2458,7 +2458,7 @@ impl RuntimeLoopTeardownDisposition {
 }
 
 struct RuntimeLoopTerminalHandoff {
-    stop_completion: Option<crate::effect::StopEffectCompletion>,
+    stop_completion: crate::effect::StopEffectCompletions,
     executor_stop_retry_reason: Option<String>,
     deferred_executor_stop_error: Option<crate::RuntimeDriverError>,
     disposition: RuntimeLoopTeardownDisposition,
@@ -2467,7 +2467,7 @@ struct RuntimeLoopTerminalHandoff {
 impl Default for RuntimeLoopTerminalHandoff {
     fn default() -> Self {
         Self {
-            stop_completion: None,
+            stop_completion: crate::effect::StopEffectCompletions::default(),
             executor_stop_retry_reason: Some(
                 "runtime loop exited without a canonical terminal stop".into(),
             ),
@@ -2920,18 +2920,11 @@ impl RuntimeLoopTeardownSlot {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             if let Some(result) = retained_result {
-                retained_receipt = handoff
-                    .terminal
-                    .stop_completion
-                    .take()
-                    .map(|stop_completion| {
-                        (
-                            RuntimeLoopCleanupReceipt {
-                                stop_completion: Some(stop_completion),
-                            },
-                            result,
-                        )
-                    });
+                let stop_completion = handoff.terminal.stop_completion.take();
+                if !stop_completion.is_empty() {
+                    retained_receipt =
+                        Some((RuntimeLoopCleanupReceipt { stop_completion }, result));
+                }
             }
             *state = RuntimeLoopTeardownState::Ready(handoff);
             drop(state);
@@ -3268,9 +3261,8 @@ impl RuntimeLoopTeardownSlot {
                 RuntimeLoopTeardownState::Cleaned(receipt) => receipt.take(),
                 RuntimeLoopTeardownState::Ready(handoff) => {
                     let stop_completion = handoff.terminal.stop_completion.take();
-                    stop_completion.map(|stop_completion| RuntimeLoopCleanupReceipt {
-                        stop_completion: Some(stop_completion),
-                    })
+                    (!stop_completion.is_empty())
+                        .then_some(RuntimeLoopCleanupReceipt { stop_completion })
                 }
                 RuntimeLoopTeardownState::Pending | RuntimeLoopTeardownState::Cleaning => None,
             }
@@ -3294,13 +3286,11 @@ impl RuntimeLoopTeardownSlot {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match &mut *state {
                 RuntimeLoopTeardownState::Cleaned(receipt) => receipt.take(),
-                RuntimeLoopTeardownState::Ready(handoff) => handoff
-                    .terminal
-                    .stop_completion
-                    .take()
-                    .map(|stop_completion| RuntimeLoopCleanupReceipt {
-                        stop_completion: Some(stop_completion),
-                    }),
+                RuntimeLoopTeardownState::Ready(handoff) => {
+                    let stop_completion = handoff.terminal.stop_completion.take();
+                    (!stop_completion.is_empty())
+                        .then_some(RuntimeLoopCleanupReceipt { stop_completion })
+                }
                 RuntimeLoopTeardownState::Pending | RuntimeLoopTeardownState::Cleaning => None,
             }
         };
@@ -3319,14 +3309,12 @@ impl RuntimeLoopTeardownState {
 /// Exact acknowledgement retained until cleanup and unregister durability have
 /// both reached a typed result.
 pub(crate) struct RuntimeLoopCleanupReceipt {
-    stop_completion: Option<crate::effect::StopEffectCompletion>,
+    stop_completion: crate::effect::StopEffectCompletions,
 }
 
 impl RuntimeLoopCleanupReceipt {
-    pub(crate) fn acknowledge(mut self, result: Result<(), crate::RuntimeDriverError>) {
-        if let Some(stop_completion) = self.stop_completion.take() {
-            let _ = stop_completion.send(result);
-        }
+    pub(crate) fn acknowledge(self, result: Result<(), crate::RuntimeDriverError>) {
+        self.stop_completion.acknowledge(result);
     }
 }
 
@@ -3355,9 +3343,11 @@ impl<'a> RuntimeLoopCleanupGuard<'a> {
         &mut self,
         error: crate::RuntimeDriverError,
     ) -> Result<(), crate::RuntimeDriverError> {
-        if let Some(stop_completion) = self.handoff_mut()?.terminal.stop_completion.take() {
-            let _ = stop_completion.send(Err(error));
-        }
+        self.handoff_mut()?
+            .terminal
+            .stop_completion
+            .take()
+            .acknowledge(Err(error));
         Ok(())
     }
 
@@ -3634,7 +3624,7 @@ async fn apply_runtime_loop_effect_and_record_handoff(
         Ok(
             crate::control_plane::RuntimeLoopEffectOutcome::StopTerminalizedNeedsExternalCleanup,
         ) => {
-            handoff.stop_completion = stop_completion;
+            handoff.stop_completion.adopt(stop_completion);
             handoff.executor_stop_retry_reason = None;
             handoff.deferred_executor_stop_error = None;
             true
@@ -3661,7 +3651,7 @@ fn record_runtime_loop_effect_failure_handoff(
     effect_is_stop: bool,
     failure: crate::control_plane::RuntimeLoopEffectFailure,
 ) {
-    handoff.stop_completion = stop_completion;
+    handoff.stop_completion.adopt(stop_completion);
     match (failure.executor_stop_retry_reason, effect_is_stop) {
         (Some(reason), _) => {
             // Preserve the existing stop-hook retry contract: the first
@@ -5527,6 +5517,18 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                     }
                 }
             }
+        }
+
+        // Stop requests the machine accepted while this loop was already
+        // realizing its terminal stop are still queued behind it. Close the
+        // channel so no further request can enter, and carry every queued
+        // stop completion into the handoff: the owed cleanup acknowledges
+        // each with its result instead of dropping it with the channel.
+        effect_rx.close();
+        while let Ok(mut queued) = effect_rx.try_recv() {
+            terminal_handoff
+                .stop_completion
+                .adopt(queued.take_stop_completion());
         }
 
         // This publication is the loop task's final action. The machine-owned
@@ -8422,7 +8424,7 @@ mod tests {
                 ),
             ),
             terminal: RuntimeLoopTerminalHandoff {
-                stop_completion: Some(stop_completion),
+                stop_completion: Some(stop_completion).into(),
                 ..RuntimeLoopTerminalHandoff::default()
             },
         });
@@ -8441,7 +8443,7 @@ mod tests {
         let RuntimeLoopTeardownState::Ready(handoff) = &*state else {
             panic!("failed pre-publication unregister must retain the exact executor for retry");
         };
-        assert!(handoff.terminal.stop_completion.is_none());
+        assert!(handoff.terminal.stop_completion.is_empty());
         assert!(
             handoff.terminal.executor_stop_retry_reason.is_some(),
             "replaying the caller acknowledgement must not erase the stop-hook obligation"

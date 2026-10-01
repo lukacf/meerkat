@@ -158,6 +158,48 @@ pub struct InMemoryMobEventStore {
     active_reconciliation_latest_cursor_failures: AtomicU64,
     #[cfg(any(test, feature = "test-support"))]
     active_reconciliation_poll_failures: AtomicU64,
+    /// Parks the next `append` after its cursor is assigned and before its
+    /// broadcast: (entered, release).
+    #[cfg(test)]
+    broadcast_gate: std::sync::Mutex<Option<BroadcastTestGate>>,
+}
+
+#[cfg(test)]
+type BroadcastTestGate = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(test)]
+impl InMemoryMobEventStore {
+    /// Park the next `append` between its cursor assignment and its
+    /// broadcast. Returns the entered signal and the release sender.
+    fn arm_broadcast_test_gate(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self
+            .broadcast_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    async fn pass_broadcast_test_gate(&self) {
+        let gate = self
+            .broadcast_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+    }
 }
 
 impl Default for InMemoryMobEventStore {
@@ -183,6 +225,8 @@ impl Default for InMemoryMobEventStore {
             active_reconciliation_latest_cursor_failures: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             active_reconciliation_poll_failures: AtomicU64::new(0),
+            #[cfg(test)]
+            broadcast_gate: std::sync::Mutex::new(None),
         }
     }
 }
@@ -342,8 +386,10 @@ impl private::MobEventStoreSealed for InMemoryMobEventStore {
             kind: event.kind,
         };
         events.push(stored.clone());
-        drop(aggregate);
+        // Broadcast under the write lock so live subscribers see appends in
+        // cursor order; `send` never blocks.
         let _ = self.event_tx.send(stored.clone());
+        drop(aggregate);
         Ok(MobDefinitionEpochAppendOutcome::Appended(stored))
     }
 }
@@ -1559,8 +1605,10 @@ impl MobIdentityMemberStore for InMemoryMobIdentityStore {
             kind: proposed.kind,
         };
         aggregate.events.push(stored.clone());
-        drop(aggregate);
+        // Broadcast under the write lock so live subscribers see appends in
+        // cursor order; `send` never blocks.
         let _ = event_tx.send(stored.clone());
+        drop(aggregate);
         Ok(IdentityMemberEventCommitOutcome::Applied { event: stored })
     }
 
@@ -1678,8 +1726,10 @@ impl MobIdentityMemberStore for InMemoryMobIdentityStore {
             kind: proposed.kind,
         };
         aggregate.events.push(stored.clone());
-        drop(aggregate);
+        // Broadcast under the write lock so live subscribers see appends in
+        // cursor order; `send` never blocks.
         let _ = event_tx.send(stored.clone());
+        drop(aggregate);
         Ok(IdentityWiringEventCommitOutcome::Applied { event: stored })
     }
 }
@@ -2923,8 +2973,12 @@ impl MobEventStore for InMemoryMobEventStore {
             kind: event.kind,
         };
         events.push(stored.clone());
-        drop(aggregate);
+        #[cfg(test)]
+        self.pass_broadcast_test_gate().await;
+        // Broadcast under the write lock so live subscribers see appends in
+        // cursor order; `send` never blocks.
         let _ = self.event_tx.send(stored.clone());
+        drop(aggregate);
         #[cfg(any(test, feature = "test-support"))]
         if matches!(&stored.kind, MobEventKind::MembersUnwired { .. })
             && self
@@ -2972,8 +3026,10 @@ impl MobEventStore for InMemoryMobEventStore {
             kind: event.kind,
         };
         events.push(stored.clone());
-        drop(aggregate);
+        // Broadcast under the write lock so live subscribers see appends in
+        // cursor order; `send` never blocks.
         let _ = self.event_tx.send(stored.clone());
+        drop(aggregate);
         Ok(Some(stored))
     }
 
@@ -3024,8 +3080,10 @@ impl MobEventStore for InMemoryMobEventStore {
             kind: event.kind,
         };
         events.push(stored.clone());
-        drop(aggregate);
+        // Broadcast under the write lock so live subscribers see appends in
+        // cursor order; `send` never blocks.
         let _ = self.event_tx.send(stored.clone());
+        drop(aggregate);
         Ok(Some(stored))
     }
 
@@ -3057,10 +3115,12 @@ impl MobEventStore for InMemoryMobEventStore {
             events.push(stored.clone());
             results.push(stored);
         }
-        drop(aggregate);
+        // Broadcast under the write lock so live subscribers see appends in
+        // cursor order; `send` never blocks.
         for event in &results {
             let _ = self.event_tx.send(event.clone());
         }
+        drop(aggregate);
         Ok(results)
     }
 
@@ -4785,6 +4845,48 @@ mod tests {
             serde_json::json!({"a":1}),
         )
         .expect("authority-backed sample run")
+    }
+
+    /// Live subscribers must see appends in cursor order: a later append
+    /// cannot broadcast while an earlier one, whose cursor is assigned, has
+    /// not. The store used to release its write lock before broadcasting, so
+    /// a preempted append was overtaken, and a subscriber saw a cursor gap and
+    /// fell back to reading the store.
+    #[tokio::test(flavor = "current_thread")]
+    async fn appends_broadcast_in_cursor_order_under_concurrency() {
+        let store = Arc::new(InMemoryMobEventStore::new());
+        let mut live = store.subscribe().expect("subscribe");
+        let (entered, release) = store.arm_broadcast_test_gate();
+        let append = |store: Arc<InMemoryMobEventStore>| async move {
+            store
+                .append(NewMobEvent {
+                    mob_id: MobId::from("mob"),
+                    timestamp: None,
+                    kind: MobEventKind::MobCompleted,
+                })
+                .await
+                .expect("append")
+        };
+        let first = tokio::spawn(append(Arc::clone(&store)));
+        entered
+            .await
+            .expect("the first append reaches its broadcast");
+        let second = tokio::spawn(append(Arc::clone(&store)));
+        // One scheduler turn polls the second append as far as it can get.
+        tokio::task::yield_now().await;
+        assert!(
+            !second.is_finished(),
+            "a later append must not complete while an earlier one has not broadcast"
+        );
+        release.send(()).expect("release the first append");
+        let first = first.await.expect("first append task");
+        let second = second.await.expect("second append task");
+        assert_eq!(second.cursor, first.cursor + 1);
+        let delivered = [
+            live.recv().await.expect("first broadcast").cursor,
+            live.recv().await.expect("second broadcast").cursor,
+        ];
+        assert_eq!(delivered, [first.cursor, second.cursor]);
     }
 
     #[tokio::test]

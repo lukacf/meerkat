@@ -12999,11 +12999,16 @@ impl MobHandle {
     ) {
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let mut gate = MEMBER_STATUS_READ_TEST_GATE
+        // Keyed by identity: concurrently running tests (threaded `cargo
+        // test`) each hold their own member's read.
+        let replaced = MEMBER_STATUS_READ_TEST_GATE
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(gate.is_none(), "member status read test gate already armed");
-        *gate = Some((identity, entered_tx, release_rx));
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(identity, (entered_tx, release_rx));
+        assert!(
+            replaced.is_none(),
+            "member status read test gate already armed for this identity"
+        );
         (entered_rx, release_tx)
     }
 
@@ -18303,31 +18308,24 @@ mod tests {
 /// [`MobHandle::arm_member_status_read_test_gate`]).
 #[cfg(any(test, feature = "test-support"))]
 type MemberStatusReadTestGate = (
-    AgentIdentity,
     tokio::sync::oneshot::Sender<()>,
     tokio::sync::oneshot::Receiver<()>,
 );
 
+/// Armed gates, one per identity, so tests running concurrently in one
+/// process each hold only their own member's read.
 #[cfg(any(test, feature = "test-support"))]
-static MEMBER_STATUS_READ_TEST_GATE: std::sync::Mutex<Option<MemberStatusReadTestGate>> =
-    std::sync::Mutex::new(None);
+static MEMBER_STATUS_READ_TEST_GATE: std::sync::Mutex<
+    std::collections::BTreeMap<AgentIdentity, MemberStatusReadTestGate>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 #[cfg(any(test, feature = "test-support"))]
 async fn run_member_status_read_test_gate(identity: &AgentIdentity) {
-    let armed = {
-        let mut gate = MEMBER_STATUS_READ_TEST_GATE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if gate
-            .as_ref()
-            .is_some_and(|(armed_identity, _, _)| armed_identity == identity)
-        {
-            gate.take()
-        } else {
-            None
-        }
-    };
-    if let Some((_, entered_tx, release_rx)) = armed {
+    let armed = MEMBER_STATUS_READ_TEST_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(identity);
+    if let Some((entered_tx, release_rx)) = armed {
         let _ = entered_tx.send(());
         let _ = release_rx.await;
     }

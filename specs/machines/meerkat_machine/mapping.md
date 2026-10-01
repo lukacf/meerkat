@@ -8274,6 +8274,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `live_context_outbox_is_exact_and_session_scoped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `live_context_outbox_has_no_closed_channel_leftover`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_context_outbox_is_above_every_seed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `live_context_recovery_is_exact_and_channel_scoped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

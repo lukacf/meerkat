@@ -1384,6 +1384,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_context_bootstrap_reservation_is_not_delivery`
 - `live_context_observation_order_is_exact_and_scoped`
 - `live_context_outbox_is_exact_and_session_scoped`
+- `live_context_outbox_has_no_closed_channel_leftover`
+- `live_context_outbox_is_above_every_seed`
 - `live_context_recovery_is_exact_and_channel_scoped`
 - `runtime_epoch_requires_registered_session`
 - `runtime_binding_identity_is_typed`
@@ -17588,6 +17590,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `source_disposition_is_not_runtime_minted`
   - `ordinary_mirror_has_materializable_payload`
   - `source_observation_claim_matches_exact_custody`
+  - `canonical_cursor_is_above_every_live_recovery_seed`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`
@@ -17606,6 +17609,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `source_disposition_is_not_runtime_minted`
   - `ordinary_mirror_has_materializable_payload`
   - `source_observation_claim_matches_exact_custody`
+  - `canonical_cursor_is_above_every_live_recovery_seed`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`
@@ -17624,6 +17628,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `source_disposition_is_not_runtime_minted`
   - `ordinary_mirror_has_materializable_payload`
   - `source_observation_claim_matches_exact_custody`
+  - `canonical_cursor_is_above_every_live_recovery_seed`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`

@@ -388,6 +388,39 @@ them.
   finds them stale or the session archived, retired or gone, by a bounded
   background sweep after each retain, by eviction, or with the policy when a
   new one replaces it.
+- Closing a GPT Live channel (or abandoning its open admission) now ends the
+  session's live-context outbox: rows queued for that channel and never
+  delivered are dropped, in the generated outbox and in the runtime's row
+  custody together. A later channel is seeded from the committed transcript,
+  so it never needed them, but left behind they did harm after a transcript
+  rewrite that shrank the session (compaction). They then sat above the next
+  channel's smaller seed: its drain picked the stale row, the authorize edge
+  refused it, and every drain failed. Enqueue also started past the stale
+  cursor, so the real rows committed after the rewrite were never queued. On
+  a late-prepared channel, any leftover also blocked delegation result
+  delivery and bridge submission, which wait for an empty outbox.
+  While an ambiguity recovery obligation is live anywhere in the session, the
+  outbox is kept for its replacement. An admitted replacement that closes
+  before its recovery bind cancels that recovery. The recovery authorization drops the
+  queued rows its seed already carries: its guard proves they are at or below
+  the replacement's seed. Rows at or below a live recovery seed can no longer
+  re-enter the outbox: the generated enqueue refuses them, and the runtime
+  starts classifying past the highest live recovery seed. Before, the source
+  channel re-queued them, including the ambiguous row's cursor under a fresh
+  append id. Two new `MeerkatMachine` invariants hold this:
+  `live_context_outbox_has_no_closed_channel_leftover` and
+  `live_context_outbox_is_above_every_seed`. While a recovery is live, every
+  queued row is above every live recovery seed. Otherwise every queued row is
+  above every staged seed and every bound context cursor. The outbox is never
+  persisted (the machine state is not serialized, and a session's authority
+  is rebuilt from its lifecycle record and the live bridge recovery image), so
+  a session left with a leftover by an earlier build restarts with an empty
+  outbox. A test pins that. The canonical TLC lane gains
+  `specs/machines/meerkat_machine/live_context_outbox_audit.{tla,sh}`, a
+  bounded audit over the generated model: every generated invariant holds at
+  20 steps (4,718 distinct states), and TLC must reach each of three goals: a
+  close ending a leftover, a recovery authorization ending the rows its seed
+  carries, and a row queued after the authorization reaching the replacement.
 - On a GPT Live channel seeded at open, runtime work output committed after the
   voice session was created (the member's reply to a job result merged after
   the previous call ended) is no longer replayed on the thinking lane while the

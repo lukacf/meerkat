@@ -2300,7 +2300,10 @@ fn runtime_work_output_replays_quietly_during_the_first_turn() {
 }
 
 /// Without a held summary the same runtime work output still waits for the
-/// conversation: quiet history appended into silence is a cue to speak.
+/// conversation: quiet history appended into silence is a cue to speak. On a
+/// channel seeded at open it also waits out the user's first turn (appended
+/// mid-utterance it was read aloud over the question) and is admitted once
+/// that turn finishes.
 #[test]
 fn quiet_history_waits_for_the_conversation_without_a_bootstrap() {
     let mut authority = opened_authority();
@@ -2316,7 +2319,22 @@ fn quiet_history_waits_for_the_conversation_without_a_bootstrap() {
     assert_eq!(authority.state().live_context_cursor_by_channel[CHANNEL], 0);
     start_user_turn(&mut authority, "first-user-turn");
     let effects = authorize_row(&mut authority, "merged-result-reply", 0)
-        .expect("the conversation started; the quiet row is admitted mid-turn");
+        .expect("typed deferral while the user's first turn is open");
+    assert!(deferred(&effects, "merged-result-reply"));
+    assert_eq!(authority.state().live_context_cursor_by_channel[CHANNEL], 0);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::CompleteLiveInteraction {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            provider_turn_ref: "first-user-turn".to_string(),
+        },
+    )
+    .expect("the user's first turn finishes");
+    let effects = authorize_row(&mut authority, "merged-result-reply", 0)
+        .expect("the first turn finished; the quiet row is admitted");
     assert!(authorized(&effects, "merged-result-reply"));
 }
 

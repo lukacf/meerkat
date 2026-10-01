@@ -82098,6 +82098,162 @@ async fn retire_resolves_an_admitted_unopened_input_before_the_turn_boundary() {
     );
 }
 
+/// A TurnDriven runtime-backed lead whose runtime turns block inside apply,
+/// with the service's turn-finalization gate installed.
+async fn spawn_blocking_lead_for_retire(
+    name: &str,
+) -> (
+    MobHandle,
+    Arc<RuntimeBackedRealCommsSessionService>,
+    AgentIdentity,
+    SessionId,
+    Arc<tokio::sync::Mutex<()>>,
+) {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let identity = AgentIdentity::from(name);
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    service.set_block_runtime_turns(true);
+    let gate = service.install_non_reentrant_turn_finalization_gate();
+    (handle, service, identity, session_id, gate)
+}
+
+/// After retire's pre-boundary step the member's runtime is already Retired
+/// (the saga retired it through the member bridge before archive), and every
+/// generated admission transition is defined only for Idle, Attached and
+/// Running. So no input, including one sent straight to the member's runtime
+/// outside the mob's admission fence, can be admitted in the window before
+/// retire acquires the turn-finalization boundary.
+#[tokio::test]
+async fn retire_admits_no_input_after_its_pre_boundary_step() {
+    let (handle, service, identity, session_id, _gate) =
+        spawn_blocking_lead_for_retire("lead-retire-late-input").await;
+    let (entered, release) =
+        super::provisioner::arm_pre_boundary_step_test_gate(session_id.clone());
+    let retire_handle = handle.clone();
+    let retire_identity = identity.clone();
+    let retire = tokio::spawn(async move { retire_handle.retire(retire_identity).await });
+    tokio::time::timeout(Duration::from_secs(10), entered)
+        .await
+        .expect("retire reaches the end of its pre-boundary step")
+        .expect("the pre-boundary gate stays armed");
+
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+        "sent straight to the retiring member's runtime",
+        None,
+    ));
+    let refused = service
+        .runtime_adapter
+        .accept_input_with_completion(&session_id, input)
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(meerkat_runtime::RuntimeDriverError::NotReady {
+                state: meerkat_runtime::RuntimeState::Retired
+            })
+        ),
+        "the Retired runtime refuses admission: {refused:?}"
+    );
+    release
+        .send(())
+        .expect("retire waits on the pre-boundary gate");
+    tokio::time::timeout(Duration::from_secs(10), retire)
+        .await
+        .expect("retire settles within its own deadline")
+        .expect("retire task joins")
+        .expect("retire completes");
+}
+
+/// Runtime-only release (the host materializer's disposal) reaches the
+/// boundary with a live runtime, so an input sent straight to the runtime
+/// after its pre-boundary step can still be admitted. When the release
+/// reaches the turn-finalization boundary first, the runtime loop (which
+/// acquires that boundary before it stages queued work) cannot open the late
+/// input, and the release's retire drain ends it typed.
+///
+/// Known gap, not covered here: if the late input's run reaches the boundary
+/// first, its turn holds it and the release waits for that turn (a turn that
+/// never ends runs out the deadline, retryable). Closing that needs a runtime
+/// admission fence ahead of the boundary.
+#[tokio::test]
+async fn runtime_release_first_at_the_boundary_ends_a_late_input_typed() {
+    let (_handle, service, _identity, session_id, gate) =
+        spawn_blocking_lead_for_retire("lead-release-late-input").await;
+    let prompts_before = service.applied_runtime_prompts(&session_id).await.len();
+    let disposal = super::provisioner::MemberSessionDisposalArc::new(
+        service.clone(),
+        Some(Arc::clone(&service.runtime_adapter)),
+    );
+    let mut requests = service.turn_finalization_guard_requests.subscribe();
+    let (entered, release) =
+        super::provisioner::arm_pre_boundary_step_test_gate(session_id.clone());
+    let held = gate.lock().await;
+
+    let task_session_id = session_id.clone();
+    let releasing =
+        tokio::spawn(async move { disposal.release_runtime_only(&task_session_id).await });
+    tokio::time::timeout(Duration::from_secs(10), entered)
+        .await
+        .expect("release reaches the end of its pre-boundary step")
+        .expect("the pre-boundary gate stays armed");
+    let seen = *requests.borrow_and_update();
+    release
+        .send(())
+        .expect("release waits on the pre-boundary gate");
+    let seen = wait_for_turn_finalization_guard_request(&mut requests, seen, "release").await;
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+        "admitted after the pre-boundary step",
+        None,
+    ));
+    let (outcome, completion) = service
+        .runtime_adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("the live runtime admits the late input");
+    assert!(outcome.is_accepted());
+    let completion = completion.expect("the late input registers a completion waiter");
+    wait_for_turn_finalization_guard_request(&mut requests, seen, "the runtime loop").await;
+    // Release queued on the gate first, so it holds the boundary before the
+    // loop can stage the late input.
+    drop(held);
+
+    tokio::time::timeout(Duration::from_secs(10), releasing)
+        .await
+        .expect("release settles within its own deadline")
+        .expect("release task joins")
+        .expect("release completes without waiting out its deadline");
+    let outcome = tokio::time::timeout(Duration::from_secs(10), completion.wait())
+        .await
+        .expect("the late input reaches a terminal")
+        .expect("the late input's waiter resolves");
+    assert!(
+        matches!(
+            outcome,
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { .. }
+        ),
+        "the late input ends typed through the retire drain: {outcome:?}"
+    );
+    assert_eq!(
+        service.applied_runtime_prompts(&session_id).await.len(),
+        prompts_before,
+        "the late input never reached the agent"
+    );
+}
+
 #[tokio::test]
 async fn test_member_turn_reconfigure_failure_resolves_after_admission_without_applying_prompt() {
     let mut definition = sample_definition();

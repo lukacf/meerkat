@@ -2263,6 +2263,49 @@ struct QuiescentRuntimeTurnFinalizationBoundary {
     recovered_ops_rebind: Option<Arc<RecoveredSessionOpsRebind>>,
 }
 
+/// Per-session holds between retire's pre-boundary step and its
+/// turn-finalization boundary acquisition (entered, release).
+#[cfg(all(test, feature = "runtime-adapter"))]
+fn pre_boundary_step_test_gates()
+-> &'static std::sync::Mutex<HashMap<SessionId, (oneshot::Sender<()>, oneshot::Receiver<()>)>> {
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<SessionId, (oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Hold the next archive-time retire of `session_id` after its pre-boundary
+/// step returned and before it requests the turn-finalization boundary.
+/// Returns the entered signal and the release sender.
+#[cfg(all(test, feature = "runtime-adapter"))]
+pub(super) fn arm_pre_boundary_step_test_gate(
+    session_id: SessionId,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let replaced = pre_boundary_step_test_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(session_id, (entered_tx, release_rx));
+    assert!(
+        replaced.is_none(),
+        "pre-boundary step test gate already armed"
+    );
+    (entered_rx, release_tx)
+}
+
+#[cfg(all(test, feature = "runtime-adapter"))]
+async fn run_pre_boundary_step_test_gate(session_id: &SessionId) {
+    let gate = pre_boundary_step_test_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(session_id);
+    if let Some((entered_tx, release_rx)) = gate {
+        let _ = entered_tx.send(());
+        let _ = release_rx.await;
+    }
+}
+
 #[cfg(test)]
 fn recovered_ops_after_hook_test_gates()
 -> &'static std::sync::Mutex<HashMap<SessionId, (oneshot::Sender<()>, oneshot::Receiver<()>)>> {
@@ -3286,6 +3329,8 @@ impl MemberSessionDisposalArc {
                 self.cancel_active_runtime_turn_before_retire_until(session_id, deadline)
                     .await?;
             }
+            #[cfg(test)]
+            run_pre_boundary_step_test_gate(session_id).await;
             let boundary = self
                 .acquire_runtime_turn_finalization_boundary_until(session_id, deadline)
                 .await?;

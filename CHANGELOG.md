@@ -352,6 +352,13 @@ them.
   count the archived lanes as main unit coverage, and a manual dispatch
   runs the main unit lanes so a branch can measure them.
 
+- Nightly holds about ten of the account's 40 concurrent hosted jobs instead
+  of up to 22: the BuildBuddy graph runs alone first, then five sequential
+  chains (each job needs the previous one and runs under `!cancelled()`).
+  The 2026-10-01 nightly held 22 slots for most of 02:17-04:40 UTC while
+  pull-request jobs queued for up to 11 minutes. Nightly now takes about
+  three hours instead of about two and a half.
+
 
 ## [0.8.49] - 2026-09-30
 

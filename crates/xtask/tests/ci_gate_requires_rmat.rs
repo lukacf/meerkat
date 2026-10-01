@@ -446,6 +446,61 @@ fn nightly_covers_the_deferred_heavy_lanes() {
 }
 
 #[test]
+fn nightly_holds_a_bounded_number_of_hosted_slots() {
+    // The account's 40 concurrent hosted jobs are shared with pull-request
+    // and main CI. Nightly runs the BuildBuddy graph alone first, then a few
+    // sequential chains: every other job needs exactly one job, no job is
+    // needed by two others, and each runs under !cancelled() so a red job
+    // never skips the rest of its chain.
+    const ROOT: &str = "gcp-buildbuddy";
+    const MAX_CHAINS: usize = 5;
+    let doc = read_workflow(&workflow_yml_path("nightly.yml"));
+    let jobs = doc
+        .get("jobs")
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("nightly jobs mapping");
+    let mut needed_by: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut chain_heads = 0;
+    for (name, job) in jobs {
+        let name = name.as_str().expect("job name");
+        if name == ROOT {
+            assert!(job.get("needs").is_none(), "{ROOT} runs first");
+            continue;
+        }
+        let need = job
+            .get("needs")
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or_else(|| panic!("nightly job {name} must need exactly one job (a chain)"));
+        assert_eq!(
+            job.get("if").and_then(serde_yaml::Value::as_str),
+            Some("${{ !cancelled() }}"),
+            "nightly job {name} must run under !cancelled() so a red predecessor does not skip it"
+        );
+        *needed_by.entry(need.to_string()).or_default() += 1;
+        if need == ROOT {
+            chain_heads += 1;
+        }
+    }
+    for (need, count) in &needed_by {
+        if need != ROOT {
+            assert_eq!(
+                *count, 1,
+                "{need} starts two nightly jobs: chains must not fan out"
+            );
+        }
+        assert!(
+            jobs.contains_key(serde_yaml::Value::String(need.clone())),
+            "unknown job {need}"
+        );
+    }
+    assert!(
+        (1..=MAX_CHAINS).contains(&chain_heads),
+        "nightly must run at most {MAX_CHAINS} chains after {ROOT} (found {chain_heads})"
+    );
+}
+
+#[test]
 fn buildbuddy_workflow_is_called_only_by_nightly_and_release() {
     let ci_yml = workflow_yml_path("ci.yml");
     let cargo_yml = workflow_yml_path("cargo.yml");

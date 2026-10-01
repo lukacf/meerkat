@@ -364,6 +364,46 @@ fn capped_tlc_run_is_killed_and_reported_incomplete() {
     assert!(incomplete.to_string().contains("not a pass"));
 }
 
+#[cfg(feature = "machine-authority")]
+#[test]
+fn deep_coverage_credits_transitions_tlc_reports_as_next_disjuncts() {
+    // work_attention_lifecycle shape: PauseActive binds a state-dependent set,
+    // so TLC reports it as a Next disjunct, while ClassifyEligibilityActive is
+    // split and named directly.
+    let model = [
+        "Next ==",
+        "    \\/ \\E expected_revision \\in {revision} : \\E until_utc_ms \\in OptionU64Values : PauseActive(expected_revision, until_utc_ms)",
+        "    \\/ \\E expected_revision \\in {revision} : ResumePaused(expected_revision)",
+    ]
+    .join("\n");
+    let output = "\
+<ClassifyEligibilityActive line 137, col 1 to line 137, col 37 of module model>: 27:111
+<Next line 1, col 1 to line 1, col 4 of module model (2 8 2 127)>: 4:148
+<Next line 1, col 1 to line 1, col 4 of module model (3 8 3 76)>: 0:0
+";
+    let coverage = parse_tlc_coverage_with_model(output, &model);
+    let counts = |name: &str| coverage.counts_by_operator.get(name).map(|c| c.evaluations);
+    assert_eq!(counts("ClassifyEligibilityActive"), Some(111));
+    assert_eq!(
+        counts("PauseActive"),
+        Some(148),
+        "a fired disjunct is credited"
+    );
+    assert_eq!(
+        counts("ResumePaused"),
+        Some(0),
+        "an unfired disjunct stays zero-hit"
+    );
+    // Without the model the disjunct counts are not attributed at all.
+    assert_eq!(
+        parse_tlc_coverage(output)
+            .counts_by_operator
+            .get("PauseActive")
+            .map(|c| c.evaluations),
+        None
+    );
+}
+
 fn materialize_missing_coverage_anchors(mismatches: &[String]) -> anyhow::Result<()> {
     for mismatch in mismatches {
         let Some((_, rest)) = mismatch.split_once("coverage anchor ") else {

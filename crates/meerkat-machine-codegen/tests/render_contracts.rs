@@ -1673,3 +1673,43 @@ fn tla_models_emit_each_unchanged_frame_once_and_reference_it_by_name() {
         "meerkat_machine: whole-state UNCHANGED vars conjuncts must stay inline"
     );
 }
+
+/// Deep machine configs must offer the string literals that guards require an
+/// input binding to equal; otherwise transitions guarded on them are unreachable in Deep TLC
+/// and show up as zero-hit coverage (#1364). CI configs keep the minimal
+/// generic samples, and composition Deep configs are unchanged.
+#[test]
+fn deep_machine_cfgs_sample_guard_string_literals() {
+    fn string_values(cfg: &str) -> String {
+        cfg.lines()
+            .find(|line| line.trim_start().starts_with("StringValues ="))
+            .map(|line| line.trim().to_owned())
+            .unwrap_or_default()
+    }
+    let schema = |name: &str| {
+        canonical_machine_schemas()
+            .into_iter()
+            .find(|schema| schema.machine.as_str() == name)
+            .expect("canonical machine exists")
+    };
+    // DetachedJobMachine's Apply*Delivery and Observe*DeliveryAlreadyApplied
+    // guard on `delivery_id == "terminal"`.
+    let detached = schema("DetachedJobMachine");
+    let deep = string_values(&render_machine_ci_cfg(&detached, true));
+    assert!(deep.contains("\"terminal\""), "detached_job deep: {deep}");
+    // Inequality guards (`attempt_id != ""`) are satisfiable by the generic
+    // samples, so they contribute no literal.
+    assert!(!deep.contains("\"\""), "detached_job deep: {deep}");
+    assert!(
+        !string_values(&render_machine_ci_cfg(&detached, false)).contains("\"terminal\""),
+        "CI configs keep the generic samples"
+    );
+    // The *Malformed rejections guard on an empty request/claim/activation id.
+    for name in [
+        "TemporaryCouncilLifecycleMachine",
+        "ForkedParticipantLifecycleMachine",
+    ] {
+        let deep = string_values(&render_machine_ci_cfg(&schema(name), true));
+        assert!(deep.contains("\"\""), "{name} deep: {deep}");
+    }
+}

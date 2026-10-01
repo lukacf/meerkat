@@ -1287,6 +1287,10 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
     let mut out = String::new();
     let domains = collect_binding_domains(schema);
     let named_samples = collect_machine_named_type_samples(schema);
+    let deep_named_samples = with_guard_binding_string_samples(&named_samples, schema);
+    // The native SessionId/String bridge deliberately substitutes its sample
+    // into a fixed-size Deep string pool; keep that bound for bridge machines.
+    let deep_guard_string_samples = deep && !machine_uses_session_id_string_bridge(schema);
     let named_bindings = collect_machine_named_bindings(schema);
     let sample_cardinality = machine_cfg_sample_cardinality(schema, deep);
     let operator_suffix = if deep { "Deep" } else { "Ci" };
@@ -1348,9 +1352,13 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
                     render_cfg_domain_assignment(
                         &ty,
                         domain_cardinality,
-                        &named_samples,
+                        if deep_guard_string_samples {
+                            &deep_named_samples
+                        } else {
+                            &named_samples
+                        },
                         &named_bindings,
-                        false,
+                        deep_guard_string_samples,
                         session_id_string_bridge_sample.as_deref(),
                     )
                 )
@@ -3008,6 +3016,103 @@ fn collect_type_domains(ty: &TypeRef, domains: &mut BTreeMap<String, TypeRef>) {
         | TypeRef::String
         | TypeRef::Named(_)
         | TypeRef::Enum(_) => {}
+    }
+}
+
+/// Named samples for a machine Deep profile: every named bucket unchanged, but
+/// the generic `String` bucket holds only the string literals a transition
+/// guard requires an input binding to equal (`delivery_id == "terminal"`,
+/// `claim_id == ""`). Without them a transition guarded on such a literal is
+/// unreachable under the generic `"alpha"`/`"beta"` samples and Deep coverage
+/// reports it as zero-hit. Literals from updates, effects or init (messages,
+/// error codes) are deliberately not added, so unrelated machines keep their
+/// sample domains.
+fn with_guard_binding_string_samples(
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    schema: &MachineSchema,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut samples = named_samples.clone();
+    let literals = collect_guard_binding_string_literals(schema);
+    if literals.is_empty() {
+        samples.remove("String");
+    } else {
+        samples.insert("String".to_owned(), literals);
+    }
+    samples
+}
+
+fn collect_guard_binding_string_literals(schema: &MachineSchema) -> BTreeSet<String> {
+    let mut literals = BTreeSet::new();
+    for transition in &schema.transitions {
+        let string_bindings = transition_trigger_variant(schema, transition)
+            .map(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .filter(|field| {
+                        matches!(field.ty, TypeRef::String)
+                            && transition
+                                .on
+                                .bindings()
+                                .iter()
+                                .any(|binding| binding == &field.name)
+                    })
+                    .map(|field| field.name.as_str().to_owned())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        if string_bindings.is_empty() {
+            continue;
+        }
+        for guard in &transition.guards {
+            collect_binding_literal_comparisons(&guard.expr, &string_bindings, &mut literals);
+        }
+    }
+    literals
+}
+
+fn collect_binding_literal_comparisons(
+    expr: &Expr,
+    string_bindings: &BTreeSet<String>,
+    literals: &mut BTreeSet<String>,
+) {
+    match expr {
+        // Only equality makes a guard unreachable without its literal. An
+        // inequality such as `attempt_id != ""` is already satisfied by the
+        // generic samples, so its literal would only add rejection-path states.
+        Expr::Eq(left, right) => {
+            match (left.as_ref(), right.as_ref()) {
+                (Expr::Binding(binding), Expr::String(literal))
+                | (Expr::String(literal), Expr::Binding(binding))
+                    if string_bindings.contains(binding) =>
+                {
+                    literals.insert(literal.clone());
+                }
+                _ => {}
+            }
+            collect_binding_literal_comparisons(left, string_bindings, literals);
+            collect_binding_literal_comparisons(right, string_bindings, literals);
+        }
+        Expr::Neq(left, right) => {
+            collect_binding_literal_comparisons(left, string_bindings, literals);
+            collect_binding_literal_comparisons(right, string_bindings, literals);
+        }
+        Expr::Not(inner) => collect_binding_literal_comparisons(inner, string_bindings, literals),
+        Expr::And(items) | Expr::Or(items) => {
+            for item in items {
+                collect_binding_literal_comparisons(item, string_bindings, literals);
+            }
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            for item in [condition, then_expr, else_expr] {
+                collect_binding_literal_comparisons(item, string_bindings, literals);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -8778,8 +8883,8 @@ impl<'a> MachineTlaCompiler<'a> {
                 suffix: "Deep".to_owned(),
                 sample_cardinality: machine_cfg_sample_cardinality(self.schema, true),
                 domain_overrides: Some(&self.schema.deep_domain_overrides),
-                named_samples: &named_samples,
-                include_string_samples: false,
+                named_samples: &with_guard_binding_string_samples(&named_samples, self.schema),
+                include_string_samples: !machine_uses_session_id_string_bridge(self.schema),
             },
         );
 

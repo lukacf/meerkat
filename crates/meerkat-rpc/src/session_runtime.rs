@@ -26866,7 +26866,11 @@ mod tests {
         let probe = meerkat_live::LiveChannelId::random_uuid();
         assert!(
             matches!(
-                host.reserve_channel_close_observation(&probe).await,
+                host.reserve_channel_close_observation(
+                    &probe,
+                    meerkat_core::LiveChannelCloseReason::ClientRequested
+                )
+                .await,
                 Err(meerkat_live::LiveAdapterHostError::ChannelNotFound(_))
             ),
             "host must hold no live channels after a fail-closed no-factory open"

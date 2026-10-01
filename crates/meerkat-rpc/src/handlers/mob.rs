@@ -3371,6 +3371,7 @@ pub async fn handle_member_live_status(
             meerkat_contracts::wire::LiveStatusResult {
                 channel_id: domain.channel_id,
                 status: domain.status,
+                provider_input_latency: None,
             },
         ),
         Err(err) => mob_call_error(id, &err),

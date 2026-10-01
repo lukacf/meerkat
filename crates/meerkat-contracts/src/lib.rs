@@ -484,6 +484,8 @@ pub use wire::{
     WireLiveExecutionIdentityVersion,
     WireLiveHotSwapSkip,
     WireLiveHotSwapSkipReason,
+    WireLiveProviderInputLatency,
+    WireLiveProviderInputLatencyReading,
     WireLiveRefreshFailure,
     WireLiveResponseModality,
     WireLiveSwapFailure,

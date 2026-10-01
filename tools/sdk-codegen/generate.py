@@ -848,6 +848,10 @@ def _promote_nested_schema_def(name: str) -> bool:
         # `LiveCommitInputParams.response_modality` carries the typed
         # `audio | text` discriminated union into SDK codegen.
         "WireLiveResponseModality",
+        # Provider input latency telemetry on `LiveStatusResult`: keep the
+        # reading and its reflected-clock anchor typed by name.
+        "WireLiveProviderInputLatency",
+        "WireLiveProviderInputLatencyReading",
         # R5-10: promote `LiveInputChunkWire` so `LiveSendInputParams.chunk`
         # carries the typed discriminated-union shape into SDK codegen instead
         # of falling back to opaque `dict[str, Any]` / `Record<string, unknown>`.
@@ -3717,6 +3721,16 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         "Response payload for live/webrtc/answer.",
     )
     append_python_dataclass("LiveChannelParams", wire_schema, "Request payload for live/{status,close,interrupt}.")
+    append_python_dataclass(
+        "WireLiveProviderInputLatencyReading",
+        wire_schema,
+        "One provider input latency reading anchored on the reflected input clock.",
+    )
+    append_python_dataclass(
+        "WireLiveProviderInputLatency",
+        wire_schema,
+        "Provider input latency telemetry beside the current reflected input clock.",
+    )
     append_python_dataclass("LiveStatusResult", wire_schema, "Response payload for live/status.")
     append_python_dataclass("LiveSendInputParams", wire_schema, "Request payload for live/send_input.")
     append_python_dataclass(
@@ -4500,6 +4514,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("LiveWebrtcAnswerParams", wire_schema)
     append_typescript_interface("LiveWebrtcAnswerResult", wire_schema)
     append_typescript_interface("LiveChannelParams", wire_schema)
+    append_typescript_interface("WireLiveProviderInputLatencyReading", wire_schema)
+    append_typescript_interface("WireLiveProviderInputLatency", wire_schema)
     append_typescript_interface("LiveStatusResult", wire_schema)
     append_typescript_interface("LiveSendInputParams", wire_schema)
     append_typescript_interface("LiveSendInputErrorData", wire_schema)

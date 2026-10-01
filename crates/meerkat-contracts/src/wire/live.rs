@@ -760,6 +760,35 @@ pub struct LiveCommitInputParams {
 pub struct LiveStatusResult {
     pub channel_id: String,
     pub status: WireLiveAdapterStatus,
+    /// Provider input latency measurement, when the channel's provider
+    /// reports one. Telemetry beside the machine-owned `status`: it never
+    /// changes `status`, and a degraded status remains the machine's call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_input_latency: Option<WireLiveProviderInputLatency>,
+}
+
+/// One provider input latency reading: how far the provider's input
+/// processing ran behind the audio it had received, measured when its
+/// reflected input clock read `measured_at_reflected_clock_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireLiveProviderInputLatencyReading {
+    pub backlog_ms: u64,
+    pub measured_at_reflected_clock_ms: u64,
+}
+
+/// Provider input latency telemetry for a live channel: the latest reading
+/// beside the provider's current reflected input clock. A reading whose
+/// `measured_at_reflected_clock_ms` trails `reflected_input_clock_ms` by a
+/// long way is stale (no input transcript has arrived since), visible from
+/// the provider's own clock. A measurement, never a status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireLiveProviderInputLatency {
+    /// Absent until the provider's first input transcript of the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<WireLiveProviderInputLatencyReading>,
+    pub reflected_input_clock_ms: u64,
 }
 
 /// Status of a `live/refresh` request relative to the adapter pump.

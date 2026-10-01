@@ -124,8 +124,8 @@ pub use live::{
     WireLiveAdapterObservation, WireLiveAdapterStatus, WireLiveChannelCapabilities,
     WireLiveConfigRejectionReason, WireLiveContinuityMode, WireLiveDegradationReason,
     WireLiveExecutionIdentityOverrideV1, WireLiveExecutionIdentityVersion,
-    WireLiveResponseModality, WireLiveTransportBootstrap, WireProvider,
-    WireRealtimeTranscriptEvent,
+    WireLiveProviderInputLatency, WireLiveProviderInputLatencyReading, WireLiveResponseModality,
+    WireLiveTransportBootstrap, WireProvider, WireRealtimeTranscriptEvent,
 };
 pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,

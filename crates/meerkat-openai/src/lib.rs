@@ -64,8 +64,8 @@ pub use image_generation::{
 pub use live::OpenAiLiveClient;
 #[cfg(all(not(target_arch = "wasm32"), feature = "live"))]
 pub use public_live::{
-    GPT_LIVE_MODEL_FAMILY, PublicLiveBootstrap, PublicLiveBrokerFactory, PublicLiveBrokerSession,
-    PublicLiveOpenConfig,
+    GPT_LIVE_MODEL_FAMILY, GptLiveProviderInputLatency, GptLiveProviderInputLatencyStatus,
+    PublicLiveBootstrap, PublicLiveBrokerFactory, PublicLiveBrokerSession, PublicLiveOpenConfig,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "copilot"))]
 pub use runtime::OpenAiCopilotChatCompletionsClientFactory;

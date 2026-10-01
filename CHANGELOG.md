@@ -37,6 +37,14 @@ them.
 
 ### Breaking
 
+- `meerkat_contracts::wire::LiveStatusResult` gains the public field
+  `provider_input_latency: Option<WireLiveProviderInputLatency>`; struct
+  literals must set it (`None` when no measurement exists). The JSON shape is
+  unchanged when it is absent (`skip_serializing_if`), so `live/status`
+  clients that ignore it see byte-identical replies.
+  `meerkat_live::LiveSidebandObservationKind` gains `ProviderInputLatency`
+  and `meerkat_openai::GptLiveBrokerObservation` gains
+  `ProviderInputLatency`; exhaustive matches must handle them.
 - `meerkat_mcp::McpError` gains `ToolDiscoveryCursorRepeated { server, cursor }`
   and `ToolDiscoveryLimitExceeded { server, limit }`, with the new
   `meerkat_mcp::ToolDiscoveryLimit` (`Pages { max }` / `Tools { max }`).
@@ -125,6 +133,29 @@ them.
   flow-authority validation boundary can override it. Custom stores keep the
   default and are always validated. It exists so the boundary is applied once
   per store (see Fixed).
+- `live/status` reports provider input latency for public GPT Live channels:
+  `provider_input_latency { latest: { backlog_ms,
+  measured_at_reflected_clock_ms }, reflected_input_clock_ms }`. The provider
+  reflects every input frame it receives on the sideband, so the sum of
+  reflected samples is its input clock; on each input-transcript delta the
+  backlog is that clock minus the span the delta transcribes. Healthy sessions
+  read about one second; a degraded provider session (input processing at
+  about 0.4x real time, measured 2026-10-01) grows it without bound and
+  signals nothing else. A reading whose anchor trails the current clock is
+  stale (no transcript since). This is telemetry beside the machine-owned
+  status: it never changes `status`, never feeds the machine, and nothing in
+  the runtime decides on it.
+- The public GPT Live broker logs provider `info` notices (event id, code,
+  message) as structured tracing, and the e2e evidence journal records them,
+  so a provider throttle notice becomes evidence. Telemetry only: nothing in
+  the runtime decides on it.
+- The GPT Live e2e harness classifies provider-degraded runs as a typed void
+  verdict (`Outcome::ProviderDegraded`, `GPT_LIVE_VERDICT ...
+  verdict=provider_degraded`): any exchange whose speech end to input final
+  lag is 10 s or more, or a lag p90 above 2 s, voids the run, and an exchange
+  timeout is void only when the provider's own measured backlog was 10 s or
+  more (otherwise it stays a failure). A void run is never green.
+
 - Optional connection-local host form elicitation for MCP stdio, SSE and
   streamable HTTP, including both native router connection paths. Existing
   constructors keep their default handler. Host factories receive the exact

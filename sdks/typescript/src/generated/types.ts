@@ -5176,8 +5176,19 @@ export interface LiveChannelParams {
   channel_id: string;
 }
 
+export interface WireLiveProviderInputLatencyReading {
+  backlog_ms: number;
+  measured_at_reflected_clock_ms: number;
+}
+
+export interface WireLiveProviderInputLatency {
+  latest?: WireLiveProviderInputLatencyReading | null;
+  reflected_input_clock_ms: number;
+}
+
 export interface LiveStatusResult {
   channel_id: string;
+  provider_input_latency?: WireLiveProviderInputLatency | null;
   status: WireLiveAdapterStatus;
 }
 

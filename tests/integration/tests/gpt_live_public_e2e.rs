@@ -589,6 +589,62 @@ struct PublicLiveHarness {
 }
 
 impl PublicLiveHarness {
+    /// The provider input latency telemetry read from `live/status` (all
+    /// `None` when the provider reported none or the read failed).
+    async fn provider_input_latency(&mut self) -> evidence::ProviderInputLatencyAtTimeout {
+        let Ok(status) = self
+            .rpc
+            .call("live/status", json!({"channel_id": self.channel_id}), 10)
+            .await
+        else {
+            return evidence::ProviderInputLatencyAtTimeout::default();
+        };
+        let latency = &status["provider_input_latency"];
+        let clock = latency["reflected_input_clock_ms"].as_u64();
+        let measured_at = latency["latest"]["measured_at_reflected_clock_ms"].as_u64();
+        evidence::ProviderInputLatencyAtTimeout {
+            backlog_ms: latency["latest"]["backlog_ms"].as_u64(),
+            reflected_input_clock_ms: clock,
+            reflected_clock_since_reading_ms: clock
+                .zip(measured_at)
+                .map(|(clock, measured_at)| clock.saturating_sub(measured_at)),
+        }
+    }
+
+    /// Mark `label` as awaiting its input final (provider health evidence).
+    fn exchange_started(&self, label: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(journal) = &self.evidence {
+            journal.exchange_started(label)?;
+        }
+        Ok(())
+    }
+
+    /// Settle one exchange's provider health evidence after its waits: the
+    /// speech end to input final lag when the final arrived, otherwise a
+    /// timeout carrying the provider input latency read now.
+    async fn settle_exchange_evidence(
+        &mut self,
+        label: &str,
+        schedule_id: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(journal) = self.evidence.clone() else {
+            return Ok(());
+        };
+        let timeline = self.peer.timeline().await?;
+        let heard = SpokenTurn::from_timeline(&timeline, schedule_id).and_then(|turn| {
+            turn.input_final_ms
+                .map(|final_ms| final_ms as i64 - turn.speech_end_ms as i64)
+        });
+        match heard {
+            Some(lag_ms) => journal.exchange_heard(label, lag_ms)?,
+            None => {
+                let latency = self.provider_input_latency().await;
+                journal.exchange_timed_out(latency)?;
+            }
+        }
+        Ok(())
+    }
+
     fn shared(
         &mut self,
     ) -> Result<&mut (SharedPublicLive, ExactChannel), Box<dyn std::error::Error>> {
@@ -2547,11 +2603,13 @@ async fn e2e_scenario_99_gpt_live_public_concurrent_context()
         run_s99_concurrent_context(evidence.clone()),
     )
     .await;
-    evidence.finish(match &result {
+    if let Some(degradation) = evidence.finish_classified(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
-    })?;
+    })? {
+        return Err(evidence.provider_degraded_verdict(&degradation).into());
+    }
     result
         .map_err(|_| "S99 overall deadline expired; concurrent-context acceptance not qualified")?
 }
@@ -2816,11 +2874,14 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     } else {
         evidence::Outcome::Failed
     };
-    let retained = evidence.finish(outcome);
+    let retained = evidence.finish_classified(outcome);
     live.peer.close().await;
     live.server_task.abort();
     // The scenario's own error is the one to report; journal faults that
     // followed it (a dropped peer after a failed reopen) come second.
+    if let Ok(Some(degradation)) = &retained {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result?;
     retained?;
     browser_flush?;
@@ -3154,6 +3215,7 @@ async fn native_question(
     spec: PlayAt,
 ) -> Result<(SpokenTurn, String, usize, u64), Box<dyn std::error::Error>> {
     let events_before = live.peer.events().await?.len();
+    live.exchange_started(label)?;
     let schedule_id = live.peer.play_at(&spec).await?;
     let fixture_start_ms = live
         .peer
@@ -3183,6 +3245,7 @@ async fn native_question(
             },
         )
         .await;
+    live.settle_exchange_evidence(label, schedule_id).await?;
     if waited.is_err() {
         print_no_audio_evidence(live, scenario, label, fixture_start_ms).await;
     }
@@ -4045,6 +4108,7 @@ async fn delegated_request(
         seen_executor_turns.insert(snapshot.operation_id().to_string());
     }
     let events_before = live.peer.events().await?.len();
+    live.exchange_started(label)?;
     let schedule_id = live.peer.play_at(&spec).await?;
     let fixture_start_ms = live
         .peer
@@ -4061,15 +4125,16 @@ async fn delegated_request(
             |t| fixture_end_entry(t, schedule_id).map(|_| ()),
         )
         .await?;
-    let delegation_created_ms = match live
+    let delegation_wait = live
         .peer
         .wait_for_timeline(
             Duration::from_secs(60),
             &format!("{label} delegation_created (client delegation)"),
             |t| timeline_find(t, TimelineKind::DelegationCreated, fixture_start_ms).map(|e| e.t_ms),
         )
-        .await
-    {
+        .await;
+    live.settle_exchange_evidence(label, schedule_id).await?;
+    let delegation_created_ms = match delegation_wait {
         Ok(ms) => ms,
         Err(error) => {
             // Which provider events did arrive: the model may have answered
@@ -4224,11 +4289,14 @@ async fn e2e_scenario_100_gpt_live_public_morning_standup() -> Result<(), Box<dy
     .await;
     // The scenario's own error comes first; a journal fault that followed it
     // (a dropped peer after a failed reopen) must not shadow it.
-    let finished = evidence.finish(match &result {
+    let finished = evidence.finish_classified(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
     });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result.map_err(|_| "S100 overall deadline expired")??;
     finished?;
     Ok(())
@@ -4868,11 +4936,14 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
     } else {
         evidence::Outcome::Failed
     };
-    let retained = evidence.finish(outcome);
+    let retained = evidence.finish_classified(outcome);
     live.peer.close().await;
     live.server_task.abort();
     // The scenario's own error is the one to report; journal faults that
     // followed it (a dropped peer after a failed reopen) come second.
+    if let Ok(Some(degradation)) = &retained {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result?;
     retained?;
     browser_flush?;
@@ -4930,11 +5001,14 @@ async fn e2e_scenario_102_gpt_live_public_who_are_you() -> Result<(), Box<dyn st
     .await;
     // The scenario's own error comes first; a journal fault that followed it
     // (a dropped peer after a failed reopen) must not shadow it.
-    let finished = evidence.finish(match &result {
+    let finished = evidence.finish_classified(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
     });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result.map_err(|_| "S102 overall deadline expired")??;
     finished?;
     Ok(())
@@ -5164,11 +5238,14 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
     } else {
         evidence::Outcome::Failed
     };
-    let retained = evidence.finish(outcome);
+    let retained = evidence.finish_classified(outcome);
     live.peer.close().await;
     live.server_task.abort();
     // The scenario's own error is the one to report; journal faults that
     // followed it (a dropped peer after a failed reopen) come second.
+    if let Ok(Some(degradation)) = &retained {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result?;
     retained?;
     browser_flush?;
@@ -5260,11 +5337,14 @@ async fn e2e_scenario_103_gpt_live_public_interrupt_and_recover()
     .await;
     // The scenario's own error comes first; a journal fault that followed it
     // (a dropped peer after a failed reopen) must not shadow it.
-    let finished = evidence.finish(match &result {
+    let finished = evidence.finish_classified(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
     });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result.map_err(|_| "S103 overall deadline expired")??;
     finished?;
     Ok(())
@@ -5610,11 +5690,14 @@ async fn run_s103_interrupt_and_recover(
     } else {
         evidence::Outcome::Failed
     };
-    let retained = evidence.finish(outcome);
+    let retained = evidence.finish_classified(outcome);
     live.peer.close().await;
     live.server_task.abort();
     // The scenario's own error is the one to report; journal faults that
     // followed it (a dropped peer after a failed reopen) come second.
+    if let Ok(Some(degradation)) = &retained {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result?;
     retained?;
     browser_flush?;
@@ -5656,11 +5739,14 @@ async fn e2e_scenario_107_gpt_live_public_stuck_close_convergence()
     .await;
     // The scenario's own error comes first; a journal fault that followed it
     // (a dropped peer after a failed reopen) must not shadow it.
-    let finished = evidence.finish(match &result {
+    let finished = evidence.finish_classified(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
     });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result.map_err(|_| "S107 overall deadline expired")??;
     finished?;
     Ok(())
@@ -5934,11 +6020,14 @@ async fn run_s107_stuck_close_convergence(
     } else {
         evidence::Outcome::Failed
     };
-    let retained = evidence.finish(outcome);
+    let retained = evidence.finish_classified(outcome);
     live.peer.close().await;
     live.server_task.abort();
     // The scenario's own error is the one to report; journal faults that
     // followed it (a dropped peer after a failed reopen) come second.
+    if let Ok(Some(degradation)) = &retained {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result?;
     retained?;
     browser_flush?;
@@ -6017,11 +6106,14 @@ async fn e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice()
     .await;
     // The scenario's own error comes first; a journal fault that followed it
     // (a dropped peer after a failed reopen) must not shadow it.
-    let finished = evidence.finish(match &result {
+    let finished = evidence.finish_classified(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
     });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result.map_err(|_| "S104 overall deadline expired")??;
     finished?;
     Ok(())
@@ -6457,11 +6549,14 @@ async fn run_s104_handoff_voice_typed_voice(
     } else {
         evidence::Outcome::Failed
     };
-    let retained = evidence.finish(outcome);
+    let retained = evidence.finish_classified(outcome);
     live.peer.close().await;
     live.server_task.abort();
     // The scenario's own error is the one to report; journal faults that
     // followed it (a dropped peer after a failed reopen) come second.
+    if let Ok(Some(degradation)) = &retained {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result?;
     retained?;
     browser_flush?;
@@ -6687,11 +6782,14 @@ async fn e2e_scenario_106_gpt_live_public_long_haul() -> Result<(), Box<dyn std:
         run_s106_long_haul(evidence.clone()),
     )
     .await;
-    let finished = evidence.finish(match &result {
+    let finished = evidence.finish_classified(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
     });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result.map_err(|_| "S106 overall deadline expired")??;
     finished?;
     Ok(())
@@ -7031,9 +7129,12 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
     } else {
         evidence::Outcome::Failed
     };
-    let retained = evidence.finish(outcome);
+    let retained = evidence.finish_classified(outcome);
     live.peer.close().await;
     live.server_task.abort();
+    if let Ok(Some(degradation)) = &retained {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result?;
     retained?;
     browser_flush?;
@@ -7072,11 +7173,14 @@ async fn e2e_scenario_101_gpt_live_public_busy_backend() -> Result<(), Box<dyn s
         run_s101_busy_backend(evidence.clone()),
     )
     .await;
-    let finished = evidence.finish(match &result {
+    let finished = evidence.finish_classified(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
     });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result.map_err(|_| "S101 overall deadline expired")??;
     finished?;
     Ok(())
@@ -7372,9 +7476,12 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
     } else {
         evidence::Outcome::Failed
     };
-    let retained = evidence.finish(outcome);
+    let retained = evidence.finish_classified(outcome);
     live.peer.close().await;
     live.server_task.abort();
+    if let Ok(Some(degradation)) = &retained {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result?;
     retained?;
     browser_flush?;
@@ -7460,11 +7567,14 @@ async fn e2e_scenario_105_gpt_live_public_fork_and_merge_parallel()
         run_s105_fork_and_merge_parallel(evidence.clone()),
     )
     .await;
-    let finished = evidence.finish(match &result {
+    let finished = evidence.finish_classified(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
     });
+    if let Ok(Some(degradation)) = &finished {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result.map_err(|_| "S105 overall deadline expired")??;
     finished?;
     Ok(())
@@ -7784,9 +7894,12 @@ async fn run_s105_fork_and_merge_parallel(
     } else {
         evidence::Outcome::Failed
     };
-    let retained = evidence.finish(outcome);
+    let retained = evidence.finish_classified(outcome);
     live.peer.close().await;
     live.server_task.abort();
+    if let Ok(Some(degradation)) = &retained {
+        return Err(evidence.provider_degraded_verdict(degradation).into());
+    }
     result?;
     retained?;
     browser_flush?;

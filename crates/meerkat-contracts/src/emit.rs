@@ -265,6 +265,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         // discriminated union) instead of inlining them as anonymous `Any`
         // / `unknown` blobs inside `LiveOpenResult`.
         "WireLiveChannelCapabilities": schema_for!(crate::wire::WireLiveChannelCapabilities),
+        "WireLiveProviderInputLatency": schema_for!(crate::wire::WireLiveProviderInputLatency),
+        "WireLiveProviderInputLatencyReading": schema_for!(crate::wire::WireLiveProviderInputLatencyReading),
         "WireLiveContinuityMode": schema_for!(crate::wire::WireLiveContinuityMode),
         // G8 (P2): emit `WireLiveTransportBootstrap` at the top level so
         // SDK codegen produces a typed discriminated union (TS) /

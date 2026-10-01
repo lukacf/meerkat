@@ -98787,6 +98787,51 @@
             "type": "object"
           }
         ]
+      },
+      "WireLiveProviderInputLatency": {
+        "description": "Provider input latency telemetry for a live channel: the latest reading\nbeside the provider's current reflected input clock. A reading whose\n`measured_at_reflected_clock_ms` trails `reflected_input_clock_ms` by a\nlong way is stale (no input transcript has arrived since), visible from\nthe provider's own clock. A measurement, never a status.",
+        "properties": {
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireLiveProviderInputLatencyReading"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absent until the provider's first input transcript of the session."
+          },
+          "reflected_input_clock_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reflected_input_clock_ms"
+        ],
+        "type": "object"
+      },
+      "WireLiveProviderInputLatencyReading": {
+        "description": "One provider input latency reading: how far the provider's input\nprocessing ran behind the audio it had received, measured when its\nreflected input clock read `measured_at_reflected_clock_ms`.",
+        "properties": {
+          "backlog_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "measured_at_reflected_clock_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "backlog_ms",
+          "measured_at_reflected_clock_ms"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -98794,6 +98839,17 @@
     "properties": {
       "channel_id": {
         "type": "string"
+      },
+      "provider_input_latency": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireLiveProviderInputLatency"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Provider input latency measurement, when the channel's provider\nreports one. Telemetry beside the machine-owned `status`: it never\nchanges `status`, and a degraded status remains the machine's call."
       },
       "status": {
         "$ref": "#/$defs/WireLiveAdapterStatus"
@@ -155254,6 +155310,77 @@
       }
     ],
     "title": "WireLiveDegradationReason"
+  },
+  "WireLiveProviderInputLatency": {
+    "$defs": {
+      "WireLiveProviderInputLatencyReading": {
+        "description": "One provider input latency reading: how far the provider's input\nprocessing ran behind the audio it had received, measured when its\nreflected input clock read `measured_at_reflected_clock_ms`.",
+        "properties": {
+          "backlog_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "measured_at_reflected_clock_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "backlog_ms",
+          "measured_at_reflected_clock_ms"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Provider input latency telemetry for a live channel: the latest reading\nbeside the provider's current reflected input clock. A reading whose\n`measured_at_reflected_clock_ms` trails `reflected_input_clock_ms` by a\nlong way is stale (no input transcript has arrived since), visible from\nthe provider's own clock. A measurement, never a status.",
+    "properties": {
+      "latest": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireLiveProviderInputLatencyReading"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Absent until the provider's first input transcript of the session."
+      },
+      "reflected_input_clock_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "reflected_input_clock_ms"
+    ],
+    "title": "WireLiveProviderInputLatency",
+    "type": "object"
+  },
+  "WireLiveProviderInputLatencyReading": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One provider input latency reading: how far the provider's input\nprocessing ran behind the audio it had received, measured when its\nreflected input clock read `measured_at_reflected_clock_ms`.",
+    "properties": {
+      "backlog_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "measured_at_reflected_clock_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "backlog_ms",
+      "measured_at_reflected_clock_ms"
+    ],
+    "title": "WireLiveProviderInputLatencyReading",
+    "type": "object"
   },
   "WireLiveResponseModality": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

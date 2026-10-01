@@ -10376,6 +10376,13 @@
                 },
                 "type": "array"
               },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
+              },
               "transport": {
                 "const": "stdio",
                 "type": "string"
@@ -10421,6 +10428,13 @@
                   "type": "string"
                 },
                 "type": "array"
+              },
+              "tool_names": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Explicit raw operation -> exposed name, with no credential values.",
+                "type": "object"
               },
               "transport": {
                 "const": "http",
@@ -24843,6 +24857,13 @@
           "name": {
             "description": "Server name (must be unique within scope)",
             "type": "string"
+          },
+          "tool_names": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Explicit raw MCP operation -> exposed tool name selected by configuration.\nUnmapped operations keep their raw names. Names are never derived from\ncredentials or the current set of sibling servers. Explicit exposed\nnames are 1-64 ASCII letters, digits, underscores or hyphens; the router\nrejects reserved catalog-control names before staging. An unlisted raw\noperation in the map does not create a tool.",
+            "type": "object"
           }
         },
         "required": [

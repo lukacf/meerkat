@@ -197,6 +197,7 @@ class McpStdioServerConfig(TypedDict, total=False):
     args: NotRequired[list[str]]
     env: NotRequired[dict[str, str]]
     connect_timeout_secs: NotRequired[int]
+    tool_names: NotRequired[dict[str, str]]
 
 
 class McpHttpServerConfig(TypedDict, total=False):
@@ -207,6 +208,7 @@ class McpHttpServerConfig(TypedDict, total=False):
     transport: NotRequired[McpHttpTransport]
     oauth_account: NotRequired[Optional[str]]
     connect_timeout_secs: NotRequired[int]
+    tool_names: NotRequired[dict[str, str]]
 
 
 McpServerConfig = McpStdioServerConfig | McpHttpServerConfig
@@ -6531,6 +6533,7 @@ class PortableMcpDeclStdio(TypedDict, total=False):
     command: Required[str]
     connect_timeout_secs: NotRequired[Optional[int]]
     required_env_keys: NotRequired[list[str]]
+    tool_names: NotRequired[dict[str, str]]
     transport: Required[Literal['stdio']]
 
 class PortableMcpDeclHttp(TypedDict, total=False):
@@ -6538,6 +6541,7 @@ class PortableMcpDeclHttp(TypedDict, total=False):
     http_transport: NotRequired[Optional[McpHttpTransport]]
     oauth_account: NotRequired[Optional[str]]
     required_header_names: NotRequired[list[str]]
+    tool_names: NotRequired[dict[str, str]]
     transport: Required[Literal['http']]
     url: Required[str]
 

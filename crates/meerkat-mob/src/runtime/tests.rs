@@ -606,15 +606,46 @@ fn install_ephemeral_peer_request_response_authority(
     );
 }
 
+/// Mock comms identities must be distinct for distinct names. The previous
+/// byte fold gave `<mob>/worker/cold-1` and `<mob>/worker/cold-12` the same
+/// key under this mob id (about 19% of random mob ids collided somewhere among
+/// 17 sibling members), and MobMachine then refused the second member's peer
+/// registration for reusing the first one's peer id (#1409).
+#[test]
+fn mock_comms_identities_are_distinct_for_sibling_member_names() {
+    let mob = "test-mob-8d116ece1738f7d93d9c172411e20b8f";
+    let first = MockCommsRuntime::new(
+        &format!("{mob}/worker/cold-1"),
+        MockCommsBehavior::default(),
+        SessionId::new(),
+        None,
+    );
+    let sibling = MockCommsRuntime::new(
+        &format!("{mob}/worker/cold-12"),
+        MockCommsBehavior::default(),
+        SessionId::new(),
+        None,
+    );
+    assert_ne!(first.default_peer_id, sibling.default_peer_id);
+    let again = MockCommsRuntime::new(
+        &format!("{mob}/worker/cold-1"),
+        MockCommsBehavior::default(),
+        SessionId::new(),
+        None,
+    );
+    assert_eq!(
+        first.default_peer_id, again.default_peer_id,
+        "the identity stays deterministic per name"
+    );
+}
+
 fn test_trusted_peer_descriptor(name: &str, address: &str) -> TrustedPeerDescriptor {
-    let mut pubkey = [0u8; 32];
-    for (index, byte) in name.bytes().enumerate() {
-        let slot = index % pubkey.len();
-        pubkey[slot] = pubkey[slot].wrapping_add(byte).wrapping_add(index as u8);
-    }
-    if pubkey == [0u8; 32] {
-        pubkey[0] = 1;
-    }
+    // SHA-256 of the name: deterministic and collision-resistant (a byte fold
+    // collided for sibling names).
+    let pubkey: [u8; 32] = {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(name.as_bytes()).into()
+    };
     TrustedPeerDescriptor::unsigned_with_pubkey(
         name,
         PeerId::from_ed25519_pubkey(&pubkey).to_string(),
@@ -863,16 +894,15 @@ impl MockCommsRuntime {
         session_id: SessionId,
         runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     ) -> Self {
-        let mut key_bytes = [0u8; 32];
-        for (index, byte) in name.as_bytes().iter().copied().enumerate() {
-            let slot = index % key_bytes.len();
-            key_bytes[slot] = key_bytes[slot]
-                .wrapping_add(byte)
-                .rotate_left((index % 8) as u32);
-        }
-        if key_bytes == [0u8; 32] {
-            key_bytes[0] = 1;
-        }
+        // Deterministic per name, and collision-resistant: the identity is
+        // SHA-256 of the name. A byte fold used to collide for sibling names
+        // like `<mob>/worker/cold-1` and `<mob>/worker/cold-12` on some random
+        // mob ids, and MobMachine then (correctly) refused the second
+        // member's peer registration for reusing the first one's peer id.
+        let key_bytes: [u8; 32] = {
+            use sha2::Digest as _;
+            sha2::Sha256::digest(name.as_bytes()).into()
+        };
         let public_key = meerkat_comms::PubKey::new(key_bytes);
         Self {
             session_id,

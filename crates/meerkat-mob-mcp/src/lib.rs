@@ -4077,16 +4077,13 @@ fn encode_ed25519_public_key(bytes: &[u8; 32]) -> String {
 
 impl LocalCommsRuntime {
     fn new(name: &str) -> Self {
-        let mut public_key_bytes = [0u8; 32];
-        for (index, byte) in name.bytes().enumerate() {
-            let slot = index % public_key_bytes.len();
-            public_key_bytes[slot] = public_key_bytes[slot]
-                .wrapping_add(byte)
-                .wrapping_add(index as u8);
-        }
-        if public_key_bytes == [0u8; 32] {
-            public_key_bytes[0] = 1;
-        }
+        // SHA-256 of the name: deterministic and collision-resistant. A byte
+        // fold collided for sibling member names, and MobMachine then refused
+        // the second member's peer registration for reusing a peer id.
+        let public_key_bytes: [u8; 32] = {
+            use sha2::Digest as _;
+            sha2::Sha256::digest(name.as_bytes()).into()
+        };
         let peer_id = PeerId::from_ed25519_pubkey(&public_key_bytes);
         Self {
             name: name.to_string(),
@@ -7335,16 +7332,12 @@ mod tests {
 
     impl MockComms {
         fn new(name: &str) -> Self {
-            let mut public_key_bytes = [0u8; 32];
-            for (index, byte) in name.bytes().enumerate() {
-                let slot = index % public_key_bytes.len();
-                public_key_bytes[slot] = public_key_bytes[slot]
-                    .wrapping_add(byte)
-                    .wrapping_add(index as u8);
-            }
-            if public_key_bytes == [0u8; 32] {
-                public_key_bytes[0] = 1;
-            }
+            // SHA-256 of the name: deterministic and collision-resistant (a
+            // byte fold collided for sibling names).
+            let public_key_bytes: [u8; 32] = {
+                use sha2::Digest as _;
+                sha2::Sha256::digest(name.as_bytes()).into()
+            };
             let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&public_key_bytes);
             Self {
                 name: name.to_string(),

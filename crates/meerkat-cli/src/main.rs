@@ -22201,14 +22201,12 @@ default_model = "gemma"
 
     impl TestCommsRuntime {
         fn new(name: &str) -> Self {
-            let mut public_key = [0u8; 32];
-            for (idx, byte) in name.bytes().enumerate() {
-                let slot = idx % public_key.len();
-                public_key[slot] = public_key[slot]
-                    .wrapping_add(byte)
-                    .rotate_left((idx % 8) as u32)
-                    .wrapping_add((idx as u8).wrapping_mul(31));
-            }
+            // SHA-256 of the name: deterministic and collision-resistant (a
+            // byte fold collided for sibling names).
+            let mut public_key: [u8; 32] = {
+                use sha2::Digest as _;
+                sha2::Sha256::digest(name.as_bytes()).into()
+            };
             public_key[0] |= 1;
             Self {
                 name: name.to_string(),

@@ -6744,14 +6744,12 @@ mod tests {
         transport: PeerTransport,
         endpoint: &str,
     ) -> TrustedPeerDescriptor {
-        let mut pubkey = [0u8; 32];
-        for (index, byte) in name.bytes().enumerate() {
-            let slot = index % pubkey.len();
-            pubkey[slot] = pubkey[slot].wrapping_add(byte).wrapping_add(index as u8);
-        }
-        if pubkey == [0u8; 32] {
-            pubkey[0] = 1;
-        }
+        // SHA-256 of the name: deterministic and collision-resistant (a byte
+        // fold collided for sibling names).
+        let pubkey: [u8; 32] = {
+            use sha2::Digest as _;
+            sha2::Sha256::digest(name.as_bytes()).into()
+        };
         let address = PeerAddress::new(transport, endpoint);
         TrustedPeerDescriptor::unsigned_with_pubkey(
             name,

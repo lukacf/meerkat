@@ -1817,23 +1817,30 @@ async fn reopen_with_a_turn_still_committing_seeds_the_retained_summary_up_to_th
         .expect("close active channel");
 }
 
-/// The recent-turns window counts conversation turns, not rows: typed rows
-/// committed back to back with no reply between them are one turn, so the
-/// reopen still seeds the retained summary and all of them verbatim.
+/// The startup bound counts provider items, not conversation turns, and never
+/// splits rows a retained summary does not cover: typed rows committed back
+/// to back are one turn, so at the bound the reopen seeds the retained
+/// summary and every one of them verbatim; one row more and the retained seed
+/// is refused whole (not trimmed), so the reopen summarizes afresh.
 #[tokio::test]
-async fn reopen_counts_the_recent_turns_window_in_turns_not_rows() {
+async fn reopen_bounds_retained_seed_rows_in_items_and_never_splits_them() {
+    use meerkat_openai::public_live::LIVE_STARTUP_VERBATIM_ITEMS_MAX;
     let _reservation = OPEN_RESERVATION.lock().await;
     let env = build_environment_with_pre_open_bound(Duration::from_secs(10)).await;
     env.producer.release.notify_one();
     env.store.set_gate(MaterializeGate::Pass);
     let (first, _, _) = env.open().await;
     env.activate_and_close(&first).await;
-    for index in 0..=LIVE_STARTUP_RECENT_TURNS {
+    for index in 0..LIVE_STARTUP_VERBATIM_ITEMS_MAX {
         env.commit_typed(&format!("Typed while the call was closed: row {index}."))
             .await;
     }
     let (reopened, _, _) = env.open().await;
-    assert_eq!(env.producer.observed().len(), 1, "no fresh summary");
+    assert_eq!(
+        env.producer.observed().len(),
+        1,
+        "no fresh summary at the bound"
+    );
     let (summary, recent) = env.staged_summary_seed().await;
     assert!(summary.summarizes_preceding_history());
     assert_eq!(
@@ -1841,10 +1848,32 @@ async fn reopen_counts_the_recent_turns_window_in_turns_not_rows() {
             .iter()
             .filter(|message| matches!(message, Message::User(_)))
             .count(),
-        LIVE_STARTUP_RECENT_TURNS + 1,
-        "five rows, one turn"
+        LIVE_STARTUP_VERBATIM_ITEMS_MAX,
+        "every row of the one turn, verbatim"
     );
     env.activate_and_close(&reopened).await;
+
+    env.commit_typed("Typed while the call was closed: one row over the bound.")
+        .await;
+    // The refusal requests a fresh summary: release it before the open so the
+    // summarizer never blocks it (the test barrier every fresh-summary reopen
+    // here uses).
+    env.producer.release.notify_one();
+    let (over, _, _) = env.open().await;
+    assert_eq!(
+        env.producer.observed().len(),
+        2,
+        "over the bound the retained seed is refused whole and summarized afresh"
+    );
+    // With the summarizer released before the open, the fresh summary is
+    // ready at creation: the over-bound retained seed is replaced by a fresh
+    // summary covering every row, never trimmed and never reused.
+    let (summary, _) = env.staged_summary_seed().await;
+    assert!(
+        !summary.summarizes_preceding_history(),
+        "a fresh summary covers every row, so none is left uncovered"
+    );
+    env.activate_and_close(&over).await;
 }
 
 /// A row committed after the reopen staged its seed and before the provider

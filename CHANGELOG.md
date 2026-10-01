@@ -287,6 +287,20 @@ them.
   itself through a sealed, doc-hidden, defaulted `MobRunStore` method that
   only this crate can implement, and the same run takes 151 validations and
   11 s. Validation coverage is unchanged.
+- A reopened GPT Live channel no longer seeds a long verbatim startup
+  history that leaves gpt-live-1 silent after a long answer. The retained
+  summary path (#1349) bounded the rows since its summary in conversation
+  turns, and a turn spans several startup items, so a reopen seeded the
+  summary plus 9-14 verbatim items; S106 then got no reply to the next
+  utterance (transcribed, then no turn end, no reply, no error) in 14 of 48
+  runs, against 0 of 22 with 0-5 items. The new
+  `meerkat_openai::public_live::LIVE_STARTUP_VERBATIM_ITEMS_MAX` (4) bounds
+  every summary-bearing startup seed in provider items: a retained summary
+  with more verbatim rows is refused (the open summarizes afresh), a fresh
+  summary keeps only the newest four recent items, and a Late reopen's
+  recent seed (whose late summary covers the whole history) keeps the newest
+  four, starting at a user row.
+
 - The Cargo test lanes provide the MCP form-elicitation fixture again. Since
   #1338, `meerkat-mcp`'s `form_elicitation` tests (which require
   `MEERKAT_MCP_TEST_SERVER` to name the exact `mcp-test-server` binary and

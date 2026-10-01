@@ -518,18 +518,23 @@ fn budget_startup_input(
     let mut items = Vec::with_capacity(recent.len() + 1);
     let mut tokens = estimated_startup_tokens(&keep);
     // Newest first so the oldest are the ones left out. The summary covers
-    // every recent item, so the verbatim bound only trims repetition.
+    // every recent item, so the verbatim bound only trims repetition. The
+    // walk stops at the first item that does not fit: the verbatim tail is
+    // always contiguous, never newer turns with a gap where a large one was.
     let mut kept_recent = Vec::new();
+    let mut stopped = false;
     for item in recent.iter().rev() {
         let item_tokens = estimated_startup_tokens(item);
         let under_cap = kept_recent.len() < LIVE_STARTUP_VERBATIM_ITEMS_MAX;
-        if under_cap
+        if !stopped
+            && under_cap
             && kept_recent.len() + 1 < LIVE_STARTUP_INPUT_MAX_ITEMS
             && tokens + item_tokens <= LIVE_STARTUP_INPUT_TOKEN_BUDGET
         {
             tokens += item_tokens;
             kept_recent.push(item.clone());
         } else {
+            stopped = true;
             if under_cap {
                 provider_limited += 1;
             }
@@ -3146,6 +3151,57 @@ mod tests {
         assert_eq!(kept.len(), 3);
         assert_eq!(truncation.dropped_items, 1);
         assert_eq!(provider_limited, 1);
+    }
+
+    /// The budget walk stops at the first item that does not fit, so a large
+    /// turn never leaves a gap with older turns seeded around it.
+    #[test]
+    fn startup_budget_keeps_a_contiguous_verbatim_tail() {
+        use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, UserMessage};
+        let assistant = |text: String| {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text { text, meta: None }],
+                StopReason::EndTurn,
+            ))
+        };
+        let user = |text: &str| Message::User(UserMessage::text(text));
+        let big = "x".repeat(30_000);
+        let seed = |rows: &[Message]| {
+            let config = PublicLiveOpenConfig::new("v=0", "marin")
+                .unwrap()
+                .with_history(rows)
+                .with_context_summary("summary");
+            let items = config.context_seed.initial_input().unwrap();
+            assert_eq!(items[0].role, InitialRole::Developer);
+            let texts: Vec<String> = items[1..]
+                .iter()
+                .map(|item| item.content[0].text.chars().take(8).collect())
+                .collect();
+            (texts, config.startup_input_truncation())
+        };
+        // u0 a0(large) u1 a1: a1 and u1 fit, a0 does not, so u0 is not seeded
+        // either, although it would fit on its own.
+        let rows = vec![
+            user("u0"),
+            assistant(big.clone()),
+            user("u1"),
+            assistant("a1".to_string()),
+        ];
+        let (texts, truncation) = seed(&rows);
+        assert_eq!(texts, ["u1", "a1"]);
+        assert_eq!(truncation.dropped_items, 2, "a0 and u0 are reported");
+        assert!(truncation.dropped_bytes >= big.len() + "u0".len());
+        // A large newest turn leaves no verbatim tail: the summary covers it
+        // and everything before it.
+        let rows = vec![
+            user("u0"),
+            assistant("a0".to_string()),
+            user("u1"),
+            assistant(big),
+        ];
+        let (texts, truncation) = seed(&rows);
+        assert!(texts.is_empty(), "{texts:?}");
+        assert_eq!(truncation.dropped_items, 4);
     }
 
     /// A fresh-summary open trims its verbatim tail the way the Late path

@@ -3047,6 +3047,83 @@ async fn close_or_record(
     }
 }
 
+/// Evidence for an answer whose audio was never detected: the browser's
+/// decoder and energy readings over the exchange, and the provider session
+/// it ran on. A provider WebRTC session occasionally streams silent audio for
+/// its whole life while the model speaks on the data channel; this records
+/// what a provider report needs (session id, wall-clock start, inbound-rtp
+/// energy) and lets the run be classified.
+async fn print_no_audio_evidence(
+    live: &mut PublicLiveHarness,
+    scenario: &str,
+    label: &str,
+    fixture_start_ms: u64,
+) {
+    let now_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let timeline = live.peer.timeline().await.unwrap_or_default();
+    let last_t_ms = timeline.last().map_or(0, |entry| entry.t_ms);
+    let events = live.peer.events().await.unwrap_or_default();
+    let started = events
+        .iter()
+        .rev()
+        .find(|event| event["type"] == "session.started");
+    let session_id = started
+        .and_then(|event| event["session"]["id"].as_str())
+        .unwrap_or("unknown");
+    let started_t_ms = timeline
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.kind == TimelineKind::ProviderEvent
+                && entry
+                    .detail_u64("event_index")
+                    .and_then(|index| events.get(usize::try_from(index).ok()?))
+                    .is_some_and(|event| event["type"] == "session.started")
+        })
+        .map(|entry| entry.t_ms);
+    let session_started_unix_ms = started_t_ms.map(|started_t_ms| {
+        now_unix_ms.saturating_sub(u128::from(last_t_ms.saturating_sub(started_t_ms)))
+    });
+    let reflected_frames = events
+        .iter()
+        .filter(|event| event["type"] == "session.output_audio.delta")
+        .count();
+    let transcript_deltas = events
+        .iter()
+        .filter(|event| event["type"] == "session.output_transcript.delta")
+        .count();
+    println!(
+        "GPT_LIVE_{scenario}_NO_AUDIO_EVIDENCE label={label} provider_session_id={session_id} session_started_unix_ms={session_started_unix_ms:?} output_transcript_deltas={transcript_deltas} data_channel_output_audio_deltas={reflected_frames}"
+    );
+    if let Ok(report) = live.peer.energy().await {
+        let windows: Vec<_> = report
+            .energy
+            .windows
+            .iter()
+            .filter(|window| window.t_ms >= fixture_start_ms)
+            .collect();
+        let max_rms = windows
+            .iter()
+            .map(|window| window.rms)
+            .fold(0.0_f32, f32::max);
+        let timer_gaps = windows
+            .windows(2)
+            .filter(|pair| pair[1].t_ms.saturating_sub(pair[0].t_ms) > 150)
+            .count();
+        println!(
+            "GPT_LIVE_{scenario}_NO_AUDIO_EVIDENCE label={label} energy_windows={} max_rms={max_rms} threshold={} timer_gaps={timer_gaps}",
+            windows.len(),
+            report.energy.threshold
+        );
+    }
+    if let Ok(audio) = live.peer.audio_evidence().await {
+        println!("GPT_LIVE_{scenario}_NO_AUDIO_EVIDENCE label={label} audio={audio:?}");
+    }
+}
+
 /// Speak one question the assistant should answer natively (no delegation):
 /// schedule the fixture, wait for its input final, the answer's first audio
 /// and the end of that audio, and return the answer window transcript with
@@ -3067,7 +3144,7 @@ async fn native_question(
             |t| fixture_start_entry(t, schedule_id).map(|e| e.t_ms),
         )
         .await?;
-    let timeline = live
+    let waited = live
         .peer
         .wait_for_timeline(
             Duration::from_secs(60),
@@ -3086,7 +3163,11 @@ async fn native_question(
                 timeline_find(t, TimelineKind::AssistantAudioEnd, start.t_ms).map(|_| t.to_vec())
             },
         )
-        .await?;
+        .await;
+    if waited.is_err() {
+        print_no_audio_evidence(live, scenario, label, fixture_start_ms).await;
+    }
+    let timeline = waited?;
     let timing = SpokenTurn::from_timeline(&timeline, schedule_id).ok_or("turn timing")?;
     let events = live.peer.events().await?;
     let answer = answer_transcript_text(&events, events_before);

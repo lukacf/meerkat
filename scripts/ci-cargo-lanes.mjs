@@ -124,12 +124,20 @@ const MACHINE_AUTHORITY_PACKAGES = [
   "meerkat-machine-derive",
   "meerkat-machine-kernels",
 ];
+//
+// A suite may also name `features` (a target behind a required feature
+// makes `--test '*'` fail without it) and `paths`: changed-path prefixes
+// that select it even when no Rust package changed. xtask's integration
+// tests (ci_gate_requires_rmat and friends) pin the workflow files, so a
+// workflow-only edit runs them; twice on 2026-10-01 a change merged that
+// broke one with no PR lane running it. 163 tests, 169 s on 4 cores.
 export const INTEGRATION_SUITES = [
   { package: "meerkat-runtime", triggers: [...MACHINE_AUTHORITY_PACKAGES, "meerkat-runtime"] },
   {
     package: "meerkat-machine-codegen",
     triggers: [...MACHINE_AUTHORITY_PACKAGES, "meerkat-runtime", "meerkat-mob", "meerkat-machine-codegen"],
   },
+  { package: "xtask", features: ["machine-authority"], triggers: ["xtask"], paths: [".github/workflows/"] },
 ];
 
 // Packages whose own lib-test binary dominates their push-to-main lane. On
@@ -764,14 +772,22 @@ function plan(args) {
     for (const name of [suite.package, ...suite.triggers]) {
       if (!byName.has(name)) throw new Error(`integration suite ${suite.package} names unknown package ${name}`);
     }
+    for (const feature of suite.features ?? []) {
+      if (!Object.hasOwn(byName.get(suite.package).features, feature)) {
+        throw new Error(`integration suite ${suite.package} names unknown feature ${feature}`);
+      }
+    }
   }
-  result.integration_suites = result.rust_changed
-    ? INTEGRATION_SUITES.filter((suite) => suite.triggers.some((name) => result.packages.includes(name))).map((suite) => ({
-        name: shortName(suite.package),
-        packages: [suite.package],
-        package_flags: `-p ${suite.package}`,
-      }))
-    : [];
+  const changedPaths = changed ?? [];
+  result.integration_suites = INTEGRATION_SUITES.filter(
+    (suite) =>
+      (result.rust_changed && suite.triggers.some((name) => result.packages.includes(name))) ||
+      (suite.paths ?? []).some((prefix) => changedPaths.some((path) => path.startsWith(prefix))),
+  ).map((suite) => ({
+    name: shortName(suite.package),
+    packages: [suite.package],
+    package_flags: `-p ${suite.package}${suite.features?.length ? ` --features ${suite.features.join(",")}` : ""}`,
+  }));
 
   result.closure_flags = result.closure.map((name) => `-p ${name}`).join(" ");
   result.closure_beyond_packages = result.closure.filter((name) => !result.packages.includes(name));

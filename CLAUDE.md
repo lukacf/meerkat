@@ -376,8 +376,10 @@ GitHub-hosted runners and sized to a 25-minute lane execution budget:
   non-default feature needs a suite, or no lane runs it.
 - `integration`: the `tests/*.rs` binaries (`nextest -p <package> --test
   '*'`) of each `INTEGRATION_SUITES` entry in `scripts/ci-cargo-lanes.mjs`
-  whose trigger packages changed (meerkat-runtime; meerkat-machine-codegen,
-  whose parity tests also trigger on meerkat-mob), on PRs and main pushes.
+  whose trigger packages or paths changed (meerkat-runtime;
+  meerkat-machine-codegen, whose parity tests also trigger on meerkat-mob;
+  xtask with machine-authority, also on any `.github/workflows/` edit,
+  because its tests pin the workflows), on PRs and main pushes.
   The unit lanes run `--lib --bins` only, so no other PR lane runs a
   crate's integration tests.
 - `closure-check`: `cargo check --all-features` (lib and bin targets) over

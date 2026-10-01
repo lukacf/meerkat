@@ -492,7 +492,16 @@ for (const path of [
   assert.deepEqual(names(planFor(["crates/meerkat-machine-codegen/tests/runtime_alphabet_parity.rs"])), ["meerkat-machine-codegen"]);
   assert.deepEqual(names(planFor(["crates/meerkat-sqlite/src/lib.rs"])), []);
   assert.deepEqual(names(planFor(["docs/index.mdx"])), []);
-  assert.deepEqual(names(planFor(["Cargo.toml"])), ["meerkat-runtime", "meerkat-machine-codegen"], "workspace mode runs every suite");
+  assert.deepEqual(names(planFor(["Cargo.toml"])), ["meerkat-runtime", "meerkat-machine-codegen", "xtask"], "workspace mode runs every suite");
+  // xtask's integration tests pin the workflows: an xtask change or a
+  // workflow-only edit (a plan with no Rust change) runs them, with the
+  // feature its machines_contracts target requires.
+  const xtask = planFor(["crates/xtask/src/machines.rs"]);
+  assert.deepEqual(names(xtask), ["xtask"]);
+  assert.equal(xtask.integration_suites[0].package_flags, "-p xtask --features machine-authority");
+  const workflow = planFor([".github/workflows/nightly.yml"]);
+  assert.equal(workflow.rust_changed, false);
+  assert.deepEqual(names(workflow), ["xtask"], "a workflow-only edit runs the xtask workflow pins");
   const github = run(["--format", "github", "--", "crates/meerkat-runtime/src/lib.rs"]);
   assert.equal(github.status, 0, github.stderr);
   const lines = Object.fromEntries(github.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));

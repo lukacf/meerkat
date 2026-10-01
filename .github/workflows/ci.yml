@@ -24,7 +24,7 @@ name: CI
 #                     plus the feature-gated suites of those packages
 #                     (FEATURE_UNIT_SUITES in scripts/ci-cargo-lanes.mjs)
 #   integration     - (xN) the tests/*.rs binaries of each integration
-#                     suite whose trigger packages changed
+#                     suite whose trigger packages or paths changed
 #                     (INTEGRATION_SUITES in scripts/ci-cargo-lanes.mjs):
 #                     nextest -p <package> --test '*'; pull requests and
 #                     main pushes alike
@@ -669,8 +669,11 @@ jobs:
     # changed (INTEGRATION_SUITES in scripts/ci-cargo-lanes.mjs); measured on
     # 4 cores after a meerkat-runtime change: runtime 168 s, machine-codegen
     # 396 s, so about 6 and 13 minutes on a hosted runner, well inside the
-    # lane execution budget.
-    if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.integration_count != '0' }}
+    # lane execution budget; xtask (with machine-authority, 163 tests,
+    # selected also by workflow edits) 169 s.
+    # Selected by the suite count alone: a suite can be selected by changed
+    # paths in a plan with no Rust change (xtask's workflow pins).
+    if: ${{ needs.changes.result == 'success' && needs.changes.outputs.integration_count != '0' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -720,8 +723,10 @@ jobs:
           # --no-tests=fail: a suite whose package lost its tests/ binaries
           # must be removed from INTEGRATION_SUITES, not pass silently.
           # shellcheck disable=SC2086
+          # Status level slow: the suites hold known heavy tests with exact-case
+          # timeout overrides in .config/nextest.toml; their durations stay visible.
           ./scripts/repo-cargo nextest run ${PACKAGES} --test '*' --profile ci-pr \
-            --no-tests=fail --no-fail-fast --status-level fail --final-status-level fail
+            --no-tests=fail --no-fail-fast --status-level slow --final-status-level slow
 
       - name: Upload sccache server log
         if: ${{ always() }}
@@ -1541,11 +1546,12 @@ jobs:
               forbid_failure "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
             fi
           fi
-          # Integration suites: every suite whose trigger packages changed must
-          # run and pass; with none selected the lane must not have failed.
-          if [[ "${RUST_CHANGED}" == "true" && "${INTEGRATION_COUNT}" =~ ^[0-9]+$ ]] && (( INTEGRATION_COUNT > 0 )); then
+          # Integration suites: every selected suite (by trigger packages or
+          # changed paths, Rust change or not) must run and pass; with none
+          # selected the lane must not have failed.
+          if [[ "${INTEGRATION_COUNT}" =~ ^[0-9]+$ ]] && (( INTEGRATION_COUNT > 0 )); then
             require_ran "Integration tests" "${INTEGRATION_RESULT}"
-          elif [[ "${RUST_CHANGED}" == "true" && ! "${INTEGRATION_COUNT}" =~ ^[0-9]+$ ]]; then
+          elif [[ "${CHANGES_RESULT}" == "success" && ! "${INTEGRATION_COUNT}" =~ ^[0-9]+$ ]]; then
             echo "::error::the plan carries no integration suite count (integration_count='${INTEGRATION_COUNT}')."
             failed=1
           else

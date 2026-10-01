@@ -1975,6 +1975,31 @@ model = "test"
         assert_eq!(revision, 1);
     }
 
+    /// Wrapping is idempotent only for the crate's own validation boundary.
+    /// A custom store keeps the sealed default (it cannot name the proof
+    /// type to override it), so every wrapping constructor puts the boundary
+    /// in front of it and a forged projection is still refused.
+    #[tokio::test]
+    async fn custom_run_store_is_never_taken_for_the_validation_boundary() {
+        let forged = forged_status_run();
+        let custom: Arc<dyn MobRunStore> = Arc::new(ForgedRunStore::new(Some(forged.clone())));
+        assert!(custom.flow_authority_validation_boundary().is_none());
+        let wrapped = authority_validating_mob_run_store(Arc::clone(&custom));
+        assert!(
+            !Arc::ptr_eq(&wrapped, &custom),
+            "a custom store gets the validation boundary"
+        );
+        assert!(wrapped.flow_authority_validation_boundary().is_some());
+        let error = wrapped
+            .get_run(&forged.run_id)
+            .await
+            .expect_err("the boundary refuses the custom store's forged run");
+        assert!(
+            error.to_string().contains("not authorized by MobMachine"),
+            "unexpected custom read error: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn custom_run_store_rejects_forged_lifecycle_projection() {
         let forged = forged_status_run();
